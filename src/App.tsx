@@ -1473,8 +1473,49 @@ function AdminSettingsPanel({
   settings: AdminSettings;
   onUpdateSettings: (patch: Partial<AdminSettings>) => void;
 }) {
+  const [draftSettings, setDraftSettings] = useState<AdminSettings>(settings);
+  const [savedNotice, setSavedNotice] = useState("Saved locally");
+
+  useEffect(() => {
+    setDraftSettings(settings);
+  }, [settings]);
+
+  const hasUnsavedChanges = useMemo(
+    () => JSON.stringify(draftSettings) !== JSON.stringify(settings),
+    [draftSettings, settings]
+  );
+
+  const updateDraftSettings = (patch: Partial<AdminSettings>) => {
+    setDraftSettings((current) => ({ ...current, ...patch }));
+    setSavedNotice("Unsaved changes");
+  };
+
+  const saveSettings = () => {
+    onUpdateSettings(draftSettings);
+    setSavedNotice("Saved locally");
+  };
+
+  const discardSettings = () => {
+    setDraftSettings(settings);
+    setSavedNotice("Saved locally");
+  };
+
   return (
     <section className="settings-panel">
+      <div className="settings-savebar">
+        <span className={hasUnsavedChanges ? "settings-status dirty" : "settings-status saved"}>
+          {hasUnsavedChanges ? "Unsaved changes" : savedNotice}
+        </span>
+        <div className="settings-save-actions">
+          <button className="secondary-action" onClick={discardSettings} disabled={!hasUnsavedChanges}>
+            Discard
+          </button>
+          <button className="primary-action" onClick={saveSettings} disabled={!hasUnsavedChanges}>
+            <Check size={17} />
+            Save changes
+          </button>
+        </div>
+      </div>
       <label className="toggle-row">
         <span>
           <strong>Require approval before release</strong>
@@ -1482,8 +1523,8 @@ function AdminSettingsPanel({
         </span>
         <input
           type="checkbox"
-          checked={settings.requireApproval}
-          onChange={(event) => onUpdateSettings({ requireApproval: event.target.checked })}
+          checked={draftSettings.requireApproval}
+          onChange={(event) => updateDraftSettings({ requireApproval: event.target.checked })}
         />
       </label>
       <label className="toggle-row">
@@ -1493,14 +1534,19 @@ function AdminSettingsPanel({
         </span>
         <input
           type="checkbox"
-          checked={settings.chargeFees}
-          onChange={(event) => onUpdateSettings({ chargeFees: event.target.checked })}
+          checked={draftSettings.chargeFees}
+          onChange={(event) => updateDraftSettings({ chargeFees: event.target.checked })}
         />
       </label>
       <TextInput
         label="Venmo handle"
-        value={settings.venmoHandle}
-        onChange={(venmoHandle) => onUpdateSettings({ venmoHandle })}
+        value={draftSettings.venmoHandle}
+        onChange={(venmoHandle) => updateDraftSettings({ venmoHandle })}
+      />
+      <TextArea
+        label="Beta message"
+        value={draftSettings.betaMessage}
+        onChange={(betaMessage) => updateDraftSettings({ betaMessage })}
       />
       <div className="pricing-grid">
         {runtimeOptions.map((option) => (
@@ -1508,10 +1554,10 @@ function AdminSettingsPanel({
             <span>{option.label}</span>
             <input
               type="number"
-              value={settings.pricing[option.id]}
+              value={draftSettings.pricing[option.id]}
               onChange={(event) =>
-                onUpdateSettings({
-                  pricing: { ...settings.pricing, [option.id]: Number(event.target.value) },
+                updateDraftSettings({
+                  pricing: { ...draftSettings.pricing, [option.id]: Number(event.target.value) },
                 })
               }
             />
