@@ -33,3 +33,13 @@ Before accepting real public customer files, add:
 - Payment verification through a payment provider or Venmo-capable reconciliation.
 - Transactional email provider for receipts and links.
 - Abuse moderation, content policy, privacy policy, terms, and customer consent capture.
+
+## Verification
+
+After DNS changes propagate:
+
+```bash
+pnpm run check:deploy
+```
+
+The check should report `ready: true`, GitHub Pages A records for the apex domain, `bcastle1.github.io` for `www`, and app content over HTTPS.

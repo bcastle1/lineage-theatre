@@ -11,6 +11,7 @@ Lineage Theatre is a local-first web app for creating ancestor movies from famil
 - Venmo payment path using `@ERik-Castle-1`, with local receipt/outbox tracking.
 - Publishing preferences for email link, YouTube, family gallery, public discovery, download URL, and approval status.
 - PWA manifest and service worker for offline-friendly production builds.
+- Public preview safety pages: `/privacy.html`, `/terms.html`, `/security.html`, and `/.well-known/security.txt`.
 
 ## Run Locally
 
@@ -29,6 +30,14 @@ npm run preview
 ```
 
 The production files are emitted to `dist/` and can be hosted on Vercel, Netlify, Cloudflare Pages, or a traditional static host.
+
+## Deployment Check
+
+```bash
+npm run check:deploy
+```
+
+This checks whether `lineagetheater.com` DNS points to GitHub Pages and whether HTTPS serves the app instead of Namecheap parking.
 
 ## Production Integration Points
 

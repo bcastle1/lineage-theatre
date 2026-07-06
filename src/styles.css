@@ -449,6 +449,31 @@ main {
   border-radius: 8px;
 }
 
+.public-safety-note,
+.upload-notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  margin-bottom: 12px;
+  padding: 11px 12px;
+  color: #6e5226;
+  background: var(--gold-soft);
+  border: 1px solid #e3c989;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.upload-notice {
+  display: block;
+  margin: 10px 0 0;
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: #ecc4bd;
+}
+
 .drop-zone span {
   font-weight: 900;
 }

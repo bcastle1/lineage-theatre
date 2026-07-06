@@ -47,12 +47,14 @@ import type {
 import {
   ADMIN_ACCESS_CODE,
   ADMIN_EMAIL,
+  MAX_SOURCE_FILE_SIZE_BYTES,
   PUBLIC_LAUNCH_MODE,
   SITE_DOMAIN,
   createId,
   formatCurrency,
   formatFileSize,
   inferSourceKind,
+  isAllowedSourceFile,
   musicMoods,
   nowIso,
   runtimeOptions,
@@ -133,6 +135,7 @@ export default function App() {
   const [state, setState] = useState<AppState>(() => loadState());
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [adminSection, setAdminSection] = useState("Approval Queue");
+  const [uploadNotice, setUploadNotice] = useState("");
 
   useEffect(() => {
     saveState(state);
@@ -205,8 +208,13 @@ export default function App() {
       if (!files || !activeProject) return;
       const sourceFiles = Array.from(files);
       const sources: SourceAsset[] = [];
+      const skipped: string[] = [];
 
       for (const file of sourceFiles) {
+        if (!isAllowedSourceFile(file)) {
+          skipped.push(file.name);
+          continue;
+        }
         const id = createId("source");
         await saveSourceFile(id, activeProject.id, file);
         sources.push({
@@ -220,6 +228,18 @@ export default function App() {
           notes: "",
         });
       }
+
+      if (skipped.length > 0) {
+        setUploadNotice(
+          `${skipped.length} file(s) were skipped. Use common image, audio, video, PDF, document, JSON, or text files under ${Math.round(
+            MAX_SOURCE_FILE_SIZE_BYTES / 1024 / 1024
+          )} MB each.`
+        );
+      } else {
+        setUploadNotice("");
+      }
+
+      if (sources.length === 0) return;
 
       updateActiveProject((project) => {
         const merged: MovieProject = {
@@ -381,6 +401,7 @@ export default function App() {
             onUpdateCustomer={updateCustomer}
             onAddFiles={addFiles}
             onRemoveSource={removeSource}
+            uploadNotice={uploadNotice}
             onRegenerateStory={regenerateStory}
             onGenerateTrailer={generateTrailer}
             onRequestFullMovie={requestFullMovie}
@@ -486,6 +507,7 @@ function CreatorWorkspace({
   onUpdateCustomer,
   onAddFiles,
   onRemoveSource,
+  uploadNotice,
   onRegenerateStory,
   onGenerateTrailer,
   onRequestFullMovie,
@@ -500,6 +522,7 @@ function CreatorWorkspace({
   onUpdateCustomer: (customerId: string, patch: Partial<CustomerProfile>) => void;
   onAddFiles: (files: FileList | null) => void;
   onRemoveSource: (sourceId: string) => void;
+  uploadNotice: string;
   onRegenerateStory: () => void;
   onGenerateTrailer: () => void;
   onRequestFullMovie: () => void;
@@ -559,6 +582,7 @@ function CreatorWorkspace({
               sourceCounts={sourceCounts}
               onAddFiles={onAddFiles}
               onRemoveSource={onRemoveSource}
+              uploadNotice={uploadNotice}
             />
             <StoryTimeline project={project} />
           </div>
@@ -693,11 +717,13 @@ function SourceVault({
   sourceCounts,
   onAddFiles,
   onRemoveSource,
+  uploadNotice,
 }: {
   project: MovieProject;
   sourceCounts: Record<string, number>;
   onAddFiles: (files: FileList | null) => void;
   onRemoveSource: (sourceId: string) => void;
+  uploadNotice: string;
 }) {
   const sourceUrls = useSourceUrls(project.sources);
 
@@ -710,12 +736,25 @@ function SourceVault({
           <p>Photos, audio, stories, records, video, dates, and research notes stay in this browser first.</p>
         </div>
       </div>
+      <div className="public-safety-note">
+        <AlertCircle size={18} />
+        <span>
+          Public preview: source files stay in this browser. Do not upload sensitive real records until production
+          authentication and encrypted storage are connected.
+        </span>
+      </div>
       <label className="drop-zone">
         <UploadCloud size={28} />
         <span>Upload ancestor sources</span>
         <small>Images, audio, video, PDFs, text, and scanned documents</small>
-        <input type="file" multiple onChange={(event) => onAddFiles(event.target.files)} />
+        <input
+          type="file"
+          multiple
+          accept="image/*,audio/*,video/*,.pdf,.txt,.json,.doc,.docx"
+          onChange={(event) => onAddFiles(event.target.files)}
+        />
       </label>
+      {uploadNotice ? <div className="upload-notice">{uploadNotice}</div> : null}
       <div className="source-stats">
         {Object.entries(sourceKindLabels).map(([kind, label]) => (
           <span key={kind}>

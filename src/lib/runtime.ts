@@ -6,6 +6,17 @@ export const SITE_DOMAIN = "lineagetheater.com";
 export const SITE_URL = "https://lineagetheater.com";
 export const PUBLIC_LAUNCH_MODE =
   "Public static preview: no real customer records, payments, or admin data are stored on a server yet.";
+export const MAX_SOURCE_FILE_SIZE_BYTES = 100 * 1024 * 1024;
+export const ALLOWED_SOURCE_TYPES = [
+  "image/",
+  "audio/",
+  "video/",
+  "text/",
+  "application/pdf",
+  "application/json",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument",
+];
 
 export const runtimeOptions: RuntimeOption[] = [
   {
@@ -105,4 +116,10 @@ export function inferSourceKind(file: File): keyof typeof sourceKindLabels {
     return "document";
   }
   return "record";
+}
+
+export function isAllowedSourceFile(file: File) {
+  if (file.size > MAX_SOURCE_FILE_SIZE_BYTES) return false;
+  if (!file.type) return true;
+  return ALLOWED_SOURCE_TYPES.some((prefix) => file.type.startsWith(prefix));
 }
