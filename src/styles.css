@@ -1291,6 +1291,13 @@ td small {
   backdrop-filter: blur(14px);
 }
 
+.settings-savebar-bottom {
+  position: static;
+  margin-top: 2px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
 .settings-save-actions {
   display: flex;
   flex-wrap: wrap;

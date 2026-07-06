@@ -1466,6 +1466,40 @@ function MusicLibrary() {
   );
 }
 
+function SettingsSaveBar({
+  hasUnsavedChanges,
+  savedNotice,
+  onDiscard,
+  onSave,
+  placement = "top",
+}: {
+  hasUnsavedChanges: boolean;
+  savedNotice: string;
+  onDiscard: () => void;
+  onSave: () => void;
+  placement?: "top" | "bottom";
+}) {
+  return (
+    <div className={placement === "bottom" ? "settings-savebar settings-savebar-bottom" : "settings-savebar"}>
+      <span
+        className={hasUnsavedChanges ? "settings-status dirty" : "settings-status saved"}
+        aria-live="polite"
+      >
+        {hasUnsavedChanges ? "Unsaved changes" : savedNotice}
+      </span>
+      <div className="settings-save-actions">
+        <button type="button" className="secondary-action" onClick={onDiscard} disabled={!hasUnsavedChanges}>
+          Discard
+        </button>
+        <button type="button" className="primary-action" onClick={onSave} disabled={!hasUnsavedChanges}>
+          <Check size={17} />
+          Save changes
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AdminSettingsPanel({
   settings,
   onUpdateSettings,
@@ -1502,20 +1536,12 @@ function AdminSettingsPanel({
 
   return (
     <section className="settings-panel">
-      <div className="settings-savebar">
-        <span className={hasUnsavedChanges ? "settings-status dirty" : "settings-status saved"}>
-          {hasUnsavedChanges ? "Unsaved changes" : savedNotice}
-        </span>
-        <div className="settings-save-actions">
-          <button className="secondary-action" onClick={discardSettings} disabled={!hasUnsavedChanges}>
-            Discard
-          </button>
-          <button className="primary-action" onClick={saveSettings} disabled={!hasUnsavedChanges}>
-            <Check size={17} />
-            Save changes
-          </button>
-        </div>
-      </div>
+      <SettingsSaveBar
+        hasUnsavedChanges={hasUnsavedChanges}
+        savedNotice={savedNotice}
+        onDiscard={discardSettings}
+        onSave={saveSettings}
+      />
       <label className="toggle-row">
         <span>
           <strong>Require approval before release</strong>
@@ -1564,6 +1590,13 @@ function AdminSettingsPanel({
           </label>
         ))}
       </div>
+      <SettingsSaveBar
+        hasUnsavedChanges={hasUnsavedChanges}
+        savedNotice={savedNotice}
+        onDiscard={discardSettings}
+        onSave={saveSettings}
+        placement="bottom"
+      />
     </section>
   );
 }
