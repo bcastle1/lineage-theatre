@@ -19,6 +19,10 @@
   --red-soft: #f7e4e0;
   --shadow: 0 20px 45px rgba(24, 32, 29, 0.08);
   --radius: 8px;
+  --weight-ui: 500;
+  --weight-label: 560;
+  --weight-heading: 620;
+  --weight-strong: 640;
 }
 
 * {
@@ -32,9 +36,22 @@ html {
 body {
   margin: 0;
   color: var(--ink);
+  font-weight: 400;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(247, 248, 244, 0.98) 340px),
     var(--bg);
+}
+
+strong,
+b {
+  font-weight: var(--weight-strong);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: var(--weight-heading);
 }
 
 button,
@@ -46,6 +63,7 @@ select {
 
 button {
   cursor: pointer;
+  font-weight: var(--weight-ui);
 }
 
 button:focus-visible,
@@ -102,13 +120,14 @@ img {
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
   font-size: 0.83rem;
-  font-weight: 800;
+  font-weight: var(--weight-heading);
   letter-spacing: 0;
 }
 
 .brand-mark strong {
   display: block;
   font-size: 1rem;
+  font-weight: var(--weight-heading);
   letter-spacing: 0;
 }
 
@@ -150,7 +169,7 @@ img {
   border: 0;
   border-radius: 6px;
   font-size: 0.92rem;
-  font-weight: 700;
+  font-weight: var(--weight-ui);
 }
 
 .nav-item.active,
@@ -166,7 +185,7 @@ img {
   gap: 8px;
   color: var(--ink-soft);
   font-size: 0.9rem;
-  font-weight: 700;
+  font-weight: var(--weight-ui);
 }
 
 .local-dot {
@@ -242,6 +261,7 @@ main {
 .admin-topline h2,
 .publish-hero h1 {
   margin: 0;
+  font-weight: var(--weight-heading);
   letter-spacing: 0;
 }
 
@@ -308,7 +328,7 @@ main {
 
 .project-row span {
   overflow: hidden;
-  font-weight: 800;
+  font-weight: var(--weight-heading);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -325,6 +345,7 @@ main {
 .registration-panel h3 {
   margin: 0;
   font-size: 0.95rem;
+  font-weight: var(--weight-heading);
 }
 
 .compact-grid {
@@ -397,7 +418,7 @@ main {
   gap: 6px;
   min-width: 0;
   font-size: 0.78rem;
-  font-weight: 800;
+  font-weight: var(--weight-label);
   text-transform: uppercase;
 }
 
@@ -414,7 +435,7 @@ main {
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   font-size: 0.94rem;
-  font-weight: 650;
+  font-weight: 450;
 }
 
 .field-label textarea {
@@ -462,7 +483,7 @@ main {
   border: 1px solid #e3c989;
   border-radius: 8px;
   font-size: 0.9rem;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
   line-height: 1.4;
 }
 
@@ -475,7 +496,7 @@ main {
 }
 
 .drop-zone span {
-  font-weight: 900;
+  font-weight: var(--weight-heading);
 }
 
 .drop-zone small {
@@ -511,7 +532,7 @@ main {
   border: 1px solid var(--line);
   border-radius: 8px;
   font-size: 0.79rem;
-  font-weight: 800;
+  font-weight: var(--weight-label);
 }
 
 .source-list,
@@ -596,12 +617,13 @@ main {
   border: 1px solid rgba(255, 255, 255, 0.25);
   border-radius: 6px;
   font-size: 0.78rem;
-  font-weight: 800;
+  font-weight: var(--weight-label);
 }
 
 .preview-overlay strong {
   max-width: 92%;
   font-size: clamp(1.35rem, 2vw, 2rem);
+  font-weight: var(--weight-heading);
   line-height: 1;
 }
 
@@ -634,7 +656,7 @@ main {
 .range-control > span {
   color: var(--muted);
   font-size: 0.78rem;
-  font-weight: 900;
+  font-weight: var(--weight-label);
   text-transform: uppercase;
 }
 
@@ -654,7 +676,7 @@ main {
   background: transparent;
   border: 0;
   border-radius: 6px;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .segmented button.active {
@@ -683,7 +705,7 @@ main {
   gap: 8px;
   color: var(--evergreen);
   font-size: 0.9rem;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
   line-height: 1.35;
 }
 
@@ -706,7 +728,7 @@ main {
 .fee-box span,
 .fee-box small {
   color: #6e5226;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .fee-box strong {
@@ -728,7 +750,7 @@ main {
   background: var(--evergreen);
   border: 1px solid var(--evergreen);
   border-radius: 8px;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
 }
 
 .primary-action.gold {
@@ -781,12 +803,12 @@ main {
   color: #f0d99f;
   font-size: 0.8rem;
   font-style: normal;
-  font-weight: 900;
+  font-weight: var(--weight-label);
 }
 
 .scene-number {
   color: #f0d99f;
-  font-weight: 900;
+  font-weight: var(--weight-label);
 }
 
 .approved-avatar,
@@ -851,7 +873,7 @@ main {
   gap: 10px;
   color: var(--ink-soft);
   font-size: 0.92rem;
-  font-weight: 720;
+  font-weight: 450;
   line-height: 1.35;
 }
 
@@ -903,7 +925,7 @@ main {
 .metric span {
   color: var(--muted);
   font-size: 0.8rem;
-  font-weight: 900;
+  font-weight: var(--weight-label);
   text-transform: uppercase;
 }
 
@@ -932,6 +954,7 @@ main {
 .library-card h2 {
   margin: 0;
   font-size: 1.25rem;
+  font-weight: var(--weight-heading);
 }
 
 .library-card p {
@@ -973,7 +996,7 @@ main {
 
 .error-text {
   color: var(--red);
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .security-note {
@@ -981,7 +1004,7 @@ main {
   max-width: 760px;
   color: var(--muted);
   font-size: 0.82rem;
-  font-weight: 750;
+  font-weight: 450;
   line-height: 1.4;
 }
 
@@ -1042,7 +1065,7 @@ th {
   color: var(--muted);
   background: var(--surface-muted);
   font-size: 0.76rem;
-  font-weight: 900;
+  font-weight: var(--weight-label);
   text-transform: uppercase;
 }
 
@@ -1095,7 +1118,7 @@ td small {
   background: var(--surface-muted);
   border-radius: 8px;
   font-size: 0.8rem;
-  font-weight: 800;
+  font-weight: var(--weight-ui);
 }
 
 .movie-record {
@@ -1124,7 +1147,7 @@ td small {
 .music-card span {
   color: #f0d99f;
   font-size: 0.8rem;
-  font-weight: 900;
+  font-weight: var(--weight-label);
 }
 
 .settings-panel {
@@ -1159,7 +1182,7 @@ td small {
   border: 1px solid var(--line);
   border-radius: 8px;
   font-size: 0.86rem;
-  font-weight: 900;
+  font-weight: var(--weight-ui);
 }
 
 .publish-hero {
@@ -1207,7 +1230,7 @@ td small {
   background: var(--surface-muted);
   border: 1px solid var(--line);
   border-radius: 8px;
-  font-weight: 750;
+  font-weight: 450;
 }
 
 .empty-boot {
