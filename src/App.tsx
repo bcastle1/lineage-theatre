@@ -16,6 +16,7 @@ import {
   Mail,
   Mic2,
   Music2,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -65,6 +66,7 @@ import { deleteSourceFile, getSourceObjectUrl, loadState, resetState, saveSource
 import { localEmailAdapter, localPublishAdapter, venmoLocalAdapter } from "./services/productionAdapters";
 
 const trailerStill = "/assets/ancestor-shipyard-still.png";
+const trailerPreviewSeconds = 24;
 
 type ProjectUpdater = (project: MovieProject) => MovieProject;
 
@@ -863,24 +865,100 @@ function StoryTimeline({ project }: { project: MovieProject }) {
   );
 }
 
+function formatPreviewTime(seconds: number) {
+  const wholeSeconds = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(wholeSeconds / 60);
+  return `${minutes}:${String(wholeSeconds % 60).padStart(2, "0")}`;
+}
+
+function buildTrailerPreviewBeats(project: MovieProject) {
+  const sourceScenes = project.story.scenes.slice(0, 3).map((scene) => ({
+    title: scene.title,
+    subtitle: scene.purpose,
+    caption: scene.music,
+  }));
+
+  return [
+    {
+      title: project.ancestor.name || project.title,
+      subtitle: project.story.logline || "A life rebuilt from family memory.",
+      caption: "Opening title",
+    },
+    ...sourceScenes,
+    {
+      title: "The moment that carries forward",
+      subtitle: project.story.climax || project.story.emotionalPromise,
+      caption: "Climax and legacy",
+    },
+  ];
+}
+
 function TrailerPreview({ project }: { project: MovieProject }) {
+  const beats = useMemo(() => buildTrailerPreviewBeats(project), [project]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const beatDuration = trailerPreviewSeconds / beats.length;
+  const activeBeatIndex = Math.min(beats.length - 1, Math.floor(elapsed / beatDuration));
+  const activeBeat = beats[activeBeatIndex];
+  const progress = Math.min(100, (elapsed / trailerPreviewSeconds) * 100);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = window.setInterval(() => {
+      setElapsed((current) => {
+        const next = current + 0.1;
+        if (next >= trailerPreviewSeconds) {
+          setIsPlaying(false);
+          return trailerPreviewSeconds;
+        }
+        return next;
+      });
+    }, 100);
+
+    return () => window.clearInterval(timer);
+  }, [isPlaying]);
+
+  const togglePlayback = () => {
+    setIsPlaying((currentlyPlaying) => {
+      if (currentlyPlaying) return false;
+      if (elapsed >= trailerPreviewSeconds) setElapsed(0);
+      return true;
+    });
+  };
+
   return (
-    <section className="preview-panel">
-      <div className="preview-frame">
-        <img src={trailerStill} alt="Cinematic historical ancestor preview" />
+    <section className={isPlaying ? "preview-panel is-playing" : "preview-panel"}>
+      <div className="preview-frame trailer-player">
+        <img className="trailer-still" src={trailerStill} alt="Cinematic historical ancestor preview" />
+        <div className="trailer-grain" aria-hidden="true" />
         <div className="preview-overlay">
-          <span>Based on a true story</span>
-          <button className="play-button" aria-label="Play trailer preview">
-            <Play size={24} fill="currentColor" />
+          <span className="true-story-chip">Based on a true story</span>
+          <div className="trailer-scene" key={activeBeatIndex}>
+            <small>
+              Scene {activeBeatIndex + 1} / {beats.length}
+            </small>
+            <strong>{activeBeat.title}</strong>
+            <p>{activeBeat.subtitle}</p>
+            <em>{activeBeat.caption}</em>
+          </div>
+          <button className="play-button" onClick={togglePlayback} aria-label={isPlaying ? "Pause trailer preview" : "Play trailer preview"}>
+            {isPlaying ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
           </button>
-          <strong>{project.title}</strong>
         </div>
       </div>
+      <div className="trailer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={trailerPreviewSeconds} aria-valuenow={Math.round(elapsed)}>
+        <span style={{ width: `${progress}%` }} />
+      </div>
       <div className="preview-controls">
+        <button className="preview-control-button" onClick={togglePlayback}>
+          {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+          {isPlaying ? "Pause" : elapsed >= trailerPreviewSeconds ? "Replay" : "Play"}
+        </button>
         <span>
           <Clock3 size={16} />
-          {runtimeLabel(project.preferences.runtime)}
+          {formatPreviewTime(elapsed)} / {formatPreviewTime(trailerPreviewSeconds)}
         </span>
+        <span>{runtimeLabel(project.preferences.runtime)}</span>
         <span>{project.preferences.rating}</span>
         <span>{project.preferences.style}</span>
       </div>
