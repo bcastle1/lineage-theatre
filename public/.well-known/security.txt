@@ -1,0 +1,4 @@
+Contact: mailto:info@lineagetheater.com
+Preferred-Languages: en
+Canonical: https://lineagetheater.com/.well-known/security.txt
+Policy: https://lineagetheater.com/security.html
