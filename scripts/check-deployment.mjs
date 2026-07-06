@@ -47,12 +47,14 @@ const apexA = await resolveA("lineagetheater.com");
 const wwwCname = await resolveCname("www.lineagetheater.com");
 const httpResult = await request("http://lineagetheater.com/");
 const httpsResult = await request("https://lineagetheater.com/");
+const appMarkers = ["Lineage Theatre", 'id="root"', "assets/index-"];
+const hasApp = (body) => appMarkers.every((marker) => body.includes(marker));
 
 const dnsReady = apexA.length === 4 && apexA.every((ip) => expectedA.has(ip));
 const wwwReady = wwwCname.some((target) => target.toLowerCase() === "bcastle1.github.io");
 const siteReady =
   httpsResult.status === 200 &&
-  httpsResult.body.includes("Ancestor Movie Studio") &&
+  hasApp(httpsResult.body) &&
   !httpsResult.body.includes("namecheap");
 
 const report = {
@@ -65,13 +67,13 @@ const report = {
   },
   http: {
     status: httpResult.status,
-    containsApp: httpResult.body.includes("Ancestor Movie Studio"),
+    containsApp: hasApp(httpResult.body),
     containsNamecheapParking: httpResult.body.includes("namecheap"),
   },
   https: {
     status: httpsResult.status,
     error: httpsResult.error,
-    containsApp: httpsResult.body.includes("Ancestor Movie Studio"),
+    containsApp: hasApp(httpsResult.body),
     containsNamecheapParking: httpsResult.body.includes("namecheap"),
   },
   ready: dnsReady && wwwReady && siteReady,
