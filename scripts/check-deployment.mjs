@@ -2,82 +2,74 @@ import dns from "node:dns/promises";
 import https from "node:https";
 import http from "node:http";
 
-const expectedA = new Set([
-  "185.199.108.153",
-  "185.199.109.153",
-  "185.199.110.153",
-  "185.199.111.153",
-]);
+const expectedCommit = process.argv[2]?.trim().toLowerCase() || "";
 
-async function resolveA(hostname) {
+async function resolve(recordType, hostname) {
   try {
-    return await dns.resolve4(hostname);
+    if (recordType === "A") return await dns.resolve4(hostname);
+    if (recordType === "CNAME") return await dns.resolveCname(hostname);
+    if (recordType === "NS") return await dns.resolveNs(hostname);
   } catch {
     return [];
   }
-}
-
-async function resolveCname(hostname) {
-  try {
-    return await dns.resolveCname(hostname);
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 function request(url) {
   const client = url.startsWith("https:") ? https : http;
   return new Promise((resolve) => {
-    const req = client.get(url, { timeout: 12000 }, (res) => {
+    const req = client.get(url, { timeout: 12000, headers: { "user-agent": "lineage-deployment-check/2" } }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => {
         body += chunk;
       });
-      res.on("end", () => resolve({ status: res.statusCode, url: res.responseUrl || url, body }));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body }));
     });
-    req.on("timeout", () => {
-      req.destroy(new Error("timeout"));
-    });
-    req.on("error", (error) => resolve({ status: 0, url, error: error.message, body: "" }));
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.on("error", (error) => resolve({ status: 0, headers: {}, error: error.message, body: "" }));
   });
 }
 
-const apexA = await resolveA("lineagetheater.com");
-const wwwCname = await resolveCname("www.lineagetheater.com");
-const httpResult = await request("http://lineagetheater.com/");
-const httpsResult = await request("https://lineagetheater.com/");
-const appMarkers = ["Lineage Theatre", 'id="root"', "assets/index-"];
-const hasApp = (body) => appMarkers.every((marker) => body.includes(marker));
+const [apexA, wwwCname, nameservers, httpResult, httpsResult] = await Promise.all([
+  resolve("A", "lineagetheater.com"),
+  resolve("CNAME", "www.lineagetheater.com"),
+  resolve("NS", "lineagetheater.com"),
+  request("http://lineagetheater.com/"),
+  request("https://lineagetheater.com/"),
+]);
 
-const dnsReady = apexA.length === 4 && apexA.every((ip) => expectedA.has(ip));
-const wwwReady = wwwCname.some((target) => target.toLowerCase() === "bcastle1.github.io");
-const siteReady =
-  httpsResult.status === 200 &&
-  hasApp(httpsResult.body) &&
-  !httpsResult.body.includes("namecheap");
+const buildMatch = httpsResult.body.match(/<meta name="lineage-build" content="([^"]+)"/i);
+const deployedCommit = buildMatch?.[1]?.toLowerCase() || "";
+const namecheapAuthority = nameservers.length > 0 && nameservers.every((server) => server.toLowerCase().endsWith("registrar-servers.com"));
+const servedByVercel = String(httpsResult.headers.server || "").toLowerCase() === "vercel";
+const hasApp = httpsResult.body.includes("Lineage Theatre") && httpsResult.body.includes('id="root"');
+const commitMatches = expectedCommit ? deployedCommit === expectedCommit : Boolean(deployedCommit && deployedCommit !== "local");
+const ready = httpsResult.status === 200 && namecheapAuthority && servedByVercel && hasApp && commitMatches;
 
 const report = {
   checkedAt: new Date().toISOString(),
+  expectedCommit: expectedCommit || null,
+  deployedCommit: deployedCommit || null,
+  commitMatches,
   dns: {
+    nameservers,
+    namecheapAuthority,
     apexA,
-    apexMatchesGitHubPages: dnsReady,
     wwwCname,
-    wwwMatchesGitHubPages: wwwReady,
   },
   http: {
     status: httpResult.status,
-    containsApp: hasApp(httpResult.body),
-    containsNamecheapParking: httpResult.body.includes("namecheap"),
+    location: httpResult.headers.location || null,
   },
   https: {
     status: httpsResult.status,
+    server: httpsResult.headers.server || null,
     error: httpsResult.error,
-    containsApp: hasApp(httpsResult.body),
-    containsNamecheapParking: httpsResult.body.includes("namecheap"),
+    containsAppShell: hasApp,
   },
-  ready: dnsReady && wwwReady && siteReady,
+  ready,
 };
 
 console.log(JSON.stringify(report, null, 2));
-process.exitCode = report.ready ? 0 : 1;
+process.exitCode = ready ? 0 : 1;

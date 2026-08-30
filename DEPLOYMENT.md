@@ -1,45 +1,64 @@
 # Deploying Lineage Theatre
 
-The repo is prepared for GitHub Pages and the custom domain `lineagetheater.com`.
+## Approved topology for this release
 
-## GitHub Pages
-
-1. Push this repository to GitHub with the default branch named `main`.
-2. In GitHub, open the repository settings and enable Pages with **GitHub Actions** as the source.
-3. Add the custom domain `lineagetheater.com` in the Pages settings.
-4. After DNS is correct and GitHub provisions the certificate, enable **Enforce HTTPS**.
-
-## Namecheap DNS
-
-For `lineagetheater.com`, use Namecheap Advanced DNS and configure:
-
-| Type | Host | Value |
+| Layer | Current system | Release rule |
 | --- | --- | --- |
-| A | @ | 185.199.108.153 |
-| A | @ | 185.199.109.153 |
-| A | @ | 185.199.110.153 |
-| A | @ | 185.199.111.153 |
-| CNAME | www | `<your-github-username>.github.io` |
+| Source | GitHub `bcastle1/lineage-theatre` | `main` is the production source of record. |
+| Build and hosting | Vercel project `lineage-theater` | Production must be built from the exact GitHub commit being released. |
+| Public domain | `lineagetheater.com` | The custom domain must resolve to and be served by Vercel. |
+| DNS authority | Namecheap nameservers | Preserve in this release. No IONOS nameserver change is implied. |
+| App data | Browser local storage and IndexedDB | No shared production customer database exists in this release. |
+| Future shared data | Supabase | Add only after auth, RLS, storage, consent, retention, and deletion rules are approved. |
+| Future DNS | IONOS | Migrate separately with a complete record inventory, lowered TTL, domain verification, and rollback plan. |
 
-Remove conflicting `@` or `www` URL redirect, A, CNAME, ALIAS, or parking records before saving.
+GitHub Pages is intentionally not a deployment target. The GitHub workflow validates the production build and does not publish the domain.
 
-## Public Safety Boundary
+## Vercel project settings
 
-This release is safe as a static public preview because data stays in the visitor's browser and no production customer database exists yet.
-Before accepting real public customer files, add:
+- Framework preset: Vite
+- Install command: `pnpm install --frozen-lockfile`
+- Build command: `pnpm run build`
+- Output directory: `dist`
+- Production branch: `main`
 
-- Server-side authentication and authorization for admins.
-- Encrypted server storage and signed upload URLs.
-- Payment verification through a payment provider or Venmo-capable reconciliation.
-- Transactional email provider for receipts and links.
-- Abuse moderation, content policy, privacy policy, terms, and customer consent capture.
+Connect the existing Vercel `lineage-theater` project to the existing GitHub repository. Do not create a second production project or move the domain unless separately approved.
 
-## Verification
+## Release verification
 
-After DNS changes propagate:
+For every production release, record all of the following:
+
+1. The exact pushed GitHub commit SHA.
+2. The Vercel deployment ID and `READY` state.
+3. The deployment's Git commit matching the pushed SHA.
+4. The custom domain alias pointing to that deployment.
+5. An HTTPS response from `lineagetheater.com` with `Server: Vercel`.
+6. The HTML `<meta name="lineage-build">` value matching the exact commit.
+7. Rendered desktop and mobile checks on the custom domain, including action feedback and regular-weight typography.
+
+Run the read-only production check after promotion:
 
 ```bash
-pnpm run check:deploy
+pnpm run check:deploy -- <expected-commit-sha>
 ```
 
-The check should report `ready: true`, GitHub Pages A records for the apex domain, `bcastle1.github.io` for `www`, and app content over HTTPS.
+The check reports DNS authority, Vercel serving evidence, the deployed build marker, and whether the public app matches the expected commit.
+
+## Provider boundary
+
+The browser app creates the script, scene plan, source inventory, and provider brief. It may open the official Runway, Google Flow, HeyGen, or MagicLight studio and copy that brief. It must not expose provider API credentials, fabricate rendering progress, or state that a paid render succeeded without provider evidence.
+
+## Supabase production gate
+
+Before replacing local browser persistence, define and verify:
+
+- User authentication and account recovery.
+- Project, source, membership, consent, and audit schemas.
+- Row-level-security policies for every table and storage bucket.
+- Signed upload and download paths with file-type and size enforcement.
+- Data retention, deletion, export, and incident procedures.
+- Secrets held only in server-side Vercel and Supabase environments.
+
+## Future IONOS DNS gate
+
+An IONOS cutover is a separate change. First export every current Namecheap DNS record, verify mail and domain-verification records, reproduce them in IONOS, lower TTL before the maintenance window, verify Vercel domain ownership, and retain the Namecheap configuration as rollback evidence until propagation and mail checks are complete.

@@ -1,57 +1,48 @@
 # Lineage Theatre
 
-Lineage Theatre is a local-first web app for creating ancestor movies from family photos, records, audio, dates, written stories, and customer preferences.
+Lineage Theatre is a compact, local-first film-planning app for turning an ancestor's story into a provider-ready production brief. It guides a family from script and source material through film length, studio selection, a five-scene plan, and an honest handoff to an external video renderer.
 
-## What Works Locally
+## What works
 
-- Creator workspace with customer registration, ancestor profile intake, source upload vault, style/rating/runtime controls, story recommendations, characters, storyboard timeline, trailer preview, and full-movie request flow.
-- Local-first persistence through `localStorage` for app state and IndexedDB for uploaded source files.
-- Admin console protected by access code `patriot`.
-- Admin approval queue, customer records, payment ledger, movie library, music library, fee toggles, approval toggles, and editable runtime pricing.
-- Venmo payment path using `@ERik-Castle-1`, with local receipt/outbox tracking.
-- Publishing preferences for email link, YouTube, family gallery, public discovery, download URL, and approval status.
-- PWA manifest and service worker for offline-friendly production builds.
-- Public preview safety pages: `/privacy.html`, `/terms.html`, `/security.html`, and `/.well-known/security.txt`.
+- A five-step landing-page guide from family memory to video studio.
+- Script, ancestor, title, and runtime editing with local autosave feedback.
+- Local source-file storage in IndexedDB, including duplicate and size checks.
+- Provider comparison for Runway, Google Flow + Veo, HeyGen, MagicLight, and the free Lineage planning path.
+- A deterministic five-scene film plan generated in the browser from the supplied script.
+- Copyable provider briefs and downloadable JSON production packages.
+- Direct, disclosed handoff to the selected provider's official studio.
+- Responsive desktop and mobile presentation with regular-weight typography throughout.
 
-## Run Locally
+The app does not claim that a paid third-party render completed. Rendering, account access, pricing, usage limits, and billing remain in the provider's own studio.
+
+## Run locally
 
 ```bash
-npm install
-npm run dev
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
-Open the local URL printed by Vite, usually `http://127.0.0.1:5173/`.
+Vite normally serves the app at `http://127.0.0.1:5173/`.
 
 ## Build
 
 ```bash
-npm run build
-npm run preview
+pnpm run build
 ```
 
-The production files are emitted to `dist/` and can be hosted on Vercel, Netlify, Cloudflare Pages, or a traditional static host.
+The production output is written to `dist/`. GitHub Actions runs this build on every push to `main`; Vercel is the intended production publisher.
 
-## Deployment Check
+## Current architecture
 
-```bash
-npm run check:deploy
-```
+- Source of record: GitHub (`bcastle1/lineage-theatre`)
+- Production hosting: Vercel (`lineage-theater` project)
+- DNS authority today: Namecheap nameservers
+- Application persistence today: the visitor's browser (`localStorage` and IndexedDB)
+- Planned shared data layer: Supabase, after authentication, row-level security, retention, consent, and production data rules are approved
+- Planned DNS authority: IONOS, only through a separate approved migration with rollback and domain verification
 
-This checks whether `lineagetheater.com` DNS points to GitHub Pages and whether HTTPS serves the app instead of Namecheap parking.
+See `DEPLOYMENT.md` for the release and verification contract.
 
-## Production Integration Points
+## Public safety boundary
 
-The app is intentionally structured so real services can be connected behind adapters:
-
-- `src/services/productionAdapters.ts`
-  - `VideoGenerationAdapter`: connect a video generation/render pipeline for trailers and full movies.
-  - `PaymentAdapter`: replace the local Venmo flow with Stripe, Venmo business/API-capable reconciliation, or another payment provider.
-  - `EmailAdapter`: connect Resend, Postmark, SendGrid, AWS SES, or another transactional email provider for receipts and delivery links.
-  - `PublishAdapter`: connect YouTube OAuth upload, private download storage, or a family gallery.
-
-## Notes Before Going Live
-
-- Automated Venmo verification and receipt email delivery require a server-side payment/email integration. The current app records the local workflow and prepares receipt state, but it does not verify Venmo payments by itself.
-- Realistic 4K movie generation, voice, music, and long-form rendering require external model/render infrastructure or a backend worker fleet. The frontend already captures the inputs and decisions those services need.
-- Add authentication, encrypted storage, signed upload URLs, parental/age handling, abuse moderation, privacy policy, terms, and consent workflows before accepting public users.
-- Keep music direction original. The app avoids copying any specific living composer and frames generated music as original cinematic orchestration.
+This release is appropriate for private browser drafting. Before the app accepts production customer files in a shared backend, add authenticated accounts, least-privilege access, encrypted storage, signed uploads, consent and rights records, retention and deletion controls, abuse handling, privacy terms, and provider-specific commercial-use review. Never place video-provider or Supabase secrets in browser code.

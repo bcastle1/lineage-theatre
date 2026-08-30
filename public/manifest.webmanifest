@@ -1,11 +1,11 @@
 {
   "name": "Lineage Theatre",
   "short_name": "Lineage",
-  "description": "Create cinematic ancestor movies from family history sources.",
+  "description": "Turn an ancestor's story and family sources into a provider-ready film plan.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f7f8f4",
-  "theme_color": "#f7f8f4",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
   "icons": [
     {
       "src": "/assets/ancestor-shipyard-still.png",

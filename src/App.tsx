@@ -1,1839 +1,602 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  AlertCircle,
-  CalendarDays,
-  Check,
-  CheckCircle2,
-  Clock3,
-  CreditCard,
-  Download,
-  Eye,
-  FileText,
-  Film,
-  Image as ImageIcon,
-  Library,
-  LockKeyhole,
-  Mail,
-  Mic2,
-  Music2,
-  Pause,
-  Play,
-  Plus,
-  RefreshCw,
-  Send,
-  Settings,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Trash2,
-  UploadCloud,
-  UserRound,
-  UsersRound,
-  WandSparkles,
-  X,
-  Youtube,
-} from "lucide-react";
-import type {
-  AdminSettings,
-  AppState,
-  CharacterSuggestion,
-  CustomerProfile,
-  MoviePreferences,
-  MovieProject,
-  ProjectStatus,
-  RuntimeId,
-  SourceAsset,
-  ViewId,
-} from "./types";
-import {
-  ADMIN_ACCESS_CODE,
-  ADMIN_EMAIL,
-  MAX_SOURCE_FILE_SIZE_BYTES,
-  PUBLIC_LAUNCH_MODE,
-  SITE_DOMAIN,
-  createId,
-  formatCurrency,
-  formatFileSize,
-  inferSourceKind,
-  isAllowedSourceFile,
-  musicMoods,
-  nowIso,
-  runtimeOptions,
-  sourceKindLabels,
-} from "./lib/runtime";
-import { buildStoryRecommendation, estimateProjectFee, runtimeLabel, statusCopy } from "./lib/storyEngine";
-import { deleteSourceFile, getSourceObjectUrl, loadState, resetState, saveSourceFile, saveState } from "./lib/storage";
-import { localEmailAdapter, localPublishAdapter, venmoLocalAdapter } from "./services/productionAdapters";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { deleteSourceFile, saveSourceFile } from "./lib/storage";
 
-const trailerStill = "/assets/ancestor-shipyard-still.png";
-const trailerPreviewSeconds = 24;
+type SaveState = "saved" | "saving" | "error";
+type ToastTone = "success" | "error" | "info";
 
-type ProjectUpdater = (project: MovieProject) => MovieProject;
-
-function makeBlankProject(customerId: string): MovieProject {
-  const id = createId("project");
-  const project: MovieProject = {
-    id,
-    customerId,
-    title: "Untitled Ancestor Film",
-    ancestor: {
-      name: "",
-      birthDate: "",
-      birthPlace: "",
-      deathDate: "",
-      homeland: "",
-      height: "",
-      build: "",
-      knownRelatives: "",
-      values: "",
-      definingTraits: "",
-      lifeSummary: "",
-    },
-    sources: [],
-    preferences: {
-      style: "Cinematic",
-      rating: "G",
-      runtime: "trailer",
-      realism: 90,
-      historicalFidelity: 85,
-      heroTone: 92,
-      publishToYoutube: false,
-      publishToFamilyGallery: false,
-      sendEmailLink: true,
-      allowPublicDiscovery: false,
-    },
-    story: {
-      logline: "",
-      plot: "",
-      climax: "",
-      emotionalPromise: "",
-      scenes: [],
-      characters: [],
-      musicDirection: "",
-      contentNotes: [],
-      generatedAt: nowIso(),
-    },
-    payment: {
-      id: createId("payment"),
-      amount: 0,
-      required: false,
-      status: "not-required",
-      venmoHandle: "@ERik-Castle-1",
-      receiptEmailStatus: "not-sent",
-      receiptNumber: `LT-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`,
-      updatedAt: nowIso(),
-    },
-    status: "draft",
-    createdAt: nowIso(),
-    updatedAt: nowIso(),
-    adminNote: "",
-    downloadUrl: "",
-    youtubeUrl: "",
-  };
-  return { ...project, story: buildStoryRecommendation(project) };
+interface SourceFileRecord {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
 }
 
-export default function App() {
-  const [state, setState] = useState<AppState>(() => loadState());
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
-  const [adminSection, setAdminSection] = useState("Approval Queue");
-  const [uploadNotice, setUploadNotice] = useState("");
+interface FilmProject {
+  id: string;
+  title: string;
+  ancestor: string;
+  script: string;
+  runtime: string;
+  providerId: string;
+  sources: SourceFileRecord[];
+  updatedAt: string;
+}
+
+interface FilmScene {
+  title: string;
+  direction: string;
+  narration: string;
+}
+
+interface FilmPlan {
+  generatedAt: string;
+  logline: string;
+  scenes: FilmScene[];
+}
+
+interface ProviderOption {
+  id: string;
+  name: string;
+  label: string;
+  summary: string;
+  bestFor: string;
+  price: string;
+  detail: string;
+  website: string | null;
+  accent: string;
+}
+
+interface ToastMessage {
+  id: number;
+  tone: ToastTone;
+  message: string;
+}
+
+const STORAGE_KEY = "lineage-theater-projects-v2";
+
+const sampleScript = `In 1919, twenty-four-year-old Thomas Wilson left the stone cottage where his family had lived for generations. He carried one photograph, a hand-written address in Baltimore, and the promise that he would send for his younger brother.
+
+At the shipyard, Thomas learned to shape steel and found a community of newcomers building lives beside him. His letters home described the harbor lights, the sound of hammers at dawn, and the small room where he saved every spare dollar.
+
+That journey became the first chapter of our family's American story. The courage Thomas carried forward can still be felt in the choices his descendants make today.`;
+
+const runtimeOptions = [
+  { value: "trailer", label: "Family trailer", note: "1–2 min" },
+  { value: "short", label: "Short film", note: "4–8 min" },
+  { value: "featurette", label: "Featurette", note: "10–20 min" },
+  { value: "feature", label: "Long film", note: "20–50 min" },
+];
+
+const providerOptions: ProviderOption[] = [
+  {
+    id: "runway",
+    name: "Runway",
+    label: "Recommended",
+    summary: "The strongest overall choice for directed, cinematic ancestor scenes.",
+    bestFor: "Cinematic control",
+    price: "From $15/mo",
+    detail: "Standard includes 625 monthly credits. Generation uses credits, so final cost depends on model and scene length.",
+    website: "https://runwayml.com/",
+    accent: "amber",
+  },
+  {
+    id: "flow",
+    name: "Google Flow + Veo",
+    label: "Premium shots",
+    summary: "High-end generative video for polished hero moments and visual transitions.",
+    bestFor: "Hero scenes",
+    price: "AI Pro $19.99/mo",
+    detail: "Flow access and limits vary by Google AI plan, region, and availability. Review current plan terms before rendering.",
+    website: "https://labs.google/fx/tools/flow",
+    accent: "violet",
+  },
+  {
+    id: "heygen",
+    name: "HeyGen",
+    label: "Presenter",
+    summary: "A practical choice when the film needs an on-camera family narrator or avatar.",
+    bestFor: "Narration",
+    price: "Creator $29/mo",
+    detail: "Creator lists 600 premium credits and videos up to 30 minutes. API usage is priced separately.",
+    website: "https://www.heygen.com/",
+    accent: "blue",
+  },
+  {
+    id: "magiclight",
+    name: "MagicLight",
+    label: "Long-form",
+    summary: "A fast route from a written story to a longer first-pass video with less manual assembly.",
+    bestFor: "Fast drafts",
+    price: "Free trial; paid varies",
+    detail: "MagicLight advertises videos up to 50 minutes. Confirm current paid plan and commercial-use terms in its studio.",
+    website: "https://magiclight.ai/",
+    accent: "rose",
+  },
+  {
+    id: "lineage",
+    name: "Lineage plan",
+    label: "No renderer",
+    summary: "Create a private scene plan and provider-ready production package in this browser.",
+    bestFor: "Planning",
+    price: "$0 in this app",
+    detail: "Lineage Theatre prepares the project package but does not claim to render a paid provider's video.",
+    website: null,
+    accent: "green",
+  },
+];
+
+const steps = [
+  ["01", "Tell the story", "Paste a script or begin with a family memory."],
+  ["02", "Add what is real", "Attach photos, letters, and sources you may use."],
+  ["03", "Choose the format", "Select a short, featurette, or longer family film."],
+  ["04", "Pick a studio", "Compare the right video provider for your story."],
+  ["05", "Review and create", "Prepare a scene plan, then continue in that studio."],
+];
+
+const blankProject = (): FilmProject => ({
+  id: crypto.randomUUID(),
+  title: "Untitled family film",
+  ancestor: "",
+  script: "",
+  runtime: "short",
+  providerId: "runway",
+  sources: [],
+  updatedAt: new Date().toISOString(),
+});
+
+const initialProject = (): FilmProject => ({
+  id: crypto.randomUUID(),
+  title: "The Journey of Thomas Wilson",
+  ancestor: "Thomas Wilson",
+  script: sampleScript,
+  runtime: "short",
+  providerId: "runway",
+  sources: [],
+  updatedAt: new Date().toISOString(),
+});
+
+function loadProjects(): FilmProject[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [initialProject()];
+    const parsed = JSON.parse(raw) as FilmProject[];
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [initialProject()];
+  } catch {
+    return [initialProject()];
+  }
+}
+
+function formatBytes(size: number) {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function makeFilmPlan(project: FilmProject): FilmPlan {
+  const parts = project.script
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const source = parts.length > 0 ? parts : [project.script.trim()];
+  const ancestor = project.ancestor.trim() || "your ancestor";
+  const sceneNames = ["The world before", "The turning point", "A life in motion", "What endured", "The legacy today"];
+  const directions = [
+    "Establish the place and period with sourced details and a restrained cinematic opening.",
+    "Show the choice or circumstance that changed the course of the story.",
+    "Build the middle through work, relationships, obstacles, and everyday detail.",
+    "Return to the objects, letters, and memories that carried the story forward.",
+    "Connect the ancestor's choices to the family members who remember them now.",
+  ];
+  const scenes = sceneNames.map((title, index) => ({
+    title,
+    direction: directions[index],
+    narration: source[index % source.length].slice(0, 420),
+  }));
+  return {
+    generatedAt: new Date().toISOString(),
+    logline: `${ancestor}'s story becomes a ${runtimeOptions.find((option) => option.value === project.runtime)?.label.toLowerCase() ?? "family film"} grounded in family evidence and memory.`,
+    scenes,
+  };
+}
+
+function buildProviderBrief(project: FilmProject, plan: FilmPlan | null) {
+  const provider = providerOptions.find((option) => option.id === project.providerId) ?? providerOptions[0];
+  const runtime = runtimeOptions.find((option) => option.value === project.runtime);
+  const sceneText = plan
+    ? plan.scenes.map((scene, index) => `${index + 1}. ${scene.title}\nDirection: ${scene.direction}\nNarration: ${scene.narration}`).join("\n\n")
+    : "Create a scene structure from the script below before rendering.";
+  return `LINEAGE THEATRE PRODUCTION BRIEF
+
+Project: ${project.title}
+Ancestor: ${project.ancestor || "Not yet named"}
+Format: ${runtime?.label ?? "Short film"} (${runtime?.note ?? "4–8 min"})
+Selected studio: ${provider.name}
+
+Creative direction:
+Create a respectful, cinematic family-history film. Preserve uncertainty where facts are incomplete. Do not invent quotations, dates, places, uniforms, or family relationships. Use only attached family materials for which the family has permission.
+
+Scene plan:
+${sceneText}
+
+Approved script:
+${project.script}
+
+Source inventory:
+${project.sources.length > 0 ? project.sources.map((source) => `- ${source.name}`).join("\n") : "- No source files attached yet"}
+
+Final checks:
+- Confirm likeness and media rights before upload.
+- Review every generated historical detail for accuracy.
+- Confirm the provider's current price and commercial-use terms before rendering.`;
+}
+
+function App() {
+  const [projects, setProjects] = useState<FilmProject[]>(loadProjects);
+  const [activeProjectId, setActiveProjectId] = useState(() => projects[0].id);
+  const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [plan, setPlan] = useState<FilmPlan | null>(null);
+  const [isPlanning, setIsPlanning] = useState(false);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const scriptRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  const project = projects.find((item) => item.id === activeProjectId) ?? projects[0];
+  const selectedProvider = providerOptions.find((option) => option.id === project.providerId) ?? providerOptions[0];
+  const runtime = runtimeOptions.find((option) => option.value === project.runtime) ?? runtimeOptions[1];
+  const wordCount = project.script.trim() ? project.script.trim().split(/\s+/).length : 0;
+  const readMinutes = Math.max(1, Math.ceil(wordCount / 135));
 
   useEffect(() => {
-    saveState(state);
-  }, [state]);
-
-  const activeProject = useMemo(
-    () => state.projects.find((project) => project.id === state.activeProjectId) ?? state.projects[0],
-    [state.activeProjectId, state.projects]
-  );
-
-  const activeCustomer = useMemo(
-    () => state.customers.find((customer) => customer.id === activeProject?.customerId) ?? state.customers[0],
-    [activeProject?.customerId, state.customers]
-  );
-
-  const setActiveView = useCallback((view: ViewId) => {
-    setState((previous) => ({ ...previous, activeView: view }));
-  }, []);
-
-  const updateProject = useCallback((projectId: string, updater: ProjectUpdater) => {
-    setState((previous) => ({
-      ...previous,
-      projects: previous.projects.map((project) =>
-        project.id === projectId ? { ...updater(project), updatedAt: nowIso() } : project
-      ),
-    }));
-  }, []);
-
-  const updateActiveProject = useCallback(
-    (updater: ProjectUpdater) => {
-      if (!activeProject) return;
-      updateProject(activeProject.id, updater);
-    },
-    [activeProject, updateProject]
-  );
-
-  const updateCustomer = useCallback((customerId: string, patch: Partial<CustomerProfile>) => {
-    setState((previous) => ({
-      ...previous,
-      customers: previous.customers.map((customer) =>
-        customer.id === customerId ? { ...customer, ...patch } : customer
-      ),
-    }));
-  }, []);
-
-  const updateAdminSettings = useCallback((patch: Partial<AdminSettings>) => {
-    setState((previous) => ({
-      ...previous,
-      adminSettings: { ...previous.adminSettings, ...patch },
-    }));
-  }, []);
-
-  const createProject = useCallback(() => {
-    const customerId = activeCustomer?.id ?? createId("customer");
-    const project = makeBlankProject(customerId);
-    setState((previous) => ({
-      ...previous,
-      projects: [project, ...previous.projects],
-      activeProjectId: project.id,
-      activeView: "creator",
-    }));
-  }, [activeCustomer?.id]);
-
-  const selectProject = useCallback((projectId: string) => {
-    setState((previous) => ({ ...previous, activeProjectId: projectId }));
-  }, []);
-
-  const addFiles = useCallback(
-    async (files: FileList | null) => {
-      if (!files || !activeProject) return;
-      const sourceFiles = Array.from(files);
-      const sources: SourceAsset[] = [];
-      const skipped: string[] = [];
-
-      for (const file of sourceFiles) {
-        if (!isAllowedSourceFile(file)) {
-          skipped.push(file.name);
-          continue;
-        }
-        const id = createId("source");
-        await saveSourceFile(id, activeProject.id, file);
-        sources.push({
-          id,
-          projectId: activeProject.id,
-          name: file.name,
-          kind: inferSourceKind(file),
-          type: file.type || "application/octet-stream",
-          size: file.size,
-          addedAt: nowIso(),
-          notes: "",
-        });
+    setSaveState("saving");
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
+        setSaveState("saved");
+      } catch {
+        setSaveState("error");
       }
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [projects]);
 
-      if (skipped.length > 0) {
-        setUploadNotice(
-          `${skipped.length} file(s) were skipped. Use common image, audio, video, PDF, document, JSON, or text files under ${Math.round(
-            MAX_SOURCE_FILE_SIZE_BYTES / 1024 / 1024
-          )} MB each.`
-        );
-      } else {
-        setUploadNotice("");
-      }
-
-      if (sources.length === 0) return;
-
-      updateActiveProject((project) => {
-        const merged: MovieProject = {
-          ...project,
-          sources: [...sources, ...project.sources],
-        };
-        return { ...merged, story: buildStoryRecommendation(merged) };
-      });
-    },
-    [activeProject, updateActiveProject]
-  );
-
-  const removeSource = useCallback(
-    async (sourceId: string) => {
-      await deleteSourceFile(sourceId);
-      updateActiveProject((project) => {
-        const merged = {
-          ...project,
-          sources: project.sources.filter((source) => source.id !== sourceId),
-        };
-        return { ...merged, story: buildStoryRecommendation(merged) };
-      });
-    },
-    [updateActiveProject]
-  );
-
-  const regenerateStory = useCallback(() => {
-    updateActiveProject((project) => ({ ...project, story: buildStoryRecommendation(project) }));
-  }, [updateActiveProject]);
-
-  const generateTrailer = useCallback(() => {
-    updateActiveProject((project) => {
-      const story = buildStoryRecommendation(project);
-      return {
-        ...project,
-        story,
-        status: "trailer-ready",
-        payment: {
-          ...project.payment,
-          required: false,
-          amount: 0,
-          status: "not-required",
-          updatedAt: nowIso(),
-        },
-      };
-    });
-  }, [updateActiveProject]);
-
-  const requestFullMovie = useCallback(() => {
-    updateActiveProject((project) => {
-      const story = buildStoryRecommendation(project);
-      const amount = estimateProjectFee(project, state.adminSettings);
-      const nextStatus: ProjectStatus =
-        amount > 0 ? "payment-pending" : state.adminSettings.requireApproval ? "in-review" : "full-movie-ready";
-      return {
-        ...project,
-        story,
-        status: nextStatus,
-        payment: {
-          ...project.payment,
-          amount,
-          required: amount > 0,
-          status: amount > 0 ? "awaiting-venmo" : "not-required",
-          venmoHandle: state.adminSettings.venmoHandle,
-          updatedAt: nowIso(),
-        },
-      };
-    });
-  }, [state.adminSettings, updateActiveProject]);
-
-  const reportPayment = useCallback(async () => {
-    if (!activeProject || !activeCustomer) return;
-    const email = await localEmailAdapter.sendReceipt(activeProject, activeCustomer.email);
-    setState((previous) => ({
-      ...previous,
-      outbox: [email, ...previous.outbox],
-      projects: previous.projects.map((project) =>
-        project.id === activeProject.id
-          ? {
-              ...project,
-              status: previous.adminSettings.requireApproval ? "in-review" : "full-movie-ready",
-              payment: {
-                ...project.payment,
-                status: "reported-paid",
-                receiptEmailStatus: "queued",
-                updatedAt: nowIso(),
-              },
-              updatedAt: nowIso(),
-            }
-          : project
-      ),
-    }));
-  }, [activeCustomer, activeProject]);
-
-  const adminUpdateProjectStatus = useCallback(
-    (projectId: string, status: ProjectStatus, adminNote?: string) => {
-      updateProject(projectId, (project) => ({
-        ...project,
-        status,
-        adminNote: adminNote ?? project.adminNote,
-      }));
-    },
-    [updateProject]
-  );
-
-  const markPaymentVerified = useCallback(
-    (projectId: string) => {
-      updateProject(projectId, (project) => ({
-        ...project,
-        status: state.adminSettings.requireApproval ? "in-review" : "full-movie-ready",
-        payment: {
-          ...project.payment,
-          status: "verified",
-          receiptEmailStatus: "sent",
-          updatedAt: nowIso(),
-        },
-      }));
-    },
-    [state.adminSettings.requireApproval, updateProject]
-  );
-
-  const publishProject = useCallback(async () => {
-    if (!activeProject) return;
-    const result = await localPublishAdapter.publish(activeProject);
-    updateActiveProject((project) => ({
-      ...project,
-      status: "published",
-      youtubeUrl: result.youtubeUrl ?? project.youtubeUrl,
-      downloadUrl: result.familyGalleryUrl ?? project.downloadUrl,
-    }));
-  }, [activeProject, updateActiveProject]);
-
-  const resetLocalDemo = useCallback(() => {
-    setState(resetState());
-    setAdminUnlocked(false);
+  useEffect(() => () => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
   }, []);
 
-  if (!activeProject || !activeCustomer) {
-    return (
-      <div className="empty-boot">
-        <p>Lineage Theatre could not load a project.</p>
-        <button onClick={resetLocalDemo}>Restore demo state</button>
-      </div>
+  const progress = useMemo(() => {
+    const checks = [project.script.trim().length >= 80, project.sources.length > 0, Boolean(project.runtime), Boolean(project.providerId), Boolean(plan)];
+    return Math.round((checks.filter(Boolean).length / checks.length) * 100);
+  }, [plan, project]);
+
+  const notify = (message: string, tone: ToastTone = "success") => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    setToast({ id: Date.now(), tone, message });
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 4200);
+  };
+
+  const updateProject = (patch: Partial<FilmProject>) => {
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item));
+    if ("script" in patch || "runtime" in patch || "ancestor" in patch) setPlan(null);
+  };
+
+  const focusScript = () => {
+    document.querySelector("#create")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => scriptRef.current?.focus(), 550);
+    notify("The script editor is ready.", "info");
+  };
+
+  const createProject = () => {
+    const next = blankProject();
+    setProjects((current) => [next, ...current]);
+    setActiveProjectId(next.id);
+    setPlan(null);
+    setMenuOpen(false);
+    notify("New film project created.");
+    window.setTimeout(() => scriptRef.current?.focus(), 100);
+  };
+
+  const selectProject = (id: string) => {
+    setActiveProjectId(id);
+    setPlan(null);
+    notify("Project opened.", "info");
+    document.querySelector("#create")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files?.length) return;
+    const accepted: SourceFileRecord[] = [];
+    const existingNames = new Set(project.sources.map((source) => source.name.toLowerCase()));
+    let rejected = 0;
+    for (const file of Array.from(files)) {
+      if (file.size > 100 * 1024 * 1024 || existingNames.has(file.name.toLowerCase())) {
+        rejected += 1;
+        continue;
+      }
+      const record = { id: crypto.randomUUID(), name: file.name, size: file.size, type: file.type || "application/octet-stream" };
+      try {
+        await saveSourceFile(record.id, project.id, file);
+        accepted.push(record);
+        existingNames.add(file.name.toLowerCase());
+      } catch {
+        rejected += 1;
+      }
+    }
+    if (accepted.length > 0) updateProject({ sources: [...project.sources, ...accepted] });
+    if (accepted.length > 0 && rejected === 0) notify(`${accepted.length} source ${accepted.length === 1 ? "file" : "files"} added.`);
+    else if (accepted.length > 0) notify(`${accepted.length} added; ${rejected} skipped as duplicate, oversized, or unreadable.`, "info");
+    else notify("No files were added. Check for duplicates or the 100 MB limit.", "error");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const removeSource = async (source: SourceFileRecord) => {
+    if (!window.confirm(`Remove ${source.name} from this project?`)) return;
+    try {
+      await deleteSourceFile(source.id);
+      updateProject({ sources: project.sources.filter((item) => item.id !== source.id) });
+      notify(`${source.name} removed.`);
+    } catch {
+      notify(`Could not remove ${source.name}.`, "error");
+    }
+  };
+
+  const selectProvider = (provider: ProviderOption) => {
+    updateProject({ providerId: provider.id });
+    notify(`${provider.name} selected.`, "success");
+  };
+
+  const prepareFilmPlan = () => {
+    if (project.script.trim().length < 80) {
+      scriptRef.current?.focus();
+      notify("Add at least 80 characters of story before preparing the film plan.", "error");
+      return;
+    }
+    setIsPlanning(true);
+    notify("Building a five-scene plan from your script…", "info");
+    window.setTimeout(() => {
+      setPlan(makeFilmPlan(project));
+      setIsPlanning(false);
+      notify("Film plan prepared. Review it before opening the studio.");
+      window.setTimeout(() => document.querySelector("#film-plan")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+    }, 850);
+  };
+
+  const copyBrief = async () => {
+    try {
+      await navigator.clipboard.writeText(buildProviderBrief(project, plan));
+      notify("Provider brief copied.");
+    } catch {
+      notify("The browser could not copy the brief. Download the project package instead.", "error");
+    }
+  };
+
+  const openStudio = () => {
+    if (!selectedProvider.website) {
+      notify("The Lineage plan is ready here. Download the package when your review is complete.", "info");
+      return;
+    }
+    const studioWindow = window.open(selectedProvider.website, "_blank");
+    if (studioWindow) studioWindow.opener = null;
+    navigator.clipboard.writeText(buildProviderBrief(project, plan)).then(
+      () => notify(`${selectedProvider.name} opened and the production brief was copied. Rendering and billing happen there.`),
+      () => notify(`${selectedProvider.name} opened. Download the package if you need the full brief.`, "info"),
     );
-  }
+    if (!studioWindow) notify(`Your browser blocked the ${selectedProvider.name} tab. Allow pop-ups and try again.`, "error");
+  };
+
+  const downloadPackage = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      notice: "Review facts, rights, provider pricing, and commercial-use terms before rendering.",
+      project,
+      plan,
+      provider: selectedProvider,
+      providerBrief: buildProviderBrief(project, plan),
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "lineage-film"}-package.json`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    notify("Project package downloaded.");
+  };
 
   return (
     <div className="app-shell">
-      <TopNav activeView={state.activeView} onViewChange={setActiveView} adminUnlocked={adminUnlocked} />
-      <main>
-        {state.activeView === "creator" && (
-          <CreatorWorkspace
-            state={state}
-            project={activeProject}
-            customer={activeCustomer}
-            onCreateProject={createProject}
-            onSelectProject={selectProject}
-            onUpdateProject={updateActiveProject}
-            onUpdateCustomer={updateCustomer}
-            onAddFiles={addFiles}
-            onRemoveSource={removeSource}
-            uploadNotice={uploadNotice}
-            onRegenerateStory={regenerateStory}
-            onGenerateTrailer={generateTrailer}
-            onRequestFullMovie={requestFullMovie}
-            onReportPayment={reportPayment}
-          />
-        )}
-        {state.activeView === "library" && (
-          <LibraryView
-            projects={state.projects}
-            customers={state.customers}
-            onSelectProject={(id) => {
-              selectProject(id);
-              setActiveView("creator");
-            }}
-          />
-        )}
-        {state.activeView === "admin" && (
-          <AdminConsole
-            state={state}
-            adminUnlocked={adminUnlocked}
-            adminSection={adminSection}
-            onUnlock={setAdminUnlocked}
-            onSectionChange={setAdminSection}
-            onUpdateSettings={updateAdminSettings}
-            onProjectStatus={adminUpdateProjectStatus}
-            onMarkPaymentVerified={markPaymentVerified}
-            onResetLocalDemo={resetLocalDemo}
-          />
-        )}
-        {state.activeView === "publish" && (
-          <PublishPanel
-            project={activeProject}
-            customer={activeCustomer}
-            settings={state.adminSettings}
-            onUpdateProject={updateActiveProject}
-            onRequestFullMovie={requestFullMovie}
-            onReportPayment={reportPayment}
-            onPublish={publishProject}
-          />
-        )}
-      </main>
-    </div>
-  );
-}
-
-function TopNav({
-  activeView,
-  onViewChange,
-  adminUnlocked,
-}: {
-  activeView: ViewId;
-  onViewChange: (view: ViewId) => void;
-  adminUnlocked: boolean;
-}) {
-  const nav = [
-    { id: "creator" as const, label: "Creator", icon: Film },
-    { id: "library" as const, label: "Library", icon: Library },
-    { id: "admin" as const, label: "Admin", icon: ShieldCheck },
-    { id: "publish" as const, label: "Publish", icon: Send },
-  ];
-
-  return (
-    <header className="top-nav">
-      <button className="brand-mark" onClick={() => onViewChange("creator")} aria-label="Open Creator">
-        <span className="brand-glyph">LT</span>
-        <span>
-          <strong>Lineage Theatre</strong>
-          <small>Local-first ancestor movie studio</small>
-        </span>
-      </button>
-      <nav aria-label="Primary navigation">
-        {nav.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              className={activeView === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => onViewChange(item.id)}
-            >
-              <Icon size={18} />
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
-      <div className="nav-status">
-        <span className="local-dot" />
-        <span>Local-first</span>
-        <span>{SITE_DOMAIN}</span>
-        {adminUnlocked ? <ShieldCheck size={17} /> : <LockKeyhole size={17} />}
-      </div>
-    </header>
-  );
-}
-
-function CreatorWorkspace({
-  state,
-  project,
-  customer,
-  onCreateProject,
-  onSelectProject,
-  onUpdateProject,
-  onUpdateCustomer,
-  onAddFiles,
-  onRemoveSource,
-  uploadNotice,
-  onRegenerateStory,
-  onGenerateTrailer,
-  onRequestFullMovie,
-  onReportPayment,
-}: {
-  state: AppState;
-  project: MovieProject;
-  customer: CustomerProfile;
-  onCreateProject: () => void;
-  onSelectProject: (projectId: string) => void;
-  onUpdateProject: (updater: ProjectUpdater) => void;
-  onUpdateCustomer: (customerId: string, patch: Partial<CustomerProfile>) => void;
-  onAddFiles: (files: FileList | null) => void;
-  onRemoveSource: (sourceId: string) => void;
-  uploadNotice: string;
-  onRegenerateStory: () => void;
-  onGenerateTrailer: () => void;
-  onRequestFullMovie: () => void;
-  onReportPayment: () => void;
-}) {
-  const fee = estimateProjectFee(project, state.adminSettings);
-  const sourceCounts = useMemo(() => {
-    return project.sources.reduce<Record<string, number>>((acc, source) => {
-      acc[source.kind] = (acc[source.kind] ?? 0) + 1;
-      return acc;
-    }, {});
-  }, [project.sources]);
-
-  return (
-    <section className="creator-layout">
-      <aside className="project-rail">
-        <div className="rail-head">
-          <div>
-            <h2>Projects</h2>
-            <p>{state.projects.length} local records</p>
-          </div>
-          <button className="icon-button" onClick={onCreateProject} aria-label="Create project">
-            <Plus size={18} />
-          </button>
-        </div>
-        <div className="project-list">
-          {state.projects.map((item) => (
-            <button
-              key={item.id}
-              className={item.id === project.id ? "project-row active" : "project-row"}
-              onClick={() => onSelectProject(item.id)}
-            >
-              <span>{item.title}</span>
-              <small>{statusCopy(item.status)}</small>
-            </button>
-          ))}
-        </div>
-        <CustomerRegistration customer={customer} onUpdateCustomer={onUpdateCustomer} />
-      </aside>
-
-      <section className="studio-surface">
-        <div className="studio-heading">
-          <div>
-            <h1>Ancestor Movie Studio</h1>
-            <p>
-              Build a family-safe film from records, photos, audio, dates, and lived memory.
-            </p>
-          </div>
-          <StatusBadge status={project.status} />
-        </div>
-
-        <div className="studio-grid">
-          <div className="main-column">
-            <AncestorPanel project={project} onUpdateProject={onUpdateProject} />
-            <SourceVault
-              project={project}
-              sourceCounts={sourceCounts}
-              onAddFiles={onAddFiles}
-              onRemoveSource={onRemoveSource}
-              uploadNotice={uploadNotice}
-            />
-            <StoryTimeline project={project} />
-          </div>
-
-          <aside className="inspector-column">
-            <TrailerPreview project={project} />
-            <StoryEnginePanel
-              project={project}
-              fee={fee}
-              settings={state.adminSettings}
-              onUpdateProject={onUpdateProject}
-              onRegenerateStory={onRegenerateStory}
-              onGenerateTrailer={onGenerateTrailer}
-              onRequestFullMovie={onRequestFullMovie}
-              onReportPayment={onReportPayment}
-            />
-            <CharacterPanel project={project} onUpdateProject={onUpdateProject} />
-          </aside>
-        </div>
-      </section>
-    </section>
-  );
-}
-
-function CustomerRegistration({
-  customer,
-  onUpdateCustomer,
-}: {
-  customer: CustomerProfile;
-  onUpdateCustomer: (customerId: string, patch: Partial<CustomerProfile>) => void;
-}) {
-  return (
-    <section className="registration-panel">
-      <h3>Customer Record</h3>
-      <div className="compact-grid">
-        <TextInput
-          label="First name"
-          value={customer.firstName}
-          onChange={(firstName) => onUpdateCustomer(customer.id, { firstName })}
-        />
-        <TextInput
-          label="Last name"
-          value={customer.lastName}
-          onChange={(lastName) => onUpdateCustomer(customer.id, { lastName })}
-        />
-        <TextInput
-          label="Age"
-          value={customer.age}
-          onChange={(age) => onUpdateCustomer(customer.id, { age })}
-        />
-        <TextInput
-          label="Email"
-          value={customer.email}
-          onChange={(email) => onUpdateCustomer(customer.id, { email })}
-        />
-      </div>
-      <TextInput
-        label="Address"
-        value={customer.address}
-        onChange={(address) => onUpdateCustomer(customer.id, { address })}
-      />
-      <label className="check-row">
-        <input
-          type="checkbox"
-          checked={customer.consent}
-          onChange={(event) => onUpdateCustomer(customer.id, { consent: event.target.checked })}
-        />
-        <span>Customer confirms rights to uploaded family material</span>
-      </label>
-    </section>
-  );
-}
-
-function AncestorPanel({
-  project,
-  onUpdateProject,
-}: {
-  project: MovieProject;
-  onUpdateProject: (updater: ProjectUpdater) => void;
-}) {
-  const updateAncestor = (field: keyof MovieProject["ancestor"], value: string) => {
-    onUpdateProject((current) => ({
-      ...current,
-      ancestor: { ...current.ancestor, [field]: value },
-      title:
-        field === "name" && current.title === "Untitled Ancestor Film"
-          ? `${value || "Ancestor"}: A Lineage Film`
-          : current.title,
-    }));
-  };
-
-  return (
-    <section className="panel ancestor-panel">
-      <div className="section-title">
-        <UserRound size={20} />
-        <div>
-          <h2>Ancestor Profile</h2>
-          <p>Best-light portrayal anchored to sourced family evidence.</p>
-        </div>
-      </div>
-      <div className="field-grid three">
-        <TextInput label="Movie title" value={project.title} onChange={(title) => onUpdateProject((p) => ({ ...p, title }))} />
-        <TextInput label="Ancestor name" value={project.ancestor.name} onChange={(value) => updateAncestor("name", value)} />
-        <TextInput label="Homeland / migration" value={project.ancestor.homeland} onChange={(value) => updateAncestor("homeland", value)} />
-      </div>
-      <div className="field-grid four">
-        <TextInput label="Birth date" type="date" value={project.ancestor.birthDate} onChange={(value) => updateAncestor("birthDate", value)} />
-        <TextInput label="Birth place" value={project.ancestor.birthPlace} onChange={(value) => updateAncestor("birthPlace", value)} />
-        <TextInput label="Death date" type="date" value={project.ancestor.deathDate} onChange={(value) => updateAncestor("deathDate", value)} />
-        <TextInput label="Known relatives" value={project.ancestor.knownRelatives} onChange={(value) => updateAncestor("knownRelatives", value)} />
-      </div>
-      <div className="field-grid two">
-        <TextInput label="Height" value={project.ancestor.height} onChange={(value) => updateAncestor("height", value)} />
-        <TextInput label="Build / presence" value={project.ancestor.build} onChange={(value) => updateAncestor("build", value)} />
-      </div>
-      <div className="field-grid two">
-        <TextArea label="Values" value={project.ancestor.values} onChange={(value) => updateAncestor("values", value)} />
-        <TextArea label="Defining traits" value={project.ancestor.definingTraits} onChange={(value) => updateAncestor("definingTraits", value)} />
-      </div>
-      <TextArea
-        label="Written stories and life summary"
-        value={project.ancestor.lifeSummary}
-        onChange={(value) => updateAncestor("lifeSummary", value)}
-        tall
-      />
-    </section>
-  );
-}
-
-function SourceVault({
-  project,
-  sourceCounts,
-  onAddFiles,
-  onRemoveSource,
-  uploadNotice,
-}: {
-  project: MovieProject;
-  sourceCounts: Record<string, number>;
-  onAddFiles: (files: FileList | null) => void;
-  onRemoveSource: (sourceId: string) => void;
-  uploadNotice: string;
-}) {
-  const sourceUrls = useSourceUrls(project.sources);
-
-  return (
-    <section className="panel source-panel">
-      <div className="section-title">
-        <UploadCloud size={20} />
-        <div>
-          <h2>Source Vault</h2>
-          <p>Photos, audio, stories, records, video, dates, and research notes stay in this browser first.</p>
-        </div>
-      </div>
-      <div className="public-safety-note">
-        <AlertCircle size={18} />
-        <span>
-          Public preview: source files stay in this browser. Do not upload sensitive real records until production
-          authentication and encrypted storage are connected.
-        </span>
-      </div>
-      <label className="drop-zone">
-        <UploadCloud size={28} />
-        <span>Upload ancestor sources</span>
-        <small>Images, audio, video, PDFs, text, and scanned documents</small>
-        <input
-          type="file"
-          multiple
-          accept="image/*,audio/*,video/*,.pdf,.txt,.json,.doc,.docx"
-          onChange={(event) => onAddFiles(event.target.files)}
-        />
-      </label>
-      {uploadNotice ? <div className="upload-notice">{uploadNotice}</div> : null}
-      <div className="source-stats">
-        {Object.entries(sourceKindLabels).map(([kind, label]) => (
-          <span key={kind}>
-            {label}: <strong>{sourceCounts[kind] ?? 0}</strong>
+      <header className="site-header">
+        <a className="wordmark" href="#top" aria-label="Lineage Theatre home">
+          <span className="wordmark-mark" aria-hidden="true">LT</span>
+          <span>Lineage Theatre</span>
+        </a>
+        <nav className={menuOpen ? "header-nav is-open" : "header-nav"} aria-label="Primary navigation">
+          <a href="#how" onClick={() => setMenuOpen(false)}>How it works</a>
+          <a href="#providers" onClick={() => setMenuOpen(false)}>Video studios</a>
+          <a href="#projects" onClick={() => setMenuOpen(false)}>Projects</a>
+        </nav>
+        <div className="header-actions">
+          <span className={`save-state ${saveState}`} role="status">
+            <span className="status-dot" aria-hidden="true" />
+            {saveState === "saving" ? "Saving" : saveState === "error" ? "Save failed" : "Saved locally"}
           </span>
-        ))}
-      </div>
-      <div className="source-list">
-        {project.sources.map((source, index) => (
-          <article className="source-row" key={source.id}>
-            <SourceIcon source={source} imageUrl={sourceUrls[source.id] ?? (index === 0 ? trailerStill : "")} />
-            <div>
-              <strong>{source.name}</strong>
-              <small>
-                {sourceKindLabels[source.kind]} · {formatFileSize(source.size)}
-              </small>
+          <button className="button button-primary button-small" type="button" onClick={createProject}>New film</button>
+          <button className="menu-button" type="button" aria-label="Toggle menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>Menu</button>
+        </div>
+      </header>
+
+      <main id="top">
+        <section className="hero page-width" aria-labelledby="hero-title">
+          <div className="hero-copy">
+            <p className="eyebrow">Family history, made cinematic</p>
+            <h1 id="hero-title">Turn an ancestor’s story into a film.</h1>
+            <p className="hero-description">Begin with the words you know. Lineage Theatre turns them into a clear scene plan, keeps your sources close, and hands the project to the video studio that fits your story.</p>
+            <div className="hero-actions">
+              <button className="button button-primary" type="button" onClick={focusScript}>Start with a script <span aria-hidden="true">→</span></button>
+              <a className="text-link" href="#how">See the five steps <span aria-hidden="true">↓</span></a>
             </div>
-            <button className="icon-button subtle" onClick={() => onRemoveSource(source.id)} aria-label={`Remove ${source.name}`}>
-              <Trash2 size={16} />
-            </button>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function SourceIcon({ source, imageUrl }: { source: SourceAsset; imageUrl: string }) {
-  if (source.kind === "photo" && imageUrl) {
-    return <img className="source-thumb" src={imageUrl} alt="" />;
-  }
-  const icons = {
-    photo: ImageIcon,
-    audio: Mic2,
-    document: FileText,
-    video: Film,
-    date: CalendarDays,
-    story: FileText,
-    record: Library,
-  };
-  const Icon = icons[source.kind];
-  return (
-    <span className="source-icon">
-      <Icon size={18} />
-    </span>
-  );
-}
-
-function useSourceUrls(sources: SourceAsset[]) {
-  const [urls, setUrls] = useState<Record<string, string>>({});
-  const ids = sources.map((source) => source.id).join("|");
-
-  useEffect(() => {
-    let alive = true;
-    const objectUrls: string[] = [];
-
-    Promise.all(
-      sources
-        .filter((source) => source.kind === "photo")
-        .map(async (source) => {
-          const url = await getSourceObjectUrl(source.id);
-          if (url) objectUrls.push(url);
-          return [source.id, url] as const;
-        })
-    ).then((entries) => {
-      if (!alive) return;
-      setUrls(
-        entries.reduce<Record<string, string>>((acc, [id, url]) => {
-          if (url) acc[id] = url;
-          return acc;
-        }, {})
-      );
-    });
-
-    return () => {
-      alive = false;
-      objectUrls.forEach((url) => URL.revokeObjectURL(url));
-    };
-  }, [ids, sources]);
-
-  return urls;
-}
-
-function StoryTimeline({ project }: { project: MovieProject }) {
-  return (
-    <section className="panel timeline-panel">
-      <div className="section-title">
-        <Film size={20} />
-        <div>
-          <h2>Storyboard Timeline</h2>
-          <p>Scene beats generated from the current sources and runtime.</p>
-        </div>
-      </div>
-      <div className="filmstrip">
-        {project.story.scenes.map((scene, index) => (
-          <article key={scene.id} className="scene-card">
-            <span className="scene-number">{String(index + 1).padStart(2, "0")}</span>
-            <h3>{scene.title}</h3>
-            <small>{scene.timecode}</small>
-            <p>{scene.purpose}</p>
-            <em>{scene.music}</em>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function formatPreviewTime(seconds: number) {
-  const wholeSeconds = Math.max(0, Math.round(seconds));
-  const minutes = Math.floor(wholeSeconds / 60);
-  return `${minutes}:${String(wholeSeconds % 60).padStart(2, "0")}`;
-}
-
-function buildTrailerPreviewBeats(project: MovieProject) {
-  const sourceScenes = project.story.scenes.slice(0, 3).map((scene) => ({
-    title: scene.title,
-    subtitle: scene.purpose,
-    caption: scene.music,
-  }));
-
-  return [
-    {
-      title: project.ancestor.name || project.title,
-      subtitle: project.story.logline || "A life rebuilt from family memory.",
-      caption: "Opening title",
-    },
-    ...sourceScenes,
-    {
-      title: "The moment that carries forward",
-      subtitle: project.story.climax || project.story.emotionalPromise,
-      caption: "Climax and legacy",
-    },
-  ];
-}
-
-function TrailerPreview({ project }: { project: MovieProject }) {
-  const beats = useMemo(() => buildTrailerPreviewBeats(project), [project]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const beatDuration = trailerPreviewSeconds / beats.length;
-  const activeBeatIndex = Math.min(beats.length - 1, Math.floor(elapsed / beatDuration));
-  const activeBeat = beats[activeBeatIndex];
-  const progress = Math.min(100, (elapsed / trailerPreviewSeconds) * 100);
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    const timer = window.setInterval(() => {
-      setElapsed((current) => {
-        const next = current + 0.1;
-        if (next >= trailerPreviewSeconds) {
-          setIsPlaying(false);
-          return trailerPreviewSeconds;
-        }
-        return next;
-      });
-    }, 100);
-
-    return () => window.clearInterval(timer);
-  }, [isPlaying]);
-
-  const togglePlayback = () => {
-    setIsPlaying((currentlyPlaying) => {
-      if (currentlyPlaying) return false;
-      if (elapsed >= trailerPreviewSeconds) setElapsed(0);
-      return true;
-    });
-  };
-
-  return (
-    <section className={isPlaying ? "preview-panel is-playing" : "preview-panel"}>
-      <div className="preview-frame trailer-player">
-        <img className="trailer-still" src={trailerStill} alt="Cinematic historical ancestor preview" />
-        <div className="trailer-grain" aria-hidden="true" />
-        <div className="preview-overlay">
-          <span className="true-story-chip">Based on a true story</span>
-          <div className="trailer-scene" key={activeBeatIndex}>
-            <small>
-              Scene {activeBeatIndex + 1} / {beats.length}
-            </small>
-            <strong>{activeBeat.title}</strong>
-            <p>{activeBeat.subtitle}</p>
-            <em>{activeBeat.caption}</em>
+            <p className="trust-line"><span aria-hidden="true">✓</span> Private browser draft <span aria-hidden="true">·</span> No card required <span aria-hidden="true">·</span> Export anytime</p>
           </div>
-          <button className="play-button" onClick={togglePlayback} aria-label={isPlaying ? "Pause trailer preview" : "Play trailer preview"}>
-            {isPlaying ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
-          </button>
-        </div>
-      </div>
-      <div className="trailer-progress" role="progressbar" aria-valuemin={0} aria-valuemax={trailerPreviewSeconds} aria-valuenow={Math.round(elapsed)}>
-        <span style={{ width: `${progress}%` }} />
-      </div>
-      <div className="preview-controls">
-        <button className="preview-control-button" onClick={togglePlayback}>
-          {isPlaying ? <Pause size={16} /> : <Play size={16} />}
-          {isPlaying ? "Pause" : elapsed >= trailerPreviewSeconds ? "Replay" : "Play"}
-        </button>
-        <span>
-          <Clock3 size={16} />
-          {formatPreviewTime(elapsed)} / {formatPreviewTime(trailerPreviewSeconds)}
-        </span>
-        <span>{runtimeLabel(project.preferences.runtime)}</span>
-        <span>{project.preferences.rating}</span>
-        <span>{project.preferences.style}</span>
-      </div>
-    </section>
-  );
-}
+          <div className="hero-visual" aria-label="Film preview for The Journey of Thomas Wilson">
+            <img src="/assets/ancestor-shipyard-still.png" alt="Cinematic historical portrait of a shipyard worker beside a harbor" />
+            <div className="visual-scrim" />
+            <div className="preview-topline"><span>Preview scene 01</span><span>1919 · Baltimore</span></div>
+            <div className="preview-bottom">
+              <button className="preview-play" type="button" aria-label={isPreviewPlaying ? "Pause film preview" : "Play film preview"} onClick={() => {
+                setIsPreviewPlaying((playing) => !playing);
+                notify(isPreviewPlaying ? "Preview paused." : "Preview playing.", "info");
+              }}>{isPreviewPlaying ? "Ⅱ" : "▶"}</button>
+              <div><span className="preview-kicker">The Journey of</span><span className="preview-title">Thomas Wilson</span></div>
+              <span className="preview-time">00:18</span>
+            </div>
+            <div className={isPreviewPlaying ? "preview-progress is-playing" : "preview-progress"}><span /></div>
+          </div>
+        </section>
 
-function StoryEnginePanel({
-  project,
-  fee,
-  settings,
-  onUpdateProject,
-  onRegenerateStory,
-  onGenerateTrailer,
-  onRequestFullMovie,
-  onReportPayment,
-}: {
-  project: MovieProject;
-  fee: number;
-  settings: AdminSettings;
-  onUpdateProject: (updater: ProjectUpdater) => void;
-  onRegenerateStory: () => void;
-  onGenerateTrailer: () => void;
-  onRequestFullMovie: () => void;
-  onReportPayment: () => void;
-}) {
-  const setPreference = <K extends keyof MoviePreferences>(key: K, value: MoviePreferences[K]) => {
-    onUpdateProject((current) => {
-      const merged = { ...current, preferences: { ...current.preferences, [key]: value } };
-      return { ...merged, story: buildStoryRecommendation(merged) };
-    });
-  };
+        <section className="workflow-band" id="how" aria-labelledby="workflow-title">
+          <div className="page-width">
+            <div className="section-intro compact-intro">
+              <p className="eyebrow">A simple path from memory to movie</p>
+              <h2 id="workflow-title">Five small steps. One finished story.</h2>
+            </div>
+            <ol className="step-rail">
+              {steps.map(([number, title, description]) => (
+                <li key={number}>
+                  <span className="step-number">{number}</span>
+                  <div><h3>{title}</h3><p>{description}</p></div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
 
-  return (
-    <section className="panel inspector-panel">
-      <div className="section-title compact">
-        <WandSparkles size={19} />
-        <div>
-          <h2>Story Engine</h2>
-          <p>Plot, climax, characters, and music direction.</p>
-        </div>
-      </div>
-      <Segmented
-        label="Style"
-        value={project.preferences.style}
-        options={["Cinematic", "Documentary"]}
-        onChange={(value) => setPreference("style", value)}
-      />
-      <Segmented
-        label="Rating"
-        value={project.preferences.rating}
-        options={["G", "PG"]}
-        onChange={(value) => setPreference("rating", value)}
-      />
-      <label className="field-label">
-        Runtime
-        <select
-          value={project.preferences.runtime}
-          onChange={(event) => setPreference("runtime", event.target.value as RuntimeId)}
-        >
-          {runtimeOptions.map((runtime) => (
-            <option key={runtime.id} value={runtime.id}>
-              {runtime.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <RangeControl
-        label="Realism"
-        value={project.preferences.realism}
-        onChange={(value) => setPreference("realism", value)}
-      />
-      <RangeControl
-        label="Historical fidelity"
-        value={project.preferences.historicalFidelity}
-        onChange={(value) => setPreference("historicalFidelity", value)}
-      />
-      <RangeControl
-        label="Heroic best-light tone"
-        value={project.preferences.heroTone}
-        onChange={(value) => setPreference("heroTone", value)}
-      />
-      <div className="recommendation-box">
-        <strong>{project.story.logline}</strong>
-        <p>{project.story.plot}</p>
-        <div className="climax-note">
-          <Sparkles size={16} />
-          <span>{project.story.climax}</span>
-        </div>
-      </div>
-      <div className="fee-box">
-        <div>
-          <span>Current estimate</span>
-          <strong>{formatCurrency(fee)}</strong>
-        </div>
-        <small>{settings.chargeFees ? `Payment via Venmo ${settings.venmoHandle}` : settings.betaMessage}</small>
-      </div>
-      <div className="action-stack">
-        <button className="secondary-action" onClick={onRegenerateStory}>
-          <RefreshCw size={17} />
-          Regenerate Story Plan
-        </button>
-        <button className="primary-action" onClick={onGenerateTrailer}>
-          <Play size={17} />
-          Generate Trailer
-        </button>
-        <button className="primary-action gold" onClick={onRequestFullMovie}>
-          <Film size={17} />
-          Request Full Movie
-        </button>
-        {project.payment.status === "awaiting-venmo" && (
-          <button className="secondary-action" onClick={onReportPayment}>
-            <CreditCard size={17} />
-            I paid Venmo
-          </button>
-        )}
-      </div>
-    </section>
-  );
-}
+        <section className="creator-section page-width" id="create" aria-labelledby="creator-title">
+          <div className="section-heading-row">
+            <div>
+              <p className="eyebrow">Create your film</p>
+              <h2 id="creator-title">Build the story while it is still fresh.</h2>
+            </div>
+            <div className="completion" aria-label={`${progress}% project ready`}>
+              <span>{progress}% ready</span><span className="completion-track"><span style={{ width: `${progress}%` }} /></span>
+            </div>
+          </div>
 
-function CharacterPanel({
-  project,
-  onUpdateProject,
-}: {
-  project: MovieProject;
-  onUpdateProject: (updater: ProjectUpdater) => void;
-}) {
-  const toggleCharacter = (characterId: string) => {
-    onUpdateProject((current) => ({
-      ...current,
-      story: {
-        ...current.story,
-        characters: current.story.characters.map((character) =>
-          character.id === characterId ? { ...character, approved: !character.approved } : character
-        ),
-      },
-    }));
-  };
-
-  return (
-    <section className="panel character-panel">
-      <div className="section-title compact">
-        <UsersRound size={19} />
-        <div>
-          <h2>Characters</h2>
-          <p>Approve or adjust the cast before full rendering.</p>
-        </div>
-      </div>
-      <div className="character-list">
-        {project.story.characters.map((character) => (
-          <CharacterRow key={character.id} character={character} onToggle={() => toggleCharacter(character.id)} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function CharacterRow({ character, onToggle }: { character: CharacterSuggestion; onToggle: () => void }) {
-  return (
-    <article className="character-row">
-      <span className={character.approved ? "approved-avatar" : "pending-avatar"}>
-        {character.approved ? <Check size={16} /> : <Eye size={16} />}
-      </span>
-      <div>
-        <strong>{character.name}</strong>
-        <small>{character.role}</small>
-        <p>{character.appearance}</p>
-      </div>
-      <button className="icon-button subtle" onClick={onToggle} aria-label={`Toggle approval for ${character.name}`}>
-        {character.approved ? <X size={16} /> : <Check size={16} />}
-      </button>
-    </article>
-  );
-}
-
-function LibraryView({
-  projects,
-  customers,
-  onSelectProject,
-}: {
-  projects: MovieProject[];
-  customers: CustomerProfile[];
-  onSelectProject: (projectId: string) => void;
-}) {
-  return (
-    <section className="library-view">
-      <div className="library-header">
-        <div>
-          <h1>Movie Library</h1>
-          <p>Customer projects, trailers, full movies, payments, and approval status.</p>
-        </div>
-        <div className="library-kpis">
-          <Metric icon={Film} label="Projects" value={String(projects.length)} />
-          <Metric icon={CheckCircle2} label="Approved" value={String(projects.filter((project) => project.status === "approved" || project.status === "published").length)} />
-          <Metric icon={CreditCard} label="Paid" value={String(projects.filter((project) => project.payment.status === "verified").length)} />
-        </div>
-      </div>
-      <div className="library-grid">
-        {projects.map((project) => {
-          const customer = customers.find((item) => item.id === project.customerId);
-          return (
-            <article key={project.id} className="library-card">
-              <img src={trailerStill} alt="" />
-              <div className="library-card-body">
-                <StatusBadge status={project.status} />
-                <h2>{project.title}</h2>
-                <p>{project.story.logline}</p>
-                <div className="library-meta">
-                  <span>{customer ? `${customer.firstName} ${customer.lastName}` : "Unknown customer"}</span>
-                  <span>{runtimeLabel(project.preferences.runtime)}</span>
-                  <span>{project.preferences.rating}</span>
+          <div className="creator-frame">
+            <div className="editor-panel">
+              <div className="panel-section identity-grid">
+                <label>Film title<input value={project.title} onChange={(event) => updateProject({ title: event.target.value })} /></label>
+                <label>Ancestor’s name<input value={project.ancestor} placeholder="Who is this story about?" onChange={(event) => updateProject({ ancestor: event.target.value })} /></label>
+              </div>
+              <div className="panel-section script-section">
+                <div className="field-heading"><label htmlFor="script">Script or family story</label><span>{wordCount} words · about {readMinutes} min narration</span></div>
+                <textarea id="script" ref={scriptRef} value={project.script} placeholder="Begin with the moment that changed your ancestor’s life…" onChange={(event) => updateProject({ script: event.target.value })} />
+                <p className="field-help">Tip: dates, places, letters, and sensory details make stronger scenes. Mark family lore as family lore.</p>
+              </div>
+              <div className="panel-section">
+                <div className="field-heading"><span>Film length</span><span>Choose a target, not a hard limit</span></div>
+                <div className="runtime-grid">
+                  {runtimeOptions.map((option) => (
+                    <button className={project.runtime === option.value ? "choice-card selected" : "choice-card"} type="button" key={option.value} aria-pressed={project.runtime === option.value} onClick={() => {
+                      updateProject({ runtime: option.value });
+                      notify(`${option.label} selected.`, "success");
+                    }}><span>{option.label}</span><small>{option.note}</small></button>
+                  ))}
                 </div>
-                <button className="secondary-action" onClick={() => onSelectProject(project.id)}>
-                  <SlidersHorizontal size={17} />
-                  Open Project
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function AdminConsole({
-  state,
-  adminUnlocked,
-  adminSection,
-  onUnlock,
-  onSectionChange,
-  onUpdateSettings,
-  onProjectStatus,
-  onMarkPaymentVerified,
-  onResetLocalDemo,
-}: {
-  state: AppState;
-  adminUnlocked: boolean;
-  adminSection: string;
-  onUnlock: (value: boolean) => void;
-  onSectionChange: (section: string) => void;
-  onUpdateSettings: (patch: Partial<AdminSettings>) => void;
-  onProjectStatus: (projectId: string, status: ProjectStatus, adminNote?: string) => void;
-  onMarkPaymentVerified: (projectId: string) => void;
-  onResetLocalDemo: () => void;
-}) {
-  const [code, setCode] = useState("");
-  const adminSections = ["Approval Queue", "Customer Records", "Payment Ledger", "Movie Library", "Music Library", "Settings"];
-
-  if (!adminUnlocked) {
-    return (
-      <section className="admin-lock">
-        <div className="admin-lock-card">
-          <ShieldCheck size={34} />
-          <h1>Admin Console</h1>
-          <p>Enter the access code to manage approvals, fee mode, payments, projects, and release settings.</p>
-      <div className="access-row">
-            <input
-              value={code}
-              onChange={(event) => setCode(event.target.value)}
-              type="password"
-              placeholder="Access code"
-            />
-            <button
-              className="primary-action"
-              onClick={() => {
-                if (code === ADMIN_ACCESS_CODE) onUnlock(true);
-              }}
-            >
-              <LockKeyhole size={17} />
-              Unlock
-            </button>
-          </div>
-          {code && code !== ADMIN_ACCESS_CODE ? <small className="error-text">Access code not recognized.</small> : null}
-          <small className="security-note">
-            {PUBLIC_LAUNCH_MODE} Admin contact: {ADMIN_EMAIL}
-          </small>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="admin-layout">
-      <aside className="admin-rail">
-        <h1>Admin Console</h1>
-        {adminSections.map((section) => (
-          <button
-            key={section}
-            className={adminSection === section ? "admin-nav active" : "admin-nav"}
-            onClick={() => onSectionChange(section)}
-          >
-            {section}
-          </button>
-        ))}
-      </aside>
-      <div className="admin-main">
-        <div className="admin-topline">
-          <div>
-            <h2>{adminSection}</h2>
-          <p>Approval rules, customer records, Venmo status, movie assets, and beta controls.</p>
-          <small className="security-note">{PUBLIC_LAUNCH_MODE}</small>
-        </div>
-          <button className="secondary-action danger" onClick={onResetLocalDemo}>
-            <RefreshCw size={17} />
-            Reset Demo
-          </button>
-        </div>
-        {adminSection === "Approval Queue" && (
-          <ApprovalQueue
-            projects={state.projects}
-            customers={state.customers}
-            settings={state.adminSettings}
-            onProjectStatus={onProjectStatus}
-            onMarkPaymentVerified={onMarkPaymentVerified}
-          />
-        )}
-        {adminSection === "Customer Records" && <CustomerRecords projects={state.projects} customers={state.customers} />}
-        {adminSection === "Payment Ledger" && <PaymentLedger projects={state.projects} customers={state.customers} onMarkPaymentVerified={onMarkPaymentVerified} />}
-        {adminSection === "Movie Library" && <AdminMovieLibrary projects={state.projects} customers={state.customers} />}
-        {adminSection === "Music Library" && <MusicLibrary />}
-        {adminSection === "Settings" && (
-          <AdminSettingsPanel settings={state.adminSettings} onUpdateSettings={onUpdateSettings} />
-        )}
-      </div>
-    </section>
-  );
-}
-
-function ApprovalQueue({
-  projects,
-  customers,
-  settings,
-  onProjectStatus,
-  onMarkPaymentVerified,
-}: {
-  projects: MovieProject[];
-  customers: CustomerProfile[];
-  settings: AdminSettings;
-  onProjectStatus: (projectId: string, status: ProjectStatus, adminNote?: string) => void;
-  onMarkPaymentVerified: (projectId: string) => void;
-}) {
-  return (
-    <div className="table-shell">
-      <div className="settings-strip">
-        <span>Require approval before release: <strong>{settings.requireApproval ? "On" : "Off"}</strong></span>
-        <span>Charge fees during beta: <strong>{settings.chargeFees ? "On" : "Off"}</strong></span>
-        <span>Venmo {settings.venmoHandle}</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Movie</th>
-            <th>Customer</th>
-            <th>Runtime</th>
-            <th>Rating</th>
-            <th>Status</th>
-            <th>Fee</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {projects.map((project) => {
-            const customer = customers.find((item) => item.id === project.customerId);
-            return (
-              <tr key={project.id}>
-                <td>
-                  <strong>{project.title}</strong>
-                  <small>{project.ancestor.name || "Ancestor pending"}</small>
-                </td>
-                <td>{customer ? `${customer.firstName} ${customer.lastName}` : "Unknown"}</td>
-                <td>{runtimeLabel(project.preferences.runtime)}</td>
-                <td>{project.preferences.rating}</td>
-                <td><StatusBadge status={project.status} /></td>
-                <td>{formatCurrency(project.payment.amount)}</td>
-                <td>
-                  <div className="table-actions">
-                    <button onClick={() => onProjectStatus(project.id, "approved", "Approved by admin.")}>
-                      Approve
-                    </button>
-                    <button onClick={() => onProjectStatus(project.id, "changes-requested", "Admin requested source or story changes.")}>
-                      Request Changes
-                    </button>
-                    {project.payment.status !== "verified" && (
-                      <button onClick={() => onMarkPaymentVerified(project.id)}>Verify Paid</button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function CustomerRecords({ projects, customers }: { projects: MovieProject[]; customers: CustomerProfile[] }) {
-  return (
-    <div className="record-grid">
-      {customers.map((customer) => (
-        <article className="record-card" key={customer.id}>
-          <h3>{customer.firstName} {customer.lastName}</h3>
-          <p>{customer.email}</p>
-          <p>{customer.address}</p>
-          <div className="record-card-row">
-            <span>Age {customer.age || "n/a"}</span>
-            <span>{customer.consent ? "Consent on file" : "Consent needed"}</span>
-            <span>{projects.filter((project) => project.customerId === customer.id).length} project(s)</span>
-          </div>
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function PaymentLedger({
-  projects,
-  customers,
-  onMarkPaymentVerified,
-}: {
-  projects: MovieProject[];
-  customers: CustomerProfile[];
-  onMarkPaymentVerified: (projectId: string) => void;
-}) {
-  return (
-    <div className="table-shell">
-      <table>
-        <thead>
-          <tr>
-            <th>Receipt</th>
-            <th>Customer</th>
-            <th>Project</th>
-            <th>Amount</th>
-            <th>Venmo</th>
-            <th>Email</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {projects.map((project) => {
-            const customer = customers.find((item) => item.id === project.customerId);
-            return (
-              <tr key={project.id}>
-                <td>{project.payment.receiptNumber}</td>
-                <td>{customer?.email ?? "No email"}</td>
-                <td>{project.title}</td>
-                <td>{formatCurrency(project.payment.amount)}</td>
-                <td>{project.payment.status}</td>
-                <td>{project.payment.receiptEmailStatus}</td>
-                <td>
-                  {project.payment.status !== "verified" ? (
-                    <button onClick={() => onMarkPaymentVerified(project.id)}>Mark verified</button>
-                  ) : (
-                    <CheckCircle2 size={18} />
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function AdminMovieLibrary({ projects, customers }: { projects: MovieProject[]; customers: CustomerProfile[] }) {
-  return (
-    <div className="record-grid">
-      {projects.map((project) => {
-        const customer = customers.find((item) => item.id === project.customerId);
-        return (
-          <article key={project.id} className="record-card movie-record">
-            <img src={trailerStill} alt="" />
-            <div>
-              <StatusBadge status={project.status} />
-              <h3>{project.title}</h3>
-              <p>{project.story.emotionalPromise}</p>
-              <div className="record-card-row">
-                <span>{customer?.email ?? "No customer email"}</span>
-                <span>{project.sources.length} source(s)</span>
-                <span>{project.story.scenes.length} scene(s)</span>
               </div>
             </div>
-          </article>
-        );
-      })}
-    </div>
-  );
-}
 
-function MusicLibrary() {
-  return (
-    <div className="music-grid">
-      {musicMoods.map((mood, index) => (
-        <article key={mood.title} className="music-card">
-          <Music2 size={20} />
-          <span>0{index + 1}</span>
-          <h3>{mood.title}</h3>
-          <p>{mood.tone}</p>
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function SettingsSaveBar({
-  hasUnsavedChanges,
-  savedNotice,
-  onDiscard,
-  onSave,
-  placement = "top",
-}: {
-  hasUnsavedChanges: boolean;
-  savedNotice: string;
-  onDiscard: () => void;
-  onSave: () => void;
-  placement?: "top" | "bottom";
-}) {
-  return (
-    <div className={placement === "bottom" ? "settings-savebar settings-savebar-bottom" : "settings-savebar"}>
-      <span
-        className={hasUnsavedChanges ? "settings-status dirty" : "settings-status saved"}
-        aria-live="polite"
-      >
-        {hasUnsavedChanges ? "Unsaved changes" : savedNotice}
-      </span>
-      <div className="settings-save-actions">
-        <button type="button" className="secondary-action" onClick={onDiscard} disabled={!hasUnsavedChanges}>
-          Discard
-        </button>
-        <button type="button" className="primary-action" onClick={onSave} disabled={!hasUnsavedChanges}>
-          <Check size={17} />
-          Save changes
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function AdminSettingsPanel({
-  settings,
-  onUpdateSettings,
-}: {
-  settings: AdminSettings;
-  onUpdateSettings: (patch: Partial<AdminSettings>) => void;
-}) {
-  const [draftSettings, setDraftSettings] = useState<AdminSettings>(settings);
-  const [savedNotice, setSavedNotice] = useState("Saved locally");
-
-  useEffect(() => {
-    setDraftSettings(settings);
-  }, [settings]);
-
-  const hasUnsavedChanges = useMemo(
-    () => JSON.stringify(draftSettings) !== JSON.stringify(settings),
-    [draftSettings, settings]
-  );
-
-  const updateDraftSettings = (patch: Partial<AdminSettings>) => {
-    setDraftSettings((current) => ({ ...current, ...patch }));
-    setSavedNotice("Unsaved changes");
-  };
-
-  const saveSettings = () => {
-    onUpdateSettings(draftSettings);
-    setSavedNotice("Saved locally");
-  };
-
-  const discardSettings = () => {
-    setDraftSettings(settings);
-    setSavedNotice("Saved locally");
-  };
-
-  return (
-    <section className="settings-panel">
-      <SettingsSaveBar
-        hasUnsavedChanges={hasUnsavedChanges}
-        savedNotice={savedNotice}
-        onDiscard={discardSettings}
-        onSave={saveSettings}
-      />
-      <label className="toggle-row">
-        <span>
-          <strong>Require approval before release</strong>
-          <small>Generated movies wait for admin approval before publishing or download.</small>
-        </span>
-        <input
-          type="checkbox"
-          checked={draftSettings.requireApproval}
-          onChange={(event) => updateDraftSettings({ requireApproval: event.target.checked })}
-        />
-      </label>
-      <label className="toggle-row">
-        <span>
-          <strong>Charge fees during beta</strong>
-          <small>When off, requests stay free while the app is being tested.</small>
-        </span>
-        <input
-          type="checkbox"
-          checked={draftSettings.chargeFees}
-          onChange={(event) => updateDraftSettings({ chargeFees: event.target.checked })}
-        />
-      </label>
-      <TextInput
-        label="Venmo handle"
-        value={draftSettings.venmoHandle}
-        onChange={(venmoHandle) => updateDraftSettings({ venmoHandle })}
-      />
-      <TextArea
-        label="Beta message"
-        value={draftSettings.betaMessage}
-        onChange={(betaMessage) => updateDraftSettings({ betaMessage })}
-      />
-      <div className="pricing-grid">
-        {runtimeOptions.map((option) => (
-          <label key={option.id} className="price-control">
-            <span>{option.label}</span>
-            <input
-              type="number"
-              value={draftSettings.pricing[option.id]}
-              onChange={(event) =>
-                updateDraftSettings({
-                  pricing: { ...draftSettings.pricing, [option.id]: Number(event.target.value) },
-                })
-              }
-            />
-          </label>
-        ))}
-      </div>
-      <SettingsSaveBar
-        hasUnsavedChanges={hasUnsavedChanges}
-        savedNotice={savedNotice}
-        onDiscard={discardSettings}
-        onSave={saveSettings}
-        placement="bottom"
-      />
-    </section>
-  );
-}
-
-function PublishPanel({
-  project,
-  customer,
-  settings,
-  onUpdateProject,
-  onRequestFullMovie,
-  onReportPayment,
-  onPublish,
-}: {
-  project: MovieProject;
-  customer: CustomerProfile;
-  settings: AdminSettings;
-  onUpdateProject: (updater: ProjectUpdater) => void;
-  onRequestFullMovie: () => void;
-  onReportPayment: () => void;
-  onPublish: () => void;
-}) {
-  const setPreference = <K extends keyof MoviePreferences>(key: K, value: MoviePreferences[K]) => {
-    onUpdateProject((current) => ({
-      ...current,
-      preferences: { ...current.preferences, [key]: value },
-    }));
-  };
-
-  return (
-    <section className="publish-view">
-      <div className="publish-hero">
-        <img src={trailerStill} alt="" />
-        <div>
-          <StatusBadge status={project.status} />
-          <h1>{project.title}</h1>
-          <p>{project.story.emotionalPromise}</p>
-          <div className="publish-actions">
-            <button className="primary-action" onClick={onRequestFullMovie}>
-              <Film size={17} />
-              Request Full Movie
-            </button>
-            <button className="secondary-action" onClick={onPublish}>
-              <Send size={17} />
-              Publish / Prepare Links
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="publish-grid">
-        <section className="panel">
-          <div className="section-title">
-            <CreditCard size={20} />
-            <div>
-              <h2>Payment</h2>
-              <p>Trailer remains available while a full movie waits for fee and approval rules.</p>
-            </div>
-          </div>
-          <div className="payment-card">
-            <strong>{formatCurrency(project.payment.amount)}</strong>
-            <span>{settings.chargeFees ? `Pay by Venmo ${settings.venmoHandle}` : "Beta mode: no fee required"}</span>
-            <small>Receipt {project.payment.receiptNumber} · {project.payment.receiptEmailStatus}</small>
-            {project.payment.status === "awaiting-venmo" ? (
-              <button className="primary-action" onClick={onReportPayment}>
-                <CreditCard size={17} />
-                I paid Venmo
+            <aside className="source-panel" aria-labelledby="sources-title">
+              <div className="source-heading"><div><span className="panel-kicker">Source room</span><h3 id="sources-title">Keep the film grounded.</h3></div><span className="source-count">{project.sources.length}</span></div>
+              <p>Add only material your family has permission to use. Files remain in this browser during this release.</p>
+              <input ref={fileInputRef} className="visually-hidden" type="file" multiple accept="image/*,.pdf,.txt,.doc,.docx,audio/*,video/*" onChange={(event) => void handleFiles(event.target.files)} />
+              <button className="drop-zone" type="button" onClick={() => fileInputRef.current?.click()}>
+                <span className="drop-icon" aria-hidden="true">+</span>
+                <span>Add photos, letters, audio, or notes</span>
+                <small>Up to 100 MB per file</small>
               </button>
-            ) : null}
-            <a className="secondary-action as-link" href="https://venmo.com/ERik-Castle-1" target="_blank" rel="noreferrer">
-              Open Venmo
-            </a>
+              {project.sources.length > 0 ? (
+                <ul className="source-list">
+                  {project.sources.map((source) => (
+                    <li key={source.id}><span className="file-mark" aria-hidden="true">□</span><span><span>{source.name}</span><small>{formatBytes(source.size)}</small></span><button type="button" aria-label={`Remove ${source.name}`} onClick={() => void removeSource(source)}>×</button></li>
+                  ))}
+                </ul>
+              ) : <div className="empty-sources"><span aria-hidden="true">◎</span><p>No sources attached yet.</p><small>You can still prepare a plan, then return to add evidence.</small></div>}
+              <div className="privacy-note"><span aria-hidden="true">◌</span><p><span>Local for now</span><small>Supabase sync can be added after production data and access rules are approved.</small></p></div>
+            </aside>
           </div>
         </section>
 
-        <section className="panel">
-          <div className="section-title">
-            <Youtube size={20} />
-            <div>
-              <h2>Release Options</h2>
-              <p>Choose where the approved movie should go when production services are connected.</p>
+        <section className="providers-section" id="providers" aria-labelledby="providers-title">
+          <div className="page-width">
+            <div className="section-heading-row provider-heading">
+              <div><p className="eyebrow">Choose the video studio</p><h2 id="providers-title">Use the right engine for this film.</h2><p>Lineage Theatre prepares the creative brief. Paid rendering, accounts, usage limits, and billing stay with the selected provider.</p></div>
+              <span className="pricing-check">Pricing checked August 30, 2026</span>
             </div>
-          </div>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={project.preferences.sendEmailLink}
-              onChange={(event) => setPreference("sendEmailLink", event.target.checked)}
-            />
-            <span>Email private link to {customer.email || "customer email"}</span>
-          </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={project.preferences.publishToYoutube}
-              onChange={(event) => setPreference("publishToYoutube", event.target.checked)}
-            />
-            <span>Publish through customer YouTube account</span>
-          </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={project.preferences.publishToFamilyGallery}
-              onChange={(event) => setPreference("publishToFamilyGallery", event.target.checked)}
-            />
-            <span>Add to family gallery</span>
-          </label>
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={project.preferences.allowPublicDiscovery}
-              onChange={(event) => setPreference("allowPublicDiscovery", event.target.checked)}
-            />
-            <span>Allow public discovery after approval</span>
-          </label>
-        </section>
-
-        <section className="panel">
-          <div className="section-title">
-            <Download size={20} />
-            <div>
-              <h2>Delivery</h2>
-              <p>Production delivery records are stored with the project for admin tracking.</p>
+            <div className="provider-list">
+              {providerOptions.map((provider) => {
+                const selected = project.providerId === provider.id;
+                return (
+                  <button className={selected ? `provider-row selected ${provider.accent}` : `provider-row ${provider.accent}`} type="button" key={provider.id} aria-pressed={selected} onClick={() => selectProvider(provider)}>
+                    <span className="provider-radio" aria-hidden="true"><span /></span>
+                    <span className="provider-name"><span>{provider.name}</span><small>{provider.label}</small></span>
+                    <span className="provider-summary">{provider.summary}</span>
+                    <span className="provider-use"><small>Best for</small><span>{provider.bestFor}</span></span>
+                    <span className="provider-price"><span>{provider.price}</span><small>{provider.detail}</small></span>
+                    <span className="provider-state">{selected ? "Selected ✓" : "Choose"}</span>
+                  </button>
+                );
+              })}
             </div>
-          </div>
-          <div className="delivery-list">
-            <span>Download URL: {project.downloadUrl || "Prepared after render"}</span>
-            <span>YouTube URL: {project.youtubeUrl || "Connect OAuth in production"}</span>
-            <span>Approval: {settings.requireApproval ? "Required" : "Automatic"}</span>
+            <p className="pricing-disclosure">Prices are provider list prices or disclosed starting points, not Lineage Theatre charges. Taxes, credits, duration, API use, and commercial terms can change; confirm the final amount in the provider’s studio.</p>
           </div>
         </section>
+
+        {plan ? (
+          <section className="plan-section page-width" id="film-plan" aria-labelledby="plan-title">
+            <div className="section-heading-row">
+              <div><p className="eyebrow">Film plan ready</p><h2 id="plan-title">Review before anything is rendered.</h2><p>{plan.logline}</p></div>
+              <span className="success-chip"><span aria-hidden="true">✓</span> Five scenes prepared</span>
+            </div>
+            <div className="scene-grid">
+              {plan.scenes.map((scene, index) => <article className="scene-card" key={scene.title}><span>Scene {String(index + 1).padStart(2, "0")}</span><h3>{scene.title}</h3><p>{scene.direction}</p><blockquote>{scene.narration}</blockquote></article>)}
+            </div>
+            <div className="plan-actions">
+              <button className="button button-secondary" type="button" onClick={() => void copyBrief()}>Copy provider brief</button>
+              <button className="button button-secondary" type="button" onClick={downloadPackage}>Download project package ↓</button>
+              <button className="button button-primary" type="button" onClick={openStudio}>{selectedProvider.website ? `Open ${selectedProvider.name} ↗` : "Keep planning here"}</button>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="projects-section page-width" id="projects" aria-labelledby="projects-title">
+          <div className="section-heading-row">
+            <div><p className="eyebrow">Your projects</p><h2 id="projects-title">Return to a family story.</h2></div>
+            <button className="button button-secondary button-small" type="button" onClick={createProject}>+ New film</button>
+          </div>
+          <div className="project-grid">
+            {projects.map((item) => (
+              <button className={item.id === project.id ? "project-card current" : "project-card"} type="button" key={item.id} onClick={() => selectProject(item.id)}>
+                <span className="project-thumb"><img src="/assets/ancestor-shipyard-still.png" alt="" /></span>
+                <span className="project-meta"><span>{item.title}</span><small>{item.ancestor || "Ancestor not named"} · {runtimeOptions.find((option) => option.value === item.runtime)?.label}</small><small>Updated {new Date(item.updatedAt).toLocaleDateString()}</small></span>
+                <span className="project-arrow" aria-hidden="true">→</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      </main>
+
+      <footer className="site-footer" data-build-commit={__BUILD_COMMIT__}>
+        <div className="page-width"><div><span className="footer-mark">LT</span><p><span>Lineage Theatre</span><small>Make family history feel close again.</small></p></div><p>GitHub source · Vercel hosting · Namecheap DNS today · Supabase-ready data path · Build {__BUILD_COMMIT__.slice(0, 7)}</p></div>
+      </footer>
+
+      <div className="action-dock" aria-label="Current film action">
+        <div><span>Next step</span><p>{plan ? `Continue with ${selectedProvider.name}` : `Prepare ${runtime.label.toLowerCase()} for ${selectedProvider.name}`}</p></div>
+        <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? openStudio : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? (selectedProvider.website ? `Open ${selectedProvider.name} ↗` : "Download the plan") : "Prepare film plan →"}</button>
       </div>
-    </section>
-  );
-}
 
-function TextInput({
-  label,
-  value,
-  onChange,
-  type = "text",
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  type?: string;
-}) {
-  return (
-    <label className="field-label">
-      {label}
-      <input value={value} onChange={(event) => onChange(event.target.value)} type={type} />
-    </label>
-  );
-}
-
-function TextArea({
-  label,
-  value,
-  onChange,
-  tall,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  tall?: boolean;
-}) {
-  return (
-    <label className="field-label">
-      {label}
-      <textarea
-        className={tall ? "tall" : ""}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
-  );
-}
-
-function Segmented<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: T[];
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div className="segmented-wrap">
-      <span>{label}</span>
-      <div className="segmented">
-        {options.map((option) => (
-          <button
-            key={option}
-            className={value === option ? "active" : ""}
-            onClick={() => onChange(option)}
-            type="button"
-          >
-            {option}
-          </button>
-        ))}
-      </div>
+      {toast ? <div className={`toast ${toast.tone}`} key={toast.id} role={toast.tone === "error" ? "alert" : "status"}><span aria-hidden="true">{toast.tone === "success" ? "✓" : toast.tone === "error" ? "!" : "i"}</span><p>{toast.message}</p><button type="button" aria-label="Dismiss message" onClick={() => setToast(null)}>×</button></div> : null}
     </div>
   );
 }
 
-function RangeControl({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="range-control">
-      <span>
-        {label}
-        <strong>{value}</strong>
-      </span>
-      <input type="range" min="0" max="100" value={value} onChange={(event) => onChange(Number(event.target.value))} />
-    </label>
-  );
-}
-
-function StatusBadge({ status }: { status: ProjectStatus }) {
-  return <span className={`status-badge ${status}`}>{statusCopy(status)}</span>;
-}
-
-function Metric({ icon: Icon, label, value }: { icon: typeof Film; label: string; value: string }) {
-  return (
-    <div className="metric">
-      <Icon size={18} />
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
+export default App;
