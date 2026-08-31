@@ -20,6 +20,17 @@ interface FilmProject {
   providerId: string;
   sources: SourceFileRecord[];
   updatedAt: string;
+  archivedAt: string | null;
+  greenlitAt: string | null;
+  readinessGaps: string[];
+}
+
+type ReadinessKey = "title" | "ancestor" | "script" | "sources" | "runtime" | "provider";
+
+interface ReadinessGap {
+  key: ReadinessKey;
+  label: string;
+  detail: string;
 }
 
 interface FilmScene {
@@ -141,18 +152,21 @@ const steps = [
   ["02", "Add what is real", "Attach photos, letters, and sources you may use."],
   ["03", "Choose the format", "Select a short, featurette, or longer family film."],
   ["04", "Pick a studio", "Compare the right video provider for your story."],
-  ["05", "Review and create", "Prepare a scene plan, then continue in that studio."],
+  ["05", "Review and greenlight", "Confirm the production details, then send the film to your studio."],
 ];
 
 const blankProject = (): FilmProject => ({
   id: crypto.randomUUID(),
-  title: "Untitled family film",
+  title: "",
   ancestor: "",
   script: "",
   runtime: "short",
   providerId: "runway",
   sources: [],
   updatedAt: new Date().toISOString(),
+  archivedAt: null,
+  greenlitAt: null,
+  readinessGaps: [],
 });
 
 const initialProject = (): FilmProject => ({
@@ -164,17 +178,55 @@ const initialProject = (): FilmProject => ({
   providerId: "runway",
   sources: [],
   updatedAt: new Date().toISOString(),
+  archivedAt: null,
+  greenlitAt: null,
+  readinessGaps: [],
 });
+
+function normalizeProject(project: FilmProject): FilmProject {
+  return {
+    ...project,
+    title: typeof project.title === "string" ? project.title : "",
+    ancestor: typeof project.ancestor === "string" ? project.ancestor : "",
+    script: typeof project.script === "string" ? project.script : "",
+    runtime: project.runtime || "short",
+    providerId: project.providerId || "runway",
+    sources: Array.isArray(project.sources) ? project.sources : [],
+    archivedAt: project.archivedAt ?? null,
+    greenlitAt: project.greenlitAt ?? null,
+    readinessGaps: Array.isArray(project.readinessGaps) ? project.readinessGaps : [],
+  };
+}
 
 function loadProjects(): FilmProject[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [initialProject()];
     const parsed = JSON.parse(raw) as FilmProject[];
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : [initialProject()];
+    if (!Array.isArray(parsed) || parsed.length === 0) return [initialProject()];
+    const normalized = parsed.map(normalizeProject);
+    return normalized.some((project) => !project.archivedAt) ? normalized : [blankProject(), ...normalized];
   } catch {
     return [initialProject()];
   }
+}
+
+function getReadinessGaps(project: FilmProject): ReadinessGap[] {
+  const gaps: ReadinessGap[] = [];
+  if (!project.title.trim()) gaps.push({ key: "title", label: "Film title", detail: "Name the film so the production package and saved project are easy to identify." });
+  if (!project.ancestor.trim()) gaps.push({ key: "ancestor", label: "Ancestor's name", detail: "Identify the person at the center of the family story." });
+  if (project.script.trim().length < 80) gaps.push({ key: "script", label: "Script or family story", detail: project.script.trim() ? "Add more story detail so the production plan has enough material." : "Add the story, narration, or script that the film will follow." });
+  if (project.sources.length === 0) gaps.push({ key: "sources", label: "Source material", detail: "Add at least one photo, letter, recording, or note to help ground the film." });
+  if (!project.runtime) gaps.push({ key: "runtime", label: "Film length", detail: "Choose the intended running time for the film." });
+  if (!project.providerId) gaps.push({ key: "provider", label: "Video studio", detail: "Choose the studio that should receive the production package." });
+  return gaps;
+}
+
+function getProjectStatus(project: FilmProject) {
+  if (project.archivedAt) return "Archived";
+  if (project.greenlitAt && project.readinessGaps.length > 0) return "Greenlit with gaps";
+  if (project.greenlitAt) return "Greenlit";
+  return "In development";
 }
 
 function formatBytes(size: number) {
@@ -224,10 +276,12 @@ function buildProviderBrief(project: FilmProject, plan: FilmPlan | null) {
     : "Create a scene structure from the script below before rendering.";
   return `LINEAGE THEATRE PRODUCTION BRIEF
 
-Project: ${project.title}
+Project: ${project.title.trim() || "Untitled family film"}
 Ancestor: ${project.ancestor || "Not yet named"}
 Format: ${runtime?.label ?? "Short film"} (${runtime?.note ?? "4–8 min"})
 Selected studio: ${provider.name}
+Production status: ${getProjectStatus(project)}
+Readiness gaps: ${project.readinessGaps.length > 0 ? project.readinessGaps.join(", ") : "None recorded"}
 
 Creative direction:
 Create a respectful, cinematic family-history film. Preserve uncertainty where facts are incomplete. Do not invent quotations, dates, places, uniforms, or family relationships. Use only attached family materials for which the family has permission.
@@ -249,7 +303,7 @@ Final checks:
 
 function App() {
   const [projects, setProjects] = useState<FilmProject[]>(loadProjects);
-  const [activeProjectId, setActiveProjectId] = useState(() => projects[0].id);
+  const [activeProjectId, setActiveProjectId] = useState(() => projects.find((project) => !project.archivedAt)?.id ?? projects[0].id);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [plan, setPlan] = useState<FilmPlan | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
@@ -259,16 +313,23 @@ function App() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showActionDock, setShowActionDock] = useState(false);
+  const [readinessReview, setReadinessReview] = useState<ReadinessGap[] | null>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const ancestorRef = useRef<HTMLInputElement>(null);
   const scriptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sourceButtonRef = useRef<HTMLButtonElement>(null);
+  const readinessDialogRef = useRef<HTMLElement>(null);
   const heroVideoRef = useRef<HTMLVideoElement>(null);
   const toastTimerRef = useRef<number | null>(null);
 
-  const project = projects.find((item) => item.id === activeProjectId) ?? projects[0];
+  const activeProjects = projects.filter((item) => !item.archivedAt);
+  const archivedProjects = projects.filter((item) => Boolean(item.archivedAt));
+  const project = projects.find((item) => item.id === activeProjectId && !item.archivedAt) ?? activeProjects[0] ?? projects[0];
   const selectedProvider = providerOptions.find((option) => option.id === project.providerId) ?? providerOptions[0];
   const runtime = runtimeOptions.find((option) => option.value === project.runtime) ?? runtimeOptions[1];
   const wordCount = project.script.trim() ? project.script.trim().split(/\s+/).length : 0;
-  const readMinutes = Math.max(1, Math.ceil(wordCount / 135));
+  const readMinutes = wordCount > 0 ? Math.max(1, Math.ceil(wordCount / 135)) : 0;
 
   useEffect(() => {
     setSaveState("saving");
@@ -288,6 +349,16 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!readinessReview) return;
+    window.setTimeout(() => readinessDialogRef.current?.focus(), 0);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setReadinessReview(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [readinessReview]);
+
+  useEffect(() => {
     const creator = document.querySelector("#create");
     const updateDockVisibility = () => {
       if (!creator) return;
@@ -303,7 +374,7 @@ function App() {
   }, []);
 
   const progress = useMemo(() => {
-    const checks = [project.script.trim().length >= 80, project.sources.length > 0, Boolean(project.runtime), Boolean(project.providerId), Boolean(plan)];
+    const checks = [Boolean(project.title.trim()), Boolean(project.ancestor.trim()), project.script.trim().length >= 80, project.sources.length > 0, Boolean(project.runtime), Boolean(project.providerId), Boolean(plan)];
     return Math.round((checks.filter(Boolean).length / checks.length) * 100);
   }, [plan, project]);
 
@@ -335,7 +406,7 @@ function App() {
   };
 
   const updateProject = (patch: Partial<FilmProject>) => {
-    setProjects((current) => current.map((item) => item.id === activeProjectId ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item));
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? { ...item, ...patch, greenlitAt: null, readinessGaps: [], updatedAt: new Date().toISOString() } : item));
     if ("script" in patch || "runtime" in patch || "ancestor" in patch) setPlan(null);
   };
 
@@ -351,15 +422,89 @@ function App() {
     setActiveProjectId(next.id);
     setPlan(null);
     setMenuOpen(false);
-    notify("New film project created.");
-    window.setTimeout(() => scriptRef.current?.focus(), 100);
+    setReadinessReview(null);
+    notify("A clear development slate is ready.");
+    document.querySelector("#create")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => titleRef.current?.focus(), 450);
   };
 
   const selectProject = (id: string) => {
     setActiveProjectId(id);
     setPlan(null);
-    notify("Project opened.", "info");
+    setReadinessReview(null);
+    notify("Film opened for development.", "info");
     document.querySelector("#create")?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const clearField = (field: "title" | "ancestor" | "script", label: string) => {
+    const value = project[field];
+    if (!value) {
+      notify(`${label} is already clear.`, "info");
+      return;
+    }
+    if (!window.confirm(`Clear ${label.toLowerCase()}? This text will be removed from the current film.`)) return;
+    updateProject({ [field]: "" });
+    const target = field === "title" ? titleRef.current : field === "ancestor" ? ancestorRef.current : scriptRef.current;
+    window.setTimeout(() => target?.focus(), 0);
+    notify(`${label} cleared.`);
+  };
+
+  const clearDevelopmentSlate = async () => {
+    if (!window.confirm("Clear every development field and remove all source files from this film? This cannot be undone.")) return;
+    const results = await Promise.allSettled(project.sources.map((source) => deleteSourceFile(source.id)));
+    const failed = results.filter((result) => result.status === "rejected").length;
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? {
+      ...item,
+      title: "",
+      ancestor: "",
+      script: "",
+      runtime: "short",
+      providerId: "runway",
+      sources: [],
+      greenlitAt: null,
+      readinessGaps: [],
+      updatedAt: new Date().toISOString(),
+    } : item));
+    setPlan(null);
+    setReadinessReview(null);
+    window.setTimeout(() => titleRef.current?.focus(), 0);
+    notify(failed > 0 ? `Development fields cleared, but ${failed} stored source ${failed === 1 ? "file could" : "files could"} not be removed.` : "Development slate cleared.", failed > 0 ? "info" : "success");
+  };
+
+  const archiveProject = (item: FilmProject) => {
+    const remaining = activeProjects.filter((candidate) => candidate.id !== item.id);
+    const archivedAt = new Date().toISOString();
+    if (item.id === activeProjectId && remaining.length === 0) {
+      const next = blankProject();
+      setProjects((current) => [next, ...current.map((candidate) => candidate.id === item.id ? { ...candidate, archivedAt } : candidate)]);
+      setActiveProjectId(next.id);
+      setPlan(null);
+      notify(`${item.title.trim() || "Untitled family film"} archived. A clear development slate is ready.`);
+      return;
+    }
+    setProjects((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, archivedAt } : candidate));
+    if (item.id === activeProjectId) {
+      setActiveProjectId(remaining[0].id);
+      setPlan(null);
+    }
+    notify(`${item.title.trim() || "Untitled family film"} archived. You can restore it below.`);
+  };
+
+  const restoreProject = (item: FilmProject) => {
+    setProjects((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, archivedAt: null, updatedAt: new Date().toISOString() } : candidate));
+    setActiveProjectId(item.id);
+    setPlan(null);
+    notify(`${item.title.trim() || "Untitled family film"} restored to development.`);
+    window.setTimeout(() => document.querySelector("#create")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  };
+
+  const deleteArchivedProject = async (item: FilmProject) => {
+    const name = item.title.trim() || "Untitled family film";
+    if (!window.confirm(`Permanently delete ${name}? Its saved details and source files cannot be recovered.`)) return;
+    const results = await Promise.allSettled(item.sources.map((source) => deleteSourceFile(source.id)));
+    const failed = results.filter((result) => result.status === "rejected").length;
+    setProjects((current) => current.filter((candidate) => candidate.id !== item.id));
+    notify(failed > 0 ? `${name} deleted, but ${failed} stored source ${failed === 1 ? "file could" : "files could"} not be removed.` : `${name} permanently deleted.`, failed > 0 ? "info" : "success");
   };
 
   const handleFiles = async (files: FileList | null) => {
@@ -400,6 +545,10 @@ function App() {
   };
 
   const selectProvider = (provider: ProviderOption) => {
+    if (project.providerId === provider.id) {
+      notify(`${provider.name} is already selected.`, "info");
+      return;
+    }
     updateProject({ providerId: provider.id });
     notify(`${provider.name} selected.`, "success");
   };
@@ -407,17 +556,58 @@ function App() {
   const prepareFilmPlan = () => {
     if (project.script.trim().length < 80) {
       scriptRef.current?.focus();
-      notify("Add at least 80 characters of story before preparing the film plan.", "error");
+      notify("Add at least 80 characters of story before creating the shooting plan.", "error");
       return;
     }
     setIsPlanning(true);
-    notify("Building a five-scene plan from your script…", "info");
+    notify("Creating a five-scene shooting plan from your script…", "info");
     window.setTimeout(() => {
       setPlan(makeFilmPlan(project));
       setIsPlanning(false);
-      notify("Film plan prepared. Review it before opening the studio.");
+      notify("Shooting plan created. Review it, then greenlight the film.");
       window.setTimeout(() => document.querySelector("#film-plan")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
     }, 850);
+  };
+
+  const focusReadinessGap = (gap: ReadinessGap) => {
+    setReadinessReview(null);
+    const targets: Record<ReadinessKey, HTMLElement | null> = {
+      title: titleRef.current,
+      ancestor: ancestorRef.current,
+      script: scriptRef.current,
+      sources: sourceButtonRef.current,
+      runtime: document.querySelector("#film-length button"),
+      provider: document.querySelector("#providers .provider-row"),
+    };
+    const target = targets[gap.key];
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => target?.focus(), 420);
+    notify(`${gap.label} is ready to finish.`, "info");
+  };
+
+  const finalizeGreenlight = (gaps: ReadinessGap[]) => {
+    const nextPlan = plan ?? (project.script.trim().length >= 80 ? makeFilmPlan(project) : null);
+    if (nextPlan) setPlan(nextPlan);
+    const greenlitAt = new Date().toISOString();
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? {
+      ...item,
+      greenlitAt,
+      readinessGaps: gaps.map((gap) => gap.label),
+      updatedAt: greenlitAt,
+    } : item));
+    setReadinessReview(null);
+    notify(gaps.length > 0 ? `Film greenlit with ${gaps.length} acknowledged ${gaps.length === 1 ? "gap" : "gaps"}.` : "Film greenlit and ready for production.", gaps.length > 0 ? "info" : "success");
+    if (nextPlan) window.setTimeout(() => document.querySelector("#film-plan")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+  };
+
+  const greenlightFilm = () => {
+    const gaps = getReadinessGaps(project);
+    if (gaps.length > 0) {
+      setReadinessReview(gaps);
+      notify(`${gaps.length} production ${gaps.length === 1 ? "detail needs" : "details need"} review before greenlight.`, "info");
+      return;
+    }
+    finalizeGreenlight([]);
   };
 
   const copyBrief = async () => {
@@ -475,7 +665,7 @@ function App() {
             <span className="status-dot" aria-hidden="true" />
             {saveState === "saving" ? "Saving" : saveState === "error" ? "Save failed" : "Saved locally"}
           </span>
-          <button className="button button-primary button-small" type="button" onClick={createProject}>New film</button>
+          <button className="button button-primary button-small" type="button" onClick={createProject}>Develop a film</button>
           <button className="menu-button" type="button" aria-label="Toggle menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>Menu</button>
         </div>
       </header>
@@ -548,8 +738,8 @@ function App() {
         <section className="creator-section page-width" id="create" aria-labelledby="creator-title">
           <div className="section-heading-row">
             <div>
-              <p className="eyebrow">Create your film</p>
-              <h2 id="creator-title">Build the story while it is still fresh.</h2>
+              <p className="eyebrow">Film development</p>
+              <h2 id="creator-title">Shape the story while it is still fresh.</h2>
             </div>
             <div className="completion" aria-label={`${progress}% project ready`}>
               <span>{progress}% ready</span><span className="completion-track"><span style={{ width: `${progress}%` }} /></span>
@@ -559,19 +749,29 @@ function App() {
           <div className="creator-frame">
             <div className="editor-panel">
               <div className="panel-section identity-grid">
-                <label>Film title<input value={project.title} onChange={(event) => updateProject({ title: event.target.value })} /></label>
-                <label>Ancestor’s name<input value={project.ancestor} placeholder="Who is this story about?" onChange={(event) => updateProject({ ancestor: event.target.value })} /></label>
+                <div className="field-block">
+                  <div className="field-label-row"><label htmlFor="film-title">Film title</label><button type="button" onClick={() => clearField("title", "Film title")}>Clear</button></div>
+                  <input id="film-title" ref={titleRef} value={project.title} placeholder="Name this film" onChange={(event) => updateProject({ title: event.target.value })} />
+                </div>
+                <div className="field-block">
+                  <div className="field-label-row"><label htmlFor="ancestor-name">Ancestor’s name</label><button type="button" onClick={() => clearField("ancestor", "Ancestor's name")}>Clear</button></div>
+                  <input id="ancestor-name" ref={ancestorRef} value={project.ancestor} placeholder="Who is this story about?" onChange={(event) => updateProject({ ancestor: event.target.value })} />
+                </div>
               </div>
               <div className="panel-section script-section">
-                <div className="field-heading"><label htmlFor="script">Script or family story</label><span>{wordCount} words · about {readMinutes} min narration</span></div>
+                <div className="field-heading"><label htmlFor="script">Script or family story</label><div className="field-heading-actions"><span>{wordCount} words · about {readMinutes} min narration</span><button type="button" onClick={() => clearField("script", "Script")}>Clear</button></div></div>
                 <textarea id="script" ref={scriptRef} value={project.script} placeholder="Begin with the moment that changed your ancestor’s life…" onChange={(event) => updateProject({ script: event.target.value })} />
                 <p className="field-help">Tip: dates, places, letters, and sensory details make stronger scenes. Mark family lore as family lore.</p>
               </div>
-              <div className="panel-section">
+              <div className="panel-section" id="film-length">
                 <div className="field-heading"><span>Film length</span><span>Choose a target, not a hard limit</span></div>
                 <div className="runtime-grid">
                   {runtimeOptions.map((option) => (
                     <button className={project.runtime === option.value ? "choice-card selected" : "choice-card"} type="button" key={option.value} aria-pressed={project.runtime === option.value} onClick={() => {
+                      if (project.runtime === option.value) {
+                        notify(`${option.label} is already selected.`, "info");
+                        return;
+                      }
                       updateProject({ runtime: option.value });
                       notify(`${option.label} selected.`, "success");
                     }}><span>{option.label}</span><small>{option.note}</small></button>
@@ -584,7 +784,7 @@ function App() {
               <div className="source-heading"><div><span className="panel-kicker">Source room</span><h3 id="sources-title">Keep the film grounded.</h3></div><span className="source-count">{project.sources.length}</span></div>
               <p>Add only material your family has permission to use. Files remain in this browser during this release.</p>
               <input ref={fileInputRef} className="visually-hidden" type="file" multiple accept="image/*,.pdf,.txt,.doc,.docx,audio/*,video/*" onChange={(event) => void handleFiles(event.target.files)} />
-              <button className="drop-zone" type="button" onClick={() => fileInputRef.current?.click()}>
+              <button ref={sourceButtonRef} className="drop-zone" type="button" onClick={() => fileInputRef.current?.click()}>
                 <span className="drop-icon" aria-hidden="true">+</span>
                 <span>Add photos, letters, audio, or notes</span>
                 <small>Up to 100 MB per file</small>
@@ -595,9 +795,14 @@ function App() {
                     <li key={source.id}><span className="file-mark" aria-hidden="true">□</span><span><span>{source.name}</span><small>{formatBytes(source.size)}</small></span><button type="button" aria-label={`Remove ${source.name}`} onClick={() => void removeSource(source)}>×</button></li>
                   ))}
                 </ul>
-              ) : <div className="empty-sources"><span aria-hidden="true">◎</span><p>No sources attached yet.</p><small>You can still prepare a plan, then return to add evidence.</small></div>}
+              ) : <div className="empty-sources"><span aria-hidden="true">◎</span><p>No sources attached yet.</p><small>You can still create a shooting plan, then return to add evidence.</small></div>}
               <div className="privacy-note"><span aria-hidden="true">◌</span><p><span>Local for now</span><small>Supabase sync can be added after production data and access rules are approved.</small></p></div>
             </aside>
+          </div>
+          <div className="development-controls">
+            <div><span>Production decision</span><p>Greenlight means the development package is ready to move into production. It does not publish or render the finished film.</p></div>
+            <button className="button button-secondary" type="button" onClick={() => void clearDevelopmentSlate()}>Clear development slate</button>
+            <button className="button button-primary" type="button" disabled={Boolean(project.greenlitAt)} onClick={greenlightFilm}>{project.greenlitAt ? `${getProjectStatus(project)} ✓` : "Greenlight film →"}</button>
           </div>
         </section>
 
@@ -629,8 +834,8 @@ function App() {
         {plan ? (
           <section className="plan-section page-width" id="film-plan" aria-labelledby="plan-title">
             <div className="section-heading-row">
-              <div><p className="eyebrow">Film plan ready</p><h2 id="plan-title">Review before anything is rendered.</h2><p>{plan.logline}</p></div>
-              <span className="success-chip"><span aria-hidden="true">✓</span> Five scenes prepared</span>
+              <div><p className="eyebrow">Shooting plan ready</p><h2 id="plan-title">Review the production blueprint.</h2><p>{plan.logline}</p></div>
+              <span className="success-chip"><span aria-hidden="true">✓</span> {project.greenlitAt ? getProjectStatus(project) : "Ready for greenlight"}</span>
             </div>
             <div className="scene-grid">
               {plan.scenes.map((scene, index) => <article className="scene-card" key={scene.title}><span>Scene {String(index + 1).padStart(2, "0")}</span><h3>{scene.title}</h3><p>{scene.direction}</p><blockquote>{scene.narration}</blockquote></article>)}
@@ -638,25 +843,41 @@ function App() {
             <div className="plan-actions">
               <button className="button button-secondary" type="button" onClick={() => void copyBrief()}>Copy provider brief</button>
               <button className="button button-secondary" type="button" onClick={downloadPackage}>Download project package ↓</button>
-              {selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" onClick={downloadPackage}>Download Lineage plan ↓</button>}
+              {!project.greenlitAt ? <button className="button button-primary" type="button" onClick={greenlightFilm}>Greenlight film →</button> : selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" onClick={downloadPackage}>Download Lineage plan ↓</button>}
             </div>
           </section>
         ) : null}
 
         <section className="projects-section page-width" id="projects" aria-labelledby="projects-title">
           <div className="section-heading-row">
-            <div><p className="eyebrow">Your projects</p><h2 id="projects-title">Return to a family story.</h2></div>
-            <button className="button button-secondary button-small" type="button" onClick={createProject}>+ New film</button>
+            <div><p className="eyebrow">Your films</p><h2 id="projects-title">Return to a family story.</h2></div>
+            <button className="button button-secondary button-small" type="button" onClick={createProject}>+ Develop a film</button>
           </div>
           <div className="project-grid">
-            {projects.map((item) => (
-              <button className={item.id === project.id ? "project-card current" : "project-card"} type="button" key={item.id} onClick={() => selectProject(item.id)}>
-                <span className="project-thumb"><img src="/assets/ancestor-shipyard-still.png" alt="" /></span>
-                <span className="project-meta"><span>{item.title}</span><small>{item.ancestor || "Ancestor not named"} · {runtimeOptions.find((option) => option.value === item.runtime)?.label}</small><small>Updated {new Date(item.updatedAt).toLocaleDateString()}</small></span>
-                <span className="project-arrow" aria-hidden="true">→</span>
-              </button>
+            {activeProjects.map((item) => (
+              <article className={item.id === project.id ? "project-card current" : "project-card"} key={item.id}>
+                <button className="project-open" type="button" onClick={() => selectProject(item.id)}>
+                  <span className="project-thumb"><img src="/assets/ancestor-shipyard-still.png" alt="" /></span>
+                  <span className="project-meta"><span>{item.title.trim() || "Untitled family film"}</span><small>{item.ancestor || "Ancestor not named"} · {runtimeOptions.find((option) => option.value === item.runtime)?.label}</small><small><span className="project-status">{getProjectStatus(item)}</span> · Updated {new Date(item.updatedAt).toLocaleDateString()}</small></span>
+                  <span className="project-arrow" aria-hidden="true">→</span>
+                </button>
+                <button className="project-archive" type="button" onClick={() => archiveProject(item)}>Archive</button>
+              </article>
             ))}
           </div>
+          {archivedProjects.length > 0 ? (
+            <section className="archive-library" aria-labelledby="archive-title">
+              <div className="archive-heading"><div><span>Archive</span><h3 id="archive-title">Archived films</h3></div><span>{archivedProjects.length}</span></div>
+              <div className="archive-list">
+                {archivedProjects.map((item) => (
+                  <article className="archive-card" key={item.id}>
+                    <div><span>{item.title.trim() || "Untitled family film"}</span><small>{item.ancestor || "Ancestor not named"} · Archived {new Date(item.archivedAt as string).toLocaleDateString()}</small></div>
+                    <div><button className="button button-secondary button-small" type="button" onClick={() => restoreProject(item)}>Restore</button><button className="button button-danger button-small" type="button" onClick={() => void deleteArchivedProject(item)}>Delete permanently</button></div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
         </section>
       </main>
 
@@ -666,8 +887,21 @@ function App() {
 
       {showActionDock ? (
         <div className="action-dock" aria-label="Current film action">
-          <div><span>Next step</span><p>{plan ? `Continue with ${selectedProvider.name}` : `Prepare ${runtime.label.toLowerCase()} for ${selectedProvider.name}`}</p></div>
-          {plan && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? downloadPackage : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? "Download the plan ↓" : "Prepare film plan →"}</button>}
+          <div><span>Next production step</span><p>{project.greenlitAt ? `Send the greenlit film to ${selectedProvider.name}` : plan ? "Review and greenlight the shooting plan" : `Create the ${runtime.label.toLowerCase()} shooting plan`}</p></div>
+          {project.greenlitAt && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : project.greenlitAt ? <button className="button button-primary" type="button" onClick={downloadPackage}>Download production package ↓</button> : plan ? <button className="button button-primary" type="button" onClick={greenlightFilm}>Greenlight film →</button> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={prepareFilmPlan}>{isPlanning ? "Creating shooting plan…" : "Create shooting plan →"}</button>}
+        </div>
+      ) : null}
+
+      {readinessReview ? (
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setReadinessReview(null); }}>
+          <section className="readiness-dialog" ref={readinessDialogRef} role="dialog" aria-modal="true" aria-labelledby="readiness-title" aria-describedby="readiness-description" tabIndex={-1}>
+            <div className="dialog-heading"><div><span>Production readiness review</span><h2 id="readiness-title">Finish the details—or greenlight with gaps.</h2></div><button type="button" aria-label="Close production readiness review" onClick={() => setReadinessReview(null)}>×</button></div>
+            <p id="readiness-description">The following fields are not complete. You can return directly to any field, or acknowledge the gaps and continue.</p>
+            <ul className="readiness-list">
+              {readinessReview.map((gap) => <li key={gap.key}><div><span>{gap.label}</span><p>{gap.detail}</p></div><button className="button button-secondary button-small" type="button" onClick={() => focusReadinessGap(gap)}>Finish field</button></li>)}
+            </ul>
+            <div className="dialog-actions"><button className="button button-secondary" type="button" onClick={() => setReadinessReview(null)}>Return to development</button><button className="button button-primary" type="button" onClick={() => finalizeGreenlight(readinessReview)}>Greenlight with gaps</button></div>
+          </section>
         </div>
       ) : null}
 
