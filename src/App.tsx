@@ -11,6 +11,20 @@ interface SourceFileRecord {
   type: string;
 }
 
+type ImagineRenderStatus = "submitting" | "queued" | "processing" | "completed" | "failed";
+
+interface ImagineRender {
+  provider: "imagineart";
+  jobId: string | null;
+  status: ImagineRenderStatus;
+  model: string;
+  videoUrl: string | null;
+  thumbnailUrl: string | null;
+  submittedAt: string;
+  updatedAt: string;
+  error: string | null;
+}
+
 interface FilmProject {
   id: string;
   title: string;
@@ -23,6 +37,7 @@ interface FilmProject {
   archivedAt: string | null;
   greenlitAt: string | null;
   readinessGaps: string[];
+  render: ImagineRender | null;
 }
 
 type ReadinessKey = "title" | "ancestor" | "script" | "sources" | "runtime" | "provider";
@@ -93,12 +108,12 @@ const providerOptions: ProviderOption[] = [
   {
     id: "imagineart",
     name: "ImagineArt",
-    label: "All-in-one",
-    summary: "A unified studio for cinematic video, source images, avatars, voice, music, and finishing tools.",
-    bestFor: "End-to-end creation",
-    price: "Ultimate ≈ $34/mo yearly",
-    detail: "Displayed annual-plan equivalent checked August 31, 2026. Promotions, credits, seats, model access, and commercial terms can change.",
-    website: "https://www.imagine.art/",
+    label: "Automated in app",
+    summary: "Greenlight a premium cinematic preview and follow its production without leaving Lineage Theatre.",
+    bestFor: "In-app production",
+    price: "API usage billed separately",
+    detail: "The connected Imagine API account pays per generation. Model cost and available balance can change.",
+    website: null,
     accent: "violet",
   },
   {
@@ -151,8 +166,8 @@ const steps = [
   ["01", "Tell the story", "Paste a script or begin with a family memory."],
   ["02", "Add what is real", "Attach photos, letters, and sources you may use."],
   ["03", "Choose the format", "Select a short, featurette, or longer family film."],
-  ["04", "Pick a studio", "Compare the right video provider for your story."],
-  ["05", "Review and greenlight", "Confirm the production details, then send the film to your studio."],
+  ["04", "Pick a studio", "Choose ImagineArt for automatic in-app production, or compare another provider."],
+  ["05", "Greenlight and watch", "Confirm the details, begin production, and follow the finished video here."],
 ];
 
 const blankProject = (): FilmProject => ({
@@ -161,12 +176,13 @@ const blankProject = (): FilmProject => ({
   ancestor: "",
   script: "",
   runtime: "short",
-  providerId: "runway",
+  providerId: "imagineart",
   sources: [],
   updatedAt: new Date().toISOString(),
   archivedAt: null,
   greenlitAt: null,
   readinessGaps: [],
+  render: null,
 });
 
 const initialProject = (): FilmProject => ({
@@ -175,26 +191,40 @@ const initialProject = (): FilmProject => ({
   ancestor: "Thomas Wilson",
   script: sampleScript,
   runtime: "short",
-  providerId: "runway",
+  providerId: "imagineart",
   sources: [],
   updatedAt: new Date().toISOString(),
   archivedAt: null,
   greenlitAt: null,
   readinessGaps: [],
+  render: null,
 });
 
 function normalizeProject(project: FilmProject): FilmProject {
+  const rawRender = project.render;
+  const render = rawRender && rawRender.provider === "imagineart" ? {
+    provider: "imagineart" as const,
+    jobId: typeof rawRender.jobId === "string" ? rawRender.jobId : null,
+    status: (["submitting", "queued", "processing", "completed", "failed"] as ImagineRenderStatus[]).includes(rawRender.status) ? rawRender.status : "failed",
+    model: typeof rawRender.model === "string" ? rawRender.model : "luma-dream-machine-ray-2",
+    videoUrl: typeof rawRender.videoUrl === "string" ? rawRender.videoUrl : null,
+    thumbnailUrl: typeof rawRender.thumbnailUrl === "string" ? rawRender.thumbnailUrl : null,
+    submittedAt: typeof rawRender.submittedAt === "string" ? rawRender.submittedAt : "",
+    updatedAt: typeof rawRender.updatedAt === "string" ? rawRender.updatedAt : "",
+    error: typeof rawRender.error === "string" ? rawRender.error : null,
+  } : null;
   return {
     ...project,
     title: typeof project.title === "string" ? project.title : "",
     ancestor: typeof project.ancestor === "string" ? project.ancestor : "",
     script: typeof project.script === "string" ? project.script : "",
     runtime: project.runtime || "short",
-    providerId: project.providerId || "runway",
+    providerId: project.providerId === "magiclight" ? "imagineart" : project.providerId || "imagineart",
     sources: Array.isArray(project.sources) ? project.sources : [],
     archivedAt: project.archivedAt ?? null,
     greenlitAt: project.greenlitAt ?? null,
     readinessGaps: Array.isArray(project.readinessGaps) ? project.readinessGaps : [],
+    render,
   };
 }
 
@@ -224,6 +254,9 @@ function getReadinessGaps(project: FilmProject): ReadinessGap[] {
 
 function getProjectStatus(project: FilmProject) {
   if (project.archivedAt) return "Archived";
+  if (project.render?.status === "completed") return "Film ready";
+  if (["submitting", "queued", "processing"].includes(project.render?.status ?? "")) return "In production";
+  if (project.render?.status === "failed") return "Production needs attention";
   if (project.greenlitAt && project.readinessGaps.length > 0) return "Greenlit with gaps";
   if (project.greenlitAt) return "Greenlit";
   return "In development";
@@ -299,6 +332,21 @@ Final checks:
 - Confirm likeness and media rights before upload.
 - Review every generated historical detail for accuracy.
 - Confirm the provider's current price and commercial-use terms before rendering.`;
+}
+
+function buildImaginePrompt(project: FilmProject, plan: FilmPlan) {
+  const sceneDirection = plan.scenes
+    .map((scene, index) => `Scene ${index + 1}, ${scene.title}: ${scene.direction} Visual story detail: ${scene.narration}`)
+    .join("\n");
+  const prompt = `Create a premium, realistic cinematic family-history film preview in 16:9 widescreen about ${project.ancestor.trim() || "an ancestor"}. Use natural human movement, historically plausible environments, restrained camera motion, warm filmic light, realistic texture, subtle depth of field, and emotionally grounded visual storytelling. Avoid fantasy imagery, modern objects that do not belong in the period, invented written quotations, logos, subtitles, title cards, and on-screen text. Preserve uncertainty rather than inventing facts.
+
+Film: ${project.title.trim() || "Untitled family film"}
+Creative structure:
+${sceneDirection}
+
+Approved family story:
+${project.script.trim()}`;
+  return prompt.slice(0, 4_000);
 }
 
 function App() {
@@ -384,6 +432,81 @@ function App() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 4200);
   };
 
+  useEffect(() => {
+    const render = project.render;
+    if (!render?.jobId || render.status === "failed") return;
+
+    let stopped = false;
+    let timer: number | null = null;
+    let failures = 0;
+
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/imagineart/status?id=${encodeURIComponent(render.jobId as string)}`, {
+          headers: { Accept: "application/json" },
+        });
+        const payload = await response.json().catch(() => ({})) as {
+          status?: ImagineRenderStatus;
+          videoUrl?: string | null;
+          thumbnailUrl?: string | null;
+          message?: string | null;
+        };
+        if (!response.ok) throw new Error(payload.message || "ImagineArt could not report production status.");
+        if (stopped) return;
+
+        failures = 0;
+        const nextStatus = payload.status ?? "processing";
+        const now = new Date().toISOString();
+        setProjects((current) => current.map((item) => item.id === activeProjectId && item.render?.jobId === render.jobId ? {
+          ...item,
+          render: {
+            ...item.render,
+            status: nextStatus,
+            videoUrl: payload.videoUrl ?? item.render.videoUrl,
+            thumbnailUrl: payload.thumbnailUrl ?? item.render.thumbnailUrl,
+            error: payload.message ?? null,
+            updatedAt: now,
+          },
+          updatedAt: now,
+        } : item));
+
+        if (nextStatus === "completed") {
+          if (render.status !== "completed") {
+            notify("ImagineArt finished the cinematic film preview. It is ready to watch here.");
+            window.setTimeout(() => document.querySelector("#render-status")?.scrollIntoView({ behavior: "smooth", block: "center" }), 100);
+          }
+          return;
+        }
+        if (nextStatus === "failed") {
+          notify(payload.message || "ImagineArt could not complete this production.", "error");
+          return;
+        }
+        timer = window.setTimeout(poll, 5_000);
+      } catch (error) {
+        if (stopped) return;
+        failures += 1;
+        if (failures >= 3) {
+          const message = error instanceof Error ? error.message : "Production status could not be checked.";
+          const now = new Date().toISOString();
+          setProjects((current) => current.map((item) => item.id === activeProjectId && item.render?.jobId === render.jobId ? {
+            ...item,
+            render: { ...item.render, status: "failed", error: message, updatedAt: now },
+            updatedAt: now,
+          } : item));
+          notify(`${message} You can retry from the production panel.`, "error");
+          return;
+        }
+        timer = window.setTimeout(poll, 5_000);
+      }
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeProjectId, project.render?.jobId]);
+
   const togglePreview = async () => {
     const video = heroVideoRef.current;
     if (!video) {
@@ -406,7 +529,15 @@ function App() {
   };
 
   const updateProject = (patch: Partial<FilmProject>) => {
-    setProjects((current) => current.map((item) => item.id === activeProjectId ? { ...item, ...patch, greenlitAt: null, readinessGaps: [], updatedAt: new Date().toISOString() } : item));
+    const resetsProduction = ["title", "ancestor", "script", "runtime", "providerId", "sources"].some((key) => key in patch);
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? {
+      ...item,
+      ...patch,
+      greenlitAt: null,
+      readinessGaps: [],
+      render: resetsProduction ? null : item.render,
+      updatedAt: new Date().toISOString(),
+    } : item));
     if ("script" in patch || "runtime" in patch || "ancestor" in patch) setPlan(null);
   };
 
@@ -459,10 +590,11 @@ function App() {
       ancestor: "",
       script: "",
       runtime: "short",
-      providerId: "runway",
+      providerId: "imagineart",
       sources: [],
       greenlitAt: null,
       readinessGaps: [],
+      render: null,
       updatedAt: new Date().toISOString(),
     } : item));
     setPlan(null);
@@ -569,6 +701,98 @@ function App() {
     }, 850);
   };
 
+  const startImagineRender = async (productionProject: FilmProject, productionPlan: FilmPlan) => {
+    if (productionProject.providerId !== "imagineart") return;
+
+    const attemptAt = new Date().toISOString();
+    const baseRender: ImagineRender = {
+      provider: "imagineart",
+      jobId: null,
+      status: "submitting",
+      model: "luma-dream-machine-ray-2",
+      videoUrl: null,
+      thumbnailUrl: null,
+      submittedAt: attemptAt,
+      updatedAt: attemptAt,
+      error: null,
+    };
+
+    if (productionProject.script.trim().length < 80) {
+      const message = "Add at least 80 characters of script before ImagineArt production can begin.";
+      setProjects((current) => current.map((item) => item.id === productionProject.id ? {
+        ...item,
+        render: { ...baseRender, status: "failed", error: message },
+        updatedAt: attemptAt,
+      } : item));
+      notify(message, "error");
+      return;
+    }
+
+    setProjects((current) => current.map((item) => item.id === productionProject.id ? {
+      ...item,
+      render: baseRender,
+      updatedAt: attemptAt,
+    } : item));
+    notify("ImagineArt production is starting. Keep this page open to follow its progress.", "info");
+
+    try {
+      const response = await fetch("/api/imagineart/start", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "Idempotency-Key": `${productionProject.id}:${productionProject.greenlitAt ?? attemptAt}:${attemptAt}`,
+        },
+        body: JSON.stringify({
+          projectId: productionProject.id,
+          title: productionProject.title,
+          ancestor: productionProject.ancestor,
+          runtime: productionProject.runtime,
+          prompt: buildImaginePrompt(productionProject, productionPlan),
+        }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        jobId?: string;
+        status?: ImagineRenderStatus;
+        model?: string;
+        submittedAt?: string;
+        message?: string;
+      };
+      if (!response.ok || !payload.jobId) throw new Error(payload.message || "ImagineArt did not start this production.");
+
+      const now = new Date().toISOString();
+      setProjects((current) => current.map((item) => item.id === productionProject.id ? {
+        ...item,
+        render: {
+          ...baseRender,
+          jobId: payload.jobId as string,
+          status: payload.status === "processing" ? "processing" : "queued",
+          model: payload.model || baseRender.model,
+          submittedAt: payload.submittedAt || attemptAt,
+          updatedAt: now,
+        },
+        updatedAt: now,
+      } : item));
+      notify("ImagineArt accepted the film. The cinematic preview is now rendering.");
+      window.setTimeout(() => document.querySelector("#render-status")?.scrollIntoView({ behavior: "smooth", block: "center" }), 100);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ImagineArt production could not begin.";
+      const now = new Date().toISOString();
+      setProjects((current) => current.map((item) => item.id === productionProject.id ? {
+        ...item,
+        render: { ...baseRender, status: "failed", error: message, updatedAt: now },
+        updatedAt: now,
+      } : item));
+      notify(`${message} No ImagineArt page was opened.`, "error");
+    }
+  };
+
+  const retryImagineRender = () => {
+    const productionPlan = plan ?? makeFilmPlan(project);
+    if (!plan) setPlan(productionPlan);
+    void startImagineRender(project, productionPlan);
+  };
+
   const focusReadinessGap = (gap: ReadinessGap) => {
     setReadinessReview(null);
     const targets: Record<ReadinessKey, HTMLElement | null> = {
@@ -589,14 +813,16 @@ function App() {
     const nextPlan = plan ?? (project.script.trim().length >= 80 ? makeFilmPlan(project) : null);
     if (nextPlan) setPlan(nextPlan);
     const greenlitAt = new Date().toISOString();
-    setProjects((current) => current.map((item) => item.id === activeProjectId ? {
-      ...item,
+    const greenlitProject = {
+      ...project,
       greenlitAt,
       readinessGaps: gaps.map((gap) => gap.label),
       updatedAt: greenlitAt,
-    } : item));
+    };
+    setProjects((current) => current.map((item) => item.id === activeProjectId ? greenlitProject : item));
     setReadinessReview(null);
-    notify(gaps.length > 0 ? `Film greenlit with ${gaps.length} acknowledged ${gaps.length === 1 ? "gap" : "gaps"}.` : "Film greenlit and ready for production.", gaps.length > 0 ? "info" : "success");
+    notify(gaps.length > 0 ? `Film greenlit with ${gaps.length} acknowledged ${gaps.length === 1 ? "gap" : "gaps"}.` : project.providerId === "imagineart" ? "Film greenlit. ImagineArt production is beginning here." : "Film greenlit and ready for production.", gaps.length > 0 ? "info" : "success");
+    if (nextPlan && project.providerId === "imagineart") void startImagineRender(greenlitProject, nextPlan);
     if (nextPlan) window.setTimeout(() => document.querySelector("#film-plan")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
   };
 
@@ -646,6 +872,32 @@ function App() {
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     notify("Project package downloaded.");
+  };
+
+  const isImagineArtProduction = selectedProvider.id === "imagineart";
+  const render = project.render;
+  const renderIsActive = render ? ["submitting", "queued", "processing"].includes(render.status) : false;
+  const renderProgress = render?.status === "completed" ? 100 : render?.status === "processing" ? 68 : render?.status === "queued" ? 32 : render?.status === "submitting" ? 14 : 0;
+  const renderHeading = render?.status === "completed"
+    ? "Your cinematic preview is ready."
+    : render?.status === "failed"
+      ? "Production needs attention."
+      : render?.status === "processing"
+        ? "ImagineArt is rendering the film."
+        : render?.status === "queued"
+          ? "The film is in the production queue."
+          : "Connecting the production stage.";
+  const renderDetail = render?.status === "completed"
+    ? "Watch the finished ImagineArt video here or download the MP4 while its delivery link is active."
+    : render?.status === "failed"
+      ? render.error || "ImagineArt could not complete this production. You can retry without leaving Lineage Theatre."
+      : "The story and scene direction were sent securely through the Lineage Theatre production service. This page checks progress automatically.";
+
+  const renderAction = (small = false) => {
+    const className = small ? "button button-primary button-small" : "button button-primary";
+    if (renderIsActive) return <button className={className} type="button" disabled>Producing in ImagineArt…</button>;
+    if (render?.status === "completed") return <button className={className} type="button" onClick={() => document.querySelector("#render-status")?.scrollIntoView({ behavior: "smooth", block: "center" })}>Watch finished film ↓</button>;
+    return <button className={className} type="button" onClick={retryImagineRender}>{render?.status === "failed" ? "Retry ImagineArt production →" : "Start ImagineArt production →"}</button>;
   };
 
   return (
@@ -800,16 +1052,16 @@ function App() {
             </aside>
           </div>
           <div className="development-controls">
-            <div><span>Production decision</span><p>Greenlight means the development package is ready to move into production. It does not publish or render the finished film.</p></div>
+            <div><span>Production decision</span><p>{isImagineArtProduction ? "Greenlight securely sends the approved story and scene direction to ImagineArt, uses the connected API balance, and keeps the production experience on this page." : "Greenlight confirms the development package is ready to move into production with the selected studio."}</p></div>
             <button className="button button-secondary" type="button" onClick={() => void clearDevelopmentSlate()}>Clear development slate</button>
-            <button className="button button-primary" type="button" disabled={Boolean(project.greenlitAt)} onClick={greenlightFilm}>{project.greenlitAt ? `${getProjectStatus(project)} ✓` : "Greenlight film →"}</button>
+            <button className="button button-primary" type="button" disabled={Boolean(project.greenlitAt)} onClick={greenlightFilm}>{project.greenlitAt ? `${getProjectStatus(project)} ✓` : isImagineArtProduction ? "Greenlight & produce →" : "Greenlight film →"}</button>
           </div>
         </section>
 
         <section className="providers-section" id="providers" aria-labelledby="providers-title">
           <div className="page-width">
             <div className="section-heading-row provider-heading">
-              <div><p className="eyebrow">Choose the video studio</p><h2 id="providers-title">Use the right engine for this film.</h2><p>Lineage Theatre prepares the creative brief. Paid rendering, accounts, usage limits, and billing stay with the selected provider.</p></div>
+              <div><p className="eyebrow">Choose the video studio</p><h2 id="providers-title">Use the right engine for this film.</h2><p>ImagineArt can produce a cinematic preview directly inside Lineage Theatre. Other studios still use a provider-ready production package.</p></div>
               <span className="pricing-check">Pricing checked August 31, 2026</span>
             </div>
             <div className="provider-list">
@@ -840,10 +1092,32 @@ function App() {
             <div className="scene-grid">
               {plan.scenes.map((scene, index) => <article className="scene-card" key={scene.title}><span>Scene {String(index + 1).padStart(2, "0")}</span><h3>{scene.title}</h3><p>{scene.direction}</p><blockquote>{scene.narration}</blockquote></article>)}
             </div>
+            {render ? (
+              <section className={`render-panel ${render.status}`} id="render-status" aria-labelledby="render-title" aria-live="polite">
+                <div className="render-copy">
+                  <p className="panel-kicker">ImagineArt production</p>
+                  <h3 id="render-title">{renderHeading}</h3>
+                  <p>{renderDetail}</p>
+                  <div className="render-meter" role="progressbar" aria-label="ImagineArt production progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={renderProgress}>
+                    <span style={{ width: `${renderProgress}%` }} />
+                  </div>
+                  <div className="render-meta"><span>{render.status === "completed" ? "Finished" : render.status === "failed" ? "Action needed" : `${renderProgress}% production stage`}</span><span>Luma Ray 2 · 16:9</span></div>
+                  {render.status === "failed" ? <div className="render-inline-action">{renderAction(true)}</div> : null}
+                </div>
+                <div className="render-screen">
+                  {render.status === "completed" && render.videoUrl ? (
+                    <video controls playsInline preload="metadata" poster={render.thumbnailUrl ?? undefined} src={render.videoUrl}>Your browser does not support video playback.</video>
+                  ) : (
+                    <div className="render-placeholder" aria-hidden="true"><span>{render.status === "failed" ? "!" : "▶"}</span><small>{render.status === "failed" ? "Production paused" : "Film rendering"}</small></div>
+                  )}
+                </div>
+                {render.status === "completed" && render.videoUrl ? <a className="button button-secondary button-small render-download" href={render.videoUrl} download={`${project.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "lineage-film"}-imagineart.mp4`}>Download MP4 ↓</a> : null}
+              </section>
+            ) : null}
             <div className="plan-actions">
               <button className="button button-secondary" type="button" onClick={() => void copyBrief()}>Copy provider brief</button>
               <button className="button button-secondary" type="button" onClick={downloadPackage}>Download project package ↓</button>
-              {!project.greenlitAt ? <button className="button button-primary" type="button" onClick={greenlightFilm}>Greenlight film →</button> : selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" onClick={downloadPackage}>Download Lineage plan ↓</button>}
+              {!project.greenlitAt ? <button className="button button-primary" type="button" onClick={greenlightFilm}>{isImagineArtProduction ? "Greenlight & produce →" : "Greenlight film →"}</button> : isImagineArtProduction ? renderAction() : selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" onClick={downloadPackage}>Download Lineage plan ↓</button>}
             </div>
           </section>
         ) : null}
@@ -887,8 +1161,8 @@ function App() {
 
       {showActionDock ? (
         <div className="action-dock" aria-label="Current film action">
-          <div><span>Next production step</span><p>{project.greenlitAt ? `Send the greenlit film to ${selectedProvider.name}` : plan ? "Review and greenlight the shooting plan" : `Create the ${runtime.label.toLowerCase()} shooting plan`}</p></div>
-          {project.greenlitAt && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : project.greenlitAt ? <button className="button button-primary" type="button" onClick={downloadPackage}>Download production package ↓</button> : plan ? <button className="button button-primary" type="button" onClick={greenlightFilm}>Greenlight film →</button> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={prepareFilmPlan}>{isPlanning ? "Creating shooting plan…" : "Create shooting plan →"}</button>}
+          <div><span>Next production step</span><p>{project.greenlitAt && isImagineArtProduction ? render?.status === "completed" ? "Watch the finished cinematic preview" : render?.status === "failed" ? "Retry ImagineArt production" : "ImagineArt is producing the film here" : project.greenlitAt ? `Send the greenlit film to ${selectedProvider.name}` : plan ? "Review and greenlight the shooting plan" : `Create the ${runtime.label.toLowerCase()} shooting plan`}</p></div>
+          {project.greenlitAt && isImagineArtProduction ? renderAction() : project.greenlitAt && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Send to {selectedProvider.name} ↗</a> : project.greenlitAt ? <button className="button button-primary" type="button" onClick={downloadPackage}>Download production package ↓</button> : plan ? <button className="button button-primary" type="button" onClick={greenlightFilm}>{isImagineArtProduction ? "Greenlight & produce →" : "Greenlight film →"}</button> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={prepareFilmPlan}>{isPlanning ? "Creating shooting plan…" : "Create shooting plan →"}</button>}
         </div>
       ) : null}
 
