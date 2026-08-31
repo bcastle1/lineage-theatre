@@ -171,6 +171,13 @@ function formatBytes(size: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const rounded = Math.floor(seconds);
+  const minutes = Math.floor(rounded / 60);
+  return `${minutes}:${String(rounded % 60).padStart(2, "0")}`;
+}
+
 function makeFilmPlan(project: FilmProject): FilmPlan {
   const parts = project.script
     .split(/\n\s*\n/)
@@ -236,10 +243,14 @@ function App() {
   const [plan, setPlan] = useState<FilmPlan | null>(null);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [previewTime, setPreviewTime] = useState(0);
+  const [previewDuration, setPreviewDuration] = useState(78.5);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showActionDock, setShowActionDock] = useState(false);
   const scriptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const heroVideoRef = useRef<HTMLVideoElement>(null);
   const toastTimerRef = useRef<number | null>(null);
 
   const project = projects.find((item) => item.id === activeProjectId) ?? projects[0];
@@ -265,6 +276,21 @@ function App() {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
   }, []);
 
+  useEffect(() => {
+    const creator = document.querySelector("#create");
+    const updateDockVisibility = () => {
+      if (!creator) return;
+      setShowActionDock(creator.getBoundingClientRect().top < window.innerHeight - 72);
+    };
+    updateDockVisibility();
+    window.addEventListener("scroll", updateDockVisibility, { passive: true });
+    window.addEventListener("resize", updateDockVisibility);
+    return () => {
+      window.removeEventListener("scroll", updateDockVisibility);
+      window.removeEventListener("resize", updateDockVisibility);
+    };
+  }, []);
+
   const progress = useMemo(() => {
     const checks = [project.script.trim().length >= 80, project.sources.length > 0, Boolean(project.runtime), Boolean(project.providerId), Boolean(plan)];
     return Math.round((checks.filter(Boolean).length / checks.length) * 100);
@@ -274,6 +300,27 @@ function App() {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     setToast({ id: Date.now(), tone, message });
     toastTimerRef.current = window.setTimeout(() => setToast(null), 4200);
+  };
+
+  const togglePreview = async () => {
+    const video = heroVideoRef.current;
+    if (!video) {
+      notify("The trailer is not ready yet. Please try again.", "error");
+      return;
+    }
+
+    if (video.paused) {
+      try {
+        await video.play();
+        notify("Thomas Wilson trailer playing.", "success");
+      } catch {
+        notify("The trailer could not start. Please try again.", "error");
+      }
+      return;
+    }
+
+    video.pause();
+    notify("Trailer paused.", "info");
   };
 
   const updateProject = (patch: Partial<FilmProject>) => {
@@ -434,19 +481,39 @@ function App() {
             </div>
             <p className="trust-line"><span aria-hidden="true">✓</span> Private browser draft <span aria-hidden="true">·</span> No card required <span aria-hidden="true">·</span> Export anytime</p>
           </div>
-          <div className="hero-visual" aria-label="Film preview for The Journey of Thomas Wilson">
-            <img src="/assets/ancestor-shipyard-still.png" alt="Cinematic historical portrait of a shipyard worker beside a harbor" />
+          <div className="hero-visual" aria-label="Finished film example: The Journey of Thomas Wilson">
+            <video
+              ref={heroVideoRef}
+              src="/assets/the-journey-of-thomas-wilson.mp4"
+              poster="/assets/the-journey-of-thomas-wilson-poster.jpg"
+              preload="metadata"
+              playsInline
+              onClick={togglePreview}
+              onLoadedMetadata={(event) => setPreviewDuration(event.currentTarget.duration || 78.5)}
+              onTimeUpdate={(event) => setPreviewTime(event.currentTarget.currentTime)}
+              onPlay={() => setIsPreviewPlaying(true)}
+              onPause={() => setIsPreviewPlaying(false)}
+              onEnded={() => {
+                setIsPreviewPlaying(false);
+                notify("Trailer finished. You can replay it anytime.", "success");
+              }}
+              aria-label="Play or pause the 78-second Thomas Wilson cinematic trailer"
+            />
             <div className="visual-scrim" />
-            <div className="preview-topline"><span>Preview scene 01</span><span>1919 · Baltimore</span></div>
+            <div className="preview-topline"><span>Finished example</span><span>1:18 · 1080p</span></div>
             <div className="preview-bottom">
-              <button className="preview-play" type="button" aria-label={isPreviewPlaying ? "Pause film preview" : "Play film preview"} onClick={() => {
-                setIsPreviewPlaying((playing) => !playing);
-                notify(isPreviewPlaying ? "Preview paused." : "Preview playing.", "info");
-              }}>{isPreviewPlaying ? "Ⅱ" : "▶"}</button>
+              <button className="preview-play" type="button" aria-label={isPreviewPlaying ? "Pause Thomas Wilson trailer" : "Play Thomas Wilson trailer"} onClick={togglePreview}>{isPreviewPlaying ? "Ⅱ" : "▶"}</button>
               <div><span className="preview-kicker">The Journey of</span><span className="preview-title">Thomas Wilson</span></div>
-              <span className="preview-time">00:18</span>
+              <span className="preview-time">{formatTime(previewTime)} / {formatTime(previewDuration)}</span>
             </div>
-            <div className={isPreviewPlaying ? "preview-progress is-playing" : "preview-progress"}><span /></div>
+            <div
+              className="preview-progress"
+              role="progressbar"
+              aria-label="Trailer progress"
+              aria-valuemin={0}
+              aria-valuemax={Math.round(previewDuration)}
+              aria-valuenow={Math.round(previewTime)}
+            ><span style={{ width: `${previewDuration > 0 ? Math.min(100, (previewTime / previewDuration) * 100) : 0}%` }} /></div>
           </div>
         </section>
 
@@ -586,10 +653,12 @@ function App() {
         <div className="page-width"><div><span className="footer-mark">LT</span><p><span>Lineage Theatre</span><small>Make family history feel close again.</small></p></div><p>GitHub source · Vercel hosting · Namecheap DNS today · Supabase-ready data path · Build {__BUILD_COMMIT__.slice(0, 7)}</p></div>
       </footer>
 
-      <div className="action-dock" aria-label="Current film action">
-        <div><span>Next step</span><p>{plan ? `Continue with ${selectedProvider.name}` : `Prepare ${runtime.label.toLowerCase()} for ${selectedProvider.name}`}</p></div>
-        {plan && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? downloadPackage : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? "Download the plan ↓" : "Prepare film plan →"}</button>}
-      </div>
+      {showActionDock ? (
+        <div className="action-dock" aria-label="Current film action">
+          <div><span>Next step</span><p>{plan ? `Continue with ${selectedProvider.name}` : `Prepare ${runtime.label.toLowerCase()} for ${selectedProvider.name}`}</p></div>
+          {plan && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? downloadPackage : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? "Download the plan ↓" : "Prepare film plan →"}</button>}
+        </div>
+      ) : null}
 
       {toast ? <div className={`toast ${toast.tone}`} key={toast.id} role={toast.tone === "error" ? "alert" : "status"}><span aria-hidden="true">{toast.tone === "success" ? "✓" : toast.tone === "error" ? "!" : "i"}</span><p>{toast.message}</p><button type="button" aria-label="Dismiss message" onClick={() => setToast(null)}>×</button></div> : null}
     </div>
