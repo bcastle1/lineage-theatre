@@ -80,6 +80,17 @@ const providerOptions: ProviderOption[] = [
     accent: "amber",
   },
   {
+    id: "imagineart",
+    name: "ImagineArt",
+    label: "All-in-one",
+    summary: "A unified studio for cinematic video, source images, avatars, voice, music, and finishing tools.",
+    bestFor: "End-to-end creation",
+    price: "Ultimate ≈ $34/mo yearly",
+    detail: "Displayed annual-plan equivalent checked August 31, 2026. Promotions, credits, seats, model access, and commercial terms can change.",
+    website: "https://www.imagine.art/",
+    accent: "violet",
+  },
+  {
     id: "flow",
     name: "Google Flow + Veo",
     label: "Premium shots",
@@ -594,7 +605,7 @@ function App() {
           <div className="page-width">
             <div className="section-heading-row provider-heading">
               <div><p className="eyebrow">Choose the video studio</p><h2 id="providers-title">Use the right engine for this film.</h2><p>Lineage Theatre prepares the creative brief. Paid rendering, accounts, usage limits, and billing stay with the selected provider.</p></div>
-              <span className="pricing-check">Pricing checked August 30, 2026</span>
+              <span className="pricing-check">Pricing checked August 31, 2026</span>
             </div>
             <div className="provider-list">
               {providerOptions.map((provider) => {
