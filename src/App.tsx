@@ -371,18 +371,15 @@ function App() {
     }
   };
 
-  const openStudio = () => {
+  const prepareStudioHandoff = () => {
     if (!selectedProvider.website) {
       notify("The Lineage plan is ready here. Download the package when your review is complete.", "info");
       return;
     }
-    const studioWindow = window.open(selectedProvider.website, "_blank");
-    if (studioWindow) studioWindow.opener = null;
     navigator.clipboard.writeText(buildProviderBrief(project, plan)).then(
-      () => notify(`${selectedProvider.name} opened and the production brief was copied. Rendering and billing happen there.`),
-      () => notify(`${selectedProvider.name} opened. Download the package if you need the full brief.`, "info"),
+      () => notify(`${selectedProvider.name} is opening and the production brief was copied. Rendering and billing happen there.`),
+      () => notify(`${selectedProvider.name} is opening. Download the package if you need the full brief.`, "info"),
     );
-    if (!studioWindow) notify(`Your browser blocked the ${selectedProvider.name} tab. Allow pop-ups and try again.`, "error");
   };
 
   const downloadPackage = () => {
@@ -563,7 +560,7 @@ function App() {
             <div className="plan-actions">
               <button className="button button-secondary" type="button" onClick={() => void copyBrief()}>Copy provider brief</button>
               <button className="button button-secondary" type="button" onClick={downloadPackage}>Download project package ↓</button>
-              <button className="button button-primary" type="button" onClick={openStudio}>{selectedProvider.website ? `Open ${selectedProvider.name} ↗` : "Keep planning here"}</button>
+              {selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" onClick={downloadPackage}>Download Lineage plan ↓</button>}
             </div>
           </section>
         ) : null}
@@ -591,7 +588,7 @@ function App() {
 
       <div className="action-dock" aria-label="Current film action">
         <div><span>Next step</span><p>{plan ? `Continue with ${selectedProvider.name}` : `Prepare ${runtime.label.toLowerCase()} for ${selectedProvider.name}`}</p></div>
-        <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? openStudio : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? (selectedProvider.website ? `Open ${selectedProvider.name} ↗` : "Download the plan") : "Prepare film plan →"}</button>
+        {plan && selectedProvider.website ? <a className="button button-primary" href={selectedProvider.website} target="_blank" rel="noopener noreferrer" onClick={prepareStudioHandoff}>Open {selectedProvider.name} ↗</a> : <button className="button button-primary" type="button" disabled={isPlanning} onClick={plan ? downloadPackage : prepareFilmPlan}>{isPlanning ? "Preparing your plan…" : plan ? "Download the plan ↓" : "Prepare film plan →"}</button>}
       </div>
 
       {toast ? <div className={`toast ${toast.tone}`} key={toast.id} role={toast.tone === "error" ? "alert" : "status"}><span aria-hidden="true">{toast.tone === "success" ? "✓" : toast.tone === "error" ? "!" : "i"}</span><p>{toast.message}</p><button type="button" aria-label="Dismiss message" onClick={() => setToast(null)}>×</button></div> : null}
