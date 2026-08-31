@@ -2,7 +2,7 @@ import dns from "node:dns/promises";
 import https from "node:https";
 import http from "node:http";
 
-const expectedCommit = process.argv[2]?.trim().toLowerCase() || "";
+const expectedCommit = process.argv.slice(2).find((argument) => argument !== "--")?.trim().toLowerCase() || "";
 
 async function resolve(recordType, hostname) {
   try {
