@@ -1,48 +1,39 @@
 # Lineage Theatre
 
-Lineage Theatre is a compact, local-first film-planning app for turning an ancestor's story into a provider-ready production brief. It guides a family from script and source material through film length, studio selection, a five-scene plan, and an honest handoff to an external video renderer.
+An invitation-only family-history film studio at https://lineagetheater.com. React/Vite guides a user through Family archive, Story direction, The cutting room, and Create & watch.
 
-## What works
+## Working features
 
-- A five-step landing-page guide from family memory to video studio.
-- Script, ancestor, title, and runtime editing with local autosave feedback.
-- Local source-file storage in IndexedDB, including duplicate and size checks.
-- Provider comparison for Runway, Google Flow + Veo, HeyGen, MagicLight, and the free Lineage planning path.
-- A deterministic five-scene film plan generated in the browser from the supplied script.
-- Copyable provider briefs and downloadable JSON production packages.
-- Direct, disclosed handoff to the selected provider's official studio.
-- Responsive desktop and mobile presentation with regular-weight typography throughout.
+- Sign-in and forced first-login password change; salted scrypt password hashes in private Vercel Blob storage, signed HTTP-only sessions, origin checks, and durable request limits.
+- Account-specific local film projects and IndexedDB source files. Existing v2 projects remain untouched and Erik can explicitly import them.
+- Text extraction from PDF, DOCX, legacy DOC, text, CSV and GEDCOM. Photos, audio, and video can be added as original sources. Legacy DOC extraction is an authenticated transient server operation; other extraction stays in the browser.
+- Documentary and Cinematic treatments, historical setting, 15-second to 10-minute runtime, ten Gemini story directions, refresh excluding previous titles, up to three selected themes, and editable scene plans.
+- A real browser-rendered 1920 x 1080 film from source photographs/footage, captions, gentle ambient score, and optional uploaded narration. MP4 when supported; WebM fallback. Keep the tab visible during export, which takes the selected running time.
+- Runway and ImagineArt authenticated shot APIs with durable per-user job ownership and duplicate-request protection. Five-second generated takes can be combined with archive scenes. Reenactments are labeled. Runway's credential and credit balance are checked; no-credit status is disclosed. ImagineArt requires its own configured key.
+- Disclosed external handoffs to MagicLight, Google Flow, and HeyGen, with downloadable production briefs.
+- Progress, success, failure, and uncertain-submission feedback; responsive layouts and regular-weight typography throughout.
 
-The app does not claim that a paid third-party render completed. Rendering, account access, pricing, usage limits, and billing remain in the provider's own studio.
+## Local development
 
-## Run locally
+Use Node 22+ and pnpm 11.7.0.
 
-```bash
+```
 pnpm install --frozen-lockfile
 pnpm run dev
-```
-
-Vite normally serves the app at `http://127.0.0.1:5173/`.
-
-## Build
-
-```bash
 pnpm run build
+pnpm test
 ```
 
-The production output is written to `dist/`. GitHub Actions runs this build on every push to `main`; Vercel is the intended production publisher.
+The development server serves Vite and API handlers at http://127.0.0.1:5173. A gitignored `.env.local` supplies server-only values. Never expose provider credentials through VITE variables.
 
-## Current architecture
+## Server environment
 
-- Source of record: GitHub (`bcastle1/lineage-theatre`)
-- Production hosting: Vercel (`lineage-theater` project)
-- DNS authority today: Namecheap nameservers
-- Application persistence today: the visitor's browser (`localStorage` and IndexedDB)
-- Planned shared data layer: Supabase, after authentication, row-level security, retention, consent, and production data rules are approved
-- Planned DNS authority: IONOS, only through a separate approved migration with rollback and domain verification
+- `BLOB_READ_WRITE_TOKEN`: private Vercel Blob store for accounts, rate limits and provider jobs.
+- `LINEAGE_SESSION_SECRET`: high-entropy server signing secret.
+- `GEMINI_API_KEY`: story development; default model `gemini-3.8-flash`. `LINEAGE_STORY_MODEL` can override it with a compatible model supporting low thinking level and structured output.
+- `RUNWAYML_API_SECRET`: Runway API account, separate from its web-app subscription/credits.
+- `IMAGINEART_API_TOKEN`: optional ImagineArt API integration.
 
-See `DEPLOYMENT.md` for the release and verification contract.
+Provider credentials are server-only. Account records are provisioned administratively with the helpers in `api/_lib/auth.mjs`; plaintext initial passwords are never committed. Password reset is currently handled by the administrator. This release does not provide cross-device project sync: source files and finished movies remain in the browser. Download films and retain original source files.
 
-## Public safety boundary
-
-This release is appropriate for private browser drafting. Before the app accepts production customer files in a shared backend, add authenticated accounts, least-privilege access, encrypted storage, signed uploads, consent and rights records, retention and deletion controls, abuse handling, privacy terms, and provider-specific commercial-use review. Never place video-provider or Supabase secrets in browser code.
+See DEPLOYMENT.md for exact-commit release verification and rollback.

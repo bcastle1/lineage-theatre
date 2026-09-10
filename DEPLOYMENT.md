@@ -1,64 +1,31 @@
 # Deploying Lineage Theatre
 
-## Approved topology for this release
+GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds. Production publishing uses the authenticated Vercel CLI from the exact committed source.
 
-| Layer | Current system | Release rule |
-| --- | --- | --- |
-| Source | GitHub `bcastle1/lineage-theatre` | `main` is the production source of record. |
-| Build and hosting | Vercel project `lineage-theater` | Production must be built from the exact GitHub commit being released. |
-| Public domain | `lineagetheater.com` | The custom domain must resolve to and be served by Vercel. |
-| DNS authority | Namecheap nameservers | Preserve in this release. No IONOS nameserver change is implied. |
-| App data | Browser local storage and IndexedDB | No shared production customer database exists in this release. |
-| Future shared data | Supabase | Add only after auth, RLS, storage, consent, retention, and deletion rules are approved. |
-| Future DNS | IONOS | Migrate separately with a complete record inventory, lowered TTL, domain verification, and rollback plan. |
+## Runtime
 
-GitHub Pages is intentionally not a deployment target. The GitHub workflow validates the production build and does not publish the domain.
+Framework Vite; install `pnpm install --frozen-lockfile`; build `pnpm run build`; output `dist`. Three Vercel functions provide authentication, studio requests/media, and legacy Word text extraction. Their limits are declared in vercel.json.
 
-## Vercel project settings
+Production and preview require the private Blob connection and session secret. Server-side provider environment variables are described in README.md. Vercel sensitive variables cannot be read back into local development; validate them through an authenticated preview runtime. Do not commit `.env*`, local credential files, render fixtures, or build output. `.vercelignore` excludes them from uploads.
 
-- Framework preset: Vite
-- Install command: `pnpm install --frozen-lockfile`
-- Build command: `pnpm run build`
-- Output directory: `dist`
-- Production branch: `main`
+The private Blob store retains account password hashes, rate limits, and provider job references. Original family sources, project metadata, and finished archive films remain local to the browser, under the signed-in account's project key. Local storage is not encrypted or a shared cloud vault. Do not represent it as cross-device storage.
 
-Connect the existing Vercel `lineage-theater` project to the existing GitHub repository. Do not create a second production project or move the domain unless separately approved.
+## Release gates
 
-## Release verification
+1. Build/typecheck and auth tests pass; inspect the staged diff for unrelated changes or secrets.
+2. Exercise sign-in, forced password setup, document extraction, ten AI ideas plus refresh, scene planning, actual video export/playback, and useful failures with a synthetic QA identity.
+3. Confirm responsive desktop/mobile layout, visible feedback, no overflow, and all text weights at 400 or below.
+4. Push the exact commit to GitHub main, deploy that same tree with its SHA as `VERCEL_GIT_COMMIT_SHA`, and record the READY deployment ID and aliases.
+5. Run `pnpm run check:deploy -- <sha>`. HTTPS, Vercel serving headers, and `<meta name="lineage-build">` must match the exact SHA at the custom domain.
+6. Verify the authenticated custom-domain flow; provider credentials configured in production may differ from preview. Clearly report missing credits or credentials, never a simulated successful render.
+7. Remove the synthetic QA account. Verify each invited user still requires a first-login password change, then send the explicitly authorized invitations and record send receipts.
 
-For every production release, record all of the following:
+## Rollback
 
-1. The exact pushed GitHub commit SHA.
-2. The Vercel deployment ID and `READY` state.
-3. The deployment's Git commit matching the pushed SHA.
-4. The custom domain alias pointing to that deployment.
-5. An HTTPS response from `lineagetheater.com` with `Server: Vercel`.
-6. The HTML `<meta name="lineage-build">` value matching the exact commit.
-7. Rendered desktop and mobile checks on the custom domain, including action feedback and regular-weight typography.
+Retain the previous deployment ID and Git commit. Promote the known-good Vercel deployment if a release fails; do not delete account storage, change DNS, or rotate working secrets as a routine rollback. A rollback to the former unauthenticated planning app removes the login experience, so prefer a corrective deployment for authentication/UI issues.
 
-Run the read-only production check after promotion:
+## Provider behavior
 
-```bash
-pnpm run check:deploy -- <expected-commit-sha>
-```
+Gemini suggestions are generated from the text the user explicitly permits sending. Runway/ImagineArt shots incur provider costs only after a confirmation inside the app. Job IDs are reserved before submission; uncertain responses never trigger an automatic retry. Final provider outputs must exist before a job is shown as completed. The browser composes complete films, transparently looping a five-second generated take within a longer scene. External studios have separate accounts and billing.
 
-The check reports DNS authority, Vercel serving evidence, the deployed build marker, and whether the public app matches the expected commit.
-
-## Provider boundary
-
-The browser app creates the script, scene plan, source inventory, and provider brief. It may open the official Runway, Google Flow, HeyGen, or MagicLight studio and copy that brief. It must not expose provider API credentials, fabricate rendering progress, or state that a paid render succeeded without provider evidence.
-
-## Supabase production gate
-
-Before replacing local browser persistence, define and verify:
-
-- User authentication and account recovery.
-- Project, source, membership, consent, and audit schemas.
-- Row-level-security policies for every table and storage bucket.
-- Signed upload and download paths with file-type and size enforcement.
-- Data retention, deletion, export, and incident procedures.
-- Secrets held only in server-side Vercel and Supabase environments.
-
-## Future IONOS DNS gate
-
-An IONOS cutover is a separate change. First export every current Namecheap DNS record, verify mail and domain-verification records, reproduce them in IONOS, lower TTL before the maintenance window, verify Vercel domain ownership, and retain the Namecheap configuration as rollback evidence until propagation and mail checks are complete.
+Provider API references: https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash, https://docs.dev.runwayml.com/api/, https://docs.imagine.art/.

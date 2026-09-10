@@ -35,3 +35,6 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      - name: Authentication tests
+        run: pnpm test

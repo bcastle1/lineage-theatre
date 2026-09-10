@@ -1,38 +1,77 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lineage Theatre Privacy</title>
     <style>
+      * {
+        font-weight: 400;
+      }
       body {
-        max-width: 780px;
-        margin: 0 auto;
-        padding: 40px 20px;
-        color: #18201d;
-        background: #f7f8f4;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        line-height: 1.55;
+        max-width: 760px;
+        margin: 40px auto;
+        padding: 0 24px;
+        font:
+          15px/1.7 Arial,
+          sans-serif;
+        background: #f8f7f4;
+        color: #29332e;
+      }
+      h1,
+      h2 {
+        font-family: Georgia, serif;
       }
       a {
-        color: #284c3b;
-        font-weight: 400;
+        color: #183e33;
       }
     </style>
   </head>
   <body>
-    <h1>Privacy Notice</h1>
+    <a href="/">Return to Lineage Theatre</a>
+    <h1>Privacy at Lineage Theatre</h1>
     <p>
-      Lineage Theatre is currently a static public preview. Information entered into the app is stored in the visitor's
-      own browser through local browser storage and IndexedDB. The preview does not send uploaded family records,
-      customer profile details, payment status, or movie projects to a Lineage Theatre server.
+      Sign-in is available to invited accounts. Passwords are stored as salted
+      password hashes in private Vercel storage. Session cookies are secure,
+      HTTP-only, and expire. Temporary passwords must be replaced before the
+      studio can be used.
+    </p>
+    <h2>Your family archive</h2>
+    <p>
+      Project details, original source files, and exported films are saved in
+      this browser. Projects are separated by the signed-in account. They do not
+      automatically sync to another browser or device. Download your finished
+      film and a project backup, and keep your original source files. Someone
+      with access to this browser profile or device may be able to access
+      locally stored files.
     </p>
     <p>
-      Do not upload sensitive real records until production authentication, encrypted storage, signed upload URLs,
-      payment verification, transactional email, retention controls, and deletion workflows are connected.
+      Text, PDF, and DOCX files are read locally. Legacy DOC files under 2.5 MB
+      are sent to this app's authenticated server for text extraction and are
+      not retained there. Scanned PDFs may need a transcription.
+    </p>
+    <h2>AI assistance and rendering</h2>
+    <p>
+      When you enable AI assistance and request story directions or a scene
+      plan, your family story, extracted document text, and source captions are
+      sent to Google Gemini. When you confirm a cinematic take, its visual
+      direction and selected reference image are sent to the chosen video
+      provider. Provider job references and status are held in private Vercel
+      storage under your account so a render can be tracked without starting it
+      again.
     </p>
     <p>
-      Questions can be sent to <a href="mailto:info@lineagetheater.com">info@lineagetheater.com</a>.
+      Archive-film exports are created in the browser. External studio links do
+      not automatically transfer your sources. If you upload materials there,
+      that studio's privacy and retention terms apply.
     </p>
+    <h2>Account help</h2>
+    <p>
+      Contact <a href="mailto:admin@brocotech.ai">admin@brocotech.ai</a> for
+      account access, password reset, or deletion requests. Clearing this site's
+      browser data removes locally saved projects, sources, and films. Download
+      anything you want to retain first.
+    </p>
+    <p>Updated September 9, 2026.</p>
   </body>
 </html>

@@ -1,0 +1,10 @@
+node_modules
+.git
+.vercel
+dist
+video-projects
+.env*
+*.local
+tmp
+*.log
+tests

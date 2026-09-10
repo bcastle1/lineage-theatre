@@ -20,7 +20,8 @@ export function loadState(): AppState {
     const raw = localStorage.getItem(STATE_KEY);
     if (!raw) return createSeedState();
     const parsed = JSON.parse(raw) as AppState;
-    if (parsed.version !== 1 || !Array.isArray(parsed.projects)) return createSeedState();
+    if (parsed.version !== 1 || !Array.isArray(parsed.projects))
+      return createSeedState();
     return migrateState(parsed);
   } catch {
     return createSeedState();
@@ -31,7 +32,9 @@ function migrateState(state: AppState): AppState {
   return {
     ...state,
     customers: state.customers.map((customer) =>
-      customer.email === "family@example.com" ? { ...customer, email: ADMIN_EMAIL } : customer
+      customer.email === "family@example.com"
+        ? { ...customer, email: ADMIN_EMAIL }
+        : customer,
     ),
   };
 }
@@ -60,7 +63,11 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveSourceFile(id: string, projectId: string, file: File) {
+export async function saveSourceFile(
+  id: string,
+  projectId: string,
+  file: File,
+) {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readwrite");
@@ -82,15 +89,34 @@ export async function saveSourceFile(id: string, projectId: string, file: File) 
 
 export async function getSourceObjectUrl(id: string): Promise<string | null> {
   const db = await openDb();
-  const stored = await new Promise<StoredSourceFile | undefined>((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readonly");
-    const store = transaction.objectStore(STORE_NAME);
-    const request = store.get(id);
-    request.onsuccess = () => resolve(request.result as StoredSourceFile | undefined);
-    request.onerror = () => reject(request.error);
-  });
+  const stored = await new Promise<StoredSourceFile | undefined>(
+    (resolve, reject) => {
+      const transaction = db.transaction(STORE_NAME, "readonly");
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.get(id);
+      request.onsuccess = () =>
+        resolve(request.result as StoredSourceFile | undefined);
+      request.onerror = () => reject(request.error);
+    },
+  );
   db.close();
   return stored ? URL.createObjectURL(stored.file) : null;
+}
+
+export async function getSourceBlob(id: string): Promise<Blob | null> {
+  const db = await openDb();
+  const stored = await new Promise<StoredSourceFile | undefined>(
+    (resolve, reject) => {
+      const request = db
+        .transaction(STORE_NAME, "readonly")
+        .objectStore(STORE_NAME)
+        .get(id);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    },
+  );
+  db.close();
+  return stored?.file ?? null;
 }
 
 export async function deleteSourceFile(id: string) {
