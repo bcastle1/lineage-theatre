@@ -7,6 +7,7 @@ import {
   LockKeyhole,
 } from "lucide-react";
 import { api, type User } from "./studio/model";
+import Landing from "./Landing";
 const Workspace = lazy(() => import("./studio/Workspace"));
 
 export default function App() {
@@ -84,11 +85,15 @@ export default function App() {
         />
       </Suspense>
     );
-  return (
-    <main className="login-shell">
+  const AuthTitle = user?.mustChangePassword ? "h1" : "h2";
+  const signIn = (
+    <section id="studio" className="login-shell" aria-label="Sign in to Lineage Theatre">
       <section className="login-art">
         <img
           src="/assets/family-archive.webp"
+          width="1024"
+          height="1536"
+          loading="lazy"
           alt="An illustrative archival portrait, family letters, and a linen photograph album"
         />
         <div className="art-caption">
@@ -107,11 +112,11 @@ export default function App() {
         </a>
         <div className="login-form-wrap">
           <LockKeyhole size={24} strokeWidth={1.3} />
-          <h1>
+          <AuthTitle>
             {user?.mustChangePassword
               ? "Make this account yours."
-              : "Your family. A lasting film."}
-          </h1>
+              : "Your story starts here."}
+          </AuthTitle>
           <p className="muted">
             {user?.mustChangePassword
               ? `Welcome, ${user.name}. Set a personal password before entering your studio.`
@@ -212,6 +217,7 @@ export default function App() {
           <a href="/privacy.html">Privacy</a>
         </footer>
       </section>
-    </main>
+    </section>
   );
+  return user?.mustChangePassword ? signIn : <Landing>{signIn}</Landing>;
 }

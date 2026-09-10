@@ -1049,6 +1049,7 @@ export default function Workspace({
         </main>
         <footer className="workspace-footer">
           <span>Lineage Theatre · Lives remembered. Stories kept.</span>
+          <a href="/assets/the-journey-of-thomas-wilson.mp4" target="_blank" rel="noreferrer">Sample trailer</a>
           <a href="/privacy.html">Privacy</a>
           <a href="mailto:admin@brocotech.ai">Help</a>
           <span className="build-id">{__BUILD_COMMIT__.slice(0, 7)}</span>
