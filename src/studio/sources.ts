@@ -2,6 +2,7 @@ import type { Source } from "./model";
 import { api } from "./model";
 import { saveSourceFile } from "../lib/storage";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { mediaFeedback, readPdfText, textFeedback } from "./source-policy.mjs";
 
 export async function importSource(
   file: File,
@@ -39,80 +40,83 @@ export async function importSource(
     id: crypto.randomUUID(),
     name: file.name,
     type:
-      file.type ||
+      (file.type !== "application/octet-stream" && file.type) ||
       ({
         jpg: "image/jpeg",
         jpeg: "image/jpeg",
         png: "image/png",
         webp: "image/webp",
+        pdf: "application/pdf",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        doc: "application/msword",
+        txt: "text/plain",
+        md: "text/markdown",
+        ged: "text/plain",
+        csv: "text/csv",
         mp3: "audio/mpeg",
         wav: "audio/wav",
+        m4a: "audio/mp4",
+        ogg: "audio/ogg",
         mp4: "video/mp4",
+        mov: "video/quicktime",
+        webm: "video/webm",
       }[ext || ""] ??
         "application/octet-stream"),
     size: file.size,
   };
-  if (["txt", "md", "ged", "csv"].includes(ext || "")) {
-    source.text = (await file.text()).slice(0, 50000);
-    source.extraction = "Text read";
-  } else if (ext === "docx") {
-    const mammoth = await import("mammoth");
-    source.text = (
-      await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })
-    ).value.slice(0, 50000);
-    source.extraction = source.text.trim()
-      ? "Word text read"
-      : "No readable text; add a caption";
-  } else if (ext === "pdf") {
-    const pdf = await import("pdfjs-dist");
-    pdf.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-    const loading = pdf.getDocument({ data: await file.arrayBuffer() });
-    const document = await loading.promise;
-    try {
-      const pages: string[] = [];
-      for (let i = 1; i <= Math.min(document.numPages, 60); i++) {
-        const page = await document.getPage(i);
-        pages.push(
-          (await page.getTextContent()).items
-            .map((item) => ("str" in item ? item.str : ""))
-            .join(" "),
-        );
-      }
-      source.text = pages.join("\n").slice(0, 50000);
-      source.extraction = source.text.trim()
-        ? `Text read from ${Math.min(document.numPages, 60)} pages`
-        : "Scanned PDF: add a transcription in the family story";
-    } finally {
-      await loading.destroy();
-    }
-  } else if (ext === "doc") {
-    if (file.size > 2_500_000)
-      source.extraction =
-        "Legacy Word file saved; convert to DOCX to read files over 2.5 MB";
-    else {
-      const data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result).split(",")[1]);
-        reader.onerror = () => reject(new Error("Document could not be read."));
-        reader.readAsDataURL(file);
+  try {
+    if (["txt", "md", "ged", "csv"].includes(ext || "")) {
+      source.text = await file.text();
+      source.extraction = textFeedback(source.text);
+    } else if (ext === "docx") {
+      const mammoth = await import("mammoth");
+      const result = await mammoth.extractRawText({
+        arrayBuffer: await file.arrayBuffer(),
       });
+      source.text = result.value;
+      source.extraction = `${textFeedback(source.text, "Word text")}. Embedded pictures are not read; add them as photos with context.`;
+      if (result.messages.length)
+        source.extraction += ` The Word reader reported ${result.messages.length} warning${result.messages.length === 1 ? "" : "s"}; review the extracted text.`;
+    } else if (ext === "pdf") {
+      const pdf = await import("pdfjs-dist");
+      pdf.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+      const loading = pdf.getDocument({ data: await file.arrayBuffer() });
       try {
-        const result = await api<{ text: string }>("/api/document", { data });
-        source.text = result.text;
-        source.extraction = "Legacy Word text read";
-      } catch (e) {
-        source.extraction =
-          e instanceof Error
-            ? e.message
-            : "Legacy Word text could not be read; paste the text.";
+        const document = await loading.promise;
+        Object.assign(source, await readPdfText(document));
+      } finally {
+        await loading.destroy();
       }
+    } else if (ext === "doc") {
+      if (file.size > 2_500_000)
+        source.extraction =
+          "Legacy Word file saved; convert to DOCX to read files over 2.5 MB";
+      else {
+        const data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(",")[1]);
+          reader.onerror = () => reject(new Error("Document could not be read."));
+          reader.readAsDataURL(file);
+        });
+        try {
+          const result = await api<{ text: string }>("/api/document", { data });
+          source.text = result.text;
+          source.extraction = textFeedback(source.text, "Legacy Word text");
+        } catch (e) {
+          source.extraction =
+            e instanceof Error
+              ? e.message
+              : "Legacy Word text could not be read; paste the text.";
+        }
+      }
+    } else {
+      source.extraction = mediaFeedback(source.type);
     }
-  } else {
-    source.extraction = source.type.startsWith("image")
-      ? "Photo ready; add names, dates, or context below"
-      : source.type.startsWith("audio")
-        ? "Recording ready for soundtrack"
-        : "Footage ready for your scenes";
+  } catch {
+    source.extraction =
+      ext === "pdf"
+        ? "PDF saved, but its text could not be read. Unlock protected PDFs or add a transcription for scans."
+        : "File saved, but its text could not be read. Convert it to DOCX or plain text, or add the story details manually.";
   }
   await saveSourceFile(source.id, projectId, file);
   return source;

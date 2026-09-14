@@ -22,13 +22,7 @@ export interface Theme {
 export interface Shot {
   id: string;
   provider: string;
-  status:
-    | "submitting"
-    | "queued"
-    | "processing"
-    | "completed"
-    | "failed"
-    | "uncertain";
+  status: "submitting" | "queued" | "processing" | "completed" | "failed" | "uncertain";
   videoUrl?: string;
   message?: string;
 }
@@ -38,7 +32,32 @@ export interface Scene {
   narration: string;
   visual: string;
   sourceIds: string[];
+  characterIds: string[];
+  dialogue: string;
+  dramatization: string;
   shot?: Shot;
+}
+export interface Character {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  basis: "documented" | "inferred" | "invented";
+  sourceIds: string[];
+}
+export interface Assumption {
+  id: string;
+  description: string;
+  reason: string;
+}
+export interface SourceCoverage {
+  totalSources: number;
+  readSources: number;
+  textCharacters: number;
+  photoSources: number;
+  photosRead: number;
+  notesOnlySources: number;
+  warnings: string[];
 }
 export interface Film {
   id: string;
@@ -54,6 +73,12 @@ export interface Film {
   themes: Theme[];
   selectedThemes: Theme[];
   scenes: Scene[];
+  characters: Character[];
+  assumptions: Assumption[];
+  factuality: "based-on-a-true-story" | "documentary";
+  quality: "highest";
+  sourceCoverage?: SourceCoverage;
+  job?: Shot;
   logline: string;
   generatedBy?: string;
   updatedAt: string;
@@ -70,13 +95,17 @@ export const newFilm = (): Film => ({
   ancestor: "",
   script: "",
   era: "",
-  style: "Documentary",
-  duration: 60,
-  providerId: "archive",
+  style: "Cinematic",
+  duration: 120,
+  providerId: "magiclight",
   sources: [],
   themes: [],
   selectedThemes: [],
   scenes: [],
+  characters: [],
+  assumptions: [],
+  factuality: "based-on-a-true-story",
+  quality: "highest",
   logline: "",
   updatedAt: new Date().toISOString(),
   music: true,
@@ -84,81 +113,39 @@ export const newFilm = (): Film => ({
 export function normalizeFilm(raw: Partial<Film>): Film {
   const duration =
     raw.duration ??
-    { trailer: 60, short: 300, featurette: 600, feature: 600 }[
-      raw.runtime || ""
-    ] ??
-    60;
+    { trailer: 60, short: 300, featurette: 600, feature: 600 }[raw.runtime || ""] ??
+    120;
   return {
     ...newFilm(),
     ...raw,
     duration,
-    style: raw.style || "Documentary",
-    providerId:
-      raw.providerId === "lineage" ? "archive" : raw.providerId || "archive",
+    style: raw.style || "Cinematic",
+    providerId: "magiclight",
+    quality: "highest",
+    factuality:
+      raw.factuality ||
+      (raw.style === "Documentary" ? "documentary" : "based-on-a-true-story"),
     sources: Array.isArray(raw.sources) ? raw.sources : [],
+    themes: Array.isArray(raw.themes) ? raw.themes : [],
+    selectedThemes: Array.isArray(raw.selectedThemes) ? raw.selectedThemes : [],
+    characters: Array.isArray(raw.characters) ? raw.characters : [],
+    assumptions: Array.isArray(raw.assumptions) ? raw.assumptions : [],
+    scenes: Array.isArray(raw.scenes)
+      ? raw.scenes.map((scene) => ({
+          ...scene,
+          sourceIds: scene.sourceIds || [],
+          characterIds: scene.characterIds || [],
+          dialogue: scene.dialogue || "",
+          dramatization: scene.dramatization || "",
+        }))
+      : [],
   };
 }
 export const steps = [
-  "Family archive",
-  "Story direction",
-  "The cutting room",
+  "Add your story",
+  "Develop the film",
+  "Review script & cast",
   "Create & watch",
-];
-export const studios = [
-  {
-    id: "archive",
-    name: "Archive film",
-    tag: "Create here",
-    description:
-      "A finished film from your photographs, captions, motion, and optional narration. No generation credits.",
-    detail: "1080p · 15 seconds to 10 minutes · MP4 or WebM",
-    url: "",
-  },
-  {
-    id: "runway",
-    name: "Runway",
-    tag: "Generate here",
-    description:
-      "Photorealistic reenactments and image-to-video shots, assembled with your family archive.",
-    detail: "5-second shots · provider credits · 12 shots per day",
-    url: "https://runwayml.com/",
-  },
-  {
-    id: "imagineart",
-    name: "ImagineArt",
-    tag: "Connection required",
-    description:
-      "Alternative cinematic generation. Available in app when the administrator connects its API.",
-    detail: "Provider credits · connection checked in this app",
-    url: "https://www.imagine.art/",
-  },
-  {
-    id: "magiclight",
-    name: "MagicLight",
-    tag: "External studio",
-    description:
-      "A complete script-to-video workflow for longer stories and consistent characters.",
-    detail: "Export your brief, then create in MagicLight",
-    url: "https://magiclight.ai/",
-  },
-  {
-    id: "flow",
-    name: "Google Flow",
-    tag: "External studio",
-    description:
-      "Veo-powered filmmaking for scene exploration, atmospheric shots, and visual storytelling.",
-    detail: "Export your brief, then create in Flow",
-    url: "https://labs.google/fx/tools/flow",
-  },
-  {
-    id: "heygen",
-    name: "HeyGen",
-    tag: "External studio",
-    description:
-      "Presenter-led family stories and narrated documentary segments.",
-    detail: "Export your brief, then create in HeyGen",
-    url: "https://www.heygen.com/",
-  },
 ];
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -171,13 +158,10 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
         }
       : {}),
   });
-  const payload = await res
-    .json()
-    .catch(() => ({
-      message: "The service returned an unreadable response. Please try again.",
-    }));
-  if (!res.ok)
-    throw new Error(payload.message || "The action could not be completed.");
+  const payload = await res.json().catch(() => ({
+    message: "The service returned an unreadable response. Please try again.",
+  }));
+  if (!res.ok) throw new Error(payload.message || "The action could not be completed.");
   return payload as T;
 }
 export function editorialThemes(film: Film, page = 0): Theme[] {
@@ -294,10 +278,7 @@ export function editorialThemes(film: Film, page = 0): Theme[] {
     }));
 }
 export function editorialPlan(film: Film): Scene[] {
-  const evidence = [
-    film.script,
-    ...film.sources.map((s) => s.text || s.note || ""),
-  ]
+  const evidence = [film.script, ...film.sources.map((s) => s.text || s.note || "")]
     .join("\n\n")
     .trim();
   const sentences = evidence
@@ -318,6 +299,12 @@ export function editorialPlan(film: Film): Scene[] {
     id: crypto.randomUUID(),
     title: names[Math.round((i * 5) / (count - 1))],
     narration: sentences.slice(i * group, (i + 1) * group).join(" "),
+    characterIds: [],
+    dialogue: "",
+    dramatization:
+      film.factuality === "documentary"
+        ? ""
+        : "Reconstruction to review; no additional facts have been established.",
     visual:
       film.style === "Documentary"
         ? "A slow, restrained move across the original family photograph. Preserve the photograph and its context."
@@ -328,7 +315,11 @@ export function editorialPlan(film: Film): Scene[] {
   }));
 }
 export function productionBrief(f: Film) {
-  return `LINEAGE THEATRE — PRODUCTION BRIEF\n${f.title}\nAncestor: ${f.ancestor}\nPeriod: ${f.era || "Not specified"}\nStyle: ${f.style}\nDuration: ${f.duration} seconds\n\n${f.logline}\n\nThemes:\n${f.selectedThemes.map((t) => `${t.title}\nPlot: ${t.plot}\nClimax: ${t.climax}`).join("\n\n")}\n\nScenes:\n${f.scenes.map((s, i) => `${i + 1}. ${s.title}\nNarration: ${s.narration}\nVisual: ${s.visual}\nSources: ${s.sourceIds.map((id) => f.sources.find((x) => x.id === id)?.name || id).join(", ")}`).join("\n\n")}\n\nFamily evidence:\n${f.script}\n${f.sources.map((s) => `${s.name}: ${s.text || s.note || "Attached source file; transfer separately."}`).join("\n")}\n\nHonor verified facts. Identify dramatization and uncertain family lore. Do not invent quotations or relationships. Source files must be uploaded separately to an external studio.`;
+  const sourceName = (id: string) =>
+    id === "@family-narrative"
+      ? "Family narrative"
+      : f.sources.find((s) => s.id === id)?.name || id;
+  return `LINEAGE THEATRE — PRODUCTION BRIEF\n${f.title}\nAncestor: ${f.ancestor}\nPeriod: ${f.era || "Not specified"}\nStyle: ${f.style}\nDuration: ${f.duration} seconds\nProduction: MagicLight within Lineage Theatre\nQuality preference: highest available animation and final film quality; subject to verified account availability\nTreatment: ${f.factuality === "documentary" ? "Documentary; verified evidence only" : "Based on a true story; some scenes and dialogue are dramatized"}\n\n${f.logline}\n\nThemes:\n${f.selectedThemes.map((t) => `${t.title}\nPlot: ${t.plot}\nClimax: ${t.climax}`).join("\n\n")}\n\nCast:\n${f.characters.map((c) => `${c.name} — ${c.role} [${c.basis}]\n${c.description}\nSources: ${c.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nAssumptions for review:\n${f.assumptions.map((a) => `${a.description}\nReason: ${a.reason}`).join("\n\n")}\n\nScenes:\n${f.scenes.map((s, i) => `${i + 1}. ${s.title}\nNarration: ${s.narration}\nDialogue: ${s.dialogue}\nVisual: ${s.visual}\nCast: ${s.characterIds.map((id) => f.characters.find((c) => c.id === id)?.name || id).join(", ")}\nDramatization: ${s.dramatization || "None identified; review required"}\nSources: ${s.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nFamily evidence:\n${f.script}\n${f.sources.map((s) => `${s.name}: ${s.text || s.note || "Attached source file; add context if its content has not been read."}`).join("\n")}\n\nCelebrate the ancestor with warmth and dignity. Preserve documented facts and distinguish inference and invention. Dramatic dialogue is not a verified quotation. Review the full ensemble and source coverage before production.`;
 }
 export const formatDuration = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;

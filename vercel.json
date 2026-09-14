@@ -23,7 +23,7 @@
       "maxDuration": 30
     },
     "api/studio.mjs": {
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/document.mjs": {
       "maxDuration": 30

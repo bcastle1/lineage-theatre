@@ -36,7 +36,7 @@ export default async function handler(req, res) {
           "Legacy Word documents must be under 2.5 MB. Convert larger files to DOCX.",
       });
     const doc = await new WordExtractor().extract(buffer);
-    return json(res, 200, { text: doc.getBody().slice(0, 50000) });
+    return json(res, 200, { text: doc.getBody() });
   } catch {
     return json(res, 400, {
       message:

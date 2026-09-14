@@ -1,15 +1,12 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
   Check,
-  ChevronDown,
   Download,
-  ExternalLink,
   FileText,
   Film as FilmIcon,
   FolderOpen,
-  Image as ImageIcon,
   Loader2,
   Music2,
   Plus,
@@ -21,15 +18,9 @@ import {
   X,
   CheckCircle2,
 } from "lucide-react";
-import {
-  type Source,
-  type Scene,
-  type Theme,
-  studios,
-  formatDuration,
-} from "./model";
+import { type Source, type Scene, type Theme, formatDuration } from "./model";
 import { getSourceObjectUrl } from "../lib/storage";
-import { supportedMime } from "./render";
+
 import type { Capabilities, StepProps } from "./Workspace";
 
 function SourceThumb({ source }: { source: Source }) {
@@ -82,8 +73,11 @@ export function ArchiveStep({
     <section className="panel archive-panel">
       <div className="section-title">
         <div>
-          <h2>Let’s start with the basics</h2>
-          <p>Add a few details from your family archive.</p>
+          <h2>Begin with the people you remember</h2>
+          <p>
+            Upload your memories and records. They become the foundation for an uplifting
+            film with a full cast.
+          </p>
         </div>
         <FolderOpen size={22} strokeWidth={1.4} />
       </div>
@@ -120,7 +114,7 @@ export function ArchiveStep({
           <textarea
             rows={6}
             value={film.script}
-            maxLength={50000}
+            maxLength={200000}
             placeholder="Begin with what you know. Names, dates, places, small details, turning points…"
             onChange={(e) => update({ script: e.target.value })}
           />
@@ -128,11 +122,10 @@ export function ArchiveStep({
       </div>
       <div className="field-row">
         <span className="field-note">
-          Distinguish verified records from family lore.
+          Include relatives, friends, neighbors, work, and everyday details.
         </span>
         <span className="field-note">
-          {film.script.trim() ? film.script.trim().split(/\s+/).length : 0}{" "}
-          words
+          {film.script.trim() ? film.script.trim().split(/\s+/).length : 0} words
         </span>
       </div>
       <div className="section-subtitle">
@@ -162,13 +155,9 @@ export function ArchiveStep({
       >
         <Upload size={24} strokeWidth={1.4} />
         <span>
-          {busy.startsWith("Reading")
-            ? busy
-            : "Drop files here or click to upload"}
+          {busy.startsWith("Reading") ? busy : "Drop files here or click to upload"}
         </span>
-        <small>
-          Photos, PDF, Word, text, GEDCOM, audio & video · 100 MB per file
-        </small>
+        <small>Photos, PDF, Word, text, GEDCOM, audio & video · 100 MB per file</small>
       </button>
       {film.sources.length > 0 && (
         <div className="source-list">
@@ -202,8 +191,7 @@ export function ArchiveStep({
                         notify("Source text view updated.", "info");
                       }}
                     >
-                      {expanded === source.id ? "Hide" : "Review"} extracted
-                      text
+                      {expanded === source.id ? "Hide" : "Review"} extracted text
                     </button>
                     {expanded === source.id && (
                       <pre className="extracted-text">{source.text}</pre>
@@ -222,9 +210,11 @@ export function ArchiveStep({
                       ...s,
                       sourceIds: s.sourceIds.filter((id) => id !== source.id),
                     })),
-                    ...(film.audioId === source.id
-                      ? { audioId: undefined }
-                      : {}),
+                    characters: film.characters.map((c) => ({
+                      ...c,
+                      sourceIds: c.sourceIds.filter((id) => id !== source.id),
+                    })),
+                    ...(film.audioId === source.id ? { audioId: undefined } : {}),
                   });
                   notify(`${source.name} removed from this film.`);
                 }}
@@ -236,9 +226,11 @@ export function ArchiveStep({
         </div>
       )}
       <div className="panel-actions">
-        <span className="field-note">Sources stay in this browser.</span>
+        <span className="field-note">
+          Sources save in this browser. You choose when AI may read them.
+        </span>
         <button className="button primary" disabled={!!busy} onClick={next}>
-          Choose story direction
+          Develop my film
           <ArrowRight size={16} />
         </button>
       </div>
@@ -247,6 +239,7 @@ export function ArchiveStep({
 }
 
 type DirectionProps = StepProps & {
+  caps: Capabilities | null;
   aiConsent: boolean;
   setAiConsent: (v: boolean) => void;
   themeOrigin: string;
@@ -259,9 +252,9 @@ type DirectionProps = StepProps & {
 export function DirectionStep({
   film,
   update,
-  notify,
   busy,
   navigate,
+  caps,
   aiConsent,
   setAiConsent,
   themeOrigin,
@@ -271,81 +264,85 @@ export function DirectionStep({
   editorial,
   archivePlan,
 }: DirectionProps) {
-  const [expanded, setExpanded] = useState("");
   return (
     <section className="panel">
       <div className="section-title">
         <div>
-          <h2>Find the heart of your story</h2>
-          <p>Choose the treatment, running time, and emotional arc.</p>
+          <h2>A life surrounded by stories</h2>
+          <p>Develop a complete film from your memories, photographs, and records.</p>
         </div>
-        <Sparkles size={21} />
+        <Sparkles size={23} />
       </div>
-      <div className="choice-row" role="group" aria-label="Film treatment">
-        {(["Documentary", "Cinematic"] as const).map((style) => (
-          <button
-            key={style}
-            className={`choice ${film.style === style ? "chosen" : ""}`}
-            aria-pressed={film.style === style}
-            disabled={!!busy}
-            onClick={() => {
-              update({ style });
-              notify(
-                `${style} selected. ${style === "Documentary" ? "The film will center on evidence and testimony." : "The film will use a dramatized cinematic treatment."}`,
-              );
-            }}
-          >
-            <span>
-              {style === "Documentary" ? (
-                <FileText size={19} />
-              ) : (
-                <FilmIcon size={19} />
-              )}{" "}
-              {style}
-              {film.style === style && <Check size={16} />}
-            </span>
-            <small>
-              {style === "Documentary"
-                ? "Archival images, records, and testimony."
-                : "Dramatic structure, reenactments, and a resonant climax."}
-            </small>
-          </button>
-        ))}
+      <div className="story-promise">
+        <FilmIcon size={26} />
+        <div>
+          <h3>The ancestor at the heart. A world around them.</h3>
+          <p>
+            A warm, respectful portrait with supporting characters, shared moments,
+            setbacks, and a hopeful ending. The film can fill gaps with plausible dramatic
+            details for your review.
+          </p>
+        </div>
+      </div>
+      <div className="choice-row" role="group" aria-label="Story treatment">
+        <button
+          className={`choice ${film.factuality === "based-on-a-true-story" ? "chosen" : ""}`}
+          aria-pressed={film.factuality === "based-on-a-true-story"}
+          disabled={!!busy}
+          onClick={() =>
+            update({ style: "Cinematic", factuality: "based-on-a-true-story" })
+          }
+        >
+          <span>
+            <FilmIcon size={19} />
+            Based on a true story
+            {film.factuality === "based-on-a-true-story" && <Check size={16} />}
+          </span>
+          <small>
+            Recommended · cinematic animation, an ensemble cast, and clearly labeled
+            dramatization.
+          </small>
+        </button>
+        <button
+          className={`choice ${film.factuality === "documentary" ? "chosen" : ""}`}
+          aria-pressed={film.factuality === "documentary"}
+          disabled={!!busy}
+          onClick={() => update({ style: "Documentary", factuality: "documentary" })}
+        >
+          <span>
+            <FileText size={19} />
+            Documentary{film.factuality === "documentary" && <Check size={16} />}
+          </span>
+          <small>
+            Documented people and events. Gaps remain open rather than becoming invented
+            scenes.
+          </small>
+        </button>
       </div>
       <div className="duration-row">
         <label>
-          Running time
+          Target running time
           <select
             value={film.duration}
-            onChange={(e) => {
-              update({ duration: Number(e.target.value) });
-              notify(
-                `Running time set to ${formatDuration(Number(e.target.value))}. Rebuild the scene plan to adjust narration.`,
-              );
-            }}
+            disabled={!!busy}
+            onChange={(e) => update({ duration: Number(e.target.value) })}
           >
-            {[15, 30, 60, 120, 300, 600].map((s) => (
+            {[30, 60, 120, 300, 600].map((s) => (
               <option key={s} value={s}>
                 {formatDuration(s)} ·{" "}
-                {s === 15
-                  ? "Screen test"
-                  : s === 30
-                    ? "Teaser"
-                    : s === 60
-                      ? "Family trailer"
-                      : s === 120
-                        ? "Short portrait"
-                        : s === 300
-                          ? "Short film"
-                          : "Featurette"}
+                {s === 120
+                  ? "Short film · recommended"
+                  : s <= 60
+                    ? "Trailer"
+                    : "Extended family story"}
               </option>
             ))}
           </select>
         </label>
         <p className="field-note">
-          Your finished export follows this duration.
+          MagicLight · highest available animation and output quality requested.
           <br />
-          Need a longer cut? Send the brief to an external studio.
+          Final runtime and quality depend on verified production availability.
         </p>
       </div>
       <div className="ai-consent">
@@ -353,163 +350,128 @@ export function DirectionStep({
           <input
             type="checkbox"
             checked={aiConsent}
-            onChange={(e) => {
-              setAiConsent(e.target.checked);
-              notify(
-                e.target.checked
-                  ? "AI story assistance enabled for this session."
-                  : "AI story assistance turned off.",
-                "info",
-              );
-            }}
+            disabled={!!busy}
+            onChange={(e) => setAiConsent(e.target.checked)}
           />
-          Allow Gemini to read this family story and extracted document text to
-          suggest themes and scenes.
+          Allow GPT-6 Astra to read my family story, extracted document text, photo
+          captions, and up to 8 reference photos to develop this film.
         </label>
         <small>
-          Original source files stay in this browser. Only the story, source
-          text, and captions are sent when you request AI assistance.
+          Text, context, and available reference photos are sent only when you request AI
+          development. Add captions for people and events that a photograph alone cannot
+          establish. Source coverage is shown with the draft.
         </small>
       </div>
-      <div className="section-subtitle">
+      {!caps?.story && (
+        <div className="feedback info" role="status">
+          {caps?.connections?.story?.reason ||
+            (caps
+              ? "GPT-6 Astra story development is awaiting a verified connection. You can edit your archive and prepare a manual outline."
+              : "Checking story development availability…")}
+        </div>
+      )}
+      <div className="develop-action">
         <div>
-          <h3>Choose up to three story directions</h3>
-          <span>
-            {themeOrigin || "Explore the plot and climax before choosing."}
-          </span>
+          <h3>One action to develop your film</h3>
+          <p>
+            We choose a story direction, then draft the script, supporting cast, scenes,
+            and assumptions. Everything stays editable.
+          </p>
         </div>
         <button
-          className="button secondary small"
-          disabled={!!busy}
-          onClick={() => void suggest()}
+          className="button primary"
+          disabled={!!busy || !caps?.story || !aiConsent}
+          onClick={() => void plan()}
         >
-          {busy.includes("directions") ? (
-            <Loader2 className="spin" size={15} />
-          ) : (
-            <RefreshCw size={15} />
-          )}{" "}
-          {film.themes.length ? "Refresh 10 ideas" : "Suggest 10 ideas"}
+          {busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}Develop
+          my film
         </button>
       </div>
-      {film.selectedThemes.length > 0 && (
-        <div className="selected-themes">
-          {film.selectedThemes.map((t) => (
-            <button
-              key={t.id}
-              className="theme-chip"
-              onClick={() => selectTheme(t)}
-            >
-              <Check size={13} />
-              {t.title}
-              <X size={13} />
+      <details className="optional-directions">
+        <summary>
+          Choose a story direction yourself <span>Optional</span>
+        </summary>
+        <div className="section-subtitle">
+          <div>
+            <h3>Story ideas</h3>
+            <span>{themeOrigin || "Select up to three, or let us choose."}</span>
+          </div>
+          <button
+            className="button secondary small"
+            disabled={!!busy || !caps?.story || !aiConsent}
+            onClick={() => void suggest()}
+          >
+            <RefreshCw size={15} />
+            {film.themes.length ? "New ideas" : "Suggest ideas"}
+          </button>
+        </div>
+        {film.themes.length ? (
+          <div className="theme-list">
+            {film.themes.map((theme, i) => {
+              const selected = film.selectedThemes.some((t) => t.id === theme.id);
+              return (
+                <article
+                  className={`theme-item ${selected ? "chosen" : ""}`}
+                  key={theme.id}
+                >
+                  <button
+                    className="theme-select"
+                    aria-pressed={selected}
+                    disabled={!!busy}
+                    onClick={() => selectTheme(theme)}
+                  >
+                    <span className="theme-number">
+                      {selected ? <Check size={16} /> : String(i + 1).padStart(2, "0")}
+                    </span>
+                    <div>
+                      <h4>{theme.title}</h4>
+                      <p>{theme.plot}</p>
+                    </div>
+                  </button>
+                  {selected && (
+                    <div className="theme-detail">
+                      <p>
+                        <span>Proposed climax</span>
+                        {theme.climax}
+                      </p>
+                      <p>
+                        <span>Why it fits</span>
+                        {theme.reason}
+                      </p>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-inline">
+            <p>
+              Choose ideas after AI development is connected, or explore editable
+              editorial prompts.
+            </p>
+            <button className="text-button" disabled={!!busy} onClick={editorial}>
+              Explore editorial prompts
+              <ArrowRight size={14} />
             </button>
-          ))}
-        </div>
-      )}
-      {film.themes.length === 0 ? (
-        <div className="empty-inline">
-          <Sparkles size={28} strokeWidth={1.2} />
-          <p>Ten possible paths through your family story.</p>
-          <span>
-            Request suggestions, or start with our editable editorial
-            directions.
-          </span>
-          <button className="text-button" onClick={editorial}>
-            Explore editorial directions
-            <ArrowRight size={14} />
-          </button>
-        </div>
-      ) : (
-        <div className="theme-list">
-          {film.themes.map((theme, i) => {
-            const selected = film.selectedThemes.some((t) => t.id === theme.id);
-            return (
-              <article
-                className={`theme-item ${selected ? "chosen" : ""}`}
-                key={theme.id}
-              >
-                <button
-                  className="theme-select"
-                  aria-label={`Select ${theme.title}`}
-                  aria-pressed={selected}
-                  disabled={!!busy}
-                  onClick={() => selectTheme(theme)}
-                >
-                  <span className="theme-number">
-                    {selected ? (
-                      <Check size={16} />
-                    ) : (
-                      String(i + 1).padStart(2, "0")
-                    )}
-                  </span>
-                  <div>
-                    <h4>{theme.title}</h4>
-                    <p>{theme.plot}</p>
-                  </div>
-                </button>
-                <button
-                  className="icon-button"
-                  aria-label={`Details for ${theme.title}`}
-                  aria-expanded={expanded === theme.id || selected}
-                  onClick={() => {
-                    setExpanded(expanded === theme.id ? "" : theme.id);
-                    notify("Story direction details updated.", "info");
-                  }}
-                >
-                  <ChevronDown size={17} />
-                </button>
-                {(selected || expanded === theme.id) && (
-                  <div className="theme-detail">
-                    <p>
-                      <span>Proposed climax</span>
-                      {theme.climax}
-                    </p>
-                    <p>
-                      <span>Why this direction</span>
-                      {theme.reason}
-                    </p>
-                  </div>
-                )}
-              </article>
-            );
-          })}
-        </div>
-      )}
+          </div>
+        )}
+      </details>
       <div className="panel-actions">
-        <button
-          className="text-button"
-          disabled={!!busy}
-          onClick={() => navigate(0)}
-        >
+        <button className="text-button" disabled={!!busy} onClick={() => navigate(0)}>
           <ArrowLeft size={15} />
-          Family archive
+          My sources
         </button>
-        <div className="action-group">
-          <button
-            className="button secondary"
-            disabled={!!busy}
-            onClick={archivePlan}
-          >
-            Use archive plan
-          </button>
-          <button
-            className="button primary"
-            disabled={!!busy}
-            onClick={() => void plan()}
-          >
-            {busy.includes("scene") ? (
-              <Loader2 className="spin" size={16} />
-            ) : (
-              <Sparkles size={16} />
-            )}
-            Develop scene plan
-          </button>
-        </div>
+        <button className="text-button" disabled={!!busy} onClick={archivePlan}>
+          Start a manual outline
+          <ArrowRight size={15} />
+        </button>
       </div>
     </section>
   );
 }
 
+type FilmCharacter = import("./model").Character;
 export function CuttingStep({
   film,
   update,
@@ -518,213 +480,503 @@ export function CuttingStep({
   navigate,
   changeScene,
 }: StepProps & { changeScene: (id: string, patch: Partial<Scene>) => void }) {
+  const referencedSources = new Set([
+    ...film.scenes.flatMap((s) => s.sourceIds),
+    ...film.characters.flatMap((c) => c.sourceIds),
+  ]);
+  const coverage = film.sourceCoverage;
+  const evidenceSources: Source[] = [
+    ...(film.script.trim()
+      ? [
+          {
+            id: "@family-narrative",
+            name: "Family narrative",
+            type: "text/plain",
+            size: film.script.length,
+          },
+        ]
+      : []),
+    ...film.sources,
+  ];
+  const changeCharacter = (id: string, patch: Partial<FilmCharacter>) =>
+    update({
+      characters: film.characters.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    });
   return (
     <section className="panel">
       <div className="section-title">
         <div>
-          <h2>The cutting room</h2>
-          <p>
-            Review the words, choose the source images, and direct every scene.
-          </p>
+          <h2>Your film, ready to shape</h2>
+          <p>Review the script, cast, and dramatic choices before production.</p>
         </div>
         <span className="subtle-tag">
-          {film.scenes.length} scenes · {formatDuration(film.duration)}
+          {film.scenes.length} scenes · {film.characters.length} characters ·{" "}
+          {formatDuration(film.duration)}
         </span>
       </div>
-      {film.scenes.length === 0 ? (
+      {film.factuality === "based-on-a-true-story" && (
+        <div className="story-label">
+          <FilmIcon size={18} />
+          <div>
+            <strong>Based on a true story</strong>
+            <p>
+              Some scenes, supporting characters, and dialogue may be dramatized.
+              Documented events remain the foundation; review each assumption below.
+            </p>
+          </div>
+        </div>
+      )}
+      <div className="coverage-panel">
+        <div className="section-subtitle">
+          <h3>What informed this film</h3>
+          <span>
+            {film.sources.filter((s) => referencedSources.has(s.id)).length} of{" "}
+            {film.sources.length} uploaded sources linked to the draft
+          </span>
+        </div>
+        {coverage ? (
+          <>
+            <p>
+              {coverage.readSources} of {coverage.totalSources} source records read ·{" "}
+              {coverage.textCharacters.toLocaleString()} text characters ·{" "}
+              {coverage.photosRead} of {coverage.photoSources} photos read
+              {coverage.notesOnlySources > 0
+                ? ` · ${coverage.notesOnlySources} sources read from notes only`
+                : ""}
+            </p>
+            {coverage.warnings?.map((warning, i) => (
+              <p className="coverage-warning" key={i}>
+                {warning}
+              </p>
+            ))}
+          </>
+        ) : (
+          <p>
+            {film.generatedBy?.startsWith("Manual")
+              ? "This manual outline uses source text. Photos have not been interpreted by AI."
+              : "AI source coverage has not been verified for this draft."}{" "}
+            {film.sources.filter((s) => !s.text?.trim() && !s.note?.trim()).length > 0
+              ? "Add context to photographs, audio, and files with no extracted text."
+              : ""}
+          </p>
+        )}
+        {evidenceSources.length > 0 && (
+          <details>
+            <summary>Review source links</summary>
+            <ul className="source-coverage-list">
+              {evidenceSources.map((source) => (
+                <li key={source.id}>
+                  <span>{source.name}</span>
+                  <span>
+                    {referencedSources.has(source.id)
+                      ? "Linked to draft"
+                      : "Not linked yet"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+      <label className="logline-label">
+        The film in one sentence
+        <input
+          value={film.logline}
+          placeholder="The emotional thread connecting your scenes"
+          onChange={(e) => update({ logline: e.target.value })}
+        />
+      </label>
+      <div className="section-subtitle">
+        <div>
+          <h3>The people in this story</h3>
+          <span>
+            Give the ancestor relationships, community, and a life beyond the frame.
+          </span>
+        </div>
+        <button
+          className="button secondary small"
+          disabled={!!busy}
+          onClick={() =>
+            update({
+              characters: [
+                ...film.characters,
+                {
+                  id: crypto.randomUUID(),
+                  name: "",
+                  role: "Supporting character",
+                  description: "",
+                  basis: "invented",
+                  sourceIds: [],
+                },
+              ],
+            })
+          }
+        >
+          <Plus size={15} />
+          Add character
+        </button>
+      </div>
+      <div className="cast-grid">
+        {film.characters.map((character) => (
+          <article className="cast-card" key={character.id}>
+            <div className="cast-card-heading">
+              <span className={`basis-tag ${character.basis}`}>
+                {character.basis === "documented"
+                  ? "Documented"
+                  : character.basis === "inferred"
+                    ? "Inferred · review"
+                    : "Invented · dramatization"}
+              </span>
+              <button
+                className="icon-button"
+                aria-label={`Remove ${character.name || "character"}`}
+                disabled={!!busy}
+                onClick={() =>
+                  update({
+                    characters: film.characters.filter((c) => c.id !== character.id),
+                    scenes: film.scenes.map((s) => ({
+                      ...s,
+                      characterIds: s.characterIds.filter((id) => id !== character.id),
+                    })),
+                  })
+                }
+              >
+                <X size={15} />
+              </button>
+            </div>
+            <label>
+              Name
+              <input
+                value={character.name}
+                onChange={(e) => changeCharacter(character.id, { name: e.target.value })}
+              />
+            </label>
+            <label>
+              Role or relationship
+              <input
+                value={character.role}
+                onChange={(e) => changeCharacter(character.id, { role: e.target.value })}
+              />
+            </label>
+            <label>
+              Character, appearance & motivation
+              <textarea
+                rows={3}
+                value={character.description}
+                onChange={(e) =>
+                  changeCharacter(character.id, { description: e.target.value })
+                }
+              />
+            </label>
+            <label>
+              Basis
+              <select
+                value={character.basis}
+                onChange={(e) =>
+                  changeCharacter(character.id, {
+                    basis: e.target.value as FilmCharacter["basis"],
+                  })
+                }
+              >
+                <option value="documented">Documented in family evidence</option>
+                <option value="inferred">Inferred from context</option>
+                <option value="invented">Invented for the dramatization</option>
+              </select>
+            </label>
+            <details className="source-picker">
+              <summary>
+                Evidence for this character · {character.sourceIds.length} sources
+              </summary>
+              {evidenceSources.map((s) => (
+                <label className="check-label" key={s.id}>
+                  <input
+                    type="checkbox"
+                    checked={character.sourceIds.includes(s.id)}
+                    onChange={(e) =>
+                      changeCharacter(character.id, {
+                        sourceIds: e.target.checked
+                          ? [...character.sourceIds, s.id]
+                          : character.sourceIds.filter((id) => id !== s.id),
+                      })
+                    }
+                  />
+                  {s.name}
+                </label>
+              ))}
+            </details>
+          </article>
+        ))}
+      </div>
+      {!film.characters.length && (
+        <p className="field-note">
+          No cast has been developed yet. Add the ancestor and the people who shaped their
+          life.
+        </p>
+      )}
+      <div className="section-subtitle">
+        <div>
+          <h3>Assumptions & dramatic choices</h3>
+          <span>Review what was added, and why it belongs in the story.</span>
+        </div>
+        <button
+          className="button secondary small"
+          disabled={!!busy}
+          onClick={() =>
+            update({
+              assumptions: [
+                ...film.assumptions,
+                { id: crypto.randomUUID(), description: "", reason: "" },
+              ],
+            })
+          }
+        >
+          <Plus size={15} />
+          Add assumption
+        </button>
+      </div>
+      <div className="assumption-list">
+        {film.assumptions.map((a, i) => (
+          <article className="assumption-card" key={a.id}>
+            <span className="assumption-number">{String(i + 1).padStart(2, "0")}</span>
+            <div>
+              <label>
+                What is inferred or invented
+                <textarea
+                  rows={2}
+                  value={a.description}
+                  onChange={(e) =>
+                    update({
+                      assumptions: film.assumptions.map((x) =>
+                        x.id === a.id ? { ...x, description: e.target.value } : x,
+                      ),
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Why this choice makes sense
+                <input
+                  value={a.reason}
+                  onChange={(e) =>
+                    update({
+                      assumptions: film.assumptions.map((x) =>
+                        x.id === a.id ? { ...x, reason: e.target.value } : x,
+                      ),
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <button
+              className="icon-button"
+              aria-label={`Remove assumption ${i + 1}`}
+              onClick={() =>
+                update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) })
+              }
+            >
+              <X size={15} />
+            </button>
+          </article>
+        ))}
+      </div>
+      {!film.assumptions.length && (
+        <p className="field-note">
+          No assumptions have been listed. Review dialogue and scene details for anything
+          the family evidence does not establish.
+        </p>
+      )}
+      <div className="section-subtitle">
+        <h3>Script & scene direction</h3>
+        <span>Every word and scene is editable</span>
+      </div>
+      {!film.scenes.length ? (
         <div className="empty-inline">
           <FilmIcon size={30} />
           <p>Your scenes will appear here.</p>
           <button className="button primary" onClick={() => navigate(1)}>
-            Choose story direction
+            Develop my film
             <ArrowRight size={16} />
           </button>
         </div>
       ) : (
-        <>
-          <label className="logline-label">
-            Film logline
-            <input
-              value={film.logline}
-              placeholder="The emotional thread connecting your scenes"
-              onChange={(e) => update({ logline: e.target.value })}
-            />
-          </label>
-          <div className="timeline">
-            {film.scenes.map((scene, i) => (
-              <button
-                key={scene.id}
-                onClick={() => {
-                  document
-                    .getElementById(`scene-${scene.id}`)
-                    ?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  notify(`Scene ${i + 1}: ${scene.title}`, "info");
-                }}
-              >
-                <span>{String(i + 1).padStart(2, "0")}</span>
-                <span>{scene.title}</span>
-                <small>
-                  {formatDuration((i * film.duration) / film.scenes.length)}
-                </small>
-              </button>
-            ))}
-          </div>
-          <div className="scene-list">
-            {film.scenes.map((scene, i) => (
-              <article
-                className="scene-card"
-                key={scene.id}
-                id={`scene-${scene.id}`}
-              >
-                <div className="scene-index">
-                  {String(i + 1).padStart(2, "0")}
-                  <small>
-                    {formatDuration((i * film.duration) / film.scenes.length)}
-                  </small>
-                </div>
-                <div className="scene-content">
+        <div className="scene-list">
+          {film.scenes.map((scene, i) => (
+            <article className="scene-card" key={scene.id} id={`scene-${scene.id}`}>
+              <div className="scene-index">
+                {String(i + 1).padStart(2, "0")}
+                <small>{formatDuration((i * film.duration) / film.scenes.length)}</small>
+              </div>
+              <div className="scene-content">
+                <label>
+                  Scene title
+                  <input
+                    value={scene.title}
+                    onChange={(e) => changeScene(scene.id, { title: e.target.value })}
+                  />
+                </label>
+                <div className="scene-fields">
                   <label>
-                    Scene title
-                    <input
-                      value={scene.title}
+                    Narration
+                    <textarea
+                      rows={4}
+                      value={scene.narration}
                       onChange={(e) =>
-                        changeScene(scene.id, { title: e.target.value })
+                        changeScene(scene.id, { narration: e.target.value })
                       }
                     />
                   </label>
-                  <div className="scene-fields">
-                    <label>
-                      Narration & captions
-                      <textarea
-                        rows={3}
-                        value={scene.narration}
+                  <label>
+                    Visual direction & animation
+                    <textarea
+                      rows={4}
+                      value={scene.visual}
+                      onChange={(e) => changeScene(scene.id, { visual: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Dialogue
+                    <textarea
+                      rows={3}
+                      value={scene.dialogue}
+                      placeholder="Name: spoken line. Identify invented dialogue below."
+                      onChange={(e) =>
+                        changeScene(scene.id, { dialogue: e.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    Dramatization in this scene
+                    <textarea
+                      rows={3}
+                      value={scene.dramatization}
+                      placeholder="Which details or lines are reconstructed, inferred, or invented?"
+                      onChange={(e) =>
+                        changeScene(scene.id, { dramatization: e.target.value })
+                      }
+                    />
+                  </label>
+                </div>
+                <fieldset className="scene-cast">
+                  <legend>Characters in this scene</legend>
+                  {film.characters.length ? (
+                    film.characters.map((c) => (
+                      <label className="check-label" key={c.id}>
+                        <input
+                          type="checkbox"
+                          checked={scene.characterIds.includes(c.id)}
+                          onChange={(e) =>
+                            changeScene(scene.id, {
+                              characterIds: e.target.checked
+                                ? [...scene.characterIds, c.id]
+                                : scene.characterIds.filter((id) => id !== c.id),
+                            })
+                          }
+                        />
+                        {c.name || "Unnamed character"}
+                      </label>
+                    ))
+                  ) : (
+                    <p className="field-note">
+                      Add characters above to connect them to this scene.
+                    </p>
+                  )}
+                </fieldset>
+                <details className="source-picker">
+                  <summary>
+                    Source evidence & reference images · {scene.sourceIds.length} sources
+                  </summary>
+                  {evidenceSources.map((s) => (
+                    <label className="check-label" key={s.id}>
+                      <input
+                        type="checkbox"
+                        checked={scene.sourceIds.includes(s.id)}
                         onChange={(e) =>
-                          changeScene(scene.id, { narration: e.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      Visual direction
-                      <textarea
-                        rows={3}
-                        value={scene.visual}
-                        onChange={(e) =>
-                          changeScene(scene.id, { visual: e.target.value })
-                        }
-                      />
-                    </label>
-                  </div>
-                  <div className="scene-bottom">
-                    <label>
-                      Picture or footage
-                      <select
-                        value={
-                          scene.sourceIds.find((id) =>
-                            film.sources.some(
-                              (s) =>
-                                s.id === id && /^(image|video)\//.test(s.type),
-                            ),
-                          ) || ""
-                        }
-                        onChange={(e) => {
                           changeScene(scene.id, {
-                            sourceIds: e.target.value ? [e.target.value] : [],
-                          });
-                          notify("Scene source updated.");
-                        }}
-                      >
-                        <option value="">
-                          Automatic from archive / title sequence
-                        </option>
-                        {film.sources
-                          .filter((s) => /^(image|video)\//.test(s.type))
-                          .map((s) => (
-                            <option key={s.id} value={s.id}>
-                              {s.name}
-                            </option>
-                          ))}
-                      </select>
+                            sourceIds: e.target.checked
+                              ? [...scene.sourceIds, s.id]
+                              : scene.sourceIds.filter((id) => id !== s.id),
+                          })
+                        }
+                      />
+                      {s.name}
                     </label>
-                    <div className="action-group">
-                      <button
-                        className="icon-button"
-                        aria-label={`Move scene ${i + 1} earlier`}
-                        disabled={i === 0 || !!busy}
-                        onClick={() => {
-                          const scenes = [...film.scenes];
-                          [scenes[i - 1], scenes[i]] = [
-                            scenes[i],
-                            scenes[i - 1],
-                          ];
-                          update({ scenes });
-                          notify("Scene moved earlier.");
-                        }}
-                      >
-                        <ArrowLeft size={16} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        aria-label={`Remove scene ${i + 1}`}
-                        disabled={film.scenes.length <= 1 || !!busy}
-                        onClick={() => {
-                          update({
-                            scenes: film.scenes.filter(
-                              (s) => s.id !== scene.id,
-                            ),
-                          });
-                          notify("Scene removed.");
-                        }}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+                  ))}
+                </details>
+                <div className="scene-bottom">
+                  <span className="field-note">
+                    {scene.characterIds.length} characters ·{" "}
+                    {scene.dramatization ? "Dramatization noted" : "Review factual basis"}
+                  </span>
+                  <div className="action-group">
+                    <button
+                      className="icon-button"
+                      aria-label={`Move scene ${i + 1} earlier`}
+                      disabled={i === 0 || !!busy}
+                      onClick={() => {
+                        const scenes = [...film.scenes];
+                        [scenes[i - 1], scenes[i]] = [scenes[i], scenes[i - 1]];
+                        update({ scenes });
+                        notify("Scene moved earlier.");
+                      }}
+                    >
+                      <ArrowLeft size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      aria-label={`Remove scene ${i + 1}`}
+                      disabled={film.scenes.length <= 1 || !!busy}
+                      onClick={() =>
+                        update({ scenes: film.scenes.filter((s) => s.id !== scene.id) })
+                      }
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </div>
                 </div>
-              </article>
-            ))}
-          </div>
-          <button
-            className="text-button"
-            onClick={() => {
-              update({
-                scenes: [
-                  ...film.scenes,
-                  {
-                    id: crypto.randomUUID(),
-                    title: "A new chapter",
-                    narration: "",
-                    visual: "",
-                    sourceIds: [],
-                  },
-                ],
-              });
-              notify("A new scene was added.");
-            }}
-          >
-            <Plus size={15} />
-            Add a scene
-          </button>
-          <p className="field-note">
-            {film.generatedBy || "Your scene plan"} · Review names, dates, and
-            proposed dramatizations before creating the film.
-          </p>
-        </>
+              </div>
+            </article>
+          ))}
+        </div>
       )}
+      <button
+        className="text-button"
+        disabled={!!busy}
+        onClick={() =>
+          update({
+            scenes: [
+              ...film.scenes,
+              {
+                id: crypto.randomUUID(),
+                title: "A new chapter",
+                narration: "",
+                visual: "",
+                sourceIds: [],
+                characterIds: [],
+                dialogue: "",
+                dramatization: "",
+              },
+            ],
+          })
+        }
+      >
+        <Plus size={15} />
+        Add a scene
+      </button>
+      <p className="field-note">
+        {film.generatedBy || "Your editable film draft"} · Source links identify material
+        used, not independent proof that every detail is true.
+      </p>
       <div className="panel-actions">
-        <button
-          className="text-button"
-          disabled={!!busy}
-          onClick={() => navigate(1)}
-        >
+        <button className="text-button" disabled={!!busy} onClick={() => navigate(1)}>
           <ArrowLeft size={15} />
-          Story direction
+          Story development
         </button>
         <button
           className="button primary"
-          disabled={!film.scenes.length || !!busy}
+          disabled={!!busy || !film.scenes.length}
           onClick={() => navigate(3)}
         >
-          Choose studio & create
+          Create & watch
           <ArrowRight size={16} />
         </button>
       </div>
@@ -734,382 +986,255 @@ export function CuttingStep({
 
 type CreateProps = StepProps & {
   caps: Capabilities | null;
-  changeScene: (id: string, patch: Partial<Scene>) => void;
-  checkShot: (s: Scene) => Promise<void>;
-  confirmShot: (s: Scene) => void;
+  checkFilm: () => Promise<void>;
   consent: boolean;
   setConsent: (v: boolean) => void;
-  canvasRef: RefObject<HTMLCanvasElement>;
-  progress: number;
-  renderMessage: string;
   resultUrl: string;
-  exportFilm: () => Promise<void>;
-  cancel: () => void;
+  generate: () => Promise<void>;
   brief: () => void;
   backup: () => void;
 };
 export function CreateStep({
   film,
-  update,
   notify,
   busy,
   caps,
-  changeScene,
-  checkShot,
-  confirmShot,
+  checkFilm,
   consent,
   setConsent,
-  canvasRef,
-  progress,
-  renderMessage,
   resultUrl,
-  exportFilm,
-  cancel,
+  generate,
   brief,
   backup,
+  navigate,
 }: CreateProps) {
-  const studio = studios.find((s) => s.id === film.providerId) || studios[0];
+  // A price must be returned and confirmed by the server before this can enable.
+  const hasConfirmedQuote = false;
+  const referenceRate = caps?.pricing?.referenceRate;
+  const referencePrice = referenceRate && referenceRate.amountCents > 0
+    ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(referenceRate.amountCents / 100)
+    : null;
+  const canGenerate = Boolean(
+    caps?.magiclight &&
+      caps?.billing &&
+      hasConfirmedQuote &&
+      consent &&
+      film.scenes.length,
+  );
+  const mediaUrl =
+    film.job?.status === "completed"
+      ? `/api/studio?action=media&id=${encodeURIComponent(film.job.id)}`
+      : resultUrl;
   return (
     <section className="panel">
       <div className="section-title">
         <div>
-          <h2>From family archive to final cut</h2>
-          <p>
-            Choose how to create your film, then watch and download it here.
-          </p>
+          <h2>Bring your family's world to life</h2>
+          <p>Create, watch, and keep your film in Lineage Theatre.</p>
         </div>
-        <FilmIcon size={23} />
+        <FilmIcon size={24} />
       </div>
-      <label>
-        Production studio
-        <select
-          value={film.providerId}
-          disabled={!!busy}
-          onChange={(e) => {
-            update({ providerId: e.target.value });
-            notify(
-              `${studios.find((s) => s.id === e.target.value)?.name} selected.`,
-            );
-          }}
-        >
-          {studios.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name}
-              {["magiclight", "heygen", "flow"].includes(s.id)
-                ? " · external studio"
-                : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      <p className="studio-description">
-        {studio.description}
-        <br />
-        <span>{studio.detail}</span>
-      </p>
-      {["runway", "imagineart"].includes(film.providerId) && (
-        <div className="shot-production">
-          <div className="section-subtitle">
-            <h3>Cinematic shot queue</h3>
-            <span>Generate only the scenes you choose</span>
-          </div>
-          <p className="field-note">
-            Each take is a 5-second generated shot. It plays as a loop within
-            its scene; the rest of your film uses the family archive.
-            Reenactments are labeled in the finished film.
-          </p>
-          {film.providerId === "runway" &&
-            caps &&
-            (!caps.runway || caps.connections?.runway?.credits === 0) && (
-              <div className="feedback info">
-                {caps.runway
-                  ? "Runway is connected, but its API account has no credits. An administrator must add Runway API credits before generating shots. Archive film export is available now."
-                  : caps.connections?.runway?.reason ||
-                    "Runway is not connected."}
-              </div>
-            )}
-          {film.providerId === "imagineart" && !caps?.imagineart && (
-            <div className="feedback info">
-              ImagineArt’s API is not connected. Choose Runway, create an
-              archive film, or{" "}
-              <a
-                href="https://www.imagine.art/"
-                target="_blank"
-                rel="noreferrer"
-              >
-                open ImagineArt’s studio
-              </a>
-              .
-            </div>
-          )}
-          {film.scenes.map((scene, i) => (
-            <div className="shot-row" key={scene.id}>
-              <div>
-                <span>
-                  {String(i + 1).padStart(2, "0")} · {scene.title}
-                </span>
-                <small>
-                  {scene.shot?.status === "completed"
-                    ? "Shot ready · included in export"
-                    : scene.shot?.message ||
-                      scene.shot?.status ||
-                      "Uses your archive until you generate a take"}
-                </small>
-              </div>
-              <div className="action-group">
-                {scene.shot && (
-                  <button
-                    className="text-button"
-                    disabled={!!busy}
-                    onClick={() => void checkShot(scene)}
-                  >
-                    Check status
-                  </button>
-                )}
-                {scene.shot && (
-                  <button
-                    className="icon-button"
-                    aria-label={`Use archive for ${scene.title}`}
-                    disabled={
-                      !!busy ||
-                      ["queued", "processing", "submitting"].includes(
-                        scene.shot.status,
-                      )
-                    }
-                    onClick={() => {
-                      changeScene(scene.id, { shot: undefined });
-                      notify("This scene will use your archive.");
-                    }}
-                  >
-                    <X size={15} />
-                  </button>
-                )}
-                <button
-                  className="button secondary small"
-                  disabled={
-                    !!busy ||
-                    (!!scene.shot &&
-                      [
-                        "queued",
-                        "processing",
-                        "submitting",
-                        "uncertain",
-                      ].includes(scene.shot.status)) ||
-                    !(film.providerId === "runway"
-                      ? caps?.runway && caps.connections?.runway?.credits !== 0
-                      : caps?.imagineart)
-                  }
-                  onClick={() => confirmShot(scene)}
-                >
-                  {scene.shot?.status === "completed"
-                    ? "New take"
-                    : "Generate shot"}
-                  <Sparkles size={14} />
-                </button>
-              </div>
-            </div>
-          ))}
+      <div className="production-hero">
+        <div className="production-mark">
+          <FilmIcon size={36} />
         </div>
-      )}
-      {["magiclight", "flow", "heygen"].includes(film.providerId) ? (
-        <div className="external-handoff">
-          <ExternalLink size={27} />
-          <h3>Continue in {studio.name}</h3>
+        <div>
+          <span className="eyebrow">Your animated family film</span>
+          <h3>{film.title || "A story worth keeping"}</h3>
           <p>
-            Download the production brief, open the studio, and upload your
-            source files there. Its account and rendering charges are separate.
+            {film.logline ||
+              `A lasting portrait of ${film.ancestor || "your ancestor"}, and the people who shaped their life.`}
           </p>
-          <div className="action-group">
-            <button className="button secondary" onClick={brief}>
-              <Download size={16} />
-              Download brief
-            </button>
-            <a
-              className="button primary"
-              href={studio.url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={() =>
-                notify(
-                  `${studio.name} opened in a new tab. Upload the brief and source files there.`,
-                  "info",
-                )
-              }
-            >
-              Open {studio.name}
-              <ExternalLink size={16} />
-            </a>
+          <div className="production-facts">
+            <span>{formatDuration(film.duration)} target</span>
+            <span>{film.scenes.length} scenes</span>
+            <span>{film.characters.length} characters</span>
+            <span>
+              {film.factuality === "documentary"
+                ? "Documentary"
+                : "Based on a true story"}
+            </span>
           </div>
-          <button
-            className="text-button"
-            onClick={() => {
-              update({ providerId: "archive" });
-              notify(
-                "Archive film selected. You can create and download it here.",
-              );
-            }}
-          >
-            Create an archive film here instead
+        </div>
+      </div>
+      <div className="production-settings">
+        <div>
+          <span>Film production</span>
+          <strong>MagicLight</strong>
+          <small>Managed within Lineage Theatre</small>
+        </div>
+        <div>
+          <span>Animation & final quality</span>
+          <strong>Highest available</strong>
+          <small>
+            {caps?.quality?.verified
+              ? caps.quality.label
+              : "Quality availability awaiting verification"}
+          </small>
+        </div>
+        <div>
+          <span>Story development</span>
+          <strong>GPT-6 Astra</strong>
+          <small>{film.generatedBy || "Film draft can be edited here"}</small>
+        </div>
+      </div>
+      <section className="readiness-panel" aria-label="Film pricing">
+        <h3>Film cost, with no added markup</h3>
+        <div className="production-settings">
+          <div>
+            <span>Reference credit rate</span>
+            <strong>
+              {referencePrice && referenceRate
+                ? `${referencePrice} per ${referenceRate.credits.toLocaleString("en-US")} credits`
+                : caps ? "Reference rate unavailable" : "Checking reference rate…"}
+            </strong>
+            <small>
+              {caps?.pricing?.referenceReason || "The server must confirm the MagicLight credit-pack reference rate."}
+            </small>
+          </div>
+          <div>
+            <span>Estimated film cost</span>
+            <strong>Awaiting MagicLight quote</strong>
+            <small>A total is not available yet.</small>
+          </div>
+          <div>
+            <span>Payment provider</span>
+            <strong>QuickBooks</strong>
+            <small>Selected · connection pending</small>
+          </div>
+        </div>
+        <p>
+          Your film price will match MagicLight's quoted cost. BROCOTech markup: 0%.
+        </p>
+        <p className="field-note">
+          {caps?.pricing?.estimate.reason ||
+            "Waiting for MagicLight's credit quote for this complete film. Highest-quality animation and final-film settings have not been quoted."}
+        </p>
+      </section>
+      <div className="readiness-panel" role="status">
+        <h3>
+          {caps?.magiclight && caps?.billing
+            ? "Price confirmation required"
+            : "Production setup is pending"}
+        </h3>
+        <div className={`readiness-row ${caps?.magiclight ? "ready" : "pending"}`}>
+          <span>
+            {caps?.magiclight ? <CheckCircle2 size={18} /> : <FilmIcon size={18} />}
+          </span>
+          <div>
+            <strong>MagicLight production</strong>
+            <p>
+              {caps?.connections?.magiclight?.reason ||
+                "A verified service connection is needed to generate the complete film here."}
+            </p>
+          </div>
+        </div>
+        <div className={`readiness-row ${caps?.billing ? "ready" : "pending"}`}>
+          <span>
+            {caps?.billing ? <CheckCircle2 size={18} /> : <FileText size={18} />}
+          </span>
+          <div>
+            <strong>QuickBooks payments</strong>
+            <p>
+              {caps?.connections?.billing?.reason ||
+                "QuickBooks is selected for payments; its merchant connection is pending. A confirmed film price must be shown before you pay or production starts."}
+            </p>
+          </div>
+        </div>
+        <p className="field-note">
+          No video generation or payment has started. You can continue refining your draft
+          and download the script while setup is completed.
+        </p>
+      </div>
+      <label className="check-label consent-final">
+        <input
+          type="checkbox"
+          checked={consent}
+          disabled={!!busy}
+          onChange={(e) => setConsent(e.target.checked)}
+        />
+        I have permission to use these materials and have reviewed the facts, cast,
+        dialogue, and dramatized details.
+      </label>
+      <div className="panel-actions">
+        <div className="action-group">
+          <button className="text-button" onClick={() => navigate(2)}>
+            <ArrowLeft size={15} />
+            Edit film
+          </button>
+          <button className="text-button" onClick={brief}>
+            <Download size={15} />
+            Download script
+          </button>
+          <button className="text-button" onClick={backup}>
+            <Download size={15} />
+            Project backup
           </button>
         </div>
-      ) : (
-        <>
-          <div className="audio-settings">
-            <label>
-              Soundtrack
-              <select
-                value={film.audioId || ""}
-                disabled={!!busy}
-                onChange={(e) => {
-                  update({ audioId: e.target.value || undefined });
-                  notify(
-                    e.target.value
-                      ? "Recording selected as the film soundtrack."
-                      : "Captioned film selected without a voice recording.",
-                  );
-                }}
-              >
-                <option value="">Captions only · no voice recording</option>
-                {film.sources
-                  .filter((s) => s.type.startsWith("audio"))
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            <label className="check-label">
-              <input
-                type="checkbox"
-                checked={film.music}
-                disabled={!!busy}
-                onChange={(e) => {
-                  update({ music: e.target.checked });
-                  notify(
-                    e.target.checked
-                      ? "Gentle ambient score enabled."
-                      : "Ambient score turned off.",
-                  );
-                }}
-              />
-              Gentle ambient score
-            </label>
-          </div>
-          <p className="field-note">
-            Narration text appears as on-screen captions. Add a voice recording
-            in Family archive to include spoken narration. The recording plays
-            once from the start.
+        <button
+          className="button primary"
+          disabled={!!busy || !canGenerate}
+          onClick={() => void generate()}
+        >
+          <Sparkles size={17} />
+          Create my film
+        </button>
+      </div>
+      {film.job && (
+        <div className="render-progress" role="status">
+          <p>
+            {film.job.status === "queued" || film.job.status === "processing" ? (
+              <Loader2 className="spin" size={16} />
+            ) : (
+              <FilmIcon size={16} />
+            )}
+            Film production: {film.job.status}
           </p>
-          <label className="check-label consent-final">
-            <input
-              type="checkbox"
-              checked={consent}
-              disabled={!!busy}
-              onChange={(e) => {
-                setConsent(e.target.checked);
-                notify(
-                  e.target.checked
-                    ? "Film approved for creation."
-                    : "Film approval cleared.",
-                  "info",
-                );
-              }}
-            />
-            I have permission to use these materials and have reviewed the
-            scenes, facts, and dramatizations.
-          </label>
-          <div className="export-summary">
-            <span>
-              <Video size={17} />
-              1080p · {formatDuration(film.duration)} ·{" "}
-              {supportedMime().includes("mp4") ? "MP4" : "WebM"}
-            </span>
-            <span>
-              {film.scenes.length} scenes ·{" "}
-              {film.sources.filter((s) => s.type.startsWith("image")).length}{" "}
-              photos
-            </span>
+          <p>{film.job.message}</p>
+          <button
+            className="text-button"
+            disabled={!!busy}
+            onClick={() => void checkFilm()}
+          >
+            Check production status
+          </button>
+        </div>
+      )}
+      {mediaUrl && (
+        <div className="finished-film">
+          <div className="section-subtitle">
+            <h3>
+              <CheckCircle2 size={18} />
+              {film.job?.status === "completed"
+                ? "Your film is ready"
+                : "Your previously created film"}
+            </h3>
+            <a
+              className="button secondary small"
+              href={mediaUrl}
+              download={`${film.title.replace(/[^a-z0-9 -]/gi, "").trim() || "family-film"}.${film.job || film.outputType?.includes("mp4") ? "mp4" : "webm"}`}
+              onClick={() => notify("Your film download has started.")}
+            >
+              <Download size={16} />
+              Download film
+            </a>
           </div>
-          {renderMessage && (
-            <div className="render-progress" role="status">
-              <p>
-                <Loader2 className="spin" size={16} />
-                {renderMessage}
-              </p>
-              <progress max={100} value={progress} />
-              <p className="field-note">
-                Keep this tab visible. Export takes about the film’s running
-                time.
-              </p>
-              <button className="text-button" onClick={cancel}>
-                Cancel export
-              </button>
-            </div>
-          )}
-          <canvas
-            ref={canvasRef}
-            className={renderMessage ? "render-canvas" : "render-canvas hidden"}
-            aria-label="Film export preview"
+          <video
+            controls
+            src={mediaUrl}
+            playsInline
+            onError={() =>
+              notify(
+                "The saved film could not play. Try downloading it, or check production status.",
+                "error",
+              )
+            }
           />
-          {!renderMessage && (
-            <div className="panel-actions">
-              <div className="action-group">
-                <button className="text-button" onClick={brief}>
-                  <Download size={15} />
-                  Brief
-                </button>
-                <button className="text-button" onClick={backup}>
-                  <Download size={15} />
-                  Backup
-                </button>
-              </div>
-              <button
-                className="button primary"
-                disabled={!!busy || !film.scenes.length}
-                onClick={() => void exportFilm()}
-              >
-                <FilmIcon size={17} />
-                {film.outputId ? "Create a new cut" : "Create my film"}
-              </button>
-            </div>
-          )}
-          {resultUrl && (
-            <div className="finished-film">
-              <div className="section-subtitle">
-                <h3>
-                  <CheckCircle2 size={18} />
-                  Your film is ready
-                </h3>
-                <a
-                  className="button secondary small"
-                  href={resultUrl}
-                  download={`${film.title.replace(/[^a-z0-9 -]/gi, "").trim() || "family-film"}.${film.outputType?.includes("mp4") ? "mp4" : "webm"}`}
-                  onClick={() => notify("Your film download has started.")}
-                >
-                  <Download size={16} />
-                  Download film
-                </a>
-              </div>
-              <video
-                controls
-                src={resultUrl}
-                playsInline
-                onError={() =>
-                  notify(
-                    "The saved film could not play in this browser. Try downloading it.",
-                    "error",
-                  )
-                }
-              />
-              <p className="field-note">
-                Created{" "}
-                {film.outputAt ? new Date(film.outputAt).toLocaleString() : ""}.
-                Download a copy to keep or share with your family.
-              </p>
-            </div>
-          )}
-        </>
+          <p className="field-note">
+            {film.outputAt ? `Created ${new Date(film.outputAt).toLocaleString()}. ` : ""}
+            Download a copy to keep and share with your family.
+          </p>
+        </div>
       )}
     </section>
   );

@@ -61,7 +61,7 @@ export default function Landing({ children }: { children: ReactNode }) {
               <a className="landing-button light" href="#studio">Enter your studio <ArrowRight size={18} aria-hidden="true" /></a>
               <button className="landing-play-link" type="button" onClick={() => void playSample()}><Play size={17} aria-hidden="true" /> Watch the sample</button>
             </div>
-            <p className="hero-footnote">Your memories. Your direction. Something to keep.</p>
+            <p className="hero-footnote">Studio preview: organize and save your family materials now. AI story development, film production and checkout are awaiting connection.</p>
           </div>
           <figure className="hero-still">
             <img src="/assets/ancestor-shipyard-still.png" width="1672" height="941" decoding="async" alt="Cinematic illustration of an ancestor standing beside a wooden ship in a sunlit historic shipyard" />

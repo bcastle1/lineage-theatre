@@ -11,7 +11,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Download,
   Film as FilmIcon,
   X,
   CloudOff,
@@ -26,7 +25,6 @@ import {
   normalizeFilm,
   productionBrief,
   steps,
-  studios,
   type Film,
   type Scene,
   type Shot,
@@ -34,24 +32,48 @@ import {
   type Theme,
   type User,
 } from "./model";
-import {
-  getSourceBlob,
-  getSourceObjectUrl,
-  saveSourceFile,
-} from "../lib/storage";
-import { imageData, importSource } from "./sources";
-import { renderFilm } from "./render";
+import { getSourceBlob, getSourceObjectUrl } from "../lib/storage";
+import { importSource } from "./sources";
+
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 
 export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
   story: boolean;
-  runway: boolean;
-  imagineart: boolean;
+  magiclight: boolean;
+  billing: boolean;
+  pricing?: {
+    currency: "USD";
+    policy: "provider-cost-no-markup";
+    markupBasisPoints: number;
+    referenceStatus: "available" | "configuration-pending";
+    referenceRate: {
+      credits: number;
+      amountCents: number;
+      source: "public-pro-api-pack" | "server-configuration";
+      sourceUrl: string | null;
+    } | null;
+    referenceReason: string;
+    estimate: {
+      status: "awaiting-provider-quote";
+      amountCents: null;
+      providerCredits: null;
+      reason: string;
+    };
+    chargeReady: false;
+  };
+  payment?: {
+    provider: "quickbooks";
+    label: "QuickBooks";
+    status: "connection-pending";
+    available: false;
+  };
   connections?: {
     story?: { reason: string };
-    runway?: { reason: string; credits?: number };
+    magiclight?: { reason: string };
+    billing?: { reason: string };
   };
+  quality?: { label: string; verified: boolean };
 };
 export type StepProps = {
   film: Film;
@@ -106,61 +128,23 @@ export default function Workspace({
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [themePage, setThemePage] = useState(0);
   const [themeOrigin, setThemeOrigin] = useState("");
-  const [progress, setProgress] = useState(0);
-  const [renderMessage, setRenderMessage] = useState("");
   const [resultUrl, setResultUrl] = useState("");
-  const [confirmRender, setConfirmRender] = useState<Scene | null>(null);
   const [consent, setConsent] = useState(false);
   const [aiConsent, setAiConsent] = useState(false);
   const [localLegacy, setLocalLegacy] = useState(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+
   const workLock = useRef(false);
-  const dialogRef = useRef<HTMLElement>(null);
+
   const film = projects.find((p) => p.id === activeId) || projects[0];
   const notify = useCallback(
-    (text: string, tone: Notice["tone"] = "success") =>
-      setNotice({ text, tone }),
+    (text: string, tone: Notice["tone"] = "success") => setNotice({ text, tone }),
     [],
   );
-  useEffect(() => {
-    if (!confirmRender) return;
-    const previous = document.activeElement as HTMLElement | null;
-    const dialog = dialogRef.current;
-    dialog?.querySelector<HTMLButtonElement>("button")?.focus();
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setConfirmRender(null);
-      }
-      if (event.key === "Tab" && dialog) {
-        const buttons = Array.from(
-          dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
-        );
-        const first = buttons[0],
-          last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last?.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first?.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.removeEventListener("keydown", keydown);
-      previous?.focus();
-    };
-  }, [confirmRender]);
   const update = useCallback(
     (patch: Partial<Film>, id = activeId) =>
       setProjects((current) =>
         current.map((p) =>
-          p.id === id
-            ? { ...p, ...patch, updatedAt: new Date().toISOString() }
-            : p,
+          p.id === id ? { ...p, ...patch, updatedAt: new Date().toISOString() } : p,
         ),
       ),
     [activeId],
@@ -171,9 +155,7 @@ export default function Workspace({
         p.id === activeId
           ? {
               ...p,
-              scenes: p.scenes.map((s) =>
-                s.id === id ? { ...s, ...patch } : s,
-              ),
+              scenes: p.scenes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
             }
           : p,
       ),
@@ -199,7 +181,7 @@ export default function Workspace({
       .then(setCaps)
       .catch(() =>
         notify(
-          "Studio connections could not be checked. Archive film export is still available.",
+          "Studio connections could not be checked. Your saved story remains available to edit.",
           "error",
         ),
       );
@@ -222,10 +204,7 @@ export default function Workspace({
           else if (url) URL.revokeObjectURL(url);
         })
         .catch(() =>
-          notify(
-            "The saved film could not be opened in this browser.",
-            "error",
-          ),
+          notify("The saved film could not be opened in this browser.", "error"),
         );
     return () => {
       disposed = true;
@@ -242,13 +221,12 @@ export default function Workspace({
     return () => window.removeEventListener("beforeunload", prevent);
   }, [busy]);
   const jobSignature = projects
-    .flatMap((p) =>
-      p.scenes
-        .filter(
-          (s) => s.shot && ["queued", "processing"].includes(s.shot.status),
-        )
-        .map((s) => `${p.id}:${s.id}:${s.shot!.id}`),
+    .filter(
+      (p) =>
+        p.job?.provider === "magiclight" &&
+        ["queued", "processing"].includes(p.job.status),
     )
+    .map((p) => `${p.id}:${p.job!.id}`)
     .join("|");
   useEffect(() => {
     if (!jobSignature) return;
@@ -256,40 +234,28 @@ export default function Workspace({
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       for (const item of jobSignature.split("|")) {
-        const [projectId, sceneId, id] = item.split(":");
+        const [projectId, id] = item.split(":");
         try {
-          const job = await api<Shot>(`/api/studio?action=status&id=${id}`);
+          const job = await api<Shot>(
+            `/api/studio?action=status&id=${encodeURIComponent(id)}`,
+          );
           if (stopped) return;
           setProjects((current) =>
-            current.map((p) =>
-              p.id === projectId
-                ? {
-                    ...p,
-                    scenes: p.scenes.map((s) =>
-                      s.id === sceneId ? { ...s, shot: job } : s,
-                    ),
-                  }
-                : p,
-            ),
+            current.map((p) => (p.id === projectId ? { ...p, job } : p)),
           );
           if (job.status === "completed")
-            notify(
-              "Your cinematic shot is ready. It will be included in your film export.",
-            );
+            notify("Your film is ready to watch in Lineage Theatre.");
           if (job.status === "failed")
-            notify(
-              job.message || "The studio could not complete a shot.",
-              "error",
-            );
+            notify(job.message || "Film production could not finish.", "error");
         } catch {
           if (!stopped)
             notify(
-              "A render is still being tracked. Its status is temporarily unavailable; no new render has been started.",
+              "Film status is temporarily unavailable. Your existing production request is preserved.",
               "info",
             );
         }
       }
-      if (!stopped) timer = setTimeout(poll, 10000);
+      if (!stopped) timer = setTimeout(poll, 15000);
     };
     void poll();
     return () => {
@@ -338,9 +304,7 @@ export default function Workspace({
         try {
           added.push(await importSource(file, id));
         } catch (e) {
-          failures.push(
-            e instanceof Error ? e.message : `Could not add ${file.name}`,
-          );
+          failures.push(e instanceof Error ? e.message : `Could not add ${file.name}`);
         }
       }
       setProjects((current) =>
@@ -370,9 +334,8 @@ export default function Workspace({
       return false;
     }
     if (
-      [film.script, ...film.sources.map((s) => s.text || s.note || "")]
-        .join("")
-        .trim().length < 80
+      [film.script, ...film.sources.map((s) => s.text || s.note || "")].join("").trim()
+        .length < 80
     ) {
       notify(
         "Add at least a few sentences of family history, or a readable document, before developing the story.",
@@ -383,114 +346,145 @@ export default function Workspace({
     }
     return true;
   }
-  async function suggest() {
-    if (!enoughStory()) return;
-    if (caps?.story && !aiConsent) {
+  function allowStory() {
+    if (!enoughStory()) return false;
+    if (!caps?.story) {
       notify(
-        "Confirm that the story studio may read your family story and extracted document text.",
+        caps?.connections?.story?.reason ||
+          "GPT-6 Astra story development is awaiting a verified connection. You can keep editing your archive or start a manual outline.",
+        "info",
+      );
+      return false;
+    }
+    if (!aiConsent) {
+      notify(
+        "Allow GPT-6 Astra to read your family material before developing the film.",
         "error",
       );
-      return;
+      return false;
     }
-    await task("Finding ten story directions…", async () => {
-      if (caps?.story) {
-        try {
-          const result = await api<{
-            themes: Omit<Theme, "id">[];
-            generatedBy: string;
-          }>("/api/studio", {
-            action: "themes",
-            project: film,
-            exclude: film.themes.map((t) => t.title),
-          });
-          update({
-            themes: result.themes.map((t) => ({
-              ...t,
-              id: crypto.randomUUID(),
-            })),
-            generatedBy: result.generatedBy,
-          });
-          setThemeOrigin(
-            "Ten AI suggestions grounded in your family materials",
-          );
-          notify("Ten new AI story directions are ready. Choose up to three.");
-          return;
-        } catch (e) {
-          notify(
-            `${e instanceof Error ? e.message : "AI suggestions were unavailable."} Editorial directions are shown below.`,
-            "error",
-          );
+    return true;
+  }
+  async function storyImages() {
+    const references: { sourceId: string; dataUrl: string }[] = [];
+    for (const source of film.sources
+      .filter((s) => s.type.startsWith("image"))
+      .slice(0, 8)) {
+      const blob = await getSourceBlob(source.id);
+      if (!blob) continue;
+      try {
+        const bitmap = await createImageBitmap(blob);
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(1, 1000 / Math.max(bitmap.width, bitmap.height));
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+        let quality = 0.8;
+        let dataUrl = canvas.toDataURL("image/jpeg", quality);
+        while (dataUrl.length >= 250000 && quality > 0.3) {
+          quality -= 0.1;
+          dataUrl = canvas.toDataURL("image/jpeg", quality);
         }
-      } else
-        notify(
-          "Ten editorial directions are ready. The AI studio is not connected.",
-          "info",
-        );
-      update({ themes: editorialThemes(film, themePage) });
-      setThemePage((p) => p + 1);
-      setThemeOrigin("Editorial suggestions · review against your sources");
+        if (dataUrl.length < 250000) references.push({ sourceId: source.id, dataUrl });
+      } catch {
+        // Source coverage reports photos without a usable reference.
+      }
+    }
+    return references;
+  }
+  async function suggest() {
+    if (!allowStory()) return;
+    await task("Finding story directions with GPT-6 Astra…", async () => {
+      const result = await api<{ themes: Omit<Theme, "id">[]; generatedBy: string }>(
+        "/api/studio",
+        {
+          action: "themes",
+          project: film,
+          storyConsent: true,
+          imageReferences: await storyImages(),
+          exclude: film.themes.map((t) => t.title),
+        },
+      );
+      update({
+        themes: result.themes.map((t) => ({ ...t, id: crypto.randomUUID() })),
+        generatedBy: result.generatedBy,
+      });
+      setThemeOrigin(`${result.generatedBy} · grounded in the material read`);
+      notify(
+        "Your story ideas are ready. Choose a favorite, or let the film develop automatically.",
+      );
     });
   }
   async function plan() {
-    if (!enoughStory()) return;
-    if (!film.selectedThemes.length) {
-      notify("Choose at least one story direction first.", "error");
-      setStep(1);
-      return;
-    }
-    if (caps?.story && !aiConsent) {
-      notify(
-        "Confirm that the story studio may read your family materials, or use the editable archive plan.",
-        "error",
-      );
-      return;
-    }
-    await task("Developing your scene plan…", async () => {
-      if (caps?.story) {
-        try {
-          const r = await api<{
+    if (!allowStory()) return;
+    await task(
+      "Developing your script, ensemble, and scenes with GPT-6 Astra…",
+      async () => {
+        const selectedThemes = film.selectedThemes.length
+          ? film.selectedThemes
+          : film.themes.slice(0, 1);
+        const r = await api<
+          Pick<Film, "characters" | "assumptions" | "logline" | "sourceCoverage"> & {
             scenes: Omit<Scene, "id">[];
-            logline: string;
             generatedBy: string;
-          }>("/api/studio", { action: "plan", project: film });
-          update({
-            scenes: r.scenes.map((s) => ({
-              ...s,
-              id: crypto.randomUUID(),
-              sourceIds: (s.sourceIds || []).filter((id) =>
-                film.sources.some((x) => x.id === id),
-              ),
-            })),
-            logline: r.logline,
-            generatedBy: r.generatedBy,
-          });
-          setStep(2);
-          notify(
-            "Your AI scene plan is ready for review. Every scene is editable.",
-          );
-          return;
-        } catch (e) {
-          notify(
-            `${e instanceof Error ? e.message : "AI development failed."} An editable archive plan is ready instead.`,
-            "error",
-          );
-        }
-      } else notify("Your editable archive plan is ready.");
-      update({
-        scenes: editorialPlan(film),
-        logline: `${film.ancestor} — ${film.selectedThemes.map((t) => t.title).join(", ")}.`,
-        generatedBy: "Editorial archive plan",
-      });
-      setStep(2);
-    });
+            selectedThemes?: Omit<Theme, "id">[];
+          }
+        >("/api/studio", {
+          action: "plan",
+          project: {
+            ...film,
+            selectedThemes,
+            providerId: "magiclight",
+            quality: "highest",
+          },
+          storyConsent: true,
+          imageReferences: await storyImages(),
+        });
+        const isKnownSource = (id: string) =>
+          (id === "@family-narrative" && !!film.script.trim()) ||
+          film.sources.some((s) => s.id === id);
+        const characters = (r.characters || []).map((c) => ({
+          ...c,
+          id: c.id || crypto.randomUUID(),
+          sourceIds: (c.sourceIds || []).filter(isKnownSource),
+        }));
+        const resolvedThemes = selectedThemes.length
+          ? selectedThemes
+          : (r.selectedThemes || []).map((t) => ({ ...t, id: crypto.randomUUID() }));
+        update({
+          scenes: r.scenes.map((s) => ({
+            ...s,
+            id: crypto.randomUUID(),
+            dialogue: s.dialogue || "",
+            dramatization: s.dramatization || "",
+            characterIds: (s.characterIds || []).filter((id) =>
+              characters.some((c) => c.id === id),
+            ),
+            sourceIds: (s.sourceIds || []).filter(isKnownSource),
+          })),
+          characters,
+          assumptions: (r.assumptions || []).map((a) => ({
+            ...a,
+            id: a.id || crypto.randomUUID(),
+          })),
+          selectedThemes: resolvedThemes,
+          themes: film.themes.length ? film.themes : resolvedThemes,
+          logline: r.logline,
+          generatedBy: r.generatedBy,
+          sourceCoverage: r.sourceCoverage,
+        });
+        setStep(2);
+        notify(
+          "Your film draft is ready. Review the script, supporting cast, and clearly labeled assumptions.",
+        );
+      },
+    );
   }
   function selectTheme(theme: Theme) {
     const selected = film.selectedThemes.some((t) => t.id === theme.id);
     if (!selected && film.selectedThemes.length >= 3) {
-      notify(
-        "Choose up to three themes. Deselect one to add another.",
-        "error",
-      );
+      notify("Choose up to three themes. Deselect one to add another.", "error");
       return;
     }
     update({
@@ -504,137 +498,26 @@ export default function Workspace({
         : `${theme.title} selected. Its plot and climax will guide your film.`,
     );
   }
-  async function generate(scene: Scene) {
-    setConfirmRender(null);
-    await task("Submitting your cinematic shot…", async () => {
-      const source = film.sources.find(
-        (s) => scene.sourceIds.includes(s.id) && s.type.startsWith("image"),
-      );
-      const blob = source ? await getSourceBlob(source.id) : null;
-      const requestId = crypto.randomUUID();
-      const shot: Shot = {
-        id: requestId,
-        provider: film.providerId,
-        status: "submitting",
-      };
-      changeScene(scene.id, { shot });
-      try {
-        const job = await api<Shot>("/api/studio", {
-          action: "generate",
-          requestId,
-          provider: film.providerId,
-          prompt: `${film.style === "Cinematic" ? "Photorealistic cinematic reenactment" : "Documentary illustrative reconstruction"}. ${scene.visual}. Family period: ${film.era || "use source context"}. Natural movement, realistic textures, consistent likeness, no invented written text.`,
-          ...(blob ? { image: await imageData(blob) } : {}),
-        });
-        changeScene(scene.id, { shot: job });
-        notify(
-          job.status === "uncertain"
-            ? job.message!
-            : "Your shot was accepted by the studio. You can continue editing while it renders.",
-          job.status === "uncertain" ? "info" : "success",
-        );
-      } catch (e) {
-        changeScene(scene.id, {
-          shot: {
-            ...shot,
-            status: "uncertain",
-            message:
-              "Submission could not be confirmed. Check status before creating another take.",
-          },
-        });
-        throw e;
-      }
-    });
-  }
-  async function checkShot(scene: Scene) {
-    if (!scene.shot) return;
-    await task("Checking shot…", async () => {
+  async function checkFilm() {
+    if (!film.job) return;
+    await task("Checking film production…", async () => {
       const job = await api<Shot>(
-        `/api/studio?action=status&id=${scene.shot!.id}`,
+        `/api/studio?action=status&id=${encodeURIComponent(film.job!.id)}`,
       );
-      changeScene(scene.id, { shot: job });
+      update({ job });
       notify(
-        job.message || `Shot status: ${job.status}.`,
+        job.message || `Film status: ${job.status}.`,
         job.status === "failed" ? "error" : "info",
       );
     });
   }
-  async function exportFilm() {
-    if (!consent) {
-      notify(
-        "Confirm the family materials and scene plan are ready for this film.",
-        "error",
-      );
-      return;
-    }
-    if (!canvasRef.current) return;
-    if (!film.scenes.length) {
-      notify("Create your scene plan first.", "error");
-      return;
-    }
-    if (
-      film.scenes.some(
-        (s) =>
-          s.shot &&
-          ["queued", "processing", "submitting", "uncertain"].includes(
-            s.shot.status,
-          ),
-      )
-    ) {
-      notify(
-        "Wait for your cinematic shots to finish, or remove those takes from the scenes before exporting.",
-        "error",
-      );
-      return;
-    }
-    const id = film.id;
-    await task("Creating your film…", async () => {
-      const abort = new AbortController();
-      abortRef.current = abort;
-      try {
-        const blob = await renderFilm(
-          film,
-          canvasRef.current!,
-          abort.signal,
-          (value, message) => {
-            setProgress(value);
-            setRenderMessage(message);
-          },
-        );
-        const outputId = crypto.randomUUID();
-        const ext = blob.type.includes("mp4") ? "mp4" : "webm";
-        await saveSourceFile(
-          outputId,
-          id,
-          new File([blob], `${cleanName(film.title)}.${ext}`, {
-            type: blob.type,
-          }),
-        );
-        update(
-          {
-            outputId,
-            outputType: blob.type,
-            outputAt: new Date().toISOString(),
-          },
-          id,
-        );
-        notify(
-          "Your film was created and saved in this browser. Watch it below or download your master.",
-        );
-      } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") {
-          notify(
-            "Export cancelled. Your sources and scene plan are saved.",
-            "info",
-          );
-          return;
-        }
-        throw e;
-      } finally {
-        abortRef.current = null;
-        setRenderMessage("");
-      }
-    });
+  async function generate() {
+    // A verified server quote and in-app payment confirmation must be integrated
+    // before any production request can create a provider expense.
+    notify(
+      "Production is waiting for a verified MagicLight connection and an in-app price confirmation. Your film draft remains editable.",
+      "info",
+    );
   }
   function brief() {
     saveDownload(
@@ -648,15 +531,13 @@ export default function Workspace({
       new Blob([JSON.stringify(film, null, 2)], { type: "application/json" }),
       `${cleanName(film.title)}-project.json`,
     );
-    notify(
-      "Project backup downloaded. Original media files are stored separately.",
-    );
+    notify("Project backup downloaded. Original media files are stored separately.");
   }
-  const studio = studios.find((s) => s.id === film.providerId) || studios[0];
+
   const nav = [
     { id: "create" as const, label: "Create a film", icon: Video },
     { id: "library" as const, label: "Film library", icon: Library },
-    { id: "studios" as const, label: "Studios", icon: SlidersHorizontal },
+    { id: "studios" as const, label: "Studio status", icon: SlidersHorizontal },
   ];
   const props: StepProps = { film, update, notify, busy, navigate };
   return (
@@ -752,8 +633,8 @@ export default function Workspace({
                 <div>
                   <h1>Your family. A lasting film.</h1>
                   <p>
-                    Turn the people, places, and moments that matter into a
-                    beautiful film.
+                    Turn the people, places, and moments that matter into a beautiful
+                    film.
                   </p>
                 </div>
                 <button
@@ -793,6 +674,7 @@ export default function Workspace({
                   {step === 1 && (
                     <DirectionStep
                       {...props}
+                      caps={caps}
                       aiConsent={aiConsent}
                       setAiConsent={setAiConsent}
                       themeOrigin={themeOrigin}
@@ -811,34 +693,29 @@ export default function Workspace({
                         if (enoughStory()) {
                           update({
                             scenes: editorialPlan(film),
-                            generatedBy: "Editorial archive plan",
+                            generatedBy: "Manual outline from source text",
+                            characters: [],
+                            assumptions: [],
+                            sourceCoverage: undefined,
                           });
                           navigate(2);
                           notify(
-                            "Editable archive plan created from your source text.",
+                            "Manual outline created from your source text. Add the cast and dramatic details in the review step.",
                           );
                         }
                       }}
                     />
                   )}
-                  {step === 2 && (
-                    <CuttingStep {...props} changeScene={changeScene} />
-                  )}
+                  {step === 2 && <CuttingStep {...props} changeScene={changeScene} />}
                   {step === 3 && (
                     <CreateStep
                       {...props}
                       caps={caps}
-                      changeScene={changeScene}
-                      checkShot={checkShot}
-                      confirmShot={setConfirmRender}
+                      checkFilm={checkFilm}
                       consent={consent}
                       setConsent={setConsent}
-                      canvasRef={canvasRef}
-                      progress={progress}
-                      renderMessage={renderMessage}
                       resultUrl={resultUrl}
-                      exportFilm={exportFilm}
-                      cancel={() => abortRef.current?.abort()}
+                      generate={generate}
                       brief={brief}
                       backup={backup}
                     />
@@ -870,9 +747,7 @@ export default function Workspace({
               <div className="page-heading">
                 <div>
                   <h1>Your family film library</h1>
-                  <p>
-                    Private projects saved under your account in this browser.
-                  </p>
+                  <p>Private projects saved under your account in this browser.</p>
                 </div>
                 <button className="button primary" onClick={create}>
                   <Plus size={16} />
@@ -923,19 +798,12 @@ export default function Workspace({
                       {!p.archivedAt && (
                         <button
                           className="text-button"
-                          disabled={
-                            projects.filter((x) => !x.archivedAt).length <= 1
-                          }
+                          disabled={projects.filter((x) => !x.archivedAt).length <= 1}
                           onClick={() => {
-                            update(
-                              { archivedAt: new Date().toISOString() },
-                              p.id,
-                            );
+                            update({ archivedAt: new Date().toISOString() }, p.id);
                             if (activeId === p.id)
                               setActiveId(
-                                projects.find(
-                                  (x) => x.id !== p.id && !x.archivedAt,
-                                )!.id,
+                                projects.find((x) => x.id !== p.id && !x.archivedAt)!.id,
                               );
                             notify("Film archived. You can restore it here.");
                           }}
@@ -949,23 +817,17 @@ export default function Workspace({
               </div>
               {localLegacy && (
                 <div className="legacy-box">
-                  <p>
-                    Your earlier Lineage Theatre projects are still in this
-                    browser.
-                  </p>
+                  <p>Your earlier Lineage Theatre projects are still in this browser.</p>
                   <button
                     className="button secondary"
                     onClick={() => {
                       try {
                         const old = JSON.parse(
-                          localStorage.getItem("lineage-theater-projects-v2") ||
-                            "[]",
+                          localStorage.getItem("lineage-theater-projects-v2") || "[]",
                         );
                         const imported = old
                           .map(normalizeFilm)
-                          .filter(
-                            (p: Film) => !projects.some((x) => x.id === p.id),
-                          );
+                          .filter((p: Film) => !projects.some((x) => x.id === p.id));
                         setProjects((p) => [...p, ...imported]);
                         setLocalLegacy(false);
                         notify(
@@ -986,70 +848,91 @@ export default function Workspace({
             </>
           )}
           {view === "studios" && (
-            <>
-              <div className="page-heading">
+            <section className="panel">
+              <div className="section-title">
                 <div>
-                  <h1>A studio for every story</h1>
-                  <p>
-                    Choose an in-app renderer or carry your production brief
-                    into another studio.
-                  </p>
+                  <h1>Your Lineage Theatre studio</h1>
+                  <p>One place for your story, script, cast, and finished film.</p>
                 </div>
+                <FilmIcon size={24} />
               </div>
-              <div className="studios-list">
-                {studios.map((s) => (
-                  <article className="studio-option" key={s.id}>
-                    <div className="studio-icon">
-                      <FilmIcon size={23} strokeWidth={1.3} />
-                    </div>
-                    <div>
-                      <div className="studio-title">
-                        <h2>{s.name}</h2>
-                        <span className="subtle-tag">
-                          {s.id === "runway"
-                            ? caps?.runway
-                              ? caps.connections?.runway?.credits === 0
-                                ? "Add API credits"
-                                : "Connected in app"
-                              : "Connection required"
-                            : s.id === "imagineart"
-                              ? caps?.imagineart
-                                ? "Configured in app"
-                                : "Connection required"
-                              : s.tag}
-                        </span>
-                      </div>
-                      <p>{s.description}</p>
-                      <small>{s.detail}</small>
-                    </div>
-                    <button
-                      className="button secondary small"
-                      onClick={() => {
-                        update({ providerId: s.id });
-                        notify(
-                          `${s.name} selected for ${film.title || "your film"}.`,
-                        );
-                        setView("create");
-                        setStep(3);
-                      }}
-                    >
-                      Choose studio
-                      <ArrowRight size={14} />
-                    </button>
+              <div className="studio-status-grid">
+                {(
+                  [
+                    [
+                      "Story development",
+                      "GPT-6 Astra",
+                      caps?.story,
+                      caps?.connections?.story?.reason,
+                    ],
+                    [
+                      "Animated film production",
+                      "MagicLight",
+                      caps?.magiclight,
+                      caps?.connections?.magiclight?.reason,
+                    ],
+                    [
+                      "Payment",
+                      "Pay within Lineage Theatre",
+                      caps?.billing,
+                      caps?.connections?.billing?.reason,
+                    ],
+                  ] as const
+                ).map(([label, name, ready, reason]) => (
+                  <article className="studio-status-card" key={label}>
+                    <span className="eyebrow">{label}</span>
+                    <h3>{name}</h3>
+                    <span className={`status-pill ${ready ? "ready" : "pending"}`}>
+                      {ready
+                        ? "Connection verified"
+                        : caps
+                          ? "Setup needed"
+                          : "Checking connection"}
+                    </span>
+                    <p>
+                      {reason ||
+                        (ready
+                          ? "Available in this app."
+                          : "Connection has not yet been verified.")}
+                    </p>
                   </article>
                 ))}
               </div>
+              <div className="story-promise">
+                <Sparkles size={22} />
+                <div>
+                  <h3>Highest quality, by default</h3>
+                  <p>
+                    Every new film requests MagicLight’s highest available animation and
+                    output quality.{" "}
+                    {caps?.quality?.verified
+                      ? caps.quality.label
+                      : "The available quality must be verified before production."}
+                  </p>
+                </div>
+              </div>
               <p className="field-note">
-                Provider pricing, credits, and availability are shown in each
-                official studio. External studios require their own accounts.
-                Gemini assists with story development when connected.
+                A MagicLight account alone does not connect video production here. The
+                service connection and in-app payment setup must be verified before a film
+                can be generated. Your story and draft remain editable while setup is
+                pending.
               </p>
-            </>
+              <button className="button primary" onClick={() => navigate(0)}>
+                Return to my film
+                <ArrowRight size={16} />
+              </button>
+            </section>
           )}
         </main>
         <footer className="workspace-footer">
           <span>Lineage Theatre · Lives remembered. Stories kept.</span>
-          <a href="/assets/the-journey-of-thomas-wilson.mp4" target="_blank" rel="noreferrer">Sample trailer</a>
+          <a
+            href="/assets/the-journey-of-thomas-wilson.mp4"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Sample trailer
+          </a>
           <a href="/privacy.html">Privacy</a>
           <a href="mailto:admin@brocotech.ai">Help</a>
           <span className="build-id">{__BUILD_COMMIT__.slice(0, 7)}</span>
@@ -1077,52 +960,10 @@ export default function Workspace({
           </button>
         </div>
       )}
-      {busy && !renderMessage && (
+      {busy && (
         <div className="busy-strip" role="status">
           <Loader2 size={16} className="spin" />
           {busy}
-        </div>
-      )}
-      {confirmRender && (
-        <div className="modal-backdrop" onClick={() => setConfirmRender(null)}>
-          <section
-            ref={dialogRef}
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="render-confirm"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 id="render-confirm">Generate a cinematic take</h2>
-            <p>
-              {confirmRender.title} · {studio.name} · 5 seconds
-            </p>
-            <p className="muted">
-              This sends the scene’s visual direction and selected reference
-              photo to {studio.name}. It uses the connected account’s paid API
-              credits. One request creates one take.
-            </p>
-            <p className="field-note">
-              {film.providerId === "runway"
-                ? `Runway estimate: ${confirmRender.sourceIds.some((id) => film.sources.some((s) => s.id === id && s.type.startsWith("image"))) ? "25 credits (Gen-4 Turbo)" : "60 credits (Gen-4.5)"}. Check current provider pricing if needed.`
-                : "ImagineArt bills its connected API account for this take."}
-            </p>
-            <div className="action-group">
-              <button
-                className="button secondary"
-                onClick={() => setConfirmRender(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="button primary"
-                onClick={() => void generate(confirmRender)}
-              >
-                <Sparkles size={16} />
-                Generate this take
-              </button>
-            </div>
-          </section>
         </div>
       )}
     </div>

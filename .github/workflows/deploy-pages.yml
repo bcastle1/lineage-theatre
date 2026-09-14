@@ -3,6 +3,8 @@ name: Validate Lineage Theatre
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -36,5 +38,5 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Authentication tests
+      - name: Authentication, story and source tests
         run: pnpm test
