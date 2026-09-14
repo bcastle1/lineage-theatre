@@ -23,14 +23,17 @@ function harness(options = {}) {
   const records = new Map(), calls = [], events = [], env = options.env || testEnv();
   const putRecord = (path, value) => { const record = { value: structuredClone(value), etag: `etag-${++nextEtag}` }; records.set(path, record); return structuredClone(record); };
   putRecord(userPath(OWNER.email), OWNER);
-  const read = async path => records.has(path) ? structuredClone(records.get(path)) : null;
+  const read = async path => { await options.beforeRead?.(path); return records.has(path) ? structuredClone(records.get(path)) : null; };
   const write = async (path, value, etag) => {
     if ((records.has(path) && records.get(path).etag !== etag) || (!records.has(path) && etag)) throw new Error("Precondition failed");
-    return putRecord(path, value);
+    const result = putRecord(path, value);
+    await options.afterWrite?.(path, value);
+    return result;
   };
   let fetcher = async () => tokenResponse();
-  const service = createQuickBooksService({ env, read, write, now: () => tick,
-    fetchImpl: async (...args) => { calls.push(args); return fetcher(...args); }, auditImpl: async (...args) => events.push(args) });
+  const serviceOptions = { env, read, write, now: () => tick,
+    fetchImpl: async (...args) => { calls.push(args); return fetcher(...args); }, auditImpl: async (...args) => { events.push(args); await options.afterAudit?.(...args); } };
+  const service = createQuickBooksService(serviceOptions);
   const handler = createQuickBooksHandler({ service, sessionFor: async () => actor ? { user: structuredClone(actor) } : null,
     limiter: async () => options.allowed !== false });
   async function run(method = "GET", query = "action=status", body, headers = {}) {
@@ -50,6 +53,7 @@ function harness(options = {}) {
   }
   async function authorize(extra = {}) { const attempt = await start(extra); await service.callback(attempt.query, attempt.cookie); return attempt; }
   return { env, records, calls, events, service, run, start, authorize, putRecord,
+    peer: () => createQuickBooksService(serviceOptions),
     setActor: value => { actor = value; }, setFetch: value => { fetcher = value; }, advance: ms => { tick += ms; } };
 }
 
@@ -383,4 +387,258 @@ test("callback redirects are fixed and never echo untrusted query or provider er
   const result = await h.run("GET", "action=callback&state=bad&error_description=private-value&redirect=https://evil.invalid");
   assert.equal(result.headers.location, callbackLocation("error")); assert.equal(JSON.stringify(result).includes("private-value"), false);
   assert.equal(h.calls.length, 0);
+});
+
+async function refreshCurrent(h, service = h.service) { return service.refresh(OWNER, { expectedRevision: (await h.service.status()).revision }); }
+const rotatedResponse = (extra = {}) => tokenResponse({ access_token: "synthetic-rotated-access", refresh_token: "synthetic-rotated-refresh", ...extra });
+const savedToken = h => decryptQuickBooksTokens(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens, quickbooksConfig(h.env));
+
+test("refresh stays server-only and owner-only; valid access skips refresh and no tokens enter results or audits", async () => {
+  const h = harness(); await h.authorize();
+  for (const actor of [ADMIN, CUSTOMER, { ...OWNER, mustChangePassword: true }])
+    await assert.rejects(() => h.service.refresh(actor, { expectedRevision: 3 }), /Only the owner/);
+  assert.equal((await h.run("POST", "", { action: "refresh", expectedRevision: 3 })).status, 400);
+  const result = await refreshCurrent(h);
+  assert.equal(result.refreshed, false); assert.equal(h.calls.length, 1);
+  assert.equal(result.paymentReady, false); assert.equal(result.refundReady, false);
+  for (const secret of [ACCESS, REFRESH, h.env.QUICKBOOKS_CLIENT_SECRET]) assert.equal(JSON.stringify([result, h.events]).includes(secret), false);
+});
+
+test("refresh atomically rotates both tokens and the next refresh uses the newest stored refresh token", async () => {
+  const h = harness(); await h.authorize(); h.advance(3_600_001);
+  const originalCiphertext = h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens.ciphertext;
+  h.setFetch(async (url, request) => {
+    assert.equal(url, INTUIT_TOKEN); assert.equal(request.method, "POST"); assert.equal(request.redirect, "error");
+    assert.ok(request.signal); assert.equal(request.headers["x-include-refresh-token-hard-expires-in"], "true");
+    const form = new URLSearchParams(request.body);
+    assert.equal(form.get("grant_type"), "refresh_token"); assert.equal(form.has("code"), false);
+    assert.equal(form.get("refresh_token"), h.calls.length === 2 ? REFRESH : "synthetic-rotated-refresh");
+    return rotatedResponse();
+  });
+  const result = await refreshCurrent(h);
+  assert.equal(result.refreshed, true); assert.equal(result.refreshStatus, "refreshed"); assert.equal(result.connected, true);
+  assert.notEqual(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens.ciphertext, originalCiphertext);
+  assert.equal(savedToken(h).refreshToken, "synthetic-rotated-refresh"); assert.equal(savedToken(h).accessToken, "synthetic-rotated-access");
+  h.advance(3_600_001); await refreshCurrent(h); assert.equal(h.calls.length, 3);
+  for (const secret of [ACCESS, REFRESH, "synthetic-rotated-access", "synthetic-rotated-refresh"])
+    assert.equal(JSON.stringify([result, [...h.records.values()], h.events]).includes(secret), false);
+});
+
+test("independent service instances serialize refreshes and do not take over abandoned locks", async () => {
+  const h = harness(); await h.authorize(); h.advance(3_600_001);
+  let release, entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  h.setFetch(async () => { entered(); return new Promise(resolve => { release = () => resolve(rotatedResponse()); }); });
+  const revision = (await h.service.status()).revision;
+  const first = h.service.refresh(OWNER, { expectedRevision: revision }); await ready;
+  await assert.rejects(() => h.peer().refresh(OWNER, { expectedRevision: revision }), /connection changed/);
+  await assert.rejects(() => refreshCurrent(h, h.peer()), /still being verified/);
+  h.advance(20 * 60_000);
+  await assert.rejects(() => refreshCurrent(h, h.peer()), /still being verified/);
+  assert.equal((await h.service.status()).connected, false); assert.equal((await h.service.status()).pending, true);
+  assert.equal(h.calls.length, 2); release(); await first;
+  assert.equal((await h.service.status()).pending, false);
+});
+
+test("refresh preserves omitted scope/realm provenance and known rolling/hard expiry instead of inventing attestation", async () => {
+  for (const attested of [true, false]) {
+    const h = harness(); h.setFetch(async () => tokenResponse({ ...(attested ? { scope: QUICKBOOKS_SCOPES.join(" "), realmId: REALM } : {}), x_refresh_token_hard_expires_in: 100_000 }));
+    await h.authorize(); const before = savedToken(h); h.advance(3_600_001);
+    h.setFetch(async () => rotatedResponse({ x_refresh_token_expires_in: undefined, x_refresh_token_hard_expires_in: undefined }));
+    await refreshCurrent(h); const after = savedToken(h);
+    for (const field of ["grantedScopes", "scopeVerification", "realmVerification", "refreshTokenExpiresAt", "refreshTokenHardExpiresAt"])
+      assert.deepEqual(after[field], before[field], field);
+  }
+});
+
+test("known refresh expiry, unknown lifetime and hard expiry block without provider calls; a hard deadline never extends", async () => {
+  for (const extra of [{ x_refresh_token_expires_in: 1 }, { x_refresh_token_expires_in: undefined }, { x_refresh_token_hard_expires_in: 1 }]) {
+    const h = harness(); h.setFetch(async () => tokenResponse(extra)); await h.authorize(); h.advance(3_600_001);
+    await assert.rejects(() => refreshCurrent(h), /expiry cannot be validated or has passed/);
+    assert.equal(h.calls.length, 1); assert.equal((await h.service.status()).connected, false);
+    assert.equal((await h.service.status()).refreshStatus, "reconnect-required");
+  }
+  const h = harness(); h.setFetch(async () => tokenResponse({ x_refresh_token_hard_expires_in: 50_000 }));
+  await h.authorize(); const hard = savedToken(h).refreshTokenHardExpiresAt; h.advance(3_600_001);
+  h.setFetch(async () => rotatedResponse({ x_refresh_token_hard_expires_in: 100_000 }));
+  await refreshCurrent(h); assert.equal(savedToken(h).refreshTokenHardExpiresAt, hard);
+});
+
+test("malformed rotation, expiry, scope or realm responses revoke returned tokens and never save an unusable pair", async () => {
+  for (const extra of [{ x_refresh_token_expires_in: 0 }, { x_refresh_token_expires_in: "100" }, { x_refresh_token_hard_expires_in: -1 },
+    { scope: "openid" }, { realmId: "99999" }, { refresh_token: "" }]) {
+    const h = harness(); await h.authorize(); h.advance(3_600_001);
+    h.setFetch(async (url, request) => {
+      if (url === INTUIT_TOKEN) return rotatedResponse(extra);
+      assert.equal(url, INTUIT_REVOKE);
+      assert.equal(JSON.parse(request.body).token, extra.refresh_token === "" ? "synthetic-rotated-access" : "synthetic-rotated-refresh");
+      return new Response(null, { status: 200 });
+    });
+    await assert.rejects(() => refreshCurrent(h));
+    const status = await h.service.status(); assert.equal(status.connected, false); assert.equal(status.hasSavedAuthorization, false);
+    assert.equal(h.calls.length, 3); assert.equal(status.remoteReviewRequired, false);
+  }
+});
+
+test("invalid_grant and rejected credentials disable old access; ambiguous responses block reuse without retries or secret leaks", async () => {
+  for (const variant of ["invalid_grant", "invalid_client", "network", "server", "bad-json"]) {
+    const h = harness(); await h.authorize(); h.advance(3_550_000); // Access is still valid but inside the refresh margin.
+    h.setFetch(async () => {
+      if (variant === "network") throw new Error(`network ${REFRESH}`);
+      if (variant === "bad-json") return new Response(`bad ${REFRESH}`, { status: 200 });
+      return new Response(JSON.stringify({ error: variant, error_description: REFRESH }), { status: variant === "server" ? 500 : 400 });
+    });
+    await assert.rejects(() => refreshCurrent(h), error => !error.message.includes(REFRESH));
+    const status = await h.service.status();
+    assert.equal(status.connected, false); assert.equal(status.hasSavedAuthorization, true); assert.equal(status.pending, false);
+    assert.equal(status.remoteReviewRequired, !["invalid_grant", "invalid_client"].includes(variant));
+    await assert.rejects(() => refreshCurrent(h), /cannot be refreshed/); assert.equal(h.calls.length, 2);
+    assert.equal(JSON.stringify([status, h.events]).includes(REFRESH), false);
+  }
+});
+
+test("disconnect during refresh removes local access immediately and only the returned rotated token is revoked", async () => {
+  for (const revokeConfirmed of [true, false]) {
+    const h = harness(); await h.authorize(); h.advance(3_600_001);
+    h.setFetch(async (url, request) => {
+      if (url === INTUIT_TOKEN) {
+        const status = await h.service.disconnect(OWNER, { expectedRevision: (await h.service.status()).revision });
+        assert.equal(status.hasSavedAuthorization, false); assert.equal(status.pending, true);
+        assert.equal(h.calls.length, 2, "disconnect defers old-token revocation");
+        return rotatedResponse();
+      }
+      assert.equal(JSON.parse(request.body).token, "synthetic-rotated-refresh");
+      await assert.rejects(() => h.start(), /still being verified/);
+      if (!revokeConfirmed) throw new Error("revocation timeout");
+      return new Response(null, { status: 200 });
+    });
+    await assert.rejects(() => refreshCurrent(h));
+    const status = await h.service.status(); assert.equal(status.hasSavedAuthorization, false); assert.equal(status.connected, false);
+    assert.equal(status.pending, false); assert.equal(status.remoteReviewRequired, !revokeConfirmed); assert.equal(h.calls.length, 3);
+  }
+});
+
+test("disconnect during a failed refresh revokes old tokens once but preserves unknown rotation uncertainty", async () => {
+  for (const outcome of ["invalid_grant", "network"]) {
+    const h = harness(); await h.authorize(); h.advance(3_600_001);
+    h.setFetch(async (url, request) => {
+      if (url === INTUIT_TOKEN) {
+        await h.service.disconnect(OWNER, { expectedRevision: (await h.service.status()).revision });
+        if (outcome === "network") throw new Error("unknown outcome");
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      assert.equal(JSON.parse(request.body).token, REFRESH); return new Response(null, { status: 200 });
+    });
+    await assert.rejects(() => refreshCurrent(h));
+    const status = await h.service.status(); assert.equal(status.hasSavedAuthorization, false); assert.equal(status.pending, false);
+    assert.equal(status.remoteReviewRequired, outcome === "network"); assert.equal(h.calls.length, 3);
+  }
+});
+
+test("changed credentials fail before refresh; changes to owner or configuration during refresh revoke the returned pair", async () => {
+  for (const key of ["QUICKBOOKS_CLIENT_ID", "QUICKBOOKS_CLIENT_SECRET", "QUICKBOOKS_TOKEN_ENCRYPTION_KEY"]) {
+    const h = harness(); await h.authorize(); h.advance(3_600_001);
+    h.env[key] = key.includes("KEY") ? randomBytes(32).toString("base64") : "changed-value";
+    await assert.rejects(() => refreshCurrent(h), /credentials changed/); assert.equal(h.calls.length, 1);
+  }
+  for (const variant of ["password", "suspended", "role", "setup", "client", "key"]) {
+    const h = harness(); await h.authorize(); h.advance(3_600_001);
+    h.setFetch(async (url, request) => {
+      if (url === INTUIT_REVOKE) { assert.equal(JSON.parse(request.body).token, "synthetic-rotated-refresh"); return new Response(null, { status: 200 }); }
+      if (variant === "client") h.env.QUICKBOOKS_CLIENT_SECRET = "changed-value";
+      else if (variant === "key") h.env.QUICKBOOKS_TOKEN_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+      else h.putRecord(userPath(OWNER.email), { ...OWNER, ...(variant === "password" ? { passwordHash: "changed" } : variant === "suspended" ? { status: "suspended" } : variant === "role" ? { role: "customer" } : { mustChangePassword: true }) });
+      return rotatedResponse();
+    });
+    await assert.rejects(() => refreshCurrent(h));
+    assert.equal((await h.service.status()).hasSavedAuthorization, false); assert.equal(h.calls.length, 3);
+  }
+});
+
+test("a rotated-pair write that commits but loses its response is identified and revoked without presenting connected", async () => {
+  let failed = false;
+  const h = harness({ afterWrite: async (path, value) => {
+    if (path === QUICKBOOKS_CONNECTION_PATH && value.status === "authorized" && value.lastRefreshAttemptId && !failed) { failed = true; throw new Error("lost write response"); }
+  } });
+  await h.authorize(); h.advance(3_600_001);
+  h.setFetch(async url => url === INTUIT_TOKEN ? rotatedResponse() : new Response(null, { status: 200 }));
+  await assert.rejects(() => refreshCurrent(h));
+  const status = await h.service.status(); assert.equal(status.connected, false); assert.equal(status.hasSavedAuthorization, false);
+  assert.equal(status.pending, false); assert.equal(h.calls.length, 3);
+});
+
+test("cleanup for a lost save cannot revoke or overwrite a newer refresh that already owns the same grant", async () => {
+  let failed = false, h;
+  h = harness({ afterWrite: async (path, value) => {
+    if (path === QUICKBOOKS_CONNECTION_PATH && value.status === "authorized" && value.lastRefreshAttemptId && !failed) {
+      failed = true;
+      h.putRecord(path, { ...value, revision: value.revision + 1, status: "refreshing",
+        refreshOperation: { attemptId: "newer-worker-attempt", stage: "exchanging" } });
+      throw new Error("lost write response after a new worker claimed the grant");
+    }
+  } });
+  await h.authorize(); h.advance(3_600_001); h.setFetch(async () => rotatedResponse());
+  await assert.rejects(() => refreshCurrent(h));
+  const current = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
+  assert.equal(current.refreshOperation.attemptId, "newer-worker-attempt"); assert.ok(current.encryptedTokens);
+  assert.equal(h.calls.length, 2, "stale cleanup must not revoke a grant now owned by a newer operation");
+});
+
+test("an audit failure after a confirmed rotated-pair save does not revoke the saved authorization", async () => {
+  const h = harness({ afterAudit: async (_, action) => { if (action === "quickbooks.refresh.saved") throw new Error("audit unavailable"); } });
+  await h.authorize(); h.advance(3_600_001); h.setFetch(async () => rotatedResponse());
+  await assert.rejects(() => refreshCurrent(h));
+  assert.equal((await h.service.status()).connected, true); assert.equal(savedToken(h).refreshToken, "synthetic-rotated-refresh");
+  assert.equal(h.calls.length, 2);
+});
+
+test("precondition storage errors in server-only refresh are sanitized without a provider request", async () => {
+  let failRead = false;
+  const h = harness({ beforeRead: async () => { if (failRead) throw new Error(`storage error ${REFRESH}`); } });
+  await h.authorize(); failRead = true;
+  await assert.rejects(() => h.service.refresh(OWNER, { expectedRevision: 3 }), error =>
+    error.code === "QUICKBOOKS_REFRESH_UNCERTAIN" && !error.message.includes(REFRESH));
+  assert.equal(h.calls.length, 1);
+});
+
+test("a callback whose final save loses its response cannot revoke a refresh that now owns or has rotated the grant", async () => {
+  for (const completed of [false, true]) {
+    let failed = false, h, peerRefresh, release, entered;
+    const refreshStarted = new Promise(resolve => { entered = resolve; });
+    h = harness({ afterWrite: async (path, value) => {
+      if (path === QUICKBOOKS_CONNECTION_PATH && value.status === "authorized" && !value.lastRefreshAttemptId && !failed) {
+        failed = true;
+        peerRefresh = h.peer().refresh(OWNER, { expectedRevision: value.revision });
+        await refreshStarted;
+        if (completed) { release(); await peerRefresh; }
+        throw new Error("callback write response lost after another worker claimed the grant");
+      }
+    } });
+    h.setFetch(async (url, request) => {
+      assert.equal(url, INTUIT_TOKEN, "stale callback cleanup must not revoke this grant");
+      if (new URLSearchParams(request.body).get("grant_type") === "authorization_code") return tokenResponse({ expires_in: 1 });
+      entered(); return new Promise(resolve => { release = () => resolve(rotatedResponse()); });
+    });
+    await assert.rejects(() => h.authorize());
+    assert.equal(h.calls.length, 2);
+    if (!completed) { assert.equal((await h.service.status()).pending, true); release(); await peerRefresh; }
+    assert.equal((await h.service.status()).connected, true);
+    assert.equal(savedToken(h).refreshToken, "synthetic-rotated-refresh");
+  }
+});
+
+test("callback cleanup claims its committed generation before revocation and removes locally saved tokens", async () => {
+  let failed = false;
+  const h = harness({ afterWrite: async (path, value) => {
+    if (path === QUICKBOOKS_CONNECTION_PATH && value.status === "authorized" && !failed) { failed = true; throw new Error("callback write response lost"); }
+  } });
+  h.setFetch(async url => {
+    if (url === INTUIT_TOKEN) return tokenResponse();
+    const status = await h.service.status(); assert.equal(status.hasSavedAuthorization, false); assert.equal(status.pending, true);
+    await assert.rejects(() => refreshCurrent(h), /still being verified/);
+    return new Response(null, { status: 200 });
+  });
+  await assert.rejects(() => h.authorize());
+  assert.equal((await h.service.status()).hasSavedAuthorization, false); assert.equal((await h.service.status()).pending, false);
+  assert.equal(h.calls.length, 2);
 });

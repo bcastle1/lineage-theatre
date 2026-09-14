@@ -132,6 +132,7 @@ export default function Landing({ children }: { children: ReactNode }) {
         <a className="landing-brand" href="#home"><Aperture size={24} aria-hidden="true" /><span>Lineage Theatre</span></a>
         <p>Stories across generations.</p>
         <nav aria-label="Legal"><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/security.html">Security</a></nav>
+        <p className="payment-disclosure">When checkout becomes available, payment processing will be provided by Intuit Payments Inc.</p>
       </footer>
     </div>
   );

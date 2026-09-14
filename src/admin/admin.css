@@ -884,6 +884,25 @@
   font-size: 12px;
   line-height: 1.7;
 }
+.admin-quickbooks-fallback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+.admin-quickbooks-fallback .button {
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+}
+.admin-quickbooks-fallback > p {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #63715c;
+}
 .admin-quickbooks-readiness {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
