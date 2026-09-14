@@ -2,11 +2,11 @@
 
 A family-history film studio with public account registration at [lineagetheater.com](https://lineagetheater.com). React/Vite guides a user through family sources, film development, script and cast review, and production.
 
-## This development branch
+## Current capabilities
 
-MagicLight is the only video provider offered in the active studio, with no external handoff. **GPT-6 Astra generation, MagicLight generation, and QuickBooks charges/refunds remain connection pending.** MagicLight's real full-film API contract, highest-quality settings, commercial entitlement, and the QuickBooks merchant flow must be integrated and verified before paid production. An API key alone cannot activate an unavailable adapter. See [integration status](docs/INTERNAL-FILM-INTEGRATION.md).
+MagicLight is the only video provider offered in the active studio, with no external handoff. **GPT-6 Astra ideas and screenplay generation are connected and verified. MagicLight film generation and QuickBooks charges/refunds remain connection pending.** The MagicLight production pipeline still needs verified API operations, quality and cost settings, any required clip assembly, and commercial entitlement; the QuickBooks merchant flow must also be integrated and verified before paid production. An API key alone cannot activate an unavailable adapter. See [integration status](docs/INTERNAL-FILM-INTEGRATION.md).
 
-Story ideas and full screenplays use GPT-6 Astra through OpenAI Responses, with structured output, explicit source consent, and no model fallback. An administrator must connect the selected existing OpenAI project using server-only `OPENAI_API_KEY`; real model access and quota must be verified before claiming the feature is live.
+Story ideas and full screenplays use GPT-6 Astra through OpenAI Responses, with structured output, explicit source consent, and no model fallback. The selected existing OpenAI project is connected through server-only `OPENAI_API_KEY`. On September 14, 2026, live fictional tests confirmed the exact `gpt-6-astra` response model, a screenplay, and ten story ideas. A signed-in production UI test then read the full fictional narrative and uploaded TXT file and produced five editable scenes, four recurring characters, and nine disclosed assumptions without a redirect. These checks establish story development, not finished-video rendering or payment readiness; future requests remain subject to model access and quota.
 
 The default film treatment is a hopeful, animated story based on a true story. Script development includes a recurring ensemble, narration, dialogue, visual directions, source references and a reviewable assumptions ledger. Known facts are preserved; inferred or invented people and connective scenes are disclosed. Documentary mode restricts invention. The chosen highest-quality setting is a production preference until the MagicLight API's actual options are verified.
 
