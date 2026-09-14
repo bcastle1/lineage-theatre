@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { list } from "@vercel/blob";
 import { digest, readRecord, writeRecord } from "./auth.mjs";
-import { OWNER_EMAIL, roleForUser } from "./access.mjs";
+import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "./access.mjs";
 
 export const PRICING_PATH = "settings/pricing.json";
 export function validEmail(value) {
@@ -11,8 +11,9 @@ export function validEmail(value) {
   return email;
 }
 export function safeUser(user) {
+  const accessStatus=accessStatusForUser(user);
   return { email:user.email, name:user.name || "", role:roleForUser({...user,status:"active"}),
-    status:user.status === "suspended" ? "suspended" : "active",
+    status:accessStatus === "approved" ? "active" : accessStatus, accessStatus,
     createdAt:user.createdAt || null, lastLoginAt:user.lastLoginAt || null };
 }
 export async function recordPage(prefix, {cursor, limit=50}={}, dependencies={list,readRecord}) {
@@ -47,6 +48,7 @@ export function validateUserAction(actor, target, action) {
   if (target.email===OWNER_EMAIL) throw new Error("The owner account cannot be suspended or demoted.");
   if (actor.email===target.email) throw new Error("You cannot remove your own administrative access.");
   if (action==="revokeAdmin" && roleForUser(actor)!=="owner") throw new Error("Only the owner can change administrator access.");
+  if (action==="revokeAdmin" && target.role!=="admin") throw new Error("Only an administrator account can have administrator access removed.");
   if (target.role==="admin" && roleForUser(actor)!=="owner") throw new Error("Only the owner can manage another administrator.");
 }
 export function newInvitation(email,actor, now=Date.now()) {

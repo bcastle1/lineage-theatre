@@ -15,3 +15,16 @@ export function hasAdminAccess(user) {
 export function isOwner(user) {
   return roleForUser(user) === "owner";
 }
+
+// A customer's email domain, old active flag, or signed cookie is not approval.
+// The live private user record is checked on every protected request.
+export function hasRecordedApproval(user) {
+  return typeof user?.approvedAt === "string" && Number.isFinite(Date.parse(user.approvedAt))
+    && typeof user.approvedBy === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.approvedBy);
+}
+
+export function accessStatusForUser(user) {
+  if (user?.status === "suspended") return "suspended";
+  if (hasAdminAccess(user)) return "approved";
+  return user?.status === "active" && hasRecordedApproval(user) ? "approved" : "pending";
+}

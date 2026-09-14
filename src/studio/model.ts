@@ -3,6 +3,7 @@ export interface User {
   name: string;
   mustChangePassword: boolean;
   role: "owner" | "admin" | "customer";
+  accessStatus: "approved" | "pending" | "suspended";
   emailVerified: boolean;
 }
 export interface Source {

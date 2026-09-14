@@ -18,13 +18,14 @@ import { OWNER_EMAIL } from "./_lib/access.mjs";
 import { AccountSecurityError, validatePassword, passwordUpdate, PASSWORD_MAX_AGE_MS } from "./_lib/auth-security.mjs";
 import { createAccountSecurityService, clearMfaCookie } from "./_lib/account-security-service.mjs";
 import { verificationMail } from "./_lib/verification-mail.mjs";
+import { readRegistrationPolicy } from "./_lib/registration-policy.mjs";
 
 const unavailableRegistration = "This email cannot be registered. If you already have an account, sign in or contact the administrator.";
 const dependencies = { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction };
 
 export function validateRegistration(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Enter your name, email, and password to create an account.");
-  if (["role", "roles", "status", "emailVerified", "mustChangePassword", "permissions", "mfa", "securityVersion", "passwordHistory", "passwordExpiresAt"].some(key=>Object.hasOwn(body,key))) throw new Error("Account access and verification are assigned by the server.");
+  if (["role", "roles", "status", "accessStatus", "approvedAt", "approvedBy", "approvalSource", "approvalPolicyRevision", "approvalRequired", "adminGrantedBy", "adminRevokedAt", "emailVerified", "mustChangePassword", "permissions", "mfa", "securityVersion", "passwordHistory", "passwordExpiresAt"].some(key=>Object.hasOwn(body,key))) throw new Error("Account access and verification are assigned by the server.");
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const parts = email.split("@");
   const local = parts[0] || "";
@@ -45,6 +46,7 @@ export function validateRegistration(body) {
 export function createAuthHandler(overrides = {}) {
   const { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction } = { ...dependencies, ...overrides };
   const clock = overrides.now || (() => Date.now());
+  const registrationPolicy = overrides.readRegistrationPolicy || (() => readRegistrationPolicy(readRecord));
   const security = createAccountSecurityService({ readRecord, writeRecord, verifyPassword,
     verificationMail: overrides.verificationMail || verificationMail, now: clock, env: overrides.env || process.env });
   const revoke = overrides.revokeSession || (req => revokeSession(req, { readRecordImpl: readRecord, writeRecordImpl: writeRecord, now: clock() }));
@@ -57,8 +59,14 @@ export function createAuthHandler(overrides = {}) {
         if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in and complete password setup to manage account security." });
         return json(res, 200, security.security(session.user));
       }
+      // A settings outage must not strand signed-in owners. Registration itself
+      // still requires a successful policy read before any account is created.
+      let registrationApprovalRequired = true;
+      try { registrationApprovalRequired = (await registrationPolicy()).approvalRequired; }
+      catch {}
       return json(res, 200, {
         user: session ? publicUser(session.user) : null,
+        registrationApprovalRequired,
       });
     }
     if (req.method !== "POST")
@@ -80,6 +88,9 @@ export function createAuthHandler(overrides = {}) {
       const path = userPath(registration.email);
       if (registration.email === OWNER_EMAIL || await readRecord(path))
         return json(res, 409, { message: unavailableRegistration });
+      // This server setting applies only at creation; it never changes the
+      // approval of existing users when administrators toggle registration.
+      const policy = await registrationPolicy();
       const now = new Date(clock()).toISOString();
       const user = {
         email: registration.email,
@@ -90,7 +101,9 @@ export function createAuthHandler(overrides = {}) {
         passwordExpiresAt: new Date(clock() + PASSWORD_MAX_AGE_MS).toISOString(),
         mustChangePassword: false,
         role: "customer",
-        status: "active",
+        status: policy.approvalRequired ? "pending" : "active",
+        ...(!policy.approvalRequired ? { approvedAt: now, approvedBy: policy.updatedBy,
+          approvalSource: "registration-policy", approvalPolicyRevision: policy.revision } : {}),
         emailVerified: false,
         createdAt: now,
         updatedAt: now,
@@ -109,7 +122,9 @@ export function createAuthHandler(overrides = {}) {
         throw error;
       }
       res.setHeader("Set-Cookie", cookie);
-      return json(res, 201, { user: publicUser(user), message: "Your account is created and you are signed in." });
+      return json(res, 201, { user: publicUser(user), message: policy.approvalRequired
+        ? "Your account is created and awaiting administrator approval. You can manage account security while you wait."
+        : "Your account is created and you are signed in." });
     }
     if (body.action === "logout") {
       await revoke(req);
@@ -140,8 +155,8 @@ export function createAuthHandler(overrides = {}) {
       });
     }
     if (["mfaBegin", "mfaConfirm", "mfaDisable", "mfaRecoveryCodes", "emailVerificationRequest", "emailVerificationConfirm"].includes(body.action)) {
-      const session = await getSession(req);
-      if (!session) return json(res, 401, { message: "Your sign-in expired. Sign in again to manage account security." });
+      const session = await getSession(req, true);
+      if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in and complete password setup to manage account security." });
       const emailRequest = body.action === "emailVerificationRequest";
       if (!(await limitAction(`security:${session.user.email}:${body.action}`, emailRequest ? 3 : 10, emailRequest ? 3600_000 : 15 * 60_000)))
         return json(res, 429, { message: "Too many verification attempts. Wait before trying again." });

@@ -39,7 +39,7 @@ function harness(overrides = {}) {
   return { handler, records, writes, limits, read, write };
 }
 
-test("public signup creates an unverified customer and establishes a real authenticated session", async () => {
+test("public signup creates a pending unverified customer with a restricted authenticated session", async () => {
   const h = harness();
   const body = { ...registration(), email: "  ADA@Example.Invalid  ", name: "  Fictional   Ada Example  " };
   const result = await run(h.handler, request(body));
@@ -47,11 +47,12 @@ test("public signup creates an unverified customer and establishes a real authen
   assert.equal(result.body.user.email, "ada@example.invalid");
   assert.equal(result.body.user.name, "Fictional Ada Example");
   assert.equal(result.body.user.role, "customer");
+  assert.equal(result.body.user.accessStatus, "pending");
   assert.equal(result.body.user.emailVerified, false);
   assert.equal(result.body.user.mustChangePassword, false);
   const stored = h.records.get(userPath("ada@example.invalid"));
   assert.equal(stored.role, "customer");
-  assert.equal(stored.status, "active");
+  assert.equal(stored.status, "pending");
   assert.equal(stored.emailVerified, false);
   assert.equal(Object.hasOwn(stored, "password"), false);
   assert.equal(verifyPassword(body.password, stored.passwordHash), true);
@@ -60,16 +61,22 @@ test("public signup creates an unverified customer and establishes a real authen
   assert.equal(h.writes[0].etag, undefined);
   const cookie = result.headers["Set-Cookie"];
   assert.match(cookie, /HttpOnly; Secure; SameSite=Strict/);
+  assert.equal(await getSession({ headers: { cookie: cookie.split(";")[0] } }, false,
+    { readRecordImpl: h.read, writeRecordImpl: h.write }), null);
   const current = await run(h.handler, { method: "GET", headers: { cookie: cookie.split(";")[0] } });
   assert.equal(current.body.user.email, "ada@example.invalid");
   assert.equal(current.body.user.role, "customer");
+  assert.equal(current.body.registrationApprovalRequired, true);
   assert.equal(h.limits[0][0], "register-ip:198.51.100.7");
   assert.equal(h.limits[1][0], "register-email:ada@example.invalid");
 });
 
 test("registration rejects all supplied privilege or verification fields", async () => {
   const h = harness();
-  for (const [key, value] of Object.entries({ role: "owner", roles: ["admin"], status: "active", emailVerified: true, permissions: ["all"], mustChangePassword: false })) {
+  for (const [key, value] of Object.entries({ role: "owner", roles: ["admin"], status: "active", accessStatus: "approved",
+    approvedAt: new Date().toISOString(), approvedBy: "erik@brocotech.ai", approvalSource: "administrator",
+    approvalPolicyRevision: 1, approvalRequired: false, adminGrantedBy: "erik@brocotech.ai", adminRevokedAt: null,
+    emailVerified: true, permissions: ["all"], mustChangePassword: false })) {
     const result = await run(h.handler, request({ ...registration(), [key]: value }));
     assert.equal(result.statusCode, 400, key);
     assert.match(result.body.message, /assigned by the server/);

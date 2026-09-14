@@ -1,10 +1,11 @@
 import { json, readBody, sameOrigin, getSession, readRecord, writeRecord, userPath, publicUser, digest, limitAction } from "./_lib/auth.mjs";
-import { hasAdminAccess, isOwner, OWNER_EMAIL } from "./_lib/access.mjs";
+import { hasAdminAccess, isOwner, OWNER_EMAIL, accessStatusForUser, hasRecordedApproval } from "./_lib/access.mjs";
 import { recordPage, safeUser, validEmail, audit, newInvitation, validateInvitation, validateUserAction, validateRefund, readPricingSettings, markupFromPercent, PRICING_PATH } from "./_lib/admin.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { connections } from "./studio.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
+import { readRegistrationPolicy as readPolicy, REGISTRATION_POLICY_PATH } from "./_lib/registration-policy.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -15,17 +16,20 @@ const safeOrder=(order)=>({id:order.id,customerEmail:order.customerEmail,filmTit
 function resultError(res,status,message) { return json(res,status,{message}); }
 
 export function createAdminHandler(overrides={}) {
- const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,...overrides};
+ const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,
+   readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  return async function handler(req,res) {
-  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments}=dependencies;
+  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy}=dependencies;
   try {
-    const session=await getSession(req);
-    if (!session) return resultError(res,401,"Sign in to continue.");
-    const actor=session.user;
     if (req.method==="POST" && !sameOrigin(req)) return resultError(res,403,"Begin this action inside Lineage Theatre.");
     const url=new URL(req.url,`https://${req.headers.host}`);
     const body=req.method==="POST"?await readBody(req,12_000):null;
     const action=body?.action || url.searchParams.get("action") || "overview";
+    // Pending users can claim their exact owner-issued invitation, but cannot
+    // read administrator data or skip a required password change.
+    const session=await getSession(req,req.method==="POST" && action==="acceptInvite");
+    if (!session || session.user.mustChangePassword) return resultError(res,401,"Sign in and complete password setup to continue.");
+    const actor=session.user;
     if (req.method==="POST" && action==="acceptInvite") {
       if (!(await limitAction(`admin-invite-claim:${actor.email}`,10,3600_000))) return resultError(res,429,"Please wait before trying another invitation.");
       if (typeof body.token!=="string" || !/^[a-f0-9]{64}$/.test(body.token)) return resultError(res,400,"This administrator invitation is invalid.");
@@ -36,8 +40,10 @@ export function createAdminHandler(overrides={}) {
       const current=await readRecord(userPath(actor.email));
       if (!current || current.value.status==="suspended") return resultError(res,403,"This account is not active.");
       validateInvitation(record.value,current.value);
-      if (current.value.role!=="admin") {
-        const updated={...current.value,role:"admin",adminGrantedBy:record.value.createdBy,updatedAt:new Date().toISOString()};
+      if (current.value.role!=="admin" || !hasRecordedApproval(current.value)) {
+        const now=new Date().toISOString();
+        const updated={...current.value,role:"admin",status:"active",adminGrantedBy:record.value.createdBy,
+          ...(!hasRecordedApproval(current.value)?{approvedAt:now,approvedBy:record.value.createdBy,approvalSource:"administrator-invitation"}:{}),updatedAt:now};
         await writeRecord(userPath(actor.email),updated,current.etag);
         await audit(actor.email,"administrator.invitation.accepted",actor.email,{invitationId:record.value.id});
         return json(res,200,{user:publicUser(updated),message:"Administrator access is active."});
@@ -46,6 +52,7 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="registrationPolicy") return json(res,200,await readRegistrationPolicy());
       if(action==="productionReadiness") return json(res,200,filmProduction.readiness());
       if(action==="paymentDiagnostics") return json(res,200,await payments.adminDiagnostics(actor,url.searchParams.get("id")));
       if(action==="accountingExport") return json(res,200,await payments.accountingExport(actor,url.searchParams.get("id")));
@@ -74,6 +81,7 @@ export function createAdminHandler(overrides={}) {
         const ready=await connections({pricingSettings:settings});
         const paid=orders.records.filter(order=>!isTestOrder(order)&&["paid","captured","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
         return json(res,200,{stats:{users:users.records.length,administrators:users.records.filter(hasAdminAccess).length,
+          pending:users.records.filter(u=>accessStatusForUser(u)==="pending").length,
           suspended:users.records.filter(u=>u.status==="suspended").length,films:films.records.length,paidOrders:paid.length,
           paymentTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.amountCents)?o.amountCents:0),0),
           refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),
@@ -84,6 +92,32 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="updateRegistrationPolicy") {
+      if(typeof body.approvalRequired!=="boolean") return resultError(res,400,"Choose whether administrator approval is required.");
+      const record=await readRecord(REGISTRATION_POLICY_PATH);
+      const current=await readPolicy(async()=>record);
+      if(!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision!==current.revision)
+        return resultError(res,409,"Registration settings were changed by another administrator. Refresh before saving.");
+      if(body.approvalRequired===current.approvalRequired) return json(res,200,current);
+      const policy={approvalRequired:body.approvalRequired,revision:current.revision+1,updatedAt:new Date().toISOString(),updatedBy:actor.email};
+      await writeRecord(REGISTRATION_POLICY_PATH,policy,record?.etag);
+      await audit(actor.email,"registration.policy.updated","registration-approval",{previousApprovalRequired:current.approvalRequired,
+        approvalRequired:policy.approvalRequired,revision:policy.revision});
+      return json(res,200,await readRegistrationPolicy());
+    }
+    if(action==="approve") {
+      const email=validEmail(body.email),path=userPath(email),record=await readRecord(path);
+      validateUserAction(actor,record?.value,action);
+      if(accessStatusForUser(record.value)==="approved") return json(res,200,{user:safeUser(record.value)});
+      if(record.value.status==="suspended") return resultError(res,400,"Only pending accounts can be approved. Reactivate this account first.");
+      const now=new Date().toISOString();
+      const updated={...record.value,status:"active",approvedAt:now,approvedBy:actor.email,approvalSource:"administrator",updatedAt:now};
+      await writeRecord(path,updated,record.etag);
+      await audit(actor.email,"account.approve",email,{approvedAt:now,approvedBy:actor.email});
+      const saved=await readRecord(path);
+      if(!saved) throw new Error("Approved account readback failed.");
+      return json(res,200,{user:safeUser(saved.value)});
+    }
     if(action==="prepareProductionTest") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can prepare a production test.");
       const job=await filmProduction.prepareOperatorTest({actor,idempotencyKey:body.idempotencyKey});
@@ -104,7 +138,12 @@ export function createAdminHandler(overrides={}) {
     if(["revokeAdmin","suspend","activate"].includes(action)) {
       const email=validEmail(body.email),path=userPath(email),record=await readRecord(path);
       validateUserAction(actor,record?.value,action);
-      const update=action==="revokeAdmin"?{role:"customer",adminRevokedAt:new Date().toISOString()}:{status:action==="suspend"?"suspended":"active"};
+      const now=new Date().toISOString();
+      // Removing admin permissions deliberately retains approved studio access.
+      // Reactivating a suspended applicant does not itself approve registration.
+      const update=action==="revokeAdmin"?{role:"customer",status:record.value.status==="suspended"?"suspended":"active",adminRevokedAt:now,
+        ...(!hasRecordedApproval(record.value)?{approvedAt:now,approvedBy:actor.email,approvalSource:"administrator"}:{})}
+        :{status:action==="suspend"?"suspended":accessStatusForUser({...record.value,status:"active"})==="approved"?"active":"pending"};
       const updated={...record.value,...update,updatedAt:new Date().toISOString()};
       await writeRecord(path,updated,record.etag);
       await audit(actor.email,`account.${action}`,email,update);

@@ -69,6 +69,7 @@ type Person = {
   name: string;
   role: "owner" | "admin" | "customer";
   status: string;
+  accessStatus: User["accessStatus"];
   createdAt: string;
   lastLoginAt?: string;
 };
@@ -106,6 +107,12 @@ type AuditEvent = {
   details?: string | Record<string, unknown>;
 };
 type PeopleData = { users: Person[]; cursor?: string };
+type RegistrationPolicy = {
+  approvalRequired: boolean;
+  revision: number;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
+};
 type PaymentsData = {
   orders: Order[];
   connectionReady: boolean;
@@ -176,7 +183,7 @@ type FilmsData = { films: ArchivedFilm[]; cursor?: string };
 type AuditData = { events: AuditEvent[]; cursor?: string };
 type PersonAction = {
   kind: "person";
-  action: "suspend" | "activate" | "revokeAdmin";
+  action: "approve" | "suspend" | "activate" | "revokeAdmin";
   person: Person;
 };
 type RefundAction = { kind: "refund"; order: Order; idempotencyKey: string };
@@ -184,6 +191,7 @@ type Dialog =
   | PersonAction
   | RefundAction
   | { kind: "film"; film: ArchivedFilm }
+  | { kind: "registrationPolicy"; approvalRequired: boolean; expectedRevision: number }
   | { kind: "disconnectQuickBooks" };
 const tabs = [
   { id: "overview" as const, name: "Overview", icon: LayoutDashboard },
@@ -351,6 +359,8 @@ export default function Admin({
   );
   const [overview, setOverview] = useState<Overview | null>(null);
   const [people, setPeople] = useState<PeopleData | null>(null);
+  const [registrationPolicy, setRegistrationPolicy] = useState<RegistrationPolicy | null>(null);
+  const [registrationPolicyError, setRegistrationPolicyError] = useState("");
   const [payments, setPayments] = useState<PaymentsData | null>(null);
   const [quickBooks, setQuickBooks] = useState<QuickBooksStatus | null>(null);
   const [quickBooksError, setQuickBooksError] = useState("");
@@ -402,6 +412,7 @@ export default function Admin({
     setError("");
     setOverviewError("");
     if (tab === "payments") setQuickBooksError("");
+    if (tab === "people") setRegistrationPolicyError("");
     const overviewResult = api<Overview>("/api/admin?action=overview")
       .then((result) => {
         if (request === requestNumber.current) setOverview(result);
@@ -414,8 +425,18 @@ export default function Admin({
       });
     const loadList = async () => {
       if (tab === "people") {
-        const result = await api<PeopleData>("/api/admin?action=users");
-        if (request === requestNumber.current) setPeople(result);
+        const policyRequest = api<RegistrationPolicy>("/api/admin?action=registrationPolicy")
+          .then(result => { if (request === requestNumber.current) setRegistrationPolicy(result); })
+          .catch(e => {
+            if (request === requestNumber.current) {
+              setRegistrationPolicy(null);
+              setRegistrationPolicyError(errorText(e));
+            }
+          });
+        try {
+          const result = await api<PeopleData>("/api/admin?action=users");
+          if (request === requestNumber.current) setPeople(result);
+        } finally { await policyRequest; }
       }
       if (tab === "payments") {
         const statusRequest = api<QuickBooksStatus>("/api/quickbooks?action=status")
@@ -703,16 +724,25 @@ export default function Admin({
   async function confirmPersonAction(action: PersonAction) {
     if (actionLock.current || action.person.role === "owner") return;
     if (action.action === "revokeAdmin" && !isOwner) return;
+    if (action.action === "approve" && (action.person.role !== "customer" || action.person.accessStatus !== "pending")) return;
     actionLock.current = true;
     setBusy(true);
     setActionError("");
     try {
-      const result = await api<{ message?: string }>("/api/admin", {
+      const result = await api<{ message?: string; user: Person }>("/api/admin", {
         action: action.action,
         email: action.person.email,
       });
+      if (result.user?.email !== action.person.email ||
+        (action.action === "approve" && result.user.accessStatus !== "approved") ||
+        (action.action === "suspend" && result.user.accessStatus !== "suspended") ||
+        (action.action === "activate" && !["approved", "pending"].includes(result.user.accessStatus)) ||
+        (action.action === "revokeAdmin" && result.user.role !== "customer")) {
+        throw new Error("The saved account change could not be confirmed. Refresh People before trying again.");
+      }
+      setPeople(previous => previous ? { ...previous, users: previous.users.map(person => person.email === result.user.email ? result.user : person) } : previous);
       setDialog(null);
-      notify(result.message || "Account access updated.");
+      notify(result.message || (action.action === "approve" ? `${result.user.email} is approved for studio access.` : "Account access updated."));
       await refresh();
     } catch (e) {
       setActionError(errorText(e));
@@ -720,6 +750,29 @@ export default function Admin({
       actionLock.current = false;
       setBusy(false);
     }
+  }
+  async function confirmRegistrationPolicy(action: Extract<Dialog, { kind: "registrationPolicy" }>) {
+    if (actionLock.current) return;
+    actionLock.current = true;
+    setBusy(true);
+    setActionError("");
+    try {
+      const result = await api<RegistrationPolicy>("/api/admin", {
+        action: "updateRegistrationPolicy",
+        approvalRequired: action.approvalRequired,
+        expectedRevision: action.expectedRevision,
+      });
+      if (result.approvalRequired !== action.approvalRequired || !Number.isInteger(result.revision) || result.revision <= action.expectedRevision) {
+        throw new Error("The saved registration policy could not be confirmed. Refresh People before trying again.");
+      }
+      setRegistrationPolicy(result);
+      setDialog(null);
+      notify(result.approvalRequired
+        ? "New registrations will require administrator approval."
+        : "New registrations can enter the studio immediately. Accounts already waiting still need approval.");
+      await refresh();
+    } catch (e) { setActionError(errorText(e)); }
+    finally { actionLock.current = false; setBusy(false); }
   }
   const hasQuickBooksAuthorization = Boolean(
     quickBooks?.hasSavedAuthorization ??
@@ -1084,7 +1137,7 @@ export default function Admin({
     setActionError("");
   }
   const displayedPeople = (people?.users || []).filter((p) =>
-    matches(query, p.email, p.name, p.role, p.status),
+    matches(query, p.email, p.name, p.role, p.status, p.accessStatus),
   );
   const displayedOrders = (payments?.orders || []).filter((o) =>
     matches(query, o.id, o.customerEmail, o.filmTitle, o.status),
@@ -1383,14 +1436,43 @@ export default function Admin({
         )}{" "}
         {tab === "people" && (
           <>
+            <section className="admin-card admin-registration-policy" aria-labelledby="registration-policy-title">
+              <div className="admin-section-heading">
+                <div>
+                  <h2 id="registration-policy-title">Registration approval</h2>
+                  <p>Control access for new accounts. Accounts already awaiting approval must be approved individually.</p>
+                </div>
+                <label className="admin-check">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={registrationPolicy?.approvalRequired ?? true}
+                    disabled={busy || loading || !registrationPolicy}
+                    onChange={event => {
+                      if (!registrationPolicy) return;
+                      setActionError("");
+                      setDialog({ kind: "registrationPolicy", approvalRequired: event.target.checked, expectedRevision: registrationPolicy.revision });
+                    }}
+                  />
+                  Require approval for new registrations
+                </label>
+              </div>
+              {registrationPolicy ? <p>
+                {registrationPolicy.approvalRequired
+                  ? "New accounts wait for approval before entering the studio. Approve each employee's registered account below to give them access to the film and payment workflows without administrator permissions."
+                  : "New accounts can enter the studio immediately. Payment and film production remain subject to their service availability and the customer's confirmation."}
+              </p> : <p role="status">{registrationPolicyError ? "Registration policy is unavailable. Refresh to try again." : "Checking registration policy…"}</p>}
+              {registrationPolicyError && <p className="admin-inline-error" role="alert">{registrationPolicyError}</p>}
+              {registrationPolicy?.updatedAt && <p className="field-note">Updated {date(registrationPolicy.updatedAt)}{registrationPolicy.updatedBy ? ` by ${registrationPolicy.updatedBy}` : ""}.</p>}
+            </section>
             {isOwner && (
               <section className="admin-card admin-invite">
                 <div>
                   <UserPlus size={25} />
                   <h2>Invite an administrator</h2>
                   <p>
-                    Create a private invitation for a teammate. The link is shown here for
-                    you to share.
+                    Grant administration only to teammates who manage the application.
+                    Employees testing films and payments can register normally and be approved below.
                   </p>
                 </div>
                 <form
@@ -1473,7 +1555,7 @@ export default function Admin({
                     {people
                       ? `${people.users.length} account records loaded`
                       : "Verified account records"}
-                    . Owner access is protected.
+                    . Approval grants studio access; administrator invitations grant management permissions. Owner access is protected.
                   </p>
                 </div>
                 <SearchField
@@ -1519,14 +1601,14 @@ export default function Admin({
                             <td>
                               <Badge
                                 tone={
-                                  person.status === "active"
+                                  person.accessStatus === "approved"
                                     ? "good"
-                                    : person.status === "suspended"
+                                    : person.accessStatus === "suspended"
                                       ? "danger"
                                       : "pending"
                                 }
                               >
-                                {humanize(person.status)}
+                                {person.accessStatus === "approved" ? "Approved" : person.accessStatus === "suspended" ? "Suspended" : "Awaiting approval"}
                               </Badge>
                             </td>
                             <td>
@@ -1542,6 +1624,16 @@ export default function Admin({
                                   </span>
                                 ) : (
                                   <>
+                                    {person.role === "customer" && person.accessStatus === "pending" && (
+                                      <button
+                                        className="button primary small"
+                                        disabled={busy}
+                                        onClick={() => {
+                                          setActionError("");
+                                          setDialog({ kind: "person", action: "approve", person });
+                                        }}
+                                      >Approve account</button>
+                                    )}
                                     <button
                                       className="text-button"
                                       disabled={busy || person.email === user.email}
@@ -1550,15 +1642,15 @@ export default function Admin({
                                         setDialog({
                                           kind: "person",
                                           action:
-                                            person.status === "suspended"
+                                            person.accessStatus === "suspended"
                                               ? "activate"
                                               : "suspend",
                                           person,
                                         });
                                       }}
                                     >
-                                      {person.status === "suspended"
-                                        ? "Activate"
+                                      {person.accessStatus === "suspended"
+                                        ? "Restore account"
                                         : "Suspend"}
                                     </button>
                                     {isOwner && person.role === "admin" && (
@@ -2236,6 +2328,10 @@ export default function Admin({
                     ? dialog.order.sandbox ? "Review test refund" : "Review customer refund"
                     : dialog.kind === "disconnectQuickBooks"
                       ? "Disconnect QuickBooks"
+                    : dialog.kind === "registrationPolicy"
+                      ? dialog.approvalRequired ? "Require registration approval" : "Open registration without approval"
+                      : dialog.action === "approve"
+                        ? "Approve studio access"
                       : dialog.action === "revokeAdmin"
                         ? "Remove administrator access"
                         : dialog.action === "suspend"
@@ -2251,6 +2347,21 @@ export default function Admin({
                 <X size={19} />
               </button>
             </div>
+            {dialog.kind === "registrationPolicy" && (
+              <>
+                <p>{dialog.approvalRequired
+                  ? "Newly registered accounts will wait for an administrator to approve them before entering the studio, making payments, or producing films."
+                  : "Anyone who registers a new account will be able to enter the studio immediately and use payment and film production when those services are available. New accounts will not receive administrator permissions."}</p>
+                <p>Existing approved accounts keep their access. Accounts already awaiting approval still need individual approval, and suspended accounts remain suspended.</p>
+                <div className="admin-modal-actions">
+                  <button className="button secondary" disabled={busy} onClick={() => setDialog(null)}>Cancel</button>
+                  <button className="button primary" disabled={busy} onClick={() => void confirmRegistrationPolicy(dialog)}>
+                    {busy && <Loader2 size={16} className="spin" />}
+                    {dialog.approvalRequired ? "Require approval" : "Allow new accounts without approval"}
+                  </button>
+                </div>
+              </>
+            )}
             {dialog.kind === "disconnectQuickBooks" && (
               <>
                 <p>
@@ -2311,11 +2422,13 @@ export default function Admin({
                   {dialog.person.email}
                 </p>
                 <p>
-                  {dialog.action === "revokeAdmin"
+                  {dialog.action === "approve"
+                    ? "Approve this account to enter the studio and use the same payment and film production workflows as a customer. Each purchase still requires confirmation, and each service must be available. This does not grant administrator permissions."
+                    : dialog.action === "revokeAdmin"
                     ? "This removes access to administration. The person's customer account and family films remain associated with their account."
                     : dialog.action === "suspend"
                       ? "This prevents the account from accessing the application until an administrator restores access. It does not delete the account or its films."
-                      : "This allows the account to access the application again."}
+                      : "This removes the suspension. If this account has not yet been approved, it will return to awaiting approval before studio, payment, or film production access is allowed."}
                 </p>
                 <div className="admin-modal-actions">
                   <button
@@ -2326,12 +2439,14 @@ export default function Admin({
                     Cancel
                   </button>
                   <button
-                    className={`button ${dialog.action === "activate" ? "primary" : "admin-danger"}`}
+                    className={`button ${dialog.action === "activate" || dialog.action === "approve" ? "primary" : "admin-danger"}`}
                     disabled={busy || dialog.person.role === "owner"}
                     onClick={() => void confirmPersonAction(dialog)}
                   >
                     {busy && <Loader2 className="spin" size={15} />}{" "}
-                    {dialog.action === "activate"
+                    {dialog.action === "approve"
+                      ? "Approve this account"
+                      : dialog.action === "activate"
                       ? "Restore access"
                       : dialog.action === "suspend"
                         ? "Suspend access"
