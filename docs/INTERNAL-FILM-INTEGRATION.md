@@ -40,6 +40,8 @@ The signed-in production UI then developed a one-minute fictional workshop story
 - MagicLight product workflow: https://magiclight.ai/create/
 - MagicLight terms: https://magiclight.ai/terms/
 
-The authenticated API interface exposes keys, pricing and usage. The inspected interface did not establish the complete API workflow for generating and assembling the screenplay, cast and finished film. The vendor inquiry in [MAGICLIGHT-API-REQUEST.md](MAGICLIGHT-API-REQUEST.md) was sent after user authorization; a response is pending. The account now has user-purchased API credits, but no MagicLight API key or verified film-generation pipeline is connected to this app. No MagicLight credentials were created during that inspection.
+The authenticated API interface exposes keys, pricing and usage. The initial September 14, 2026 inspection did not establish the complete API workflow for generating and assembling the screenplay, cast and finished film; no credentials were created during that inspection. The vendor inquiry in [MAGICLIGHT-API-REQUEST.md](MAGICLIGHT-API-REQUEST.md) was sent after user authorization; a response is pending. The account has user-purchased API credits.
+
+Later on September 14, the user created the `LineageServer` key and its storage as the existing Vercel project's server-only Production secret `MAGICLIGHT_API_KEY` was verified. The environment-variable save succeeded; a deployment is still needed for a new runtime to receive it. No authenticated MagicLight API request or render has been tested, the required endpoint contracts remain unavailable, and no verified film-generation pipeline is connected. See [the current branch readiness record](INTEGRATION-READINESS.md) for locally implemented production preparation, security and payment foundations; those changes are not established as deployed by this checkpoint.
 
 Do not store credentials, account documents, user uploads, or payment information in this file or in GitHub.

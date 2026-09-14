@@ -3,15 +3,21 @@ import { hasAdminAccess, isOwner, OWNER_EMAIL } from "./_lib/access.mjs";
 import { recordPage, safeUser, validEmail, audit, newInvitation, validateInvitation, validateUserAction, validateRefund, readPricingSettings, markupFromPercent, PRICING_PATH } from "./_lib/admin.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { connections } from "./studio.mjs";
+import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
+import { payments, PaymentError } from "./_lib/payments.mjs";
 
+const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
+const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
+  &&/^[a-f0-9]{64}$/.test(order.manifestHash||"")&&/^[a-f0-9]{64}$/.test(order.merchantBinding?.grantId||"");
 const safeOrder=(order)=>({id:order.id,customerEmail:order.customerEmail,filmTitle:order.filmTitle||"",status:order.status,
-  currency:order.currency,amountCents:order.amountCents,refundedCents:order.refundedCents??0,createdAt:order.createdAt,provider:order.provider});
+  currency:order.currency,amountCents:order.amountCents,refundedCents:order.refundedCents??0,createdAt:order.createdAt,provider:order.provider,
+  sandbox:isTestOrder(order),managedPayment:isManagedOrder(order),requiresReview:["submitting","uncertain","refund-pending"].includes(order.status)});
 function resultError(res,status,message) { return json(res,status,{message}); }
 
 export function createAdminHandler(overrides={}) {
- const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,...overrides};
+ const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,...overrides};
  return async function handler(req,res) {
-  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections}=dependencies;
+  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments}=dependencies;
   try {
     const session=await getSession(req);
     if (!session) return resultError(res,401,"Sign in to continue.");
@@ -40,6 +46,9 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="productionReadiness") return json(res,200,filmProduction.readiness());
+      if(action==="paymentDiagnostics") return json(res,200,await payments.adminDiagnostics(actor,url.searchParams.get("id")));
+      if(action==="accountingExport") return json(res,200,await payments.accountingExport(actor,url.searchParams.get("id")));
       const cursor=url.searchParams.get("cursor")||undefined;
       if (cursor && cursor.length>2048) return resultError(res,400,"Invalid page reference.");
       if(action==="users") {
@@ -49,7 +58,7 @@ export function createAdminHandler(overrides={}) {
       if(action==="payments") {
         const page=await recordPage("payments/orders/",{cursor});
         return json(res,200,{orders:page.records.map(safeOrder),cursor:page.cursor,connectionReady:false,
-          reason:"QuickBooks merchant authorization for this app is pending. No refund can be submitted yet."});
+          reason:"Live payments and refunds remain disabled. Test payments are labeled and excluded from live totals; test refunds still require verified sandbox access."});
       }
       if(action==="audit") {
         const page=await recordPage("admin/audit/",{cursor});
@@ -63,17 +72,25 @@ export function createAdminHandler(overrides={}) {
       if(action==="overview") {
         const [users,orders,films,settings]=await Promise.all([recordPage("auth/users/",{limit:100}),recordPage("payments/orders/",{limit:100}),recordPage("archive/metadata/",{limit:100}),readPricingSettings()]);
         const ready=await connections({pricingSettings:settings});
-        const paid=orders.records.filter(order=>["paid","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
+        const paid=orders.records.filter(order=>!isTestOrder(order)&&["paid","captured","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
         return json(res,200,{stats:{users:users.records.length,administrators:users.records.filter(hasAdminAccess).length,
           suspended:users.records.filter(u=>u.status==="suspended").length,films:films.records.length,paidOrders:paid.length,
           paymentTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.amountCents)?o.amountCents:0),0),
-          refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),currency:"USD"},
+          refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),
+          testOrders:orders.records.filter(isTestOrder).length,currency:"USD"},
           statsPartial:Boolean(users.cursor||orders.cursor||films.cursor),connections:ready.connections,pricing:ready.pricing,quality:ready.quality});
       }
       return resultError(res,400,"Unknown administrator view.");
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="prepareProductionTest") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can prepare a production test.");
+      const job=await filmProduction.prepareOperatorTest({actor,idempotencyKey:body.idempotencyKey});
+      await audit(actor.email,"production.test.prepared",job.id,{manifestHash:job.manifestHash});
+      return json(res,201,{...job,message:"Fictional test plan saved. No render request or charge has been sent."});
+    }
+    if(action==="reconcilePayment") return json(res,200,await payments.reconcile(actor,{orderId:body.orderId}));
     if(action==="invite") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can invite administrators.");
       const email=validEmail(body.email);
@@ -107,6 +124,10 @@ export function createAdminHandler(overrides={}) {
     if(action==="refund") {
       if(typeof body.orderId!=="string" || !/^[a-zA-Z0-9-]{16,80}$/.test(body.orderId)) return resultError(res,400,"Invalid order reference.");
       const record=await readRecord(`payments/orders/${body.orderId}.json`);
+      if(record?.value&&isManagedOrder(record.value)) {
+        const {action,...input}=body;
+        return json(res,200,await payments.refund(actor,input));
+      }
       validateRefund(record?.value,body);
       // No request is sent and no order is marked refunded without the real
       // merchant connection. Browser success is never proof of a refund.
@@ -114,6 +135,8 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof FilmProductionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
+    if(error instanceof PaymentError) return json(res,error.status,{code:error.code,message:error.message,charged:error.charged});
     const text=error instanceof Error?error.message:"";
     if(/^(Enter |Choose |Use no more|Only |The owner|You cannot|Sign in with|This administrator|That account|The refund|A unique refund|This order|The saved pricing)/.test(text)) return resultError(res,400,text);
     return resultError(res,503,"The administrator action could not complete. Refresh to verify the current state before retrying.");

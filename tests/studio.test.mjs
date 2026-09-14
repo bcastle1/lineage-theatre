@@ -135,17 +135,29 @@ test("explicit story consent and per-user rate limits remain required before gen
   assert.equal(limited.calls.generation.length,0);
 });
 
-test("production, quotes, and checkout fail closed without client provider names or charge claims",async()=>{
+test("production rejects activation and payment inputs reject client provider names or charge claims",async()=>{
   const h=harness();
   for(const action of ["generate","quote","checkout"]) {
     for(const provider of [undefined,"magiclight","another-provider"]) {
       const result=await h.run(action,post({provider,amountCents:1,charged:true}));
-      assert.equal(result.status,503);assert.equal(result.body.code,"PRODUCTION_UNAVAILABLE");
-      assert.equal(result.body.charged,false);assert.match(result.body.message,/continue writing and saving/);
+      assert.equal(result.status,action==="generate"?503:400);
+      assert.equal(result.body.code,action==="generate"?"PRODUCTION_UNAVAILABLE":"PAYMENT_REQUEST_INVALID");
+      assert.equal(result.body.charged,false);
       assertCustomerSafe(result);
     }
   }
-  assert.deepEqual(h.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
+  assert.equal(h.calls.connections,0);assert.equal(h.calls.pricing,0);assert.equal(h.calls.generation.length,0);assert.equal(h.calls.reads.length,0);
+  assert.deepEqual(h.calls.limits,Array.from({length:6},()=>[`payment:${actor.email}`,20,3600_000]));
+});
+
+test("well-formed quote and checkout requests remain unavailable with default service readiness",async()=>{
+  const h=harness();
+  for(const [action,body] of [["quote",{project:{title:"Fictional family garden"},idempotencyKey:"synthetic-quote-1234"}],
+    ["checkout",{quoteId:"a".repeat(64),idempotencyKey:"synthetic-checkout-1234",paymentToken:"synthetic-payment-token",consent:true}]]) {
+    const result=await h.run(action,post(body));
+    assert.equal(result.status,503);assert.equal(result.body.code,"PRODUCTION_UNAVAILABLE");assert.equal(result.body.charged,false);
+    assertCustomerSafe(result);
+  }
 });
 
 test("legacy production messages are neutral and records remain scoped to the signed-in customer",async()=>{

@@ -2,6 +2,8 @@ import { json, readBody, sameOrigin, getSession, digest, readRecord, limitAction
 import { generateStory, STORY_MODEL } from "./_lib/story.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { readPricingSettings } from "./_lib/admin.mjs";
+import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
+import { payments, PaymentError } from "./_lib/payments.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -61,9 +63,9 @@ function customerStory(result,action) {
 }
 
 export function createStudioHandler(overrides={}) {
- const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,...overrides};
+ const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
  return async function handler(req,res) {
-  const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory}=dependencies;
+  const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments}=dependencies;
   let storyRequest=false;
   try {
     const session=await getSession(req);
@@ -73,6 +75,10 @@ export function createStudioHandler(overrides={}) {
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
       if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings()})));
+      if(action==="productionStatus") return json(res,200,await filmProduction.status({email,id:url.searchParams.get("id")}));
+      if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
+      if(action==="order") return json(res,200,await payments.order(session.user,url.searchParams.get("id")));
+      if(action==="receipt") return json(res,200,await payments.receipt(session.user,url.searchParams.get("id")));
       if(!["status","media"].includes(action)) return json(res,400,{message:"Unknown studio request."});
       const id=url.searchParams.get("id");
       if(!/^[a-z0-9-]{20,80}$/i.test(id??"")) return json(res,400,{message:"Invalid production reference."});
@@ -83,18 +89,30 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(body?.action==="prepare") {
+      if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});
+      if(!(await limitAction(`prepare:${email}`,30,3600_000))) return json(res,429,{message:"Please wait before preparing another production plan."});
+      return json(res,201,await filmProduction.prepare({email,project:body.project,idempotencyKey:body.idempotencyKey,preparationConsent:true}));
+    }
+    if(["quote","checkout"].includes(body?.action)) {
+      if(!(await limitAction(`payment:${email}`,20,3600_000))) return json(res,429,{message:"Please wait before making another payment request. Check an existing order before trying to pay again.",charged:null});
+      const {action,...input}=body;
+      return json(res,200,await payments[action](session.user,input));
+    }
     if(["themes","plan"].includes(body.action)) {
       storyRequest=true;
       if(body.storyConsent!==true) return json(res,400,{message:"Confirm that Lineage Theatre may use your family materials for AI-assisted story development."});
       if(!(await limitAction(`story:${email}`,20,3600_000))) return json(res,429,{message:"Your hourly story-development limit is reached. Your current draft is saved."});
       return json(res,200,customerStory(await generateStory(body),body.action));
     }
-    if(["generate","quote","checkout"].includes(body.action)) {
+    if(body.action==="generate") {
       // Never accept payment or invent a provider job before integration.
       return json(res,503,{code:"PRODUCTION_UNAVAILABLE",message:productionUnavailable,charged:false});
     }
     return json(res,400,{message:"Unknown studio action."});
   } catch(e) {
+    if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});
+    if(e instanceof PaymentError) return json(res,e.status,{code:e.code,message:e.message,charged:e.charged});
     return json(res,503,{message:e instanceof Error&&customerValidationMessages.has(e.message)?e.message:storyRequest?storyUnavailable:"The studio could not complete this action. Your saved film is unchanged."});
   }
  };

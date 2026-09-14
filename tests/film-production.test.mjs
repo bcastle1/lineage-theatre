@@ -1,0 +1,195 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { buildFilmManifest, createFilmProductionService, fictionalOperatorProject, productionJobPath, validateProviderOutput } from "../api/_lib/film-production.mjs";
+
+const email = "customer@example.invalid";
+const owner = { email: "erik@brocotech.ai", role: "owner", status: "active" };
+const idempotencyKey = "fictional-test-request-001";
+const at = Date.parse("2026-09-14T12:00:00Z");
+function store() {
+  const records = new Map(); let revision = 0;
+  return { records,
+    readRecordImpl: async path => records.has(path) ? structuredClone(records.get(path)) : null,
+    writeRecordImpl: async (path, value, etag) => {
+      if (records.has(path) ? records.get(path).etag !== etag : etag !== undefined) throw new Error("precondition failed");
+      records.set(path, { value: structuredClone(value), etag: `etag-${++revision}` });
+    },
+  };
+}
+function adapter(overrides = {}) {
+  return { id: "magiclight", environment: "sandbox", available: true,
+    evidence: { apiVerified: true, qualityVerified: true, commercialTermsVerified: true, reconciliationVerified: true }, outputHosts: ["media.example.invalid"],
+    validateManifest: async () => ({ ready: true, maximumCostCents: 300 }),
+    quote: async ({ manifestHash }) => ({ manifestHash, quoteReference: "fixture-price-1", currency: "USD", providerCostCents: 300, expiresAt: new Date(at + 60_000).toISOString() }),
+    submitShot: async ({ shot }) => ({ status: "queued", providerJobId: `fixture-job-${shot.id}` }),
+    reconcileShot: async () => ({ status: "uncertain" }),
+    pollShot: async ({ providerJobId }) => ({ status: "completed", providerJobId, output: { url: "https://media.example.invalid/fixture.mp4?token=private-test-token", contentType: "video/mp4", sizeBytes: 200, durationSeconds: 5 } }),
+    ...overrides,
+  };
+}
+const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, environment: "sandbox", budgetCents: 300, expiresAt: new Date(at + 600_000).toISOString(), fictionalOnly: true });
+const prepare = (service, overrides = {}) => service.prepare({ email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, ...overrides });
+
+test("manifest preserves reviewed screenplay, hashes evidence, sets exact target timing and excludes client provider flags", () => {
+  const project = fictionalOperatorProject(); project.apiVerified = true; project.providerKey = "must-not-save"; project.outputUrl = "https://untrusted.invalid";
+  const result = buildFilmManifest(project);
+  assert.equal(result.manifest.shots.reduce((sum, shot) => sum + shot.targetDurationMs, 0), 15000);
+  assert.equal(result.manifest.shots.at(-1).startMs + result.manifest.shots.at(-1).targetDurationMs, 15000);
+  assert.equal(result.manifest.continuity.length, 2); assert.equal(result.manifest.qualityVerified, false);
+  assert.equal(result.manifestHash, buildFilmManifest(structuredClone(project)).manifestHash);
+  project.scenes[0].narration = "A revised fictional opening.";
+  assert.notEqual(result.manifestHash, buildFilmManifest(project).manifestHash);
+  assert.doesNotMatch(JSON.stringify(result), /must-not-save|apiVerified|outputUrl|providerKey|"script"|"text"/);
+});
+
+test("unknown evidence, inconsistent cast, invalid duration and oversized screenplay fail before persistence", async () => {
+  const data = store(), service = createFilmProductionService(data);
+  for (const change of [p => p.scenes[0].sourceIds.push("unknown"), p => p.scenes[0].characterIds.push("unknown"), p => p.duration = 0, p => p.scenes[0].narration = "x".repeat(1_600_000)]) {
+    const project = fictionalOperatorProject(); change(project);
+    await assert.rejects(prepare(service, { project }));
+  }
+  assert.equal(data.records.size, 0);
+});
+
+test("a very uneven script never creates zero-length or overlapping scene targets", () => {
+  const project = fictionalOperatorProject();
+  project.scenes[0].narration = "word ".repeat(100_000);
+  project.scenes[1].narration = ""; project.scenes[2].narration = "";
+  const { manifest } = buildFilmManifest(project);
+  assert.equal(manifest.shots.reduce((sum, shot) => sum + shot.targetDurationMs, 0), 15_000);
+  for (const [index, shot] of manifest.shots.entries()) {
+    assert.ok(shot.targetDurationMs > 0);
+    if (index) assert.equal(shot.startMs, manifest.shots[index - 1].startMs + manifest.shots[index - 1].targetDurationMs);
+  }
+});
+
+test("preparation requires storage consent, remains private per account and is durable across service instances", async () => {
+  const data = store(), service = createFilmProductionService(data);
+  await assert.rejects(prepare(service, { preparationConsent: false }), /saved privately/);
+  assert.equal(data.records.size, 0);
+  const result = await prepare(service);
+  assert.equal(result.status, "prepared"); assert.equal(result.preparationOnly, true);
+  assert.equal((await createFilmProductionService(data).status({ email, id: result.id })).manifestHash, result.manifestHash);
+  await assert.rejects(service.status({ email: "other@example.invalid", id: result.id }), e => e.status === 404);
+  const downloaded = await service.manifest({ email, id: result.id }); downloaded.manifest.title = "Changed outside storage";
+  assert.notEqual((await service.manifest({ email, id: result.id })).manifest.title, downloaded.manifest.title);
+  assert.doesNotMatch(JSON.stringify(result), /magiclight|supplier|provider|media\.example/i);
+});
+
+test("concurrent and lost-response preparation retries reuse one immutable job; changed content conflicts", async () => {
+  const data = store(), service = createFilmProductionService(data);
+  const results = await Promise.all([prepare(service), prepare(service), prepare(service)]);
+  assert.equal(new Set(results.map(r => r.id)).size, 1); assert.equal(data.records.size, 1);
+  const project = fictionalOperatorProject(); project.title = "Changed title";
+  await assert.rejects(prepare(service, { project }), e => e.status === 409 && e.code === "IDEMPOTENCY_CONFLICT");
+  assert.equal((await service.manifest({ email, id: results[0].id })).manifest.title, fictionalOperatorProject().title);
+});
+
+test("keys, environment flags and browser evidence never enable the default production adapter", async () => {
+  const data = store(), service = createFilmProductionService(data);
+  const project = { ...fictionalOperatorProject(), preparationConsent: true, apiVerified: true, qualityVerified: true, providerCostCents: 1 };
+  await assert.rejects(service.quoteForPayment(project, { email }, { idempotencyKey }), e => e.code === "PRODUCTION_UNAVAILABLE");
+  const job = await prepare(service);
+  await assert.rejects(service.advance({ email, id: job.id, apiVerified: true, paid: true }), e => e.code === "PRODUCTION_UNAVAILABLE");
+  assert.equal((await service.status({ email, id: job.id })).status, "prepared");
+});
+
+test("server quote is bound to validated immutable manifest and exact cost, never browser amounts", async () => {
+  const data = store(), service = createFilmProductionService({ ...data, adapter: adapter(), now: () => at });
+  const project = { ...fictionalOperatorProject(), preparationConsent: true, providerCostCents: 1, amountCents: 1 };
+  const quote = await service.quoteForPayment(project, { email }, { idempotencyKey });
+  assert.equal(quote.providerCostCents, 300); assert.equal(quote.manifestHash, buildFilmManifest(project).manifestHash);
+  assert.equal(quote.amountCents, undefined); assert.equal(quote.environment, "sandbox");
+  const invalid = createFilmProductionService({ ...data, adapter: adapter({ quote: async () => ({ currency: "USD", providerCostCents: 1, manifestHash: "wrong" }) }), now: () => at });
+  await assert.rejects(invalid.quoteForPayment(project, { email }, { idempotencyKey }), e => e.code === "PRODUCTION_UNAVAILABLE");
+});
+
+test("no submit before trusted budget and matching environment authorization", async () => {
+  let submissions = 0; const data = store();
+  for (const authorize of [undefined, async args => ({ ...await grant(args), budgetCents: 299 }), async args => ({ ...await grant(args), environment: "production" }), async args => ({ ...await grant(args), expiresAt: "invalid" })]) {
+    const service = createFilmProductionService({ ...data, adapter: adapter({ submitShot: async () => { submissions++; } }), now: () => at, authorize });
+    const job = await prepare(service);
+    await assert.rejects(service.advance({ email, id: job.id, paid: true, budgetCents: 999999 }));
+  }
+  assert.equal(submissions, 0);
+});
+
+test("uncertain submission never blindly resubmits; subsequent calls reconcile the same stable request key", async () => {
+  let submitted = 0, reconciled = 0, requestKey;
+  const data = store();
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter({
+    submitShot: async request => { submitted++; requestKey = request.idempotencyKey; throw new Error("Timeout with private credential and provider output"); },
+    reconcileShot: async request => { reconciled++; assert.equal(request.idempotencyKey, requestKey); return { status: "not-found" }; },
+  }) });
+  const job = await prepare(service);
+  assert.equal((await service.advance({ email, id: job.id })).status, "uncertain");
+  assert.equal((await service.advance({ email, id: job.id })).status, "uncertain");
+  assert.equal(submitted, 1); assert.equal(reconciled, 1);
+  assert.doesNotMatch(JSON.stringify(await service.status({ email, id: job.id })), /private credential|provider|Timeout/i);
+});
+
+test("concurrent advance obtains one durable lease and permits only one submit", async () => {
+  let submitted = 0; const data = store();
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter({ submitShot: async () => { submitted++; return { status: "queued", providerJobId: "test-job" }; } }) });
+  const job = await prepare(service);
+  await Promise.all([service.advance({ email, id: job.id }), service.advance({ email, id: job.id })]);
+  assert.equal(submitted, 1);
+});
+
+test("read-only reconciliation continues after the spending grant expires", async () => {
+  let clock = at, checks = 0;
+  const data = store();
+  const service = createFilmProductionService({ ...data, now: () => clock, authorize: async args => { checks++; return grant(args); }, adapter: adapter({ submitShot: async () => { throw new Error("Ambiguous timeout"); } }) });
+  const job = await prepare(service);
+  await service.advance({ email, id: job.id });
+  clock += 700_000;
+  assert.equal((await service.advance({ email, id: job.id })).status, "uncertain");
+  assert.equal(checks, 1);
+});
+
+test("a process crash after submit claim is reconciled after lease expiry, never resubmitted", async () => {
+  let clock = at, submitted = 0, reconciled = 0; const data = store();
+  const service = createFilmProductionService({ ...data, now: () => clock, authorize: grant, adapter: adapter({
+    submitShot: async () => { submitted++; return { status: "queued", providerJobId: "test-job" }; },
+    reconcileShot: async () => { reconciled++; return { status: "queued", providerJobId: "recovered-job" }; },
+  }) });
+  const job = await prepare(service); const path = productionJobPath(email, job.id), record = data.records.get(path);
+  record.value.shots[0].status = "submitting"; record.value.status = "processing"; record.value.lease = { token: "interrupted-worker", expiresAt: at + 90_000 };
+  await service.advance({ email, id: job.id }); assert.equal(reconciled, 0);
+  clock += 90_001;
+  await service.advance({ email, id: job.id }); assert.equal(reconciled, 1); assert.equal(submitted, 0);
+});
+
+test("provider output must be approved HTTPS media and cannot expose internal URLs to the customer", () => {
+  const output = { url: "https://media.example.invalid/clip.mp4", contentType: "video/mp4", sizeBytes: 200, durationSeconds: 5 };
+  assert.equal(validateProviderOutput(output, ["media.example.invalid"]).url, output.url);
+  for (const url of ["http://media.example.invalid/a", "https://127.0.0.1/a", "https://media.example.invalid.evil.invalid/a", "https://user:pass@media.example.invalid/a", "https://media.example.invalid:444/a"]) {
+    assert.throws(() => validateProviderOutput({ ...output, url }, ["media.example.invalid"]));
+  }
+  assert.throws(() => validateProviderOutput({ ...output, contentType: "text/html" }, ["media.example.invalid"]));
+});
+
+test("completed clips remain processing until actual private assembled media passes playback and duration verification", async () => {
+  const data = store(); let verified = false;
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter(),
+    verifyAssembledMedia: async ({ email, id, manifestHash }) => ({ playable: verified, manifestHash, pathname: productionJobPath(email, id).replace("jobs", "media").replace(".json", "/final.mp4"), sha256: "a".repeat(64), contentType: "video/mp4", sizeBytes: 2000, durationSeconds: 15 }),
+  });
+  const job = await prepare(service);
+  for (let i = 0; i < 6; i++) await service.advance({ email, id: job.id });
+  assert.equal((await service.status({ email, id: job.id })).status, "processing");
+  assert.equal((await service.getPrepared({ email, id: job.id })).status, "awaiting-assembly");
+  await assert.rejects(service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash }), e => e.code === "OUTPUT_UNVERIFIED");
+  verified = true;
+  const result = await service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash });
+  assert.equal(result.status, "completed"); assert.equal(result.mediaReady, true);
+  assert.doesNotMatch(JSON.stringify(result), /private-test-token|media\.example|pathname|provider/);
+});
+
+test("owner test uses fixed fictional material and still requires a server budget; customer role cannot invoke it", async () => {
+  const service = createFilmProductionService({ ...store(), now: () => at, adapter: adapter() });
+  await assert.rejects(service.prepareOperatorTest({ actor: { email, role: "customer" }, idempotencyKey }), e => e.status === 403);
+  const job = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
+  assert.match((await service.manifest({ email: owner.email, id: job.id })).manifest.title, /SAMPLE ONLY - FICTIONAL DATA/);
+  await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
+  await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: { email: owner.email, role: "customer" } }), e => e.status === 403);
+});

@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
+import ProductionPreparation from "../studio/ProductionPreparation";
 import "./admin.css";
 
 type Tab = "overview" | "people" | "payments" | "pricing" | "films" | "activity";
@@ -50,6 +51,7 @@ type Overview = {
     paidOrders: number;
     paymentTotalCents: number;
     refundTotalCents: number;
+    testOrders?: number;
     currency: string;
   };
   connections: { story: Connection; magiclight: Connection; billing: Connection };
@@ -80,6 +82,9 @@ type Order = {
   refundedCents: number;
   createdAt: string;
   provider: string;
+  sandbox?: boolean;
+  managedPayment?: boolean;
+  requiresReview?: boolean;
 };
 type ArchivedFilm = {
   id: string;
@@ -225,6 +230,7 @@ function exportPayments(orders: Order[]) {
       "Refunded",
       "Created",
       "Provider",
+      "Payment type",
     ],
     ...orders.map((o) => [
       o.id,
@@ -236,6 +242,7 @@ function exportPayments(orders: Order[]) {
       ((o.refundedCents || 0) / 100).toFixed(2),
       o.createdAt,
       o.provider,
+      o.sandbox ? "Test payment" : "Live payment",
     ]),
   ];
   const url = URL.createObjectURL(
@@ -971,8 +978,8 @@ export default function Admin({
     dialog?.kind === "refund"
       ? Math.max(0, dialog.order.amountCents - (dialog.order.refundedCents || 0))
       : 0;
-  // OAuth authorization alone never enables moving customer money.
-  const refundReady = false;
+  // Only saved sandbox orders use the test refund path. The server rechecks access.
+  const refundReady = dialog?.kind === "refund" && dialog.order.sandbox === true && dialog.order.managedPayment === true;
   async function submitRefund(action: RefundAction) {
     if (
       actionLock.current ||
@@ -987,7 +994,7 @@ export default function Admin({
     setBusy(true);
     setActionError("");
     try {
-      const result = await api<{ message?: string }>("/api/admin", {
+      const result = await api<{ message?: string; requiresReview?: boolean }>("/api/admin", {
         action: "refund",
         orderId: action.order.id,
         amountCents,
@@ -996,8 +1003,9 @@ export default function Admin({
       });
       setDialog(null);
       notify(
-        result.message ||
-          "Refund request recorded. Check the payment record for its confirmed status.",
+        result.message || (result.requiresReview
+          ? "The test refund needs review. Do not submit another refund; check the saved order status."
+          : "Test refund confirmed. No live money was moved."),
         "info",
       );
       await refresh();
@@ -1014,6 +1022,25 @@ export default function Admin({
     setRefundConfirmed(false);
     setActionError("");
     setDialog({ kind: "refund", order, idempotencyKey: crypto.randomUUID() });
+  }
+  async function paymentRecordAction(order: Order, action: "paymentDiagnostics" | "accountingExport" | "reconcilePayment") {
+    if (actionLock.current) return;
+    actionLock.current = true; setBusy(true);
+    try {
+      if (action === "reconcilePayment") {
+        const result = await api<{ requiresReview: boolean }>("/api/admin", { action, orderId: order.id });
+        notify(result.requiresReview ? "This order still needs review. No payment or refund was repeated." : "Saved payment status checked.", "info");
+        await refresh();
+      } else {
+        const result = await api(`/api/admin?action=${action}&id=${encodeURIComponent(order.id)}`);
+        const url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: "application/json" }));
+        const link = document.createElement("a"); link.href = url;
+        link.download = `${order.sandbox ? "TEST-" : ""}${action}-${order.id}.json`;
+        document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+        notify(action === "paymentDiagnostics" ? "Payment support details downloaded." : "Accounting review exported. Nothing was posted to your books.", "info");
+      }
+    } catch (e) { notify(errorText(e), "error"); }
+    finally { actionLock.current = false; setBusy(false); }
   }
   const markupPercent = /^\d+(\.\d{0,2})?$/.test(markup) ? Number(markup) : NaN;
   const validMarkup =
@@ -1213,6 +1240,8 @@ export default function Admin({
                 </article>
               ))}
             </div>
+            {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
+            {isOwner && <ProductionPreparation operator />}
             <div className="admin-overview-grid">
               <section className="admin-card">
                 <div className="admin-section-heading">
@@ -1819,7 +1848,7 @@ export default function Admin({
             <div className="admin-feedback info">
               <AlertCircle size={18} />
               <div>
-                <strong>Customer charges and refunds remain unavailable</strong>
+                <strong>Live charges and refunds remain unavailable</strong>
                 <p>
                   {payments?.reason ||
                     overview?.connections.billing.reason ||
@@ -1867,6 +1896,7 @@ export default function Admin({
                           <td>
                             <strong>{order.filmTitle || "Untitled film"}</strong>
                             <span>{order.customerEmail}</span>
+                            {order.sandbox && <Badge tone="pending">Test payment</Badge>}
                           </td>
                           <td>
                             <span className="admin-record-id">{order.id}</span>
@@ -1879,7 +1909,7 @@ export default function Admin({
                           <td>
                             <Badge
                               tone={
-                                order.status === "paid"
+                                ["paid", "captured"].includes(order.status)
                                   ? "good"
                                   : /failed|cancel/.test(order.status)
                                     ? "danger"
@@ -1903,6 +1933,7 @@ export default function Admin({
                                 busy ||
                                 ![
                                   "paid",
+                                  "captured",
                                   "partially_refunded",
                                   "partially-refunded",
                                 ].includes(order.status) ||
@@ -1910,8 +1941,13 @@ export default function Admin({
                               }
                               onClick={() => openRefund(order)}
                             >
-                              Review refund
+                              {order.sandbox ? "Review test refund" : "Review refund"}
                             </button>
+                            {order.managedPayment && <>
+                              {order.requiresReview && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
+                              <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "paymentDiagnostics")}>Download support details</button>
+                              <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "accountingExport")}>Export accounting review</button>
+                            </>}
                           </td>
                         </tr>
                       ))}
@@ -2197,7 +2233,7 @@ export default function Admin({
                 {dialog.kind === "film"
                   ? dialog.film.title || "Family film"
                   : dialog.kind === "refund"
-                    ? "Review customer refund"
+                    ? dialog.order.sandbox ? "Review test refund" : "Review customer refund"
                     : dialog.kind === "disconnectQuickBooks"
                       ? "Disconnect QuickBooks"
                       : dialog.action === "revokeAdmin"
@@ -2307,6 +2343,7 @@ export default function Admin({
             {dialog.kind === "refund" && (
               <>
                 <div className="admin-refund-summary">
+                  {dialog.order.sandbox && <Badge tone="pending">Test payment · no live money</Badge>}
                   <span>{dialog.order.customerEmail}</span>
                   <strong>{dialog.order.filmTitle || "Untitled film"}</strong>
                   <p>
@@ -2343,7 +2380,7 @@ export default function Admin({
                   <textarea
                     rows={3}
                     value={refundReason}
-                    maxLength={1000}
+                    maxLength={500}
                     disabled={busy}
                     onChange={(e) => setRefundReason(e.target.value)}
                     placeholder="Record why this refund is being issued"
@@ -2356,8 +2393,7 @@ export default function Admin({
                     disabled={busy || !refundReady}
                     onChange={(e) => setRefundConfirmed(e.target.checked)}
                   />
-                  I confirm this refund to the customer's original payment method. Once
-                  submitted successfully, it cannot be undone.
+                  {dialog.order.sandbox ? "I confirm this sandbox test refund. No live money will be moved." : "I confirm this refund to the customer's original payment method. Once submitted successfully, it cannot be undone."}
                 </label>
                 <div className="admin-modal-actions">
                   <button
@@ -2380,7 +2416,7 @@ export default function Admin({
                     onClick={() => void submitRefund(dialog)}
                   >
                     {busy && <Loader2 className="spin" size={15} />}Issue{" "}
-                    {money(amountCents, dialog.order.currency)} refund
+                    {money(amountCents, dialog.order.currency)} {dialog.order.sandbox ? "test refund" : "refund"}
                   </button>
                 </div>
               </>

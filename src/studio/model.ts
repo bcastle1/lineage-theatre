@@ -61,6 +61,18 @@ export interface SourceCoverage {
   notesOnlySources: number;
   warnings: string[];
 }
+export interface PreparedProduction {
+  id: string;
+  manifestHash: string;
+  inputHash: string;
+  requestId: string;
+  status: string;
+  sceneCount: number;
+  shotCount: number;
+  durationSeconds: number;
+  createdAt: string;
+  issues: string[];
+}
 export interface Film {
   id: string;
   title: string;
@@ -90,6 +102,40 @@ export interface Film {
   outputAt?: string;
   audioId?: string;
   music: boolean;
+  productionPreparation?: PreparedProduction;
+}
+
+export function normalizeProductionPreparation(value: unknown): PreparedProduction | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Partial<PreparedProduction>;
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+  if (!uuid.test(record.id || "") || !uuid.test(record.requestId || "")
+    || !/^[a-f0-9]{64}$/.test(record.manifestHash || "") || !/^[a-f0-9]{64}$/.test(record.inputHash || "")
+    || !["prepared", "processing", "queued", "submitting", "uncertain", "completed", "failed"].includes(record.status || "")
+    || !Number.isInteger(record.sceneCount) || Number(record.sceneCount) < 1 || Number(record.sceneCount) > 30
+    || !Number.isInteger(record.shotCount) || Number(record.shotCount) < 1 || Number(record.shotCount) > 1000
+    || !Number.isFinite(record.durationSeconds) || Number(record.durationSeconds) < 15 || Number(record.durationSeconds) > 600
+    || typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))
+    || !Array.isArray(record.issues) || record.issues.length > 20 || record.issues.some(issue => typeof issue !== "string" || issue.length > 1000)) return undefined;
+  // Browser persistence and exported backups retain only customer plan metadata.
+  return { id: record.id!, manifestHash: record.manifestHash!, inputHash: record.inputHash!, requestId: record.requestId!, status: record.status!,
+    sceneCount: record.sceneCount!, shotCount: record.shotCount!, durationSeconds: record.durationSeconds!, createdAt: record.createdAt, issues: [...record.issues] };
+}
+
+export function productionPreparationInput(film: Film) {
+  return {
+    id: film.id, title: film.title, ancestor: film.ancestor, era: film.era, script: film.script, duration: film.duration,
+    style: film.style, factuality: film.factuality, music: film.music, logline: film.logline,
+    sources: film.sources.map(({ id, name, type, text, note, extraction }) => ({ id, name, type, text: text || "", note: note || "", extraction: extraction || "" })),
+    selectedThemes: film.selectedThemes.map(({ title, plot, climax, reason }) => ({ title, plot, climax, reason })),
+    characters: film.characters.map(({ id, name, role, description, basis, sourceIds }) => ({ id, name, role, description, basis, sourceIds })),
+    assumptions: film.assumptions.map(({ id, description, reason }) => ({ id, description, reason })),
+    scenes: film.scenes.map(({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization }) => ({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization })),
+  };
+}
+export async function productionInputHash(input: string) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 export const newFilm = (): Film => ({
   id: crypto.randomUUID(),
@@ -141,8 +187,11 @@ function customerProduction(shot: Shot): Shot {
   };
 }
 export function customerProjectBackup(film: Film): Film {
+  const { productionPreparation: originalPreparation, ...fields } = film;
+  const productionPreparation = normalizeProductionPreparation(originalPreparation);
   return {
-    ...film,
+    ...fields,
+    ...(productionPreparation ? { productionPreparation } : {}),
     providerId: "lineage-theatre",
     generatedBy: film.generatedBy?.startsWith("Manual")
       ? "Manual outline from source text"
@@ -158,13 +207,16 @@ function restoreProduction(shot: Shot): Shot {
   return shot.provider === "lineage-theatre" ? { ...shot, provider: "magiclight" } : shot;
 }
 export function normalizeFilm(raw: Partial<Film>): Film {
+  const { productionPreparation: originalPreparation, ...fields } = raw;
+  const productionPreparation = normalizeProductionPreparation(originalPreparation);
   const duration =
     raw.duration ??
     { trailer: 60, short: 300, featurette: 600, feature: 600 }[raw.runtime || ""] ??
     120;
   return {
     ...newFilm(),
-    ...raw,
+    ...fields,
+    ...(productionPreparation ? { productionPreparation } : {}),
     duration,
     style: raw.style || "Cinematic",
     providerId: "magiclight",

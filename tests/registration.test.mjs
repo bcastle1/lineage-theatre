@@ -24,18 +24,19 @@ function harness(overrides = {}) {
   const records = new Map();
   const writes = [], limits = [];
   const read = async path => records.has(path) ? { value: records.get(path), etag: "existing-etag" } : null;
+  const write = async (path, user, etag) => {
+    writes.push({ path, user, etag });
+    if (records.has(path) && !etag) throw new Error("Atomic create conflict");
+    records.set(path, user);
+  };
   const handler = createAuthHandler({
     readRecord: read,
-    writeRecord: async (path, user, etag) => {
-      writes.push({ path, user, etag });
-      if (records.has(path) && !etag) throw new Error("Atomic create conflict");
-      records.set(path, user);
-    },
-    getSession: (req, allowSetup) => getSession(req, allowSetup, { readRecordImpl: read }),
+    writeRecord: write,
+    getSession: (req, allowSetup) => getSession(req, allowSetup, { readRecordImpl: read, writeRecordImpl: write }),
     limitAction: async (...args) => { limits.push(args); return true; },
     ...overrides,
   });
-  return { handler, records, writes, limits, read };
+  return { handler, records, writes, limits, read, write };
 }
 
 test("public signup creates an unverified customer and establishes a real authenticated session", async () => {
@@ -119,7 +120,7 @@ test("concurrent signup requests atomically create one user and never overwrite 
       records.set(path, value);
     },
   });
-  const inputs = [registration(), { ...registration(), name: "Another fictional name", password: "Another synthetic passphrase" }];
+  const inputs = [registration(), { ...registration(), name: "Another fictional name", password: "Copper orchard lanterns remain" }];
   const results = await Promise.all(inputs.map(body => run(handler, request(body))));
   assert.deepEqual(results.map(r=>r.statusCode).sort(), [201, 409]);
   assert.deepEqual(writes, [undefined, undefined]);
@@ -185,10 +186,10 @@ test("suspended users cannot log in or reuse an already issued normal or setup s
   const user = { email: registration().email, name: "Fictional Ada", passwordHash: hashPassword(registration().password), mustChangePassword: false, role: "admin", status: "active" };
   h.records.set(userPath(user.email), user);
   const cookie = sessionCookie(user).split(";")[0];
-  assert.equal((await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read })).user.email, user.email);
+  assert.equal((await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read, writeRecordImpl: h.write })).user.email, user.email);
   user.status = "suspended";
-  assert.equal(await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read }), null);
-  assert.equal(await getSession({ headers: { cookie } }, true, { readRecordImpl: h.read }), null);
+  assert.equal(await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read, writeRecordImpl: h.write }), null);
+  assert.equal(await getSession({ headers: { cookie } }, true, { readRecordImpl: h.read, writeRecordImpl: h.write }), null);
   const login = await run(h.handler, request({ action: "login", email: user.email, password: registration().password }));
   assert.equal(login.statusCode, 401);
   assert.equal(login.headers["Set-Cookie"], undefined);
@@ -203,10 +204,10 @@ test("legacy login keeps forced-password setup and trusted server roles", async 
   assert.equal(login.body.user.mustChangePassword, true);
   assert.equal(login.body.user.role, "customer");
   const cookie = login.headers["Set-Cookie"].split(";")[0];
-  assert.equal(await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read }), null);
+  assert.equal(await getSession({ headers: { cookie } }, false, { readRecordImpl: h.read, writeRecordImpl: h.write }), null);
   const changed = await run(h.handler, request({ action: "password", password: "New synthetic personal passphrase" }, { cookie }));
   assert.equal(changed.statusCode, 200);
   assert.equal(changed.body.user.mustChangePassword, false);
   assert.equal(changed.body.user.role, "customer");
-  assert.equal(h.writes[0].etag, "existing-etag");
+  assert.equal(h.writes.find(write => write.path === userPath(user.email)).etag, "existing-etag");
 });

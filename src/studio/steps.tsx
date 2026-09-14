@@ -19,6 +19,7 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { type Source, type Scene, type Theme, formatDuration, productionStatusMessage } from "./model";
+import ProductionPreparation from "./ProductionPreparation";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -996,6 +997,7 @@ type CreateProps = StepProps & {
 };
 export function CreateStep({
   film,
+  update,
   notify,
   busy,
   caps,
@@ -1053,6 +1055,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
+      <ProductionPreparation key={film.id} film={film} onPrepared={prepared=>update({productionPreparation:prepared})} />
       <section className="readiness-panel" aria-label="Film pricing">
         <h3>Your film price</h3>
         <p>Price not available yet.</p>

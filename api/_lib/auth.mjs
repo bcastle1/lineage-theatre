@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import { get, put } from "@vercel/blob";
 import { roleForUser } from "./access.mjs";
+import { passwordSetupRequired, SESSION_IDLE_MS, SESSION_MAX_MS, SETUP_SESSION_MS } from "./auth-security.mjs";
 
 export function json(res, status, body) {
   res.statusCode = status;
@@ -104,18 +105,23 @@ function signature(value) {
     .update(value)
     .digest("base64url");
 }
-export function sessionCookie(user) {
+export const clearSessionCookie = "lineage_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0";
+export function sessionCookie(user, { now = Date.now() } = {}) {
+  const duration = passwordSetupRequired(user, now) ? SETUP_SESSION_MS : SESSION_MAX_MS;
   const payload = Buffer.from(
     JSON.stringify({
       sub: user.email,
       version: digest(user.passwordHash),
-      exp: Date.now() + (user.mustChangePassword ? 15 * 60_000 : 12 * 3600_000),
+      iat: now,
+      exp: now + duration,
+      securityVersion: user.securityVersion || 0,
+      setup: passwordSetupRequired(user, now),
       nonce: randomBytes(12).toString("hex"),
     }),
   ).toString("base64url");
-  return `lineage_session=${payload}.${signature(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${user.mustChangePassword ? 900 : 43200}`;
+  return `lineage_session=${payload}.${signature(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${duration / 1000}`;
 }
-export async function getSession(req, allowSetup = false, { readRecordImpl = readRecord } = {}) {
+function sessionClaims(req, now) {
   const token = req.headers.cookie
     ?.split(";")
     .map((x) => x.trim())
@@ -123,22 +129,68 @@ export async function getSession(req, allowSetup = false, { readRecordImpl = rea
     ?.slice(16);
   if (!token) return null;
   try {
-    const [payload, sig] = token.split(".");
+    const [payload, sig, extra] = token.split(".");
     const expected = signature(payload);
     if (
-      !sig ||
+      extra || !sig ||
       sig.length !== expected.length ||
       !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))
     )
       return null;
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (decoded.exp < Date.now()) return null;
+    if (typeof decoded.sub !== "string" || decoded.sub.length > 254 || !Number.isFinite(decoded.exp)
+      || decoded.exp <= now || !/^[a-f0-9]{24}$/.test(decoded.nonce || "")) return null;
+    // Previously issued cookies have no iat and expire within the original 12-hour bound.
+    const issuedAt = decoded.iat ?? decoded.exp - SESSION_MAX_MS;
+    if (!Number.isFinite(issuedAt) || issuedAt > now || decoded.exp - issuedAt > SESSION_MAX_MS) return null;
+    return { ...decoded, iat: issuedAt };
+  } catch { return null; }
+}
+const sessionPath = nonce => `auth/sessions/${digest(nonce)}.json`;
+export async function revokeSession(req, { readRecordImpl = readRecord, writeRecordImpl = writeRecord, now = Date.now() } = {}) {
+  const claims = sessionClaims(req, now);
+  if (!claims) return;
+  const path = sessionPath(claims.nonce);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const record = await readRecordImpl(path);
+    if (record?.value.revoked) return;
+    try {
+      await writeRecordImpl(path, { ...record?.value, email: claims.sub, revoked: true,
+        expiresAt: claims.exp, revokedAt: now }, record?.etag);
+      return;
+    } catch (error) { if (attempt === 3) throw error; }
+  }
+}
+export async function getSession(req, allowSetup = false, { readRecordImpl = readRecord, writeRecordImpl = writeRecord, now = Date.now() } = {}) {
+  const decoded = sessionClaims(req, now);
+  if (!decoded) return null;
+  try {
     const record = await readRecordImpl(userPath(decoded.sub));
-    if (!record || digest(record.value.passwordHash) !== decoded.version)
+    if (!record || digest(record.value.passwordHash) !== decoded.version
+      || (record.value.securityVersion || 0) !== (decoded.securityVersion || 0))
       return null;
     if (record.value.status === "suspended") return null;
-    if (record.value.mustChangePassword && !allowSetup) return null;
-    return { user: record.value, etag: record.etag };
+    // Expiry cannot turn an existing normal session into password-reset authority.
+    if (passwordSetupRequired(record.value, now) && !record.value.mustChangePassword && decoded.setup !== true) return null;
+    if (passwordSetupRequired(record.value, now) && !allowSetup) return null;
+    const path = sessionPath(decoded.nonce);
+    let active = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const stored = await readRecordImpl(path);
+      if (stored?.value.revoked || (stored && (stored.value.email !== decoded.sub || stored.value.version !== decoded.version
+          || stored.value.expiresAt !== decoded.exp))) return null;
+      const lastSeenAt = stored?.value.lastSeenAt ?? decoded.iat;
+      if (!Number.isFinite(lastSeenAt) || lastSeenAt > now || now - lastSeenAt >= SESSION_IDLE_MS) return null;
+      if (stored && now - lastSeenAt < 60_000) { active = true; break; }
+      try {
+        await writeRecordImpl(path, { email: decoded.sub, version: decoded.version, expiresAt: decoded.exp,
+          createdAt: decoded.iat, lastSeenAt: now, revoked: false }, stored?.etag);
+        active = true; break;
+      } catch (error) { if (attempt === 3) throw error; }
+    }
+    if (!active) return null;
+    return { user: { ...record.value, mustChangePassword: passwordSetupRequired(record.value, now) },
+      etag: record.etag, sessionId: digest(decoded.nonce) };
   } catch {
     return null;
   }
@@ -146,7 +198,8 @@ export async function getSession(req, allowSetup = false, { readRecordImpl = rea
 export const publicUser = (user) => ({
   email: user.email,
   name: user.name,
-  mustChangePassword: user.mustChangePassword,
+  mustChangePassword: passwordSetupRequired(user),
   role: roleForUser(user),
   emailVerified: user.emailVerified === true,
+  mfaEnabled: user.mfa?.enabled === true,
 });

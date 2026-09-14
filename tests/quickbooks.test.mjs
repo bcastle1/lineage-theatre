@@ -57,6 +57,31 @@ function harness(options = {}) {
     setActor: value => { actor = value; }, setFetch: value => { fetcher = value; }, advance: ms => { tick += ms; } };
 }
 
+test("OAuth diagnostics capture bounded support correlation metadata without credential payloads", async () => {
+  const h = harness(), tid = "12345678-abcd-4321-baad-123456789abc";
+  h.setFetch(async () => {
+    const response = tokenResponse(); response.headers.set("intuit_tid", tid); return response;
+  });
+  await h.authorize();
+  const providerEvents = h.events.filter(event => event[1] === "quickbooks.provider.request");
+  assert.equal(providerEvents.length, 1);
+  assert.deepEqual(providerEvents[0][3], { operation: "token-exchange", at: "2026-09-14T00:00:00.000Z", httpStatus: 200,
+    intuitTid: tid, code: "HTTP_RESPONSE", outcome: "response-received" });
+  for (const secret of [ACCESS, REFRESH, REALM, "synthetic-code", h.env.QUICKBOOKS_CLIENT_SECRET])
+    assert.equal(JSON.stringify(providerEvents).includes(secret), false);
+  assert.equal(JSON.stringify(await h.service.status(OWNER)).includes(tid), false);
+});
+
+test("a correlation audit failure cannot turn a successful OAuth exchange into a duplicate or revoked grant", async () => {
+  const h = harness({ afterAudit: async (...event) => {
+    if (event[1] === "quickbooks.provider.request") throw new Error("synthetic audit unavailable");
+  } });
+  await h.authorize();
+  assert.equal(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.status, "authorized");
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0][0], INTUIT_TOKEN);
+});
+
 test("QuickBooks config requires explicit allowlisted environment, app credentials, and a dedicated canonical encryption key", () => {
   const env = testEnv();
   assert.equal(quickbooksConfig(env).environment, "sandbox");
