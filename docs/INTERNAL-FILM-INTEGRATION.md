@@ -27,7 +27,10 @@ This branch is not a verified production release. The previous production deploy
 
 - OpenAI Astra model: https://developers.openai.com/api/docs/models/gpt-6-astra
 - MagicLight API account area: https://magiclight.ai/openclaw/api-keys/
+- MagicLight API packs: https://magiclight.ai/openclaw/pricing/ — the visible packs describe Hailuo image-to-video. This does not verify a complete screenplay-to-film API.
 - MagicLight product workflow: https://magiclight.ai/create/
 - MagicLight terms: https://magiclight.ai/terms/
+
+The authenticated API interface exposes keys, pricing and usage. No complete developer contract for the required screenplay, cast and finished-film workflow was available in the inspected interface. A reviewable vendor inquiry is in [MAGICLIGHT-API-REQUEST.md](MAGICLIGHT-API-REQUEST.md); it has not been sent. No API pack was purchased, and no credentials were created during this inspection.
 
 Do not store credentials, account documents, user uploads, or payment information in this file or in GitHub.
