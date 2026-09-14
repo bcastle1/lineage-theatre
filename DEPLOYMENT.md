@@ -2,7 +2,7 @@
 
 GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds and tests. Publish the exact reviewed commit through the existing Vercel project.
 
-The MagicLight-only development branch is not ready for production activation. See `docs/INTERNAL-FILM-INTEGRATION.md` for the account/API/payment prerequisites and the prior production deployment to preserve until those gates pass.
+The user authorized publishing the prepared MagicLight-only studio while its provider and payment connections are pending. This is a studio-preview release, not activation of paid film production. Public and signed-in screens must disclose that status. See `docs/INTERNAL-FILM-INTEGRATION.md` for the remaining account/API/payment prerequisites.
 
 ## Runtime
 
@@ -15,7 +15,7 @@ The private Blob store retains account password hashes, rate limits, and provide
 ## Release gates
 
 1. Build/typecheck and all tests pass; inspect the staged diff for unrelated changes or secrets.
-2. Exercise sign-in, forced password setup, complete document extraction, Astra ideas and full screenplay development, cast/assumption review, provider jobs, payment idempotency and actual finished-film playback using synthetic QA data. Mocked UI tests do not establish real provider readiness.
+2. Exercise sign-in, forced password setup, document extraction and cast/assumption review using synthetic QA data. For this studio-preview release, verify that unconfigured Astra requests, film generation and payment fail with clear status and no charge. Before activating production, additionally verify actual Astra development, provider jobs, payment idempotency and finished-film playback. Mocked UI tests do not establish real provider readiness.
 3. Confirm responsive desktop/mobile layout, visible feedback, no overflow, and all text weights at 400 or below.
 4. Push the exact commit to GitHub main, deploy that same tree with its SHA as `VERCEL_GIT_COMMIT_SHA`, and record the READY deployment ID and aliases.
 5. Run `pnpm run check:deploy -- <sha>`. HTTPS, Vercel serving headers, and `<meta name="lineage-build">` must match the exact SHA at the custom domain.

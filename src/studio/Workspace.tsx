@@ -42,6 +42,32 @@ export type Capabilities = {
   story: boolean;
   magiclight: boolean;
   billing: boolean;
+  pricing?: {
+    currency: "USD";
+    policy: "provider-cost-no-markup";
+    markupBasisPoints: number;
+    referenceStatus: "available" | "configuration-pending";
+    referenceRate: {
+      credits: number;
+      amountCents: number;
+      source: "public-pro-api-pack" | "server-configuration";
+      sourceUrl: string | null;
+    } | null;
+    referenceReason: string;
+    estimate: {
+      status: "awaiting-provider-quote";
+      amountCents: null;
+      providerCredits: null;
+      reason: string;
+    };
+    chargeReady: false;
+  };
+  payment?: {
+    provider: "quickbooks";
+    label: "QuickBooks";
+    status: "connection-pending";
+    available: false;
+  };
   connections?: {
     story?: { reason: string };
     magiclight?: { reason: string };

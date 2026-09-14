@@ -1010,6 +1010,10 @@ export function CreateStep({
 }: CreateProps) {
   // A price must be returned and confirmed by the server before this can enable.
   const hasConfirmedQuote = false;
+  const referenceRate = caps?.pricing?.referenceRate;
+  const referencePrice = referenceRate && referenceRate.amountCents > 0
+    ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(referenceRate.amountCents / 100)
+    : null;
   const canGenerate = Boolean(
     caps?.magiclight &&
       caps?.billing &&
@@ -1074,6 +1078,39 @@ export function CreateStep({
           <small>{film.generatedBy || "Film draft can be edited here"}</small>
         </div>
       </div>
+      <section className="readiness-panel" aria-label="Film pricing">
+        <h3>Film cost, with no added markup</h3>
+        <div className="production-settings">
+          <div>
+            <span>Reference credit rate</span>
+            <strong>
+              {referencePrice && referenceRate
+                ? `${referencePrice} per ${referenceRate.credits.toLocaleString("en-US")} credits`
+                : caps ? "Reference rate unavailable" : "Checking reference rate…"}
+            </strong>
+            <small>
+              {caps?.pricing?.referenceReason || "The server must confirm the MagicLight credit-pack reference rate."}
+            </small>
+          </div>
+          <div>
+            <span>Estimated film cost</span>
+            <strong>Awaiting MagicLight quote</strong>
+            <small>A total is not available yet.</small>
+          </div>
+          <div>
+            <span>Payment provider</span>
+            <strong>QuickBooks</strong>
+            <small>Selected · connection pending</small>
+          </div>
+        </div>
+        <p>
+          Your film price will match MagicLight's quoted cost. BROCOTech markup: 0%.
+        </p>
+        <p className="field-note">
+          {caps?.pricing?.estimate.reason ||
+            "Waiting for MagicLight's credit quote for this complete film. Highest-quality animation and final-film settings have not been quoted."}
+        </p>
+      </section>
       <div className="readiness-panel" role="status">
         <h3>
           {caps?.magiclight && caps?.billing
@@ -1097,10 +1134,10 @@ export function CreateStep({
             {caps?.billing ? <CheckCircle2 size={18} /> : <FileText size={18} />}
           </span>
           <div>
-            <strong>Payment in Lineage Theatre</strong>
+            <strong>QuickBooks payments</strong>
             <p>
               {caps?.connections?.billing?.reason ||
-                "In-app payment is not connected. A confirmed film price must be shown before you pay or production starts."}
+                "QuickBooks is selected for payments; its merchant connection is pending. A confirmed film price must be shown before you pay or production starts."}
             </p>
           </div>
         </div>
