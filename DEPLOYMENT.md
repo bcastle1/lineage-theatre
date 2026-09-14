@@ -8,6 +8,8 @@ The user authorized publishing the prepared MagicLight-only studio while its pro
 
 Framework Vite; install `pnpm install --frozen-lockfile`; build `pnpm run build`; output `dist`. Three Vercel functions provide authentication, studio requests/media, and legacy Word text extraction. Their limits are declared in vercel.json.
 
+The Vercel connector has a 3 MB source-file limit. When using that transport, omit the existing sample MP4 from the source upload. `scripts/ensure-public-assets.mjs` restores it during the normal build from a pinned GitHub commit and verifies its byte length and SHA-256 before Vite bundles it. The live app serves the complete video locally; it does not rely on a playback-time redirect. Normal Git checkouts already contain the file and only run the checksum check.
+
 Production and preview require the private Blob connection and session secret. Server-side provider environment variables are described in README.md. Vercel sensitive variables cannot be read back into local development; validate them through an authenticated preview runtime. Do not commit `.env*`, local credential files, render fixtures, or build output. `.vercelignore` excludes them from uploads.
 
 The private Blob store retains account password hashes, rate limits, and provider job references. Original family sources, project metadata, and finished archive films remain local to the browser, under the signed-in account's project key. Local storage is not encrypted or a shared cloud vault. Do not represent it as cross-device storage.
