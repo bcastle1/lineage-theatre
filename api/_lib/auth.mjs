@@ -59,8 +59,13 @@ export function verifyPassword(password, hash) {
     return false;
   }
 }
-export async function readRecord(path) {
-  const result = await get(path, { access: "private", useCache: false });
+export async function readRecord(path, { getImpl = get } = {}) {
+  const result = await getImpl(path, {
+    access: "private",
+    useCache: false,
+    // Compression weakens the ETag; conditional writes need the stored entity's validator.
+    headers: { "accept-encoding": "identity" },
+  });
   if (!result || !result.stream) return null;
   return {
     value: await new Response(result.stream).json(),
