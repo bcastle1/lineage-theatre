@@ -6,7 +6,7 @@ import {
   createHash,
 } from "node:crypto";
 import { get, put } from "@vercel/blob";
-import { roleForUser } from "./access.mjs";
+import { roleForUser, accessStatusForUser } from "./access.mjs";
 import { passwordSetupRequired, SESSION_IDLE_MS, SESSION_MAX_MS, SETUP_SESSION_MS } from "./auth-security.mjs";
 
 export function json(res, status, body) {
@@ -170,6 +170,9 @@ export async function getSession(req, allowSetup = false, { readRecordImpl = rea
       || (record.value.securityVersion || 0) !== (decoded.securityVersion || 0))
       return null;
     if (record.value.status === "suspended") return null;
+    // Restricted auth sessions let pending applicants manage their own account,
+    // but an old cookie must never grant studio access without current approval.
+    if (!allowSetup && accessStatusForUser(record.value) !== "approved") return null;
     // Expiry cannot turn an existing normal session into password-reset authority.
     if (passwordSetupRequired(record.value, now) && !record.value.mustChangePassword && decoded.setup !== true) return null;
     if (passwordSetupRequired(record.value, now) && !allowSetup) return null;
@@ -200,6 +203,7 @@ export const publicUser = (user) => ({
   name: user.name,
   mustChangePassword: passwordSetupRequired(user),
   role: roleForUser(user),
+  accessStatus: accessStatusForUser(user),
   emailVerified: user.emailVerified === true,
   mfaEnabled: user.mfa?.enabled === true,
 });

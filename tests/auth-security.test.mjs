@@ -11,7 +11,8 @@ import { validatePassword, passwordUpdate, passwordSetupRequired, PASSWORD_MAX_A
 process.env.LINEAGE_SESSION_SECRET = "isolated-auth-security-test-key-never-used-in-production";
 const password = "Cedar lantern rivers wander";
 const baseUser = { email: "ada@example.invalid", name: "Fictional Ada Example", passwordHash: hashPassword(password),
-  status: "active", role: "customer", mustChangePassword: false, emailVerified: false };
+  status: "active", role: "customer", mustChangePassword: false, emailVerified: false,
+  approvedAt: "2026-09-01T00:00:00.000Z", approvedBy: "erik@brocotech.ai" };
 const env = { LINEAGE_MFA_ENCRYPTION_KEY: "ab".repeat(32) };
 const clone = value => structuredClone(value);
 const request = (body, cookie, method = "POST") => ({ method, url: "/api/auth", body,

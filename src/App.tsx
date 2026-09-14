@@ -5,10 +5,94 @@ import {
   CheckCircle2,
   Loader2,
   LockKeyhole,
+  RefreshCw,
+  ShieldCheck,
 } from "lucide-react";
 import { api, type User } from "./studio/model";
 import Landing from "./Landing";
 const Workspace = lazy(() => import("./studio/Workspace"));
+const AccountSecurity = lazy(() => import("./AccountSecurity"));
+
+function AccountWaiting({ user, onUserChange, onLogout, welcome }: {
+  user: User;
+  onUserChange: (user: User | null) => void;
+  onLogout: () => Promise<void>;
+  welcome: string;
+}) {
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const [securityBusy, setSecurityBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const requestLock = useRef(false);
+  const securityUser = useRef<User | null>(null);
+  const suspended = user.accessStatus === "suspended";
+  function closeSecurity() {
+    if (securityBusy) return;
+    setSecurityOpen(false);
+    if (securityUser.current) {
+      onUserChange(securityUser.current);
+      securityUser.current = null;
+    }
+  }
+  async function refreshApproval() {
+    if (requestLock.current || securityBusy) return;
+    requestLock.current = true;
+    setChecking(true);
+    setError("");
+    setMessage("");
+    try {
+      const result = await api<{ user: User | null }>("/api/auth");
+      onUserChange(result.user);
+      if (result.user && result.user.accessStatus !== "approved") {
+        setMessage(result.user.accessStatus === "suspended"
+          ? "Account access is still suspended. Contact the administrator for help."
+          : "Your account is still awaiting approval. You can check again after an administrator approves it.");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Account status could not be checked. Please try again.");
+    } finally {
+      requestLock.current = false;
+      setChecking(false);
+    }
+  }
+  return <div className="account-waiting-shell">
+    <header className="account-waiting-header">
+      <a href="/" className="login-brand"><Aperture size={28} strokeWidth={1.3} /><span>Lineage Theatre</span></a>
+      <div className="action-group">
+        <button className="text-button" disabled={checking || securityBusy} onClick={() => securityOpen ? closeSecurity() : setSecurityOpen(true)}>
+          <ShieldCheck size={16} /> {securityOpen ? "Account status" : "Account security"}
+        </button>
+        <button className="button secondary small" disabled={checking || securityBusy} onClick={() => void onLogout().catch(() => setError("Sign-out failed. Please try again."))}>Sign out</button>
+      </div>
+    </header>
+    <main className="account-waiting-content">
+      {error && <p className="feedback error" role="alert">{error}</p>}
+      {securityOpen ? <AccountSecurity user={user} onUserChange={updatedUser => {
+        // Keep security results, including new recovery codes, on screen if an
+        // administrator approves the account while the user is managing them.
+        securityUser.current = updatedUser;
+      }} onClose={closeSecurity} onBusyChange={setSecurityBusy} returnLabel="Return to account status" /> :
+        <section className="panel account-waiting-card" aria-labelledby="account-waiting-title">
+          <LockKeyhole size={30} />
+          <h1 id="account-waiting-title">{suspended ? "Your account access is suspended." : "Your account is awaiting approval."}</h1>
+          <p>Signed in as <strong>{user.email}</strong>.</p>
+          <p>{suspended
+            ? "Contact the administrator to review your account access."
+            : "An administrator must approve your account before you can enter the studio, make payments, or produce films."}</p>
+          <p className="muted">You can manage your password and sign-in security while you wait.</p>
+          {(message || welcome) && <p className="feedback" role="status">{message || welcome}</p>}
+          <div className="action-group">
+            <button className="button primary" disabled={checking} onClick={() => void refreshApproval()}>
+              {checking ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />} {checking ? "Checking account status…" : "Check account status"}
+            </button>
+            <a className="text-button" href="mailto:admin@brocotech.ai?subject=Lineage%20Theatre%20account%20approval">Contact the administrator</a>
+          </div>
+        </section>}
+    </main>
+    <footer className="account-waiting-footer"><span>Lives remembered. Stories kept.</span><a href="/privacy.html">Privacy</a></footer>
+  </div>;
+}
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -17,6 +101,7 @@ export default function App() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [name, setName] = useState("");
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [registrationApprovalRequired, setRegistrationApprovalRequired] = useState(true);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -45,8 +130,8 @@ export default function App() {
     if (window.location.hash.startsWith("#admin-invite=") || window.location.hash.startsWith("#verify-email=")) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
-    api<{ user: User | null }>("/api/auth")
-      .then((r) => setUser(r.user))
+    api<{ user: User | null; registrationApprovalRequired?: boolean }>("/api/auth")
+      .then((r) => { setUser(r.user); setRegistrationApprovalRequired(r.registrationApprovalRequired !== false); })
       .catch(() =>
         setError("Sign-in could not be reached. Please refresh to try again."),
       )
@@ -108,9 +193,11 @@ export default function App() {
       setWelcome(
         result.user.mustChangePassword
           ? ""
-          : registering
-            ? "Your account is created and you are signed in. Welcome to your studio."
-            : "Signed in successfully. Your studio is ready.",
+          : result.user.accessStatus === "approved"
+            ? registering ? "Your account is created and you are signed in." : "Signed in successfully."
+            : result.user.accessStatus === "suspended"
+              ? "Your account access is suspended."
+              : registering ? "Your account is created and awaiting administrator approval." : "Signed in successfully. Your account is awaiting approval.",
       );
     } catch (e) {
       setError(
@@ -130,6 +217,11 @@ export default function App() {
     setMode("login");
     setMfaRequired(false); setMfaCode("");
     setWelcome("You have signed out.");
+    setRegistrationApprovalRequired(true);
+    try {
+      const result = await api<{ registrationApprovalRequired?: boolean }>("/api/auth");
+      setRegistrationApprovalRequired(result.registrationApprovalRequired !== false);
+    } catch { /* Keep registration copy approval-first until a fresh read succeeds. */ }
   }
   if (loading)
     return (
@@ -142,7 +234,7 @@ export default function App() {
   if (user && !user.mustChangePassword)
     return (
       <Suspense
-        fallback={<div className="loading-screen">Opening your studio…</div>}
+        fallback={<div className="loading-screen">Opening your account…</div>}
       >
         {verificationToken && <div className="feedback" role="status">
           <span>{verificationMessage || `Confirm the verification link for ${user.email}.`}</span>
@@ -162,13 +254,16 @@ export default function App() {
             {!inviteBusy && <button className="text-button" onClick={() => void logout()}>Use another account</button>}
           </div>
         )}
-        <Workspace
+        {user.accessStatus === "approved" ? <Workspace
           key={user.email}
           user={user}
           onUserChange={setUser}
           onLogout={logout}
           welcome={welcome}
-        />
+        /> : <AccountWaiting user={user} onUserChange={updatedUser => {
+          setUser(updatedUser);
+          if (updatedUser?.accessStatus === "approved") setWelcome("Your account has been approved. Welcome to your studio.");
+        }} onLogout={logout} welcome={welcome} />}
       </Suspense>
     );
   const AuthTitle = user?.mustChangePassword ? "h1" : "h2";
@@ -201,13 +296,15 @@ export default function App() {
           <AuthTitle>
             {mfaRequired ? "Confirm your sign-in." : user?.mustChangePassword
               ? "Make this account yours."
-              : registering ? "Create your family film studio." : "Your story starts here."}
+              : registering ? "Create your account." : "Your story starts here."}
           </AuthTitle>
           <p className="muted">
             {mfaRequired ? "Enter a code from your authenticator app or use a saved recovery code." : user?.mustChangePassword
-              ? `Welcome, ${user.name}. Set a personal password before entering your studio.`
+              ? `Welcome, ${user.name}. Set a personal password to continue.`
               : registering
-                ? "Create an account to keep your family stories and develop your first film."
+                ? registrationApprovalRequired
+                  ? "Register your account to request studio access. An administrator must approve it before you can make payments or produce films."
+                  : "Create an account to keep your family stories and develop your first film."
                 : "Sign in to turn photographs, records, and family memories into a film worth keeping."}
           </p>
           {!user && !mfaRequired && (
@@ -332,8 +429,8 @@ export default function App() {
               {busy
                 ? "Please wait…"
                 : mfaRequired ? "Confirm sign-in" : user
-                  ? "Save password & enter studio"
-                  : registering ? "Create account & enter studio" : "Sign in to your studio"}
+                  ? "Save password & continue"
+                  : registering ? registrationApprovalRequired ? "Create account & request access" : "Create account" : "Sign in to your studio"}
             </button>
           </form>
           <p className="field-note">

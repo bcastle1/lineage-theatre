@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { get, head, list } from "@vercel/blob";
-import { digest, readRecord, writeRecord } from "./auth.mjs";
+import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
+import { accessStatusForUser } from "./access.mjs";
 
 export const MAX_FILM_BYTES = 250 * 1024 * 1024;
 export const MAX_ACCOUNT_BYTES = 5 * 1024 * 1024 * 1024;
@@ -103,6 +104,12 @@ export function createArchiveService(dependencies = {}) {
   const now = dependencies.now || (() => Date.now());
   const uuid = dependencies.uuid || randomUUID;
 
+  async function requireApprovedOwner(owner) {
+    const account = await read(userPath(owner));
+    if (account?.value.email !== owner || accessStatusForUser(account.value) !== "approved")
+      throw new ArchiveError("This account is not approved to complete a cloud upload.", 403);
+  }
+
   async function mutate(path, change) {
     for (let attempt = 0; attempt < 5; attempt++) {
       const previous = await read(path);
@@ -181,6 +188,9 @@ export function createArchiveService(dependencies = {}) {
     if (ticket && ["pathname", "nonce", "contentType", "size"].some((key) => ticket[key] !== pending[key]))
       throw new ArchiveError("The upload callback does not match this film.", 403);
     if (pending.pathname !== mediaPath(owner, id, pending.contentType)) throw new ArchiveError("The archived video path is invalid.", 403);
+    // A signed upload ticket can outlive account approval. Its callback has no
+    // browser session, so the current account must authorize a new finalization.
+    await requireApprovedOwner(owner);
     let info;
     try { info = await headBlob(pending.pathname); }
     catch (error) { if (/not.?found/i.test(`${error?.name} ${error?.message}`)) throw new ArchiveError("The video upload has not arrived yet. Retry verification after the upload finishes.", 409); throw error; }
@@ -189,10 +199,13 @@ export function createArchiveService(dependencies = {}) {
     const beginning = await getBlob(pending.pathname, { access: "private", useCache: false, headers: { Range: "bytes=0-31" } });
     if (!beginning?.stream || !verifyVideoHeader(await leadingBytes(beginning.stream), pending.contentType))
       throw new ArchiveError("The uploaded file is not a recognized MP4 or WebM video.", 409);
-    const saved = await mutate(metadataPath(owner, id), (old) => {
+    const saved = await mutate(metadataPath(owner, id), async (old) => {
       if (!old || old.ownerEmail !== owner || old.id !== id) throw new ArchiveError("This cloud film was not found.", 404);
       if (old.video?.pathname === pending.pathname && old.video.nonce === pending.nonce) return old;
       if (!old.pending || old.pending.nonce !== pending.nonce) throw new ArchiveError("This video upload is no longer current.", 409);
+      // Media verification may take time. Recheck immediately before committing,
+      // including retries after a concurrent metadata update.
+      await requireApprovedOwner(owner);
       const { pending: removed, ...rest } = old;
       return { ...rest, updatedAt: new Date(now()).toISOString(), video: {
         pathname: pending.pathname, contentType: info.contentType, size: info.size,

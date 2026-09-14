@@ -65,6 +65,7 @@ const limit = async (key, maximum, windowMs) => {
 };
 const session = (req, allowSetup) => auth.getSession(req, allowSetup, { readRecordImpl: read, writeRecordImpl: write });
 const pricingSettings = async () => (await read("settings/pricing.json"))?.value || { markupBasisPoints: 0, revision: 0 };
+const registrationPolicy = async () => (await read("settings/registration.json"))?.value || { approvalRequired: true, revision: 0, updatedAt: null, updatedBy: null };
 const connections = async () => ({ story: false, ...productionReadiness({ env: {}, pricingSettings: await pricingSettings() }),
   connections: { ...productionReadiness({ env: {} }).connections,
     story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } });
@@ -87,7 +88,7 @@ const recordPage = async (prefix, { cursor, limit: size = 50 } = {}) => {
   return { records: page, ...(offset + size < all.length ? { cursor: String(offset + size) } : {}) };
 };
 const shared = { getSession: session, readRecord: read, writeRecord: write, limitAction: limit,
-  connections, readPricingSettings: pricingSettings, filmProduction, payments };
+  connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, payments };
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
@@ -99,11 +100,14 @@ const accounts = [
   { email: "customer@example.invalid", name: "SAMPLE ONLY - FICTIONAL CUSTOMER", role: "customer", password: "Cedar lantern rivers wander" },
   { email: OWNER_EMAIL, name: "SAMPLE ONLY - FICTIONAL OWNER", role: "owner", password: "Copper forest windmills travel" },
   { email: "second-customer@example.invalid", name: "SAMPLE ONLY - SECOND FICTIONAL CUSTOMER", role: "customer", password: "Orchard mountain copper lantern" },
+  { email: "waiting@example.invalid", name: "SAMPLE ONLY - WAITING CUSTOMER", role: "customer", pending: true, password: "Birch harvest lantern sunset" },
+  { email: "admin@example.invalid", name: "SAMPLE ONLY - FICTIONAL ADMIN", role: "admin", password: "Silver fountain cedar twilight" },
 ];
 for (const account of accounts) {
-  const { password, ...user } = account;
+  const { password, pending, ...user } = account;
   await write(auth.userPath(user.email), { ...user, passwordHash: auth.hashPassword(password),
-    status: "active", mustChangePassword: false, emailVerified: false, createdAt: new Date().toISOString() });
+    status: pending ? "pending" : "active", mustChangePassword: false, emailVerified: false, createdAt: new Date().toISOString(),
+    ...(!pending ? { approvedAt: new Date().toISOString(), approvedBy: OWNER_EMAIL } : {}) });
 }
 const fixture = fictionalOperatorProject();
 fixture.scenes = fixture.scenes.map((scene, index) => ({ ...scene, id: `synthetic-scene-${index + 1}` }));
@@ -214,10 +218,58 @@ async function check() {
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "generate" } })).status, 503);
   assert.equal((await route("/api/admin", { cookie: customer, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 403);
   assert.equal((await route("/api/admin", { cookie: owner, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 201);
+  await checkRegistrationAccess(owner);
   assert.equal((await route("/api/auth", { cookie: customer, body: { action: "logout" } })).status, 200);
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).status, 401);
   assert.equal(blockedExternalCalls, 0);
-  console.log("PASS: real-handler synthetic workflow, consent, idempotency, ownership, admin access, disabled payment/rendering, and logout replay; zero outbound calls.");
+  console.log("PASS: real-handler synthetic workflow, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+}
+async function checkRegistrationAccess(owner) {
+  const waiting = await login(accounts[3]), administrator = await login(accounts[4]);
+  assert.equal((await route("/api/auth", { cookie: waiting })).body.user.accessStatus, "pending");
+  assert.equal((await route("/api/auth?action=security", { cookie: waiting })).status, 200);
+  for (const action of ["prepare", "quote", "checkout", "generate"]) {
+    assert.equal((await route("/api/studio", { cookie: waiting, body: { action } })).status, 401, `Pending ${action}`);
+  }
+  assert.equal((await route("/api/admin", { cookie: waiting, body: { action: "approve", email: accounts[3].email } })).status, 401);
+  const approval = await route("/api/admin", { cookie: administrator, body: { action: "approve", email: accounts[3].email } });
+  assert.equal(approval.status, 200);
+  assert.equal(approval.body.user.accessStatus, "approved");
+  assert.equal(approval.body.user.role, "customer");
+  // The existing cookie must pick up the persisted approval without granting admin rights.
+  assert.equal((await route("/api/auth", { cookie: waiting })).body.user.accessStatus, "approved");
+  assert.equal((await route("/api/admin?action=overview", { cookie: waiting })).status, 403);
+  for (const cookie of [owner, administrator, waiting]) {
+    const capabilities = await route("/api/studio?action=capabilities", { cookie });
+    assert.equal(capabilities.status, 200);
+    assert.equal(capabilities.body.production, false);
+    assert.equal(capabilities.body.billing, false);
+    assert.equal((await route("/api/studio", { cookie, body: { action: "generate" } })).status, 503);
+    assert.equal((await route("/api/studio", { cookie, body: { action: "quote", project: fixture, idempotencyKey: "synthetic-same-workflow-quote" } })).status, 503);
+  }
+  const initial = await route("/api/admin?action=registrationPolicy", { cookie: administrator });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.approvalRequired, true);
+  assert.equal((await route("/api/admin", { cookie: waiting, body: { action: "updateRegistrationPolicy", approvalRequired: false, expectedRevision: initial.body.revision } })).status, 403);
+  const register = async email => route("/api/auth", { body: { action: "register", name: "Fictional registration policy check", email, password: "Meadow lantern copper hillside", termsAccepted: true } });
+  const pending = await register("new-waiting@example.invalid");
+  assert.equal(pending.status, 201);
+  assert.equal(pending.body.user.accessStatus, "pending");
+  const disabled = await route("/api/admin", { cookie: administrator, body: { action: "updateRegistrationPolicy", approvalRequired: false, expectedRevision: initial.body.revision } });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.approvalRequired, false);
+  const automatic = await register("automatic@example.invalid");
+  assert.equal(automatic.status, 201);
+  assert.equal(automatic.body.user.accessStatus, "approved");
+  assert.equal(automatic.body.user.role, "customer");
+  const waitingCookie = pending.cookies.find(cookie=>cookie.startsWith("lineage_session=")).split(";")[0];
+  assert.equal((await route("/api/auth", { cookie: waitingCookie })).body.user.accessStatus, "pending");
+  const enabled = await route("/api/admin", { cookie: administrator, body: { action: "updateRegistrationPolicy", approvalRequired: true, expectedRevision: disabled.body.revision } });
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.body.approvalRequired, true);
+  const automaticCookie = automatic.cookies.find(cookie=>cookie.startsWith("lineage_session=")).split(";")[0];
+  assert.equal((await route("/api/auth", { cookie: automaticCookie })).body.user.accessStatus, "approved");
+  assert.equal((await register("waiting-again@example.invalid")).body.user.accessStatus, "pending");
 }
 if (checkOnly) {
   try { await check(); } finally { await close(); }

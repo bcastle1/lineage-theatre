@@ -8,8 +8,8 @@ type SecurityStatus = {
 };
 type Enrollment = { secret: string; otpauthUri: string; expiresAt: string };
 
-export default function AccountSecurity({ user, onUserChange, onClose, onBusyChange }: {
-  user: User; onUserChange: (user: User) => void; onClose: () => void; onBusyChange?: (busy: boolean) => void;
+export default function AccountSecurity({ user, onUserChange, onClose, onBusyChange, returnLabel = "Return to my film" }: {
+  user: User; onUserChange: (user: User) => void; onClose: () => void; onBusyChange?: (busy: boolean) => void; returnLabel?: string;
 }) {
   const [status, setStatus] = useState<SecurityStatus | null>(null);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -49,7 +49,7 @@ export default function AccountSecurity({ user, onUserChange, onClose, onBusyCha
   }
   return <section className="panel account-security" aria-labelledby="account-security-title">
     <div className="section-title"><div><h2 id="account-security-title">Account security</h2><p>{user.email}</p></div><ShieldCheck size={24} /></div>
-    <button className="text-button" onClick={onClose} disabled={busy}><ArrowLeft size={16} /> Return to my film</button>
+    <button className="text-button" onClick={onClose} disabled={busy}><ArrowLeft size={16} /> {returnLabel}</button>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {message && <p className="feedback success" role="status">{message}</p>}
     {!status && !error && <p role="status"><Loader2 className="spin" size={16} /> Loading account settings…</p>}
@@ -58,7 +58,7 @@ export default function AccountSecurity({ user, onUserChange, onClose, onBusyCha
       <p>{status ? status.emailVerified ? "Your email address is verified." : "Your email address has not been verified." : "Verification status is unavailable."}</p>
       {status && !status.emailVerified && <>
         <button className="button secondary small" disabled={busy || !status.emailVerificationAvailable} onClick={() => void perform("emailVerificationRequest")}>Request verification email</button>
-        {!status.emailVerificationAvailable && <p className="field-note">Email verification is not available yet. Your saved work remains accessible.</p>}
+        {!status.emailVerificationAvailable && <p className="field-note">Email verification is not available yet.</p>}
       </>}
     </section>
     <section className="readiness-panel">

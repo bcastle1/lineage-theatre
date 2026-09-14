@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAdminHandler } from "../api/admin.mjs";
-import { OWNER_EMAIL, roleForUser } from "../api/_lib/access.mjs";
+import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "../api/_lib/access.mjs";
 import { userPath } from "../api/_lib/auth.mjs";
 import { newInvitation, validateInvitation, validateUserAction, validateRefund, markupFromPercent, readPricingSettings, safeUser, PRICING_PATH } from "../api/_lib/admin.mjs";
 const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
@@ -32,8 +32,8 @@ test("email alone never creates owner/admin access; inactive privileges are not 
 test("unsigned and customer requests cannot read admin data or mutate roles/pricing/refunds",async()=>{
   for(const actor of [null,customer]){
     const h=harness(actor),expected=actor?403:401;
-    for(const action of ["overview","users","payments","audit","pricing"]) assert.equal((await h.run(action)).status,expected);
-    for(const action of ["invite","revokeAdmin","suspend","activate","updatePricing","refund"])
+    for(const action of ["overview","users","payments","audit","pricing","registrationPolicy"]) assert.equal((await h.run(action)).status,expected);
+    for(const action of ["invite","revokeAdmin","suspend","activate","approve","updatePricing","updateRegistrationPolicy","refund"])
       assert.equal((await h.run(action,{email:admin.email,markupPercent:50,expectedRevision:0})).status,expected);
     assert.equal(h.writes,0);
   }
@@ -64,6 +64,8 @@ test("invitations are hashed, expire, and only grant the exact invited account",
   const h=harness(customer);h.records.set(invited.path,invited.record);h.records.set(userPath(customer.email),customer);
   const result=await h.run("acceptInvite",{token:invited.token});
   assert.equal(result.status,200);assert.equal(result.body.user.role,"admin");
+  assert.equal(result.body.user.accessStatus,"approved");
+  assert.equal(h.records.get(userPath(customer.email)).approvedBy,owner.email);
   assert.equal(h.records.get(invited.path).usedBy,customer.email);
   assert.equal(h.events[0][1],"administrator.invitation.accepted");
   assert.equal(JSON.stringify(h.events).includes(invited.token),false);
@@ -86,6 +88,7 @@ test("revocation persists a cutoff while preserving the password and account",as
   assert.equal(result.status,200);
   const stored=h.records.get(userPath(admin.email));
   assert.equal(stored.role,"customer");assert.equal(stored.passwordHash,"preserved-hash");assert.ok(Date.parse(stored.adminRevokedAt));
+  assert.equal(accessStatusForUser(stored),"approved");assert.equal(stored.approvedBy,owner.email);
 });
 test("pricing accepts precise bounded percentages and requires a current revision",async()=>{
   assert.equal(markupFromPercent(12.35),1235);assert.equal(markupFromPercent(1000),100000);

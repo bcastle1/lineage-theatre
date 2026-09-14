@@ -4,14 +4,18 @@ import { Writable } from "node:stream";
 import { createHmac } from "node:crypto";
 import { createArchiveService, metadataPath, mediaPath, validateArchiveInput, parseRange, MAX_FILM_BYTES, MAX_ACCOUNT_BYTES } from "../api/_lib/archive.mjs";
 import { createArchiveHandler } from "../api/archive.mjs";
-import { digest } from "../api/_lib/auth.mjs";
+import { digest, userPath } from "../api/_lib/auth.mjs";
+import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 
 const owner = "family@example.invalid", other = "other@example.invalid";
 const id = "11111111-1111-4111-8111-111111111111";
 const secondId = "22222222-2222-4222-8222-222222222222";
 const input = (overrides = {}) => ({ archiveConsent: true, id, title: "A fictional family film", ancestor: "Fictional ancestor", duration: 120, ...overrides });
-function fixture() {
+const approvedAccount = (email = owner) => ({ email, role: "customer", status: "active",
+  approvedAt: "2026-09-14T00:00:00.000Z", approvedBy: OWNER_EMAIL });
+function fixture({ beforeGetBlob } = {}) {
   const records = new Map(), videos = new Map(), reads = [], writes = [];
+  records.set(userPath(owner), { value: approvedAccount(), etag: "account" });
   let revision = 0;
   const readRecord = async (path) => structuredClone(records.get(path) || null);
   const writeRecord = async (path, value, etag) => {
@@ -29,6 +33,7 @@ function fixture() {
     return { pathname: path, size: file.bytes.length, contentType: file.type, etag: "video-etag", url: `https://store.private.blob.vercel-storage.com/${path}` };
   };
   const getBlob = async (path, options) => {
+    await beforeGetBlob?.(records);
     reads.push(path);
     const file = videos.get(path); if (!file) return null;
     const range = parseRange(options?.headers?.Range, file.bytes.length);
@@ -61,6 +66,20 @@ async function uploaded(fix) {
   const bytes = fix.addVideo(saved.upload.pathname);
   await fix.service.finalize(owner, id);
   return { path: saved.upload.pathname, bytes };
+}
+async function signedCallback(fix, event) {
+  const previous = process.env.BLOB_READ_WRITE_TOKEN;
+  const token = "vercel_blob_rw_synthetic_archive_test_token";
+  process.env.BLOB_READ_WRITE_TOKEN = token;
+  try {
+    const body = { type: "blob.upload-completed", payload: event };
+    const signature = createHmac("sha256", token).update(JSON.stringify(body)).digest("hex");
+    return await request(fix, { method: "POST", user: null, body,
+      headers: { "x-vercel-signature": signature } });
+  } finally {
+    if (previous === undefined) delete process.env.BLOB_READ_WRITE_TOKEN;
+    else process.env.BLOB_READ_WRITE_TOKEN = previous;
+  }
 }
 
 test("archive save requires explicit consent and stores only scoped film metadata", async () => {
@@ -190,6 +209,69 @@ test("a verified Blob callback can complete without a browser session while alte
     const ticket = JSON.parse(options.tokenPayload);
     await assert.rejects(fix.service.completeUpload({ blob: { pathname: saved.upload.pathname }, tokenPayload: JSON.stringify({ ...ticket, size: 12 }) }), /does not match/);
   } finally { if (previous === undefined) delete process.env.BLOB_READ_WRITE_TOKEN; else process.env.BLOB_READ_WRITE_TOKEN = previous; }
+});
+
+test("previously signed upload tickets cannot finalize for missing, pending, suspended or unapproved accounts", async () => {
+  for (const account of [null, { ...approvedAccount(), status: "pending" },
+    { ...approvedAccount(), status: "suspended" }, { email: owner, role: "customer", status: "active" },
+    { ...approvedAccount(), approvedBy: "" }, { ...approvedAccount(), role: "admin", status: "suspended" },
+    { ...approvedAccount(), email: other }]) {
+    const fix = fixture();
+    const saved = await fix.service.save(owner, input({ video: { type: "video/mp4", size: 128 } }));
+    const options = await fix.service.uploadOptions(owner, saved.upload.pathname, saved.upload.clientPayload);
+    fix.addVideo(saved.upload.pathname);
+    if (account) fix.records.set(userPath(owner), { value: account, etag: "changed" });
+    else fix.records.delete(userPath(owner));
+    const writes = fix.writes.length;
+    const response = await signedCallback(fix, { blob: { pathname: saved.upload.pathname }, tokenPayload: options.tokenPayload });
+    assert.equal(response.statusCode, 403); assert.match(response.data.message, /not approved/);
+    assert.equal(fix.writes.length, writes); assert.equal(fix.reads.length, 0);
+    assert.equal(fix.records.get(metadataPath(owner, id)).value.video, undefined);
+    await assert.rejects(fix.service.finalize(owner, id), /not approved/);
+  }
+});
+
+test("signed callbacks finalize for approved customers and active existing administrators and owner", async () => {
+  for (const account of [approvedAccount(), { email: owner, role: "admin", status: "active" },
+    { email: OWNER_EMAIL, role: "owner", status: "active" }]) {
+    const fix = fixture(), email = account.email;
+    fix.records.set(userPath(email), { value: account, etag: "current" });
+    const saved = await fix.service.save(email, input({ video: { type: "video/mp4", size: 128 } }));
+    const options = await fix.service.uploadOptions(email, saved.upload.pathname, saved.upload.clientPayload);
+    fix.addVideo(saved.upload.pathname);
+    const response = await signedCallback(fix, { blob: { pathname: saved.upload.pathname }, tokenPayload: options.tokenPayload });
+    assert.equal(response.statusCode, 200);
+    assert.ok(fix.records.get(metadataPath(email, id)).value.video);
+  }
+});
+
+test("approval revoked during media verification blocks the final metadata commit", async () => {
+  const fix = fixture({ beforeGetBlob: records => {
+    records.set(userPath(owner), { value: { ...approvedAccount(), status: "suspended" }, etag: "revoked" });
+  } });
+  const saved = await fix.service.save(owner, input({ video: { type: "video/mp4", size: 128 } }));
+  const options = await fix.service.uploadOptions(owner, saved.upload.pathname, saved.upload.clientPayload);
+  fix.addVideo(saved.upload.pathname);
+  const writes = fix.writes.length;
+  const response = await signedCallback(fix, { blob: { pathname: saved.upload.pathname }, tokenPayload: options.tokenPayload });
+  assert.equal(response.statusCode, 403); assert.equal(fix.writes.length, writes);
+  assert.equal(fix.records.get(metadataPath(owner, id)).value.video, undefined);
+});
+
+test("already finalized signed callbacks remain idempotent after approval is revoked without new writes", async () => {
+  const fix = fixture();
+  const saved = await fix.service.save(owner, input({ video: { type: "video/mp4", size: 128 } }));
+  const options = await fix.service.uploadOptions(owner, saved.upload.pathname, saved.upload.clientPayload);
+  fix.addVideo(saved.upload.pathname);
+  const event = { blob: { pathname: saved.upload.pathname }, tokenPayload: options.tokenPayload };
+  assert.equal((await signedCallback(fix, event)).statusCode, 200);
+  const prior = structuredClone(fix.records.get(metadataPath(owner, id))), writes = fix.writes.length;
+  fix.records.set(userPath(owner), { value: { ...approvedAccount(), status: "suspended" }, etag: "revoked" });
+  assert.equal((await signedCallback(fix, event)).statusCode, 200);
+  assert.equal(fix.writes.length, writes); assert.deepEqual(fix.records.get(metadataPath(owner, id)), prior);
+  const ticket = { ...JSON.parse(options.tokenPayload), nonce: id };
+  const altered = await signedCallback(fix, { ...event, tokenPayload: JSON.stringify(ticket) });
+  assert.equal(altered.statusCode, 403); assert.equal(fix.writes.length, writes);
 });
 test("tampered private media paths and ignored upstream ranges never expose another file", async () => {
   const fix = fixture(); await uploaded(fix);
