@@ -104,6 +104,58 @@ test("server quote is bound to validated immutable manifest and exact cost, neve
   await assert.rejects(invalid.quoteForPayment(project, { email }, { idempotencyKey }), e => e.code === "PRODUCTION_UNAVAILABLE");
 });
 
+test("renewed quotes retain the owned prepared plan and use a separate stable provider retry key", async () => {
+  const data = store(), calls = [];
+  let time = at;
+  const service = createFilmProductionService({ ...data, now: () => time, adapter: adapter({
+    quote: async request => {
+      calls.push(request);
+      return { manifestHash: request.manifestHash, quoteReference: `fixture-price-${time}`, currency: "USD", providerCostCents: 300, expiresAt: new Date(time + 60_000).toISOString() };
+    },
+  }) });
+  const prepared = await prepare(service), project = fictionalOperatorProject();
+  const input = { preparedId: prepared.id, manifestHash: prepared.manifestHash, idempotencyKey: "first-price-request-001" };
+  const first = await service.quoteForPayment(project, { email }, input);
+  await service.quoteForPayment(project, { email }, input);
+  assert.equal(calls[0].idempotencyKey, calls[1].idempotencyKey);
+  time += 120_000;
+  const renewed = await service.quoteForPayment(project, { email }, { ...input, idempotencyKey: "renew-price-request-002" });
+  assert.equal(first.preparedId, prepared.id); assert.equal(renewed.preparedId, prepared.id);
+  assert.equal(renewed.manifestHash, prepared.manifestHash);
+  assert.notEqual(calls[0].idempotencyKey, calls[2].idempotencyKey);
+  assert.notEqual(first.quoteReference, renewed.quoteReference);
+  assert.equal(data.records.size, 1);
+  assert.equal((await service.status({ email, id: prepared.id })).status, "prepared");
+});
+
+test("saved-plan pricing rejects changed content, foreign accounts and invalid references before provider calls", async () => {
+  const data = store(); let providerCalls = 0;
+  const service = createFilmProductionService({ ...data, now: () => at, adapter: adapter({
+    validateManifest: async () => { providerCalls++; return { ready: true }; },
+    quote: async () => { providerCalls++; },
+  }) });
+  const prepared = await prepare(service), project = fictionalOperatorProject();
+  const input = { preparedId: prepared.id, manifestHash: prepared.manifestHash, idempotencyKey: "saved-price-request-001" };
+  const changed = structuredClone(project); changed.scenes[0].narration = "A different opening scene.";
+  await assert.rejects(service.quoteForPayment(changed, { email }, input), e => e.code === "PRODUCTION_PLAN_CHANGED");
+  await assert.rejects(service.quoteForPayment(project, { email }, { ...input, manifestHash: "a".repeat(64) }), e => e.code === "PRODUCTION_PLAN_CHANGED");
+  await assert.rejects(service.quoteForPayment(project, { email: "other@example.invalid" }, input), e => e.code === "PRODUCTION_NOT_FOUND");
+  await assert.rejects(service.quoteForPayment(project, { email }, { ...input, preparedId: "../other" }), e => e.status === 400);
+  await assert.rejects(service.quoteForPayment(project, { email }, { ...input, idempotencyKey: "short" }), e => e.status === 400);
+  assert.equal(providerCalls, 0); assert.equal(data.records.size, 1);
+});
+
+test("a started plan cannot be priced again and owner test plans retain owner authorization", async () => {
+  const data = store(); let priceCalls = 0;
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter({ quote: async () => { priceCalls++; } }) });
+  const project = fictionalOperatorProject(), prepared = await prepare(service);
+  await service.advance({ email, id: prepared.id });
+  await assert.rejects(service.quoteForPayment(project, { email }, { preparedId: prepared.id, idempotencyKey }), e => e.code === "PRODUCTION_ALREADY_STARTED");
+  const operatorPlan = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
+  await assert.rejects(service.quoteForPayment(project, { email: owner.email, role: "customer", status: "active" }, { preparedId: operatorPlan.id, idempotencyKey }), e => e.code === "OWNER_REQUIRED");
+  assert.equal(priceCalls, 0);
+});
+
 test("no submit before trusted budget and matching environment authorization", async () => {
   let submissions = 0; const data = store();
   for (const authorize of [undefined, async args => ({ ...await grant(args), budgetCents: 299 }), async args => ({ ...await grant(args), environment: "production" }), async args => ({ ...await grant(args), expiresAt: "invalid" })]) {

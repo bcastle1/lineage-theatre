@@ -136,6 +136,8 @@ type QuickBooksStatus = {
   revision: number;
   pending: boolean | null;
   lastConnectedAt: string | null;
+  refreshStatus?: string;
+  lastRefreshedAt?: string | null;
   realmId?: string | null;
   revocationStatus?: string | null;
   companyVerification?: {
@@ -365,6 +367,7 @@ export default function Admin({
   const [quickBooks, setQuickBooks] = useState<QuickBooksStatus | null>(null);
   const [quickBooksError, setQuickBooksError] = useState("");
   const [verifyingCompany, setVerifyingCompany] = useState(false);
+  const [refreshingAuthorization, setRefreshingAuthorization] = useState(false);
   const [quickBooksReturn, setQuickBooksReturn] = useState(paymentCallbackResult);
   const [authorizationCheck, setAuthorizationCheck] = useState(0);
   const [authorizationAttempt, setAuthorizationAttempt] =
@@ -787,6 +790,47 @@ export default function Admin({
         )),
   );
   const companyVerification = verifiedQuickBooksCompany(quickBooks);
+  const canRefreshQuickBooks = Boolean(
+    isOwner && quickBooks?.configured && hasQuickBooksAuthorization &&
+    ["expired", "authorized"].includes(quickBooks.authorizationStatus) &&
+    !quickBooks.pending && !quickBooks.remoteReviewRequired &&
+    Number.isSafeInteger(quickBooks.revision),
+  );
+  async function refreshQuickBooksAuthorization() {
+    if (!canRefreshQuickBooks || !quickBooks || actionLock.current) return;
+    actionLock.current = true;
+    setBusy(true);
+    setRefreshingAuthorization(true);
+    setQuickBooksError("");
+    try {
+      const result = await api<QuickBooksStatus & { refreshed: boolean }>("/api/quickbooks", {
+        action: "refresh", expectedRevision: quickBooks.revision,
+      });
+      if (!adminMounted.current) return;
+      setQuickBooks(result);
+      if (result.connected && !result.pending && !result.remoteReviewRequired) {
+        notify(result.refreshed
+          ? "Authorization renewed. No payment was made."
+          : "The existing authorization is still current. No payment was made.", "info");
+      } else {
+        setQuickBooksError("Authorization renewal was not confirmed. Review its status before another action.");
+      }
+    } catch (e) {
+      if (adminMounted.current) {
+        setQuickBooksError(errorText(e));
+        // Read the result of the single attempt; never retry a token rotation.
+        try {
+          const current = await api<QuickBooksStatus>("/api/quickbooks?action=status");
+          if (adminMounted.current) setQuickBooks(current);
+        } catch {
+          if (adminMounted.current) setQuickBooks(null);
+        }
+      }
+    } finally {
+      actionLock.current = false;
+      if (adminMounted.current) { setBusy(false); setRefreshingAuthorization(false); }
+    }
+  }
   async function verifyQuickBooksCompany() {
     if (
       !isOwner ||
@@ -1861,6 +1905,14 @@ export default function Admin({
               <div className="admin-quickbooks-actions">
                 {isOwner ? (
                   <>
+                    {canRefreshQuickBooks && (
+                      <button className="button secondary"
+                        disabled={busy || loading || authorizationTracking}
+                        onClick={() => void refreshQuickBooksAuthorization()}>
+                        {refreshingAuthorization && <Loader2 size={16} className="spin" />}
+                        {refreshingAuthorization ? "Renewing authorization…" : "Refresh authorization"}
+                      </button>
+                    )}
                     <button
                       className="button primary"
                       disabled={
@@ -1880,7 +1932,7 @@ export default function Admin({
                         } else void connectQuickBooks();
                       }}
                     >
-                      {busy && !dialog && !verifyingCompany ? (
+                      {busy && !dialog && !verifyingCompany && !refreshingAuthorization ? (
                         <Loader2 size={16} className="spin" />
                       ) : (
                         <ShieldCheck size={16} />
@@ -1905,7 +1957,9 @@ export default function Admin({
                     )}
                     <p>
                       {hasQuickBooksAuthorization
-                        ? "To change or renew authorization, disconnect the saved connection first. Existing order records stay here."
+                        ? canRefreshQuickBooks
+                          ? "Refresh renews the existing authorization without making a payment. Disconnect only to replace this connection. Existing order records stay here."
+                          : "Review the connection status before reconnecting. Existing order records stay here."
                         : "Complete authorization in the opened Intuit window, then return here."}
                     </p>
                   </>

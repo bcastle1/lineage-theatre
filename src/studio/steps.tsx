@@ -18,8 +18,9 @@ import {
   X,
   CheckCircle2,
 } from "lucide-react";
-import { type Source, type Scene, type Theme, formatDuration, productionStatusMessage } from "./model";
+import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
 import ProductionPreparation from "./ProductionPreparation";
+import FilmCheckout from "./FilmCheckout";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -991,7 +992,8 @@ type CreateProps = StepProps & {
   consent: boolean;
   setConsent: (v: boolean) => void;
   resultUrl: string;
-  generate: () => Promise<void>;
+  persistPaymentReference: (reference: FilmPaymentReference) => void;
+  onCheckoutBusy: (message: string) => void;
   brief: () => void;
   backup: () => void;
 };
@@ -1005,20 +1007,12 @@ export function CreateStep({
   consent,
   setConsent,
   resultUrl,
-  generate,
+  persistPaymentReference,
+  onCheckoutBusy,
   brief,
   backup,
   navigate,
 }: CreateProps) {
-  // A price must be returned and confirmed by the server before this can enable.
-  const hasConfirmedQuote = false;
-  const canGenerate = Boolean(
-    caps?.production &&
-      caps?.billing &&
-      hasConfirmedQuote &&
-      consent &&
-      film.scenes.length,
-  );
   const mediaUrl =
     film.job?.status === "completed"
       ? `/api/studio?action=media&id=${encodeURIComponent(film.job.id)}`
@@ -1055,32 +1049,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <ProductionPreparation key={film.id} film={film} onPrepared={prepared=>update({productionPreparation:prepared})} />
-      <section className="readiness-panel" aria-label="Film pricing">
-        <h3>Your film price</h3>
-        <p>Price not available yet.</p>
-        <p className="field-note">
-          You will see the total price, running time, and available film quality before
-          you approve production and payment.
-        </p>
-      </section>
-      <div className="readiness-panel" role="status">
-        <h3>
-          {caps?.production && caps?.billing
-            ? "Price confirmation required"
-            : caps
-              ? "Film production is not available yet"
-              : "Film production availability is unconfirmed"}
-        </h3>
-        <p>
-          You can continue writing and saving your screenplay. Review your script and
-          cast, or download your script to keep a copy.
-        </p>
-        <p className="field-note">
-          Creating your film will stay unavailable until you can review the final price
-          and approve payment.
-        </p>
-      </div>
+      <ProductionPreparation key={film.id} film={film} disabled={Boolean(busy)} onPrepared={prepared=>update({productionPreparation:prepared})} />
       <label className="check-label consent-final">
         <input
           type="checkbox"
@@ -1091,6 +1060,7 @@ export function CreateStep({
         I have permission to use these materials and have reviewed the facts, cast,
         dialogue, and dramatized details.
       </label>
+      <FilmCheckout key={film.id} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>
@@ -1106,14 +1076,6 @@ export function CreateStep({
             Project backup
           </button>
         </div>
-        <button
-          className="button primary"
-          disabled={!!busy || !canGenerate}
-          onClick={() => void generate()}
-        >
-          <Sparkles size={17} />
-          Create my film
-        </button>
       </div>
       {film.job && (
         <div className="render-progress" role="status">

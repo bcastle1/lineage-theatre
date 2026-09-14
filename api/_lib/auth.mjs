@@ -161,8 +161,11 @@ export async function revokeSession(req, { readRecordImpl = readRecord, writeRec
     } catch (error) { if (attempt === 3) throw error; }
   }
 }
-export async function getSession(req, allowSetup = false, { readRecordImpl = readRecord, writeRecordImpl = writeRecord, now = Date.now() } = {}) {
-  const decoded = sessionClaims(req, now);
+export async function getSession(req, allowSetup = false, { readRecordImpl = readRecord, writeRecordImpl = writeRecord, now = Date.now } = {}) {
+  const clock = typeof now === "function" ? now : () => now;
+  let checkedAt = clock();
+  if (!Number.isFinite(checkedAt)) return null;
+  const decoded = sessionClaims(req, checkedAt);
   if (!decoded) return null;
   try {
     const record = await readRecordImpl(userPath(decoded.sub));
@@ -173,26 +176,30 @@ export async function getSession(req, allowSetup = false, { readRecordImpl = rea
     // Restricted auth sessions let pending applicants manage their own account,
     // but an old cookie must never grant studio access without current approval.
     if (!allowSetup && accessStatusForUser(record.value) !== "approved") return null;
-    // Expiry cannot turn an existing normal session into password-reset authority.
-    if (passwordSetupRequired(record.value, now) && !record.value.mustChangePassword && decoded.setup !== true) return null;
-    if (passwordSetupRequired(record.value, now) && !allowSetup) return null;
     const path = sessionPath(decoded.nonce);
     let active = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       const stored = await readRecordImpl(path);
+      // A parallel request may record activity after this request began. Compare
+      // that record with the current clock, including after a conditional retry.
+      checkedAt = clock();
+      if (!Number.isFinite(checkedAt) || checkedAt < decoded.iat || decoded.exp <= checkedAt) return null;
       if (stored?.value.revoked || (stored && (stored.value.email !== decoded.sub || stored.value.version !== decoded.version
           || stored.value.expiresAt !== decoded.exp))) return null;
+      // Expiry cannot turn an existing normal session into password-reset authority.
+      if (passwordSetupRequired(record.value, checkedAt) && !record.value.mustChangePassword && decoded.setup !== true) return null;
+      if (passwordSetupRequired(record.value, checkedAt) && !allowSetup) return null;
       const lastSeenAt = stored?.value.lastSeenAt ?? decoded.iat;
-      if (!Number.isFinite(lastSeenAt) || lastSeenAt > now || now - lastSeenAt >= SESSION_IDLE_MS) return null;
-      if (stored && now - lastSeenAt < 60_000) { active = true; break; }
+      if (!Number.isFinite(lastSeenAt) || lastSeenAt > checkedAt || checkedAt - lastSeenAt >= SESSION_IDLE_MS) return null;
+      if (stored && checkedAt - lastSeenAt < 60_000) { active = true; break; }
       try {
         await writeRecordImpl(path, { email: decoded.sub, version: decoded.version, expiresAt: decoded.exp,
-          createdAt: decoded.iat, lastSeenAt: now, revoked: false }, stored?.etag);
+          createdAt: decoded.iat, lastSeenAt: checkedAt, revoked: false }, stored?.etag);
         active = true; break;
       } catch (error) { if (attempt === 3) throw error; }
     }
     if (!active) return null;
-    return { user: { ...record.value, mustChangePassword: passwordSetupRequired(record.value, now) },
+    return { user: { ...record.value, mustChangePassword: passwordSetupRequired(record.value, checkedAt) },
       etag: record.etag, sessionId: digest(decoded.nonce) };
   } catch {
     return null;

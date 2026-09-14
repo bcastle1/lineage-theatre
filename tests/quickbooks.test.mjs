@@ -418,11 +418,10 @@ async function refreshCurrent(h, service = h.service) { return service.refresh(O
 const rotatedResponse = (extra = {}) => tokenResponse({ access_token: "synthetic-rotated-access", refresh_token: "synthetic-rotated-refresh", ...extra });
 const savedToken = h => decryptQuickBooksTokens(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens, quickbooksConfig(h.env));
 
-test("refresh stays server-only and owner-only; valid access skips refresh and no tokens enter results or audits", async () => {
+test("refresh credentials stay server-only and owner-only; valid access skips refresh and no tokens enter results or audits", async () => {
   const h = harness(); await h.authorize();
   for (const actor of [ADMIN, CUSTOMER, { ...OWNER, mustChangePassword: true }])
     await assert.rejects(() => h.service.refresh(actor, { expectedRevision: 3 }), /Only the owner/);
-  assert.equal((await h.run("POST", "", { action: "refresh", expectedRevision: 3 })).status, 400);
   const result = await refreshCurrent(h);
   assert.equal(result.refreshed, false); assert.equal(h.calls.length, 1);
   assert.equal(result.paymentReady, false); assert.equal(result.refundReady, false);

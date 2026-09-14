@@ -2212,3 +2212,14 @@ button {
 .account-waiting-card h1 { font-size: clamp(1.75rem, 4vw, 2.25rem); }
 .account-waiting-card strong { overflow-wrap: anywhere; }
 .account-waiting-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; padding: 1.5rem clamp(1rem, 4vw, 3rem); font-size: 11px; color: var(--muted); }
+.film-checkout { display: grid; gap: 1rem; }
+.film-checkout > .button { justify-self: start; }
+.film-price-review, .film-order-status, .film-paid-production { display: grid; gap: .9rem; }
+.film-price-review, .film-paid-production { border-top: 1px solid var(--line); padding-top: 1rem; }
+.film-price-total { font-size: 1.8rem; color: var(--forest); }
+.film-price-total span { font-size: .8rem; color: var(--muted); }
+.film-card-form fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 1rem; display: grid; gap: .9rem; margin: 0; min-width: 0; }
+.film-card-form legend { padding: 0 .5rem; }
+.film-card-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+.film-order-reference { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .film-card-row { grid-template-columns: 1fr; } }

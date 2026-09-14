@@ -75,6 +75,7 @@ export function createStudioHandler(overrides={}) {
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
       if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings()})));
+      if(action==="checkoutConfiguration") return json(res,200,await payments.checkoutConfiguration(session.user));
       if(action==="productionStatus") return json(res,200,await filmProduction.status({email,id:url.searchParams.get("id")}));
       if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
       if(action==="order") return json(res,200,await payments.order(session.user,url.searchParams.get("id")));
@@ -93,6 +94,18 @@ export function createStudioHandler(overrides={}) {
       if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});
       if(!(await limitAction(`prepare:${email}`,30,3600_000))) return json(res,429,{message:"Please wait before preparing another production plan."});
       return json(res,201,await filmProduction.prepare({email,project:body.project,idempotencyKey:body.idempotencyKey,preparationConsent:true}));
+    }
+    if(body?.action==="startProduction") {
+      if(Object.keys(body).some(key=>!["action","preparedId","orderId","productionConsent"].includes(key))
+        ||typeof body.preparedId!=="string"||!/^[A-Za-z0-9_-]{16,100}$/.test(body.preparedId)
+        ||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
+        return json(res,400,{message:"Choose the saved film plan and its payment before starting production."});
+      if(body.productionConsent!==true) return json(res,400,{message:"Confirm that you want to produce this saved film plan."});
+      if(!(await limitAction(`production-start:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before requesting production again. Check the current film status."});
+      // A browser order reference grants nothing: the film service validates its
+      // saved manifest and trusted payment authorization before any provider work.
+      return json(res,200,await filmProduction.advance({email,id:body.preparedId,authorizationReference:body.orderId,actor:session.user}));
     }
     if(["quote","checkout"].includes(body?.action)) {
       if(!(await limitAction(`payment:${email}`,20,3600_000))) return json(res,429,{message:"Please wait before making another payment request. Check an existing order before trying to pay again.",charged:null});

@@ -4,7 +4,7 @@ import { api, normalizeProductionPreparation, productionInputHash, productionPre
 
 type Prepared = { id:string; manifestHash:string; status:string; sceneCount:number; shotCount:number; durationSeconds:number; createdAt:string; issues:string[] };
 
-export default function ProductionPreparation({film,operator=false,onPrepared}:{film?:Film;operator?:boolean;onPrepared?:(prepared:PreparedProduction)=>void}) {
+export default function ProductionPreparation({film,operator=false,onPrepared,disabled=false}:{film?:Film;operator?:boolean;onPrepared?:(prepared:PreparedProduction)=>void;disabled?:boolean}) {
   const [consent,setConsent]=useState(false);
   const [localPrepared,setPrepared]=useState<PreparedProduction|null>(null);
   const prepared=operator?localPrepared:film?.productionPreparation || localPrepared;
@@ -20,7 +20,7 @@ export default function ProductionPreparation({film,operator=false,onPrepared}:{
     return()=>{active=false;};
   },[input]);
   async function prepare() {
-    if(lock.current || (!operator && (!consent || !film))) return;
+    if(lock.current || disabled || (!operator && (!consent || !film))) return;
     lock.current=true;setBusy(true);setError("");
     try {
       const inputHash=await productionInputHash(input);
@@ -35,7 +35,7 @@ export default function ProductionPreparation({film,operator=false,onPrepared}:{
     finally{lock.current=false;setBusy(false);}
   }
   async function download() {
-    if(!prepared || lock.current) return;
+    if(!prepared || lock.current || disabled) return;
     lock.current=true;setBusy(true);setError("");
     try {
       const manifest=await api(`/api/studio?action=manifest&id=${encodeURIComponent(prepared.id)}`);
@@ -48,10 +48,10 @@ export default function ProductionPreparation({film,operator=false,onPrepared}:{
   return <section className="readiness-panel" aria-label={operator?"Production test preparation":"Prepare production plan"}>
     <h3>{operator?"Prepare a production test":"Prepare your production plan"}</h3>
     <p>{operator?"Use a fixed fictional screenplay to check private plan storage and download. This step does not send a render request or spend credits.":"Save a reviewed version of your screenplay and cast for production planning. This does not start rendering or take a payment."}</p>
-    {!operator && <label className="check-label"><input type="checkbox" checked={consent} disabled={busy} onChange={e=>setConsent(e.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.</span></label>}
+    {!operator && <label className="check-label"><input type="checkbox" checked={consent} disabled={busy||disabled} onChange={e=>setConsent(e.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.</span></label>}
     <div className="action-group">
-      <button className="button secondary small" disabled={busy||(!operator&&(!consent||!film?.scenes.length))} onClick={()=>void prepare()}>{busy?<Loader2 className="spin" size={16}/>:null}{operator?"Prepare fictional test plan":"Prepare production plan"}</button>
-      {prepared && <button className="text-button" disabled={busy} onClick={()=>void download()}><Download size={15}/> Download prepared plan</button>}
+      <button className="button secondary small" disabled={busy||disabled||(!operator&&(!consent||!film?.scenes.length))} onClick={()=>void prepare()}>{busy?<Loader2 className="spin" size={16}/>:null}{operator?"Prepare fictional test plan":"Prepare production plan"}</button>
+      {prepared && <button className="text-button" disabled={busy||disabled} onClick={()=>void download()}><Download size={15}/> Download prepared plan</button>}
     </div>
     {error && <p className="feedback error" role="alert">{error}</p>}
     {prepared && <div role="status"><p>Plan saved: {prepared.sceneCount} scenes, {prepared.shotCount} planned shots, {prepared.durationSeconds} seconds target.</p>

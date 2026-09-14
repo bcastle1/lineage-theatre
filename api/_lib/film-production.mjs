@@ -162,13 +162,26 @@ export function createFilmProductionService(dependencies = {}) {
     catch (error) { if (conflict(error)) return prepare({ email, project, idempotencyKey, preparationConsent, mode }); throw error; }
     return customerJob(job);
   }
-  async function quoteForPayment(project, actor, { idempotencyKey } = {}) {
+  async function quoteForPayment(project, actor, { idempotencyKey, preparedId, manifestHash } = {}) {
     checkAdapter(adapter);
-    const prepared = await prepare({ email: actor?.email, project, idempotencyKey, preparationConsent: project?.preparationConsent });
+    key(idempotencyKey);
+    // Repricing an unchanged, reviewed plan must retain its identity. The new
+    // quote request has its own retry key, separate from preparation retries.
+    const prepared = preparedId === undefined
+      ? await prepare({ email: actor?.email, project, idempotencyKey, preparationConsent: project?.preparationConsent })
+      : customerJob((await get(actor?.email, preparedId)).value);
     const record = await get(actor.email, prepared.id);
+    const job = record.value;
+    if (buildFilmManifest(project).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
+      throw new FilmProductionError("This screenplay has changed. Prepare the current version before requesting a price.", 409, "PRODUCTION_PLAN_CHANGED");
+    }
+    if (job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) {
+      throw new FilmProductionError("Production has already started for this plan. Check the existing film before making another payment.", 409, "PRODUCTION_ALREADY_STARTED");
+    }
+    if (job.mode === "operator-test" && !isOwner(actor)) throw new FilmProductionError("Only the owner can price this production test.", 403, "OWNER_REQUIRED");
     const validated = await adapter.validateManifest(clone(record.value.manifest));
     if (validated?.ready !== true) throw new FilmProductionError("Review your production plan before requesting a price.", 409, "PRODUCTION_REVIEW_REQUIRED");
-    const quote = await adapter.quote({ manifest: clone(record.value.manifest), manifestHash: prepared.manifestHash, idempotencyKey: digest(`quote:${prepared.id}`) });
+    const quote = await adapter.quote({ manifest: clone(record.value.manifest), manifestHash: prepared.manifestHash, idempotencyKey: digest(`quote:${prepared.id}:${idempotencyKey}`) });
     if (!quote || quote.manifestHash !== prepared.manifestHash || quote.currency !== "USD" || typeof quote.quoteReference !== "string" || !quote.quoteReference || quote.quoteReference.length > 200
       || !Number.isSafeInteger(quote.providerCostCents) || quote.providerCostCents < 0 || !Number.isFinite(Date.parse(quote.expiresAt)) || Date.parse(quote.expiresAt) <= now()) throw unavailable();
     return { preparedId: prepared.id, filmId: project.id, filmTitle: record.value.manifest.title, manifestHash: prepared.manifestHash,
