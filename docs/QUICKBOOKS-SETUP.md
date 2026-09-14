@@ -41,6 +41,8 @@ An HTTP 200 JSON response must contain a valid `CompanyInfo` object and a nonemp
 
 Before saving, the service rechecks owner/password, access expiry, server credentials, original record ETag/revision and encrypted token version. A concurrent disconnect, refresh, credential change or newer company check rejects stale evidence. Status returns `companyVerification: null` or `{ verifiedAt, companyName, legalName, country, accountingAccessVerified: true }`; evidence is shown only while the same token/configuration is connected and has no pending or review state. Token rotation, expiry, disconnect, or configuration changes hide the evidence.
 
+Private JSON record reads bypass the Blob cache and request `Accept-Encoding: identity` to retain the original strong ETag for conditional writes. A synthetic Blob check reproduced compressed reads returning a weak ETag that rejected an otherwise valid update; identity reads allowed the update and still rejected a stale writer. The code forwards the returned ETag unchanged, including quotes; it never removes a weak-validator prefix. This storage check does not establish successful company verification.
+
 Read failures do not revoke tokens, modify authorization, retry, or set monetary uncertainty flags. Prior successful evidence retains its timestamp. Raw responses, addresses, email, card data, and secrets are not returned or stored. `scopeVerification` and the original `realmVerification` provenance remain unchanged, and `paymentReady`/`refundReady` remain false even after a successful company check. Automated tests use fabricated provider responses; an actual company read is a separate runtime verification step.
 
 ## Serialized token refresh
