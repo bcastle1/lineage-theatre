@@ -1,6 +1,8 @@
 # Deploying Lineage Theatre
 
-GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds. Production publishing uses the authenticated Vercel CLI from the exact committed source.
+GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds and tests. Publish the exact reviewed commit through the existing Vercel project.
+
+The MagicLight-only development branch is not ready for production activation. See `docs/INTERNAL-FILM-INTEGRATION.md` for the account/API/payment prerequisites and the prior production deployment to preserve until those gates pass.
 
 ## Runtime
 
@@ -12,13 +14,13 @@ The private Blob store retains account password hashes, rate limits, and provide
 
 ## Release gates
 
-1. Build/typecheck and auth tests pass; inspect the staged diff for unrelated changes or secrets.
-2. Exercise sign-in, forced password setup, document extraction, ten AI ideas plus refresh, scene planning, actual video export/playback, and useful failures with a synthetic QA identity.
+1. Build/typecheck and all tests pass; inspect the staged diff for unrelated changes or secrets.
+2. Exercise sign-in, forced password setup, complete document extraction, Astra ideas and full screenplay development, cast/assumption review, provider jobs, payment idempotency and actual finished-film playback using synthetic QA data. Mocked UI tests do not establish real provider readiness.
 3. Confirm responsive desktop/mobile layout, visible feedback, no overflow, and all text weights at 400 or below.
 4. Push the exact commit to GitHub main, deploy that same tree with its SHA as `VERCEL_GIT_COMMIT_SHA`, and record the READY deployment ID and aliases.
 5. Run `pnpm run check:deploy -- <sha>`. HTTPS, Vercel serving headers, and `<meta name="lineage-build">` must match the exact SHA at the custom domain.
 6. Verify the authenticated custom-domain flow; provider credentials configured in production may differ from preview. Clearly report missing credits or credentials, never a simulated successful render.
-7. Remove the synthetic QA account. Verify each invited user still requires a first-login password change, then send the explicitly authorized invitations and record send receipts.
+7. Remove synthetic QA records created for the release. Do not change real user credentials or send invitations as part of a routine update.
 
 ## Rollback
 
@@ -26,6 +28,6 @@ Retain the previous deployment ID and Git commit. Promote the known-good Vercel 
 
 ## Provider behavior
 
-Gemini suggestions are generated from the text the user explicitly permits sending. Runway/ImagineArt shots incur provider costs only after a confirmation inside the app. Job IDs are reserved before submission; uncertain responses never trigger an automatic retry. Final provider outputs must exist before a job is shown as completed. The browser composes complete films, transparently looping a five-second generated take within a longer scene. External studios have separate accounts and billing.
+GPT-6 Astra reads user-approved story text, source context, and selected reference photos. The active app has no alternative video provider or external MagicLight handoff. Highest quality is a preference until verified with the account's API capabilities. MagicLight production and customer payment currently fail closed, with no charge. Before enabling them, reserve durable per-user jobs, reconcile uncertain submissions without automatic duplicate charges, and verify actual output before marking a film complete. Customer payments and MagicLight expenses require separate auditable records.
 
-Provider API references: https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash, https://docs.dev.runwayml.com/api/, https://docs.imagine.art/.
+Provider references: https://developers.openai.com/api/docs/models/gpt-6-astra and https://magiclight.ai/openclaw/api-keys/.
