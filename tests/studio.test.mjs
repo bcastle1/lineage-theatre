@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { connections, createStudioHandler } from "../api/studio.mjs";
 import { digest } from "../api/_lib/auth.mjs";
 import { generateStory, prepareStory } from "../api/_lib/story.mjs";
+import { FilmProductionError } from "../api/_lib/film-production.mjs";
 
-const actor={email:"customer@example.invalid",role:"customer",status:"active"};
+const actor={email:"customer@example.invalid",role:"customer",status:"active",
+  approvedAt:"2026-09-01T00:00:00.000Z",approvedBy:"erik@brocotech.ai"};
 const internalDetails=/OpenAI|GPT-6|Astra|MagicLight|QuickBooks|Intuit|BROCOTech|supplier|markup|referenceRate|providerCredits|providerCost|storyModel|connections|credential/i;
 const ready=()=>({story:true,storyModel:"gpt-6-astra",magiclight:false,billing:false,
   connections:{story:{available:true,reason:"OpenAI GPT-6 Astra connected"},magiclight:{available:false,reason:"MagicLight API connection pending"}},
@@ -108,7 +110,7 @@ test("source validation keeps actionable customer feedback without calling a pro
 
 test("studio requests require a session and same-origin writes before reading or generating anything",async()=>{
   const unsigned=harness({},null);
-  for(const [action,options] of [["capabilities",{}],["themes",post({storyConsent:true})],["checkout",post()]]) {
+  for(const [action,options] of [["capabilities",{}],["checkoutConfiguration",{}],["themes",post({storyConsent:true})],["checkout",post()]]) {
     assert.equal((await unsigned.run(action,options)).status,401);
   }
   assert.deepEqual(unsigned.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
@@ -118,6 +120,17 @@ test("studio requests require a session and same-origin writes before reading or
     assert.equal(result.status,403);assertCustomerSafe(result);
   }
   assert.deepEqual(signed.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
+});
+
+test("checkout configuration is a signed-in read-only route and default unavailable response omits provider internals",async()=>{
+  const defaultResult=await harness().run("checkoutConfiguration");
+  assert.equal(defaultResult.status,200);assert.deepEqual(defaultResult.body,{available:false});assertCustomerSafe(defaultResult);
+  const calls=[],payments={checkoutConfiguration:async user=>{calls.push(user);return {available:false};}};
+  const h=harness({payments});
+  assert.equal((await h.run("checkoutConfiguration")).status,200);assert.deepEqual(calls,[actor]);
+  assert.equal((await h.run("checkoutConfiguration",post())).status,400);
+  assert.equal((await harness({payments},null).run("checkoutConfiguration")).status,401);
+  assert.equal(calls.length,1);assert.deepEqual(h.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
 });
 
 test("explicit story consent and per-user rate limits remain required before generation",async()=>{
@@ -170,4 +183,30 @@ test("legacy production messages are neutral and records remain scoped to the si
     const result=await harness({readRecord:async()=>({value:{provider:"MagicLight"}})}).run(action,{id});
     assert.equal(result.status,409);assert.match(result.body.message,/Downloaded films remain in your library/);assertCustomerSafe(result);
   }
+});
+
+test("starting production requires exact saved references, consent, same origin and an approved session",async()=>{
+  const calls=[],filmProduction={advance:async args=>{calls.push(args);return {id:args.id,status:"prepared"};}};
+  const body={preparedId:"synthetic-prepared-1234",orderId:"a".repeat(64),productionConsent:true};
+  const h=harness({filmProduction});
+  assert.equal((await h.run("startProduction",post(body))).status,200);
+  assert.deepEqual(calls,[{email:actor.email,id:body.preparedId,authorizationReference:body.orderId,actor}]);
+  for(const invalid of [{...body,productionConsent:false},{...body,productionConsent:"true"},{...body,preparedId:"bad"},
+    {...body,orderId:"bad"},{...body,allowed:true},{...body,manifestHash:"b".repeat(64)},{...body,amountCents:1},
+    {...body,actor:{role:"owner"}},{...body,environment:"production"}])
+    assert.equal((await h.run("startProduction",post(invalid))).status,400);
+  assert.equal((await h.run("startProduction",{...post(body),headers:{origin:"https://other.invalid"}})).status,403);
+  assert.equal((await harness({filmProduction},null).run("startProduction",post(body))).status,401);
+  assert.equal((await h.run("startProduction")).status,400);
+  assert.equal(calls.length,1);
+  assert.deepEqual(h.calls.limits,[[`production-start:${actor.email}`,20,3600_000]]);
+});
+
+test("production-start rate limits and film authorization failures never bypass the film service",async()=>{
+  let calls=0;const body={preparedId:"synthetic-prepared-1234",orderId:"a".repeat(64),productionConsent:true};
+  const filmProduction={advance:async()=>{calls++;throw new FilmProductionError("Film production is unavailable.",503,"PRODUCTION_UNAVAILABLE");}};
+  assert.equal((await harness({filmProduction,limitAction:async()=>false}).run("startProduction",post(body))).status,429);
+  assert.equal(calls,0);
+  const failed=await harness({filmProduction}).run("startProduction",post(body));
+  assert.equal(failed.status,503);assert.equal(failed.body.code,"PRODUCTION_UNAVAILABLE");assertCustomerSafe(failed);assert.equal(calls,1);
 });

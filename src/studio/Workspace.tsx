@@ -23,10 +23,12 @@ import {
   formatDuration,
   newFilm,
   normalizeFilm,
+  normalizePaymentReference,
   productionBrief,
   productionStatusMessage,
   steps,
   type Film,
+  type FilmPaymentReference,
   type Scene,
   type Shot,
   type Source,
@@ -144,6 +146,20 @@ export default function Workspace({
       ),
     [activeId],
   );
+  function persistPaymentReference(reference: FilmPaymentReference) {
+    const safe = normalizePaymentReference(reference);
+    if (!safe) throw new Error("The payment recovery reference is invalid. No payment request was sent.");
+    const next = projects.map(project => project.id === film.id ? { ...project, paymentReference: safe, updatedAt: new Date().toISOString() } : project);
+    const serialized = JSON.stringify(next);
+    try {
+      localStorage.setItem(storageKey, serialized);
+      if (localStorage.getItem(storageKey) !== serialized) throw new Error();
+    } catch {
+      throw new Error("Your payment recovery reference could not be saved. Make space in browser storage before paying. No payment request was sent.");
+    }
+    setProjects(next);
+    setSaved("Saved in this browser");
+  }
   const changeScene = (id: string, patch: Partial<Scene>) =>
     setProjects((current) =>
       current.map((p) =>
@@ -505,14 +521,6 @@ export default function Workspace({
       );
     });
   }
-  async function generate() {
-    // A verified server quote and in-app payment confirmation must be integrated
-    // before any production request can create a provider expense.
-    notify(
-      "Film production is not available yet. You can continue writing and saving your screenplay. You will see the total price before approving a payment.",
-      "info",
-    );
-  }
   function brief() {
     saveDownload(
       new Blob([productionBrief(film)], { type: "text/plain" }),
@@ -734,7 +742,8 @@ export default function Workspace({
                       consent={consent}
                       setConsent={setConsent}
                       resultUrl={resultUrl}
-                      generate={generate}
+                      persistPaymentReference={persistPaymentReference}
+                      onCheckoutBusy={setBusy}
                       brief={brief}
                       backup={backup}
                     />

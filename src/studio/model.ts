@@ -74,6 +74,15 @@ export interface PreparedProduction {
   createdAt: string;
   issues: string[];
 }
+export interface FilmPaymentReference {
+  preparedId: string;
+  manifestHash: string;
+  quoteId: string;
+  orderId: string;
+  checkoutKey: string;
+  submittedAt: string;
+  sandbox: boolean;
+}
 export interface Film {
   id: string;
   title: string;
@@ -104,6 +113,18 @@ export interface Film {
   audioId?: string;
   music: boolean;
   productionPreparation?: PreparedProduction;
+  paymentReference?: FilmPaymentReference;
+}
+
+export function normalizePaymentReference(value: unknown): FilmPaymentReference | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Partial<FilmPaymentReference>;
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(record.preparedId || "")
+    || ![record.manifestHash, record.quoteId, record.orderId].every(item => typeof item === "string" && /^[a-f0-9]{64}$/.test(item))
+    || typeof record.checkoutKey !== "string" || !/^[A-Za-z0-9_-]{16,100}$/.test(record.checkoutKey)
+    || typeof record.submittedAt !== "string" || !Number.isFinite(Date.parse(record.submittedAt)) || typeof record.sandbox !== "boolean") return undefined;
+  return { preparedId: record.preparedId!, manifestHash: record.manifestHash!, quoteId: record.quoteId!, orderId: record.orderId!,
+    checkoutKey: record.checkoutKey, submittedAt: record.submittedAt, sandbox: record.sandbox };
 }
 
 export function normalizeProductionPreparation(value: unknown): PreparedProduction | undefined {
@@ -188,11 +209,13 @@ function customerProduction(shot: Shot): Shot {
   };
 }
 export function customerProjectBackup(film: Film): Film {
-  const { productionPreparation: originalPreparation, ...fields } = film;
+  const { productionPreparation: originalPreparation, paymentReference: originalPayment, ...fields } = film;
   const productionPreparation = normalizeProductionPreparation(originalPreparation);
+  const paymentReference = normalizePaymentReference(originalPayment);
   return {
     ...fields,
     ...(productionPreparation ? { productionPreparation } : {}),
+    ...(paymentReference ? { paymentReference } : {}),
     providerId: "lineage-theatre",
     generatedBy: film.generatedBy?.startsWith("Manual")
       ? "Manual outline from source text"
@@ -208,8 +231,9 @@ function restoreProduction(shot: Shot): Shot {
   return shot.provider === "lineage-theatre" ? { ...shot, provider: "magiclight" } : shot;
 }
 export function normalizeFilm(raw: Partial<Film>): Film {
-  const { productionPreparation: originalPreparation, ...fields } = raw;
+  const { productionPreparation: originalPreparation, paymentReference: originalPayment, ...fields } = raw;
   const productionPreparation = normalizeProductionPreparation(originalPreparation);
+  const paymentReference = normalizePaymentReference(originalPayment);
   const duration =
     raw.duration ??
     { trailer: 60, short: 300, featurette: 600, feature: 600 }[raw.runtime || ""] ??
@@ -218,6 +242,7 @@ export function normalizeFilm(raw: Partial<Film>): Film {
     ...newFilm(),
     ...fields,
     ...(productionPreparation ? { productionPreparation } : {}),
+    ...(paymentReference ? { paymentReference } : {}),
     duration,
     style: raw.style || "Cinematic",
     providerId: "magiclight",
@@ -249,6 +274,9 @@ export const steps = [
   "Review script & cast",
   "Create & watch",
 ];
+export class ApiError extends Error {
+  constructor(message: string, readonly code?: string, readonly status?: number) { super(message); }
+}
 export async function api<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -263,7 +291,8 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
   const payload = await res.json().catch(() => ({
     message: "The service returned an unreadable response. Please try again.",
   }));
-  if (!res.ok) throw new Error(payload.message || "The action could not be completed.");
+  if (!res.ok) throw new ApiError(payload.message || "The action could not be completed.",
+    typeof payload.code === "string" && /^[A-Z_]{1,80}$/.test(payload.code) ? payload.code : undefined, res.status);
   return payload as T;
 }
 export function editorialThemes(film: Film, page = 0): Theme[] {

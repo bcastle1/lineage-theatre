@@ -30,8 +30,11 @@ export function createQuickBooksHandler(overrides = {}) {
       if (!sameOrigin(req) || req.headers.origin !== QUICKBOOKS_ORIGIN || req.headers.host !== new URL(QUICKBOOKS_ORIGIN).host)
         return json(res, 403, { message: "Begin this action at https://lineagetheater.com inside Administration." });
       const body = await readBody(req, 2048);
-      if (!body || typeof body !== "object" || Array.isArray(body) || !["start", "disconnect", "verifyCompany"].includes(body.action))
+      if (!body || typeof body !== "object" || Array.isArray(body) || !["start", "disconnect", "verifyCompany", "refresh"].includes(body.action))
         return json(res, 400, { message: "Unknown QuickBooks connection action." });
+      if (body.action === "refresh" && (Object.keys(body).some(key => !["action", "expectedRevision"].includes(key))
+        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0))
+        return json(res, 400, { message: "Refresh requires the current connection revision only." });
       if (!(await limiter(`quickbooks-${body.action}:${session.user.email}`, 10, 3600_000)))
         return json(res, 429, { message: "Please wait before making more QuickBooks connection changes." });
       if (body.action === "start") {
@@ -39,6 +42,7 @@ export function createQuickBooksHandler(overrides = {}) {
         res.setHeader("Set-Cookie", stateCookie); return json(res, 200, result);
       }
       if (body.action === "verifyCompany") return json(res, 200, await service.verifyCompany(session.user, body));
+      if (body.action === "refresh") return json(res, 200, await service.refresh(session.user, { expectedRevision: body.expectedRevision }));
       const disconnected = await service.disconnect(session.user, body);
       return json(res, 200, disconnected);
     } catch (error) {

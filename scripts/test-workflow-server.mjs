@@ -2,6 +2,8 @@
  * SYNTHETIC LOCAL TEST ONLY. Never deploy this server or load production credentials.
  * Start: node scripts/test-workflow-server.mjs
  * Route proof, then exit: node scripts/test-workflow-server.mjs --check
+ * Checkout UI fixtures: node scripts/test-workflow-server.mjs --checkout-fixtures
+ * Checkout route proof: node scripts/test-workflow-server.mjs --checkout-fixtures --check
  * URL: http://127.0.0.1:5178
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
@@ -17,11 +19,12 @@ import assert from "node:assert/strict";
 const HOST = "127.0.0.1", PORT = 5178, origin = `http://${HOST}:${PORT}`;
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
+const checkoutFixtures = process.argv.includes("--checkout-fixtures");
 if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new Error("Test server must not load environment files.");
 
 // Remove inherited provider settings before importing application services.
 for (const name of Object.keys(process.env)) {
-  if (/^(?:OPENAI_|QUICKBOOKS_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
+  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
 }
 process.env.LINEAGE_SESSION_SECRET = "synthetic-workflow-session-key-local-only-never-production";
 process.env.LINEAGE_MFA_ENCRYPTION_KEY = "cd".repeat(32);
@@ -71,10 +74,33 @@ const connections = async () => ({ story: false, ...productionReadiness({ env: {
     story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } });
 const refuseProvider = async () => { throw new Error("Synthetic test cannot call an external provider."); };
 const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write });
+let syntheticCharges = 0;
+const simulatedBinding = { environment: "sandbox", grantId: "c".repeat(64) };
+const fakePaymentsProvider = {
+  binding: async () => simulatedBinding,
+  charge: async (_binding, { amountCents, paymentToken }) => {
+    if (!["fixture_card_captured", "fixture_card_declined", "fixture_card_uncertain"].includes(paymentToken)) throw new Error("Only fabricated fixture tokens are accepted.");
+    syntheticCharges++;
+    if (paymentToken === "fixture_card_uncertain") throw new Error("Simulated unknown processor outcome.");
+    return { id: `fixture_charge_${syntheticCharges}`, amountCents, currency: "USD", verified: true,
+      status: paymentToken === "fixture_card_declined" ? "DECLINED" : "CAPTURED" };
+  },
+  readCharge: async (_binding, { chargeId, amountCents }) => ({ id: chargeId, amountCents, currency: "USD", verified: true, status: "CAPTURED" }),
+  refund: async (_binding, { amountCents }) => ({ id: `fixture_refund_${randomUUID()}`, amountCents, currency: "USD", verified: true, status: "ISSUED" }),
+  readRefund: refuseProvider,
+};
 const payments = createPaymentsService({ read, write, pricingSettings,
-  quoteProvider: (...args) => filmProduction.quoteForPayment(...args),
-  readiness: async () => ({ sandboxEnabled: false, merchantVerified: false }),
-  provider: { binding: refuseProvider, charge: refuseProvider, readCharge: refuseProvider,
+  quoteProvider: checkoutFixtures ? async (project, actor, { preparedId }) => {
+    const saved = await filmProduction.status({ email: actor.email, id: preparedId });
+    return { preparedId: saved.id, filmId: project.id, filmTitle: project.title, manifestHash: saved.manifestHash,
+      environment: "sandbox", currency: "USD", providerCostCents: 100, quoteReference: "synthetic_local_quote",
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(), apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
+  } : (...args) => filmProduction.quoteForPayment(...args),
+  readiness: checkoutFixtures ? async () => ({ sandboxEnabled: true, merchantVerified: true, authorization: {
+    ...simulatedBinding, evidenceHash: "d".repeat(64), validatedAt: new Date(Date.now() - 1000).toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), operations: ["quote", "charge", "refund", "read", "card-entry"],
+  } }) : async () => ({ sandboxEnabled: false, merchantVerified: false }),
+  provider: checkoutFixtures ? fakePaymentsProvider : { binding: refuseProvider, charge: refuseProvider, readCharge: refuseProvider,
     refund: refuseProvider, readRefund: refuseProvider } });
 const audit = async (actor, action, target, details = {}) => {
   const id = randomUUID(), event = { id, actor, action, target, details, at: new Date().toISOString() };
@@ -115,7 +141,25 @@ fixture.selectedThemes = fixture.selectedThemes.map((theme, index) => ({ ...them
 fixture.themes = structuredClone(fixture.selectedThemes);
 fixture.sources = fixture.sources.map(source => ({ ...source, size: Buffer.byteLength(source.text), extraction: "Synthetic fixture text" }));
 Object.assign(fixture, { providerId: "magiclight", quality: "highest", generatedBy: "Lineage Theatre", updatedAt: new Date().toISOString() });
-const seedScript = `// SYNTHETIC LOCAL TEST ONLY\nconst fixture=${JSON.stringify(fixture)};\nfor(const email of ${JSON.stringify(accounts.map(account=>account.email))}){const key='lineage-studio-v3:'+email;if(!localStorage.getItem(key))localStorage.setItem(key,JSON.stringify([fixture]));}`;
+const checkoutProjects = ["captured", "declined", "uncertain"].map((scenario, index) => ({ ...structuredClone(fixture), id: `00000000-0000-4000-8000-${String(index + 11).padStart(12, "0")}`, title: `SAMPLE ONLY - ${scenario} payment: The shared garden` }));
+const seedMarker = `lineage-checkout-fixture:${randomUUID()}`;
+const seedScript = checkoutFixtures ? `// SYNTHETIC LOCAL TEST ONLY. This script is never in an application build.
+if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
+  for(const email of ${JSON.stringify(accounts.map(account=>account.email))}) localStorage.setItem('lineage-studio-v3:'+email,${JSON.stringify(JSON.stringify(checkoutProjects))});
+  localStorage.setItem(${JSON.stringify(seedMarker)},'seeded');
+}
+const originalFetch=window.fetch.bind(window);
+window.fetch=async(input,options)=>{
+  const url=new URL(typeof input==='string'?input:input.url,location.href);
+  if(url.href==='https://sandbox.api.intuit.com/quickbooks/v4/payments/tokens') {
+    const fields=JSON.parse(options.body); const number=fields.card?.number;
+    const outcome={'4111111111111111':'captured','4000000000000002':'declined','4000000000009995':'uncertain'}[number];
+    if(!outcome) throw new Error('Only displayed fabricated test card numbers are allowed. No external request was made.');
+    return new Response(JSON.stringify({value:'fixture_card_'+outcome}),{status:200,headers:{'Content-Type':'application/json'}});
+  }
+  if(url.origin!==location.origin) throw new Error('Synthetic browser fixture forbids all external fetch requests.');
+  return originalFetch(input,options);
+};` : `// SYNTHETIC LOCAL TEST ONLY\nconst fixture=${JSON.stringify(fixture)};\nfor(const email of ${JSON.stringify(accounts.map(account=>account.email))}){const key='lineage-studio-v3:'+email;if(!localStorage.getItem(key))localStorage.setItem(key,JSON.stringify([fixture]));}`;
 
 let vite;
 const server = createServer(async (req, res) => {
@@ -130,7 +174,7 @@ const server = createServer(async (req, res) => {
       code: "SYNTHETIC_SERVICE_DISABLED", message: "This service is disabled in the synthetic local workflow test." });
     if (path === "/__workflow/status") return auth.json(res, 200, {
       synthetic: true, memoryOnly: true, providersEnabled: false, mailEnabled: false,
-      blockedExternalCalls, recordCount: records.size,
+      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures,
       preparedFilms: [...records.keys()].filter(key=>key.startsWith("production/jobs/")).length,
     });
     if (path === "/__workflow/fixture") return auth.json(res, 200, { synthetic: true, project: fixture });
@@ -147,7 +191,7 @@ const server = createServer(async (req, res) => {
         visible.push(`<tr><td>${account.email}</td><td>${account.password}</td><td>${code}</td></tr>`);
       }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
+      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? '<h2>Fake checkout fixtures — no real card data</h2><p>Use separate preloaded films for each payment. Card 4111111111111111 captures; 4000000000000002 declines; 4000000000009995 stays uncertain. Expiry 12/2030, CVC 123, Sample Person, 1 Fictional Street, Test City, UT 84003. The browser intercepts fabricated tokenization locally. No card data or payment request leaves this computer.</p>' : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
     if (checkOnly) { res.statusCode = 404; return res.end("Synthetic route-check mode."); }
     vite.middlewares(req, res);
@@ -271,8 +315,47 @@ async function checkRegistrationAccess(owner) {
   assert.equal((await route("/api/auth", { cookie: automaticCookie })).body.user.accessStatus, "approved");
   assert.equal((await register("waiting-again@example.invalid")).body.user.accessStatus, "pending");
 }
+async function checkCheckout() {
+  const customer = await login(accounts[0]), other = await login(accounts[2]);
+  const configuration = await route("/api/studio?action=checkoutConfiguration", { cookie: customer });
+  assert.equal(configuration.status, 200);
+  assert.equal(configuration.body.available, true);
+  assert.equal(configuration.body.environment, "sandbox");
+  let firstOrder;
+  for (const [index, status] of ["captured", "declined", "uncertain"].entries()) {
+    const prepared = await route("/api/studio", { cookie: customer, body: { action: "prepare", project: checkoutProjects[index], preparationConsent: true, idempotencyKey: `checkout-fixture-prepare-${index}` } });
+    assert.equal(prepared.status, 201);
+    const quoted = await route("/api/studio", { cookie: customer, body: { action: "quote", project: checkoutProjects[index], preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-quote-${index}` } });
+    assert.equal(quoted.status, 200);
+    assert.equal(quoted.body.preparedId, prepared.body.id);
+    assert.equal(quoted.body.manifestHash, prepared.body.manifestHash);
+    assert.equal(quoted.body.amountCents, 100);
+    assert.equal(quoted.body.sandbox, true);
+    const body = { action: "checkout", quoteId: quoted.body.id, idempotencyKey: `checkout-fixture-charge-${index}`, paymentToken: `fixture_card_${status}`, consent: true };
+    const paid = await route("/api/studio", { cookie: customer, body });
+    assert.equal(paid.status, 200);
+    assert.equal(paid.body.id, quoted.body.orderId);
+    assert.equal(paid.body.status, status);
+    assert.equal(paid.body.sandbox, true);
+    const charges = syntheticCharges;
+    for (let readNumber = 0; readNumber < 2; readNumber++) {
+      const checked = await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: customer });
+      assert.equal(checked.status, 200); assert.equal(checked.body.status, status);
+    }
+    assert.equal(syntheticCharges, charges);
+    assert.equal((await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: other })).status, 404);
+    const receipt = await route(`/api/studio?action=receipt&id=${paid.body.id}`, { cookie: customer });
+    assert.equal(receipt.status, status === "captured" ? 200 : 409);
+    if (status === "captured") { firstOrder = paid.body; assert.equal(receipt.body.sandbox, true); }
+  }
+  assert.equal(syntheticCharges, 3);
+  assert.ok(firstOrder);
+  assert.equal(blockedExternalCalls, 0);
+  assert.doesNotMatch(JSON.stringify([...records.values()]), /fixture_card_|4111111111111111|4000000000009995|"cvc"/);
+  console.log("PASS: actual-handler synthetic checkout quotes, captured/declined/uncertain outcomes, GET-only recovery, sandbox receipts, ownership, no stored card tokens, and zero outbound calls.");
+}
 if (checkOnly) {
-  try { await check(); } finally { await close(); }
+  try { if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
 } else {
   console.log(`Synthetic workflow test running at ${origin}. Fictional account helpers: ${origin}/__workflow . No production data or provider calls.`);
 }

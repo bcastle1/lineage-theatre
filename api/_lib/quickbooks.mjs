@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, createCipheriv, createDecipheriv, timingSafeEq
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner, OWNER_EMAIL } from "./access.mjs";
 import { audit } from "./admin.mjs";
+import { INTUIT_PAYMENT_ORIGINS, paymentAuthorizationMatches } from "./payment-authorization.mjs";
 
 // Verified against Intuit's official oauth-jsclient, src/OAuthClient.js.
 // These URLs are never derived from a request, callback query, or environment override.
@@ -549,11 +550,18 @@ export const quickbooks = createQuickBooksService();
 
 // Server-only Payments transport. No HTTP action exposes the decrypted grant.
 // Paths and methods follow Intuit's official PHP Payments SDK ChargeOperations.
-// Production money movement remains a code-level lock until merchant verification.
+// Production needs an explicitly wired trusted evidence verifier. The default
+// denies every production request; environment configuration cannot enable it.
 export function createQuickBooksPaymentsTransport(overrides={}) {
   const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,
-    connection=quickbooks}=overrides;
+    connection=quickbooks,authorizeProduction=async()=>null}=overrides;
   const unavailable=()=>new QuickBooksError("The payment connection needs administrator review.",503,"PAYMENT_CONNECTION_UNAVAILABLE");
+  async function authorize(binding,operation) {
+    if(binding?.environment!=="production")return;
+    const authorization=await authorizeProduction({binding,operation});
+    if(!paymentAuthorizationMatches(authorization,binding,operation,now()))
+      throw new QuickBooksError("Production payments are not enabled.",503,"PRODUCTION_PAYMENTS_DISABLED");
+  }
   async function inspect(allowRefresh=false) {
     const config=quickbooksConfig(env), record=await read(QUICKBOOKS_CONNECTION_PATH), value=record?.value;
     if(value?.status!=="authorized"||!value.encryptedTokens||value.pending||value.refreshOperation||value.remoteReviewRequired
@@ -570,7 +578,8 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
     const expires=Date.parse(token.accessTokenExpiresAt);
     if(!Number.isFinite(expires))throw unavailable();
     if(expires<=now()+60_000) {
-      if(!allowRefresh||config.environment!=="sandbox")throw unavailable();
+      if(!allowRefresh)throw unavailable();
+      await authorize({environment:config.environment,grantId},"refresh");
       await connection.refresh(owner,{expectedRevision:value.revision});
       const fresh=await inspect(false);
       if(fresh.binding.grantId!==grantId)throw unavailable();
@@ -580,7 +589,9 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
   }
   async function binding({allowRefresh=false}={}) {return (await inspect(allowRefresh)).binding;}
   async function request(expected,{method,path,requestId,body}) {
-    if(!expected||expected.environment!=="sandbox")throw new QuickBooksError("Production payments are not enabled.",503,"PRODUCTION_PAYMENTS_DISABLED");
+    if(!expected||!Object.hasOwn(INTUIT_PAYMENT_ORIGINS,expected.environment))throw unavailable();
+    const operation=method==="GET"?"read":path==="/charges"?"charge":"refund";
+    await authorize(expected,operation);
     const allowed=(method==="POST"&&/^\/charges(?:\/[A-Za-z0-9_-]{1,128}\/refunds)?$/.test(path))
       ||(method==="GET"&&/^\/charges\/[A-Za-z0-9_-]{1,128}(?:\/refunds\/[A-Za-z0-9_-]{1,128})?$/.test(path));
     if(!allowed||typeof requestId!=="string"||!/^[-A-Za-z0-9]{16,50}$/.test(requestId))throw unavailable();
@@ -593,10 +604,12 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
     }
     const current=await inspect(true);
     if(current.binding.environment!==expected.environment||current.binding.grantId!==expected.grantId)throw unavailable();
+    // Revalidate time-bounded evidence after any token refresh and before send.
+    await authorize(current.binding,operation);
     // Re-read immediately before sending; a changed or disconnected grant is never reused.
     const latest=await read(QUICKBOOKS_CONNECTION_PATH);
     if(latest?.etag!==current.record.etag||quickbooksConfig(env).credentialVersion!==current.config.credentialVersion)throw unavailable();
-    return fetchImpl(`https://sandbox.api.intuit.com/quickbooks/v4/payments${path}`,{
+    return fetchImpl(`${INTUIT_PAYMENT_ORIGINS[current.binding.environment]}/quickbooks/v4/payments${path}`,{
       method,redirect:"error",signal:AbortSignal.timeout(20_000),
       headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json","Content-Type":"application/json","Request-Id":requestId},
       ...(method==="POST"?{body:JSON.stringify(body)}:{}),

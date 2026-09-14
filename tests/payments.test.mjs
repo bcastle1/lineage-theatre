@@ -6,9 +6,11 @@ import {createQuickBooksPaymentsTransport,quickbooksConfig,encryptQuickBooksToke
 import {tokenizeSandboxFixture,checkSandboxTokenCors} from "../scripts/test-intuit-sandbox-token.mjs";
 import {digest,userPath} from "../api/_lib/auth.mjs";
 import {OWNER_EMAIL} from "../api/_lib/access.mjs";
+import {paymentAuthorizationMatches} from "../api/_lib/payment-authorization.mjs";
 
-const CUSTOMER={email:"customer@example.invalid",role:"customer",status:"active"};
-const OTHER={email:"other@example.invalid",role:"customer",status:"active"};
+const APPROVAL={approvedAt:"2026-09-01T00:00:00.000Z",approvedBy:OWNER_EMAIL};
+const CUSTOMER={email:"customer@example.invalid",role:"customer",status:"active",...APPROVAL};
+const OTHER={email:"other@example.invalid",role:"customer",status:"active",...APPROVAL};
 const ADMIN={email:"admin@example.invalid",role:"admin",status:"active"};
 const OWNER={email:OWNER_EMAIL,role:"owner",status:"active",passwordHash:"synthetic-owner-password"};
 const BINDING={environment:"sandbox",grantId:"a".repeat(64)};
@@ -21,6 +23,10 @@ const project={id:"synthetic-film-1234",title:"Fictional family garden",preparat
 const processorResponse=(data,status=200)=>new Response(JSON.stringify(data),{status});
 const chargeReply=(extra={})=>({id:"synthetic-charge-123",status:"CAPTURED",amount:"11.25",currency:"USD",card:{number:"4111111111111111",cvc:"123"},token:TOKEN,...extra});
 const refundReply=(extra={})=>({id:"synthetic-refund-123",status:"ISSUED",amount:"1.00",...extra});
+// In-process fabricated verifier output only; never persisted as live evidence.
+const authorization=(binding=BINDING,changes={})=>({...binding,evidenceHash:"e".repeat(64),
+  validatedAt:new Date(NOW).toISOString(),expiresAt:new Date(NOW+3600_000).toISOString(),
+  operations:["quote","charge","refund","read","render","card-entry","refresh"],...changes});
 function fixture(options={}) {
   let time=NOW,version=0,currentBinding=structuredClone(BINDING),dispatch=options.dispatch;
   const records=new Map(),requests=[],quotes=[];
@@ -176,14 +182,14 @@ test("changing the saved merchant binding invalidates old quotes and blocks refu
 
 function grantFixture(overrides={}) {
   let time=NOW,sequence=0;
-  const env={QUICKBOOKS_ENVIRONMENT:"sandbox",QUICKBOOKS_CLIENT_ID:"synthetic-client",QUICKBOOKS_CLIENT_SECRET:"synthetic-secret",QUICKBOOKS_TOKEN_ENCRYPTION_KEY:randomBytes(32).toString("base64")};
+  const env={QUICKBOOKS_ENVIRONMENT:overrides.environment||"sandbox",QUICKBOOKS_CLIENT_ID:"synthetic-client",QUICKBOOKS_CLIENT_SECRET:"synthetic-secret",QUICKBOOKS_TOKEN_ENCRYPTION_KEY:randomBytes(32).toString("base64")};
   const config=quickbooksConfig(env),calls=[],records=new Map();
   const tokens={accessToken:"synthetic-access-token",refreshToken:"synthetic-refresh-token",realmId:"123456789",accessTokenExpiresAt:new Date(NOW+3600_000).toISOString(),grantedScopes:[...QUICKBOOKS_SCOPES]};
   const put=(path,value)=>records.set(path,{value:structuredClone(value),etag:`g-${++sequence}`});
   put(userPath(OWNER.email),OWNER);
   put(QUICKBOOKS_CONNECTION_PATH,{status:"authorized",revision:3,encryptedTokens:encryptQuickBooksTokens(tokens,config),fingerprint:config.fingerprint,credentialVersion:config.credentialVersion,authorizationAttemptId:"synthetic-authorization-attempt",connectedBy:OWNER.email});
   const read=async path=>{await overrides.beforeRead?.(path,records);return records.has(path)?structuredClone(records.get(path)):null;};
-  const transport=createQuickBooksPaymentsTransport({read,env,now:()=>time,connection:{refresh:async(...args)=>{calls.push(["refresh",args]);await overrides.refresh?.({records,put,tokens,config});}},
+  const transport=createQuickBooksPaymentsTransport({read,env,now:()=>time,authorizeProduction:overrides.authorizeProduction,connection:{refresh:async(...args)=>{calls.push(["refresh",args]);await overrides.refresh?.({records,put,tokens,config});}},
     fetchImpl:async(...args)=>{calls.push(args);return processorResponse(chargeReply());}});
   return {transport,calls,records,env,put,tokens,config,advance:ms=>{time+=ms;}};
 }
@@ -240,4 +246,127 @@ test("sandbox token driver uses only the fixed fabricated fixture without creden
   assert.equal(JSON.parse(calls[0][1].body).card.name,"emulate=0");
   const cors=await checkSandboxTokenCors({fetchImpl:async(url,options)=>{assert.equal(options.method,"OPTIONS");return new Response(null,{status:200,headers:{"access-control-allow-origin":"https://lineagetheater.com","access-control-allow-methods":"POST,OPTIONS","access-control-allow-headers":"content-type,request-id"}});}});
   assert.equal(cors.preflightAllowed,true);assert.equal(cors.actualBrowserTokenizationVerified,false);
+});
+
+test("quotes bind a saved preparation and expose a stable order reference before any payment",async()=>{
+  const h=fixture(),q=await h.service.quote(CUSTOMER,{project,preparedId,idempotencyKey:quoteKey});
+  assert.equal(q.orderId,digest(`${CUSTOMER.email}:${REF}`));
+  assert.deepEqual(h.quotes[0].opts,{preparedId,idempotencyKey:quoteKey});
+  await assert.rejects(h.service.order(CUSTOMER,q.orderId),error=>error.status===404);
+  const paid=await h.service.checkout(CUSTOMER,{quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
+  assert.equal(paid.id,q.orderId);
+  assert.equal((await h.service.order(CUSTOMER,q.orderId)).status,"captured");
+  assert.equal(h.requests.length,1);
+  const mismatch=fixture();
+  await expectError(mismatch.service.quote(CUSTOMER,{project,preparedId:"different-preparation-123",idempotencyKey:quoteKey}),"PRODUCTION_UNAVAILABLE");
+  assert.equal(mismatch.records.size,0);
+});
+
+test("card entry configuration is read-only, minimal and requires a fresh separately scoped authorization",async()=>{
+  const h=fixture();assert.deepEqual(await h.service.checkoutConfiguration(CUSTOMER),{available:false});
+  const ready=fixture({overrides:{readiness:async()=>({authorization:authorization()})}});
+  assert.deepEqual(await ready.service.checkoutConfiguration(CUSTOMER),{available:true,environment:"sandbox",
+    tokenization:{method:"intuit-browser-direct",url:"https://sandbox.api.intuit.com/quickbooks/v4/payments/tokens"}});
+  assert.equal(ready.requests.length,0);assert.equal(ready.records.size,0);
+  ready.advance(3600_000);assert.deepEqual(await ready.service.checkoutConfiguration(CUSTOMER),{available:false});
+  for(const bad of [null,{...CUSTOMER,approvedAt:undefined},{...CUSTOMER,status:"pending"},{...CUSTOMER,status:"suspended"}])
+    await assert.rejects(h.service.checkoutConfiguration(bad),error=>error.status===401);
+  for(const change of [{operations:["charge"]},{grantId:"b".repeat(64)},{environment:"production"},{evidenceHash:"unverified"}]) {
+    const f=fixture({overrides:{readiness:async()=>({authorization:authorization(BINDING,change)})}});
+    assert.deepEqual(await f.service.checkoutConfiguration(CUSTOMER),{available:false});
+  }
+});
+
+test("production service plumbing uses current grant-scoped server authorization and truthful receipts",async()=>{
+  const binding={...BINDING,environment:"production"};
+  const h=fixture({quoteOverrides:{environment:"production"},overrides:{readiness:async()=>({authorization:authorization(binding)})}});
+  h.setBinding(binding);
+  const q=await h.makeQuote();assert.equal(q.sandbox,false);
+  const paid=await h.pay();assert.equal(paid.sandbox,false);
+  const receipt=await h.service.receipt(CUSTOMER,paid.id);assert.equal(receipt.sandbox,false);assert.doesNotMatch(receipt.notice,/sandbox/i);
+  noInternalData(receipt);
+  const grant=await h.service.authorizeProduction({email:CUSTOMER.email,orderId:paid.id,manifestHash:REF,preparedId});
+  assert.equal(grant.environment,"production");assert.equal(grant.fictionalOnly,false);
+  const refunded=await h.service.refund(ADMIN,{orderId:paid.id,amountCents:100,reason:"Fictional test",idempotencyKey:"synthetic-refund-1234"});
+  assert.equal(refunded.sandbox,false);assert.equal(refunded.refundedCents,100);
+  assert.equal((await h.service.accountingExport(ADMIN,paid.id)).sandbox,false);
+});
+
+test("production transport has no environment-only bypass and restricts authorization to exact operation and grant",async()=>{
+  const disabled=grantFixture({environment:"production"}),binding=await disabled.transport.binding();
+  const request={method:"POST",path:"/charges",requestId:"synthetic-request-12345",body:{amount:"11.25",currency:"USD",token:TOKEN,capture:true,context:{mobile:false,isEcommerce:true}}};
+  await assert.rejects(disabled.transport.request(binding,request),/not enabled/);assert.equal(disabled.calls.length,0);
+  for(const change of [{grantId:"f".repeat(64)},{environment:"sandbox"},{operations:["read"]},{expiresAt:new Date(NOW).toISOString()},
+    {validatedAt:new Date(NOW+1).toISOString()},{expiresAt:new Date(NOW+48*3600_000).toISOString()}]) {
+    const h=grantFixture({environment:"production",authorizeProduction:async({binding})=>authorization(binding,change)});
+    await assert.rejects(h.transport.request(await h.transport.binding(),request));assert.equal(h.calls.length,0);
+  }
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding})=>authorization(binding)});
+  await h.transport.request(await h.transport.binding(),request);
+  assert.equal(h.calls[0][0],"https://api.intuit.com/quickbooks/v4/payments/charges");
+  assert.equal(h.calls[0][1].redirect,"error");
+  assert.equal(paymentAuthorizationMatches(authorization({...BINDING,environment:"production"}),BINDING,"charge",NOW),false);
+});
+
+test("production evidence is rechecked before sending and can revoke a send without a charge",async()=>{
+  let checks=0;
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding})=>++checks===1?authorization(binding):null});
+  const adapter=createIntuitPaymentsAdapter({transport:h.transport});
+  await assert.rejects(adapter.charge(await h.transport.binding(),{amountCents:1125,paymentToken:TOKEN,requestId:"synthetic-request-12345"}));
+  assert.equal(checks,2);assert.equal(h.calls.length,0);
+});
+
+test("near-expired production transport refresh requires scoped authorization and keeps grant continuity",async()=>{
+  for(const revokeDuringRefresh of [false,true]) {
+    let revoked=false;const operations=[];
+    const h=grantFixture({environment:"production",authorizeProduction:async({binding,operation})=>{
+      operations.push(operation);return revoked?null:authorization(binding);
+    },refresh:async({records,put,tokens,config})=>{
+      put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,
+        encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-rotated-access",accessTokenExpiresAt:new Date(NOW+7200_000).toISOString()},config)});
+      revoked=revokeDuringRefresh;
+    }});
+    const binding=await h.transport.binding();h.advance(3590_000);
+    const adapter=createIntuitPaymentsAdapter({transport:h.transport});
+    const request=adapter.charge(binding,{amountCents:1125,paymentToken:TOKEN,requestId:"synthetic-request-12345"});
+    if(revokeDuringRefresh)await assert.rejects(request);else assert.equal((await request).status,"CAPTURED");
+    assert.deepEqual(operations,["charge","refresh","charge"]);
+    assert.equal(h.calls[0][0],"refresh");assert.equal(h.calls.length,revokeDuringRefresh?1:2);
+    if(!revokeDuringRefresh)assert.equal(h.calls[1][1].headers.Authorization,"Bearer synthetic-rotated-access");
+  }
+  const denied=grantFixture({environment:"production",authorizeProduction:async({binding})=>authorization(binding,{operations:["charge"]})});
+  const binding=await denied.transport.binding();denied.advance(3590_000);
+  await assert.rejects(denied.transport.binding({allowRefresh:true}));assert.equal(denied.calls.length,0);
+});
+
+test("sandbox and production orders for the same film remain separate while reconnecting cannot create another live charge",async()=>{
+  let current={...BINDING};const supplied={environment:"sandbox"};
+  const h=fixture({quoteOverrides:supplied,overrides:{readiness:async()=>({authorization:authorization(current)})}});
+  const sandboxQuote=await h.makeQuote(),sandboxOrder=await h.pay();
+  assert.equal(sandboxOrder.id,digest(`${CUSTOMER.email}:${REF}`));
+  current={...BINDING,environment:"production"};h.setBinding(current);supplied.environment="production";
+  const liveQuote=await h.makeQuote(CUSTOMER,`${quoteKey}-live`);
+  assert.notEqual(liveQuote.orderId,sandboxQuote.orderId);assert.equal(liveQuote.sandbox,false);
+  await assert.rejects(h.service.order(CUSTOMER,liveQuote.orderId),error=>error.status===404);
+  const live=await h.service.checkout(CUSTOMER,{quoteId:liveQuote.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
+  assert.equal(live.id,liveQuote.orderId);assert.equal(live.sandbox,false);assert.equal(h.requests.length,2);
+  assert.equal((await h.service.order(CUSTOMER,sandboxOrder.id)).sandbox,true);
+  current={...current,grantId:"b".repeat(64)};h.setBinding(current);
+  const reconnected=await h.makeQuote(CUSTOMER,`${quoteKey}-reconnected`);
+  assert.equal(reconnected.orderId,live.id);
+  await expectError(h.service.checkout(CUSTOMER,{quoteId:reconnected.id,idempotencyKey:`${checkoutKey}-new`,paymentToken:TOKEN,consent:true}),"PAYMENT_CONFLICT");
+  assert.equal(h.requests.length,2);
+});
+
+test("legacy unscoped production or unknown orders remain readable but block new live charges",async()=>{
+  for(const environment of ["production",undefined]) {
+    const binding={...BINDING,environment:"production"},h=fixture({quoteOverrides:{environment:"production"},
+      overrides:{readiness:async()=>({authorization:authorization(binding)})}});
+    h.setBinding(binding);
+    const legacyId=digest(`${CUSTOMER.email}:${REF}`);
+    await h.write(`payments/orders/${legacyId}.json`,{id:legacyId,customerEmail:CUSTOMER.email,manifestHash:REF,
+      status:"captured",capturedAt:new Date(NOW).toISOString(),merchantBinding:{...BINDING,environment},amountCents:1125,currency:"USD"});
+    assert.equal((await h.service.order(CUSTOMER,legacyId)).status,"captured");
+    await expectError(h.makeQuote(),"PAYMENT_CONFLICT");assert.equal(h.requests.length,0);
+  }
 });

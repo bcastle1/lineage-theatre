@@ -1,8 +1,9 @@
 import {randomUUID} from "node:crypto";
 import {digest,readRecord,writeRecord} from "./auth.mjs";
-import {hasAdminAccess} from "./access.mjs";
+import {hasAdminAccess,accessStatusForUser} from "./access.mjs";
 import {readPricingSettings} from "./admin.mjs";
 import {createQuickBooksPaymentsTransport,intuitDiagnostic} from "./quickbooks.mjs";
+import {INTUIT_PAYMENT_ORIGINS,paymentAuthorizationMatches} from "./payment-authorization.mjs";
 
 // Contracts checked against Intuit's own SDK, not inferred endpoints:
 // https://github.com/intuit/PHP-Payments-SDK/blob/master/src/Operations/ChargeOperations.php
@@ -38,7 +39,7 @@ function exactFields(value,keys) {
     throw new PaymentError("This payment request contains unsupported information.");
 }
 function actorEmail(actor) {
-  if(!actor||actor.status!=="active"||actor.mustChangePassword||typeof actor.email!=="string"
+  if(!actor||actor.status!=="active"||accessStatusForUser(actor)!=="approved"||actor.mustChangePassword||typeof actor.email!=="string"
     ||actor.email!==actor.email.trim().toLowerCase()||!/^\S+@\S+\.\S+$/.test(actor.email))throw new PaymentError("Sign in to continue.",401);
   return actor.email;
 }
@@ -47,18 +48,23 @@ function id(value) {if(typeof value!=="string"||!idPattern.test(value))throw new
 function key(value) {if(typeof value!=="string"||!keyPattern.test(value))throw new PaymentError("A unique payment request reference is required.");return value;}
 const quotePath=(email,quoteId)=>`payments/quotes/${digest(email)}/${quoteId}.json`;
 const orderPath=orderId=>`payments/orders/${orderId}.json`;
-function bindingValid(binding) {return binding?.environment==="sandbox"&&typeof binding.grantId==="string"&&idPattern.test(binding.grantId);}
-const sameBinding=(a,b)=>bindingValid(a)&&bindingValid(b)&&a.grantId===b.grantId;
+function bindingValid(binding) {return Boolean(binding&&Object.hasOwn(INTUIT_PAYMENT_ORIGINS,binding.environment)&&typeof binding.grantId==="string"&&idPattern.test(binding.grantId));}
+const sameBinding=(a,b)=>bindingValid(a)&&bindingValid(b)&&a.environment===b.environment&&a.grantId===b.grantId;
+const isSandbox=value=>value.merchantBinding?.environment==="sandbox";
+const legacyOrderId=value=>digest(`${value.customerEmail}:${value.manifestHash}`);
+// Keep issued sandbox references stable. Production identities are separate and
+// deliberately omit grantId: reconnecting OAuth must never permit another charge.
+const paymentOrderId=value=>isSandbox(value)?legacyOrderId(value):digest(`${value.customerEmail}:production:${value.manifestHash}`);
 function publicQuote(value) {
-  return {id:value.id,preparedId:value.preparedId,filmId:value.filmId,filmTitle:value.filmTitle,manifestHash:value.manifestHash,
-    currency:value.currency,amountCents:value.amountCents,expiresAt:value.expiresAt,sandbox:true};
+  return {id:value.id,orderId:paymentOrderId(value),preparedId:value.preparedId,filmId:value.filmId,filmTitle:value.filmTitle,manifestHash:value.manifestHash,
+    currency:value.currency,amountCents:value.amountCents,expiresAt:value.expiresAt,sandbox:isSandbox(value)};
 }
 function publicOrder(value) {
   return {id:value.id,quoteId:value.quoteId,preparedId:value.preparedId,filmId:value.filmId,filmTitle:value.filmTitle,status:value.status,
     currency:value.currency,amountCents:value.amountCents,refundedCents:value.refundedCents,
     charged:value.capturedAt?true:value.status==="declined"?false:null,
     requiresReview:["submitting","uncertain","refund-pending"].includes(value.status),
-    receiptAvailable:Boolean(value.capturedAt),createdAt:value.createdAt,updatedAt:value.updatedAt,sandbox:true};
+    receiptAvailable:Boolean(value.capturedAt),createdAt:value.createdAt,updatedAt:value.updatedAt,sandbox:isSandbox(value)};
 }
 
 export function createIntuitPaymentsAdapter({transport=createQuickBooksPaymentsTransport(),now=Date.now}={}) {
@@ -80,7 +86,7 @@ export function createIntuitPaymentsAdapter({transport=createQuickBooksPaymentsT
       verified:Boolean(knownId&&amountCents===expectedAmount&&currency==="USD")};
   }
   return {
-    binding:()=>transport.binding({allowRefresh:true}),
+    binding:(options={})=>transport.binding({allowRefresh:true,...options}),
     charge(binding,{amountCents,paymentToken,requestId}) {
       if(!amountValid(amountCents))throw new PaymentError("The payment amount is invalid.");
       return send(binding,{method:"POST",path:"/charges",requestId,body:{amount:centsText(amountCents),currency:"USD",token:token(paymentToken),capture:true,context:{mobile:false,isEcommerce:true}}},amountCents);
@@ -105,13 +111,28 @@ export function createPaymentsService(overrides={}) {
     pricingSettings=readPricingSettings,
     quoteProvider=async(...args)=>(await import("./film-production.mjs")).quoteForPayment(...args),
     readiness=async()=>({sandboxEnabled:false,merchantVerified:false})}=overrides;
-  async function enabled() {
+  async function enabled(operation="quote",{allowRefresh=true}={}) {
     const ready=await readiness();
-    if(ready?.sandboxEnabled!==true||ready?.merchantVerified!==true)throw blocked();
-    const binding=await provider.binding();
-    // No environment variable or customer request can enable production transactions.
+    // Legacy sandbox test injection cannot enable production. Production needs
+    // a fresh current-grant authorization from a trusted server evidence verifier.
+    if(!(ready?.sandboxEnabled===true&&ready?.merchantVerified===true)&&!ready?.authorization)throw blocked();
+    const binding=await provider.binding({allowRefresh});
     if(!bindingValid(binding))throw blocked();
+    if(binding.environment==="production"&&!paymentAuthorizationMatches(ready?.authorization,binding,operation,now()))throw blocked();
+    if(binding.environment==="sandbox"&&!(ready?.sandboxEnabled===true&&ready?.merchantVerified===true)
+      &&!paymentAuthorizationMatches(ready?.authorization,binding,operation,now()))throw blocked();
     return binding;
+  }
+  async function checkoutConfiguration(actor) {
+    actorEmail(actor);
+    try {
+      const binding=await enabled("card-entry",{allowRefresh:false}),ready=await readiness();
+      // Browser-direct entry makes the merchant page part of card-data handling.
+      // Require a separately reviewed entry authorization even for sandbox UI.
+      if(!paymentAuthorizationMatches(ready?.authorization,binding,"card-entry",now()))return {available:false};
+      return {available:true,environment:binding.environment,
+        tokenization:{method:"intuit-browser-direct",url:`${INTUIT_PAYMENT_ORIGINS[binding.environment]}/quickbooks/v4/payments/tokens`}};
+    }catch {return {available:false};}
   }
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
@@ -128,12 +149,21 @@ export function createPaymentsService(overrides={}) {
     if(!record||(record.value.customerEmail!==email&&!hasAdminAccess(actor)))throw new PaymentError("This order was not found.",404);
     return record;
   }
+  async function guardLegacyProductionOrder(value) {
+    if(isSandbox(value))return;
+    const legacy=await read(orderPath(legacyOrderId(value)));
+    // Older records remain readable by their original ID. Only a positively
+    // identified sandbox order is safe to leave behind when moving to live.
+    if(legacy&&(!isSandbox(legacy.value)||legacy.value.customerEmail!==value.customerEmail
+      ||legacy.value.manifestHash!==value.manifestHash))throw conflict();
+  }
   async function quote(actor,body) {
-    const email=actorEmail(actor);exactFields(body,["project","idempotencyKey"]);key(body.idempotencyKey);
+    const email=actorEmail(actor);exactFields(body,["project","preparedId","idempotencyKey"]);key(body.idempotencyKey);
+    if(body.preparedId!==undefined)key(body.preparedId);
     const binding=await enabled();
-    const supplied=await quoteProvider(body.project,actor,{idempotencyKey:body.idempotencyKey});
+    const supplied=await quoteProvider(body.project,actor,{idempotencyKey:body.idempotencyKey,...(body.preparedId?{preparedId:body.preparedId}:{})});
     const until=Date.parse(supplied?.expiresAt);
-    if(!supplied||supplied.environment!==binding.environment||supplied.currency!=="USD"||!amountValid(supplied.providerCostCents)||!idPattern.test(supplied.manifestHash||"")
+    if(!supplied||(body.preparedId&&supplied.preparedId!==body.preparedId)||supplied.environment!==binding.environment||supplied.currency!=="USD"||!amountValid(supplied.providerCostCents)||!idPattern.test(supplied.manifestHash||"")
       ||typeof supplied.preparedId!=="string"||!keyPattern.test(supplied.preparedId)
       ||typeof supplied.filmId!=="string"||supplied.filmId.length>100
       ||typeof supplied.filmTitle!=="string"||supplied.filmTitle.length>300
@@ -141,6 +171,7 @@ export function createPaymentsService(overrides={}) {
       ||supplied.qualityVerified!==true||supplied.apiVerified!==true||supplied.commercialTermsVerified!==true
       ||!Number.isFinite(until)||until<=now())throw blocked();
     const quoteId=digest(`${email}:${body.idempotencyKey}`),path=quotePath(email,quoteId),existing=await read(path);
+    await guardLegacyProductionOrder({customerEmail:email,manifestHash:supplied.manifestHash,merchantBinding:binding});
     if(existing) {
       if(existing.value.manifestHash!==supplied.manifestHash||existing.value.preparedId!==supplied.preparedId||!sameBinding(existing.value.merchantBinding,binding))throw conflict();
       if(Date.parse(existing.value.expiresAt)<=now())throw new PaymentError("This quote expired. Request a new price.",409,"QUOTE_EXPIRED");
@@ -175,10 +206,11 @@ export function createPaymentsService(overrides={}) {
   async function checkout(actor,body) {
     const email=actorEmail(actor);exactFields(body,["quoteId","idempotencyKey","paymentToken","consent"]);
     id(body.quoteId);key(body.idempotencyKey);if(body.consent!==true)throw new PaymentError("Confirm the total price before paying.");token(body.paymentToken);
-    const binding=await enabled(),quoteRecord=await read(quotePath(email,body.quoteId)),q=quoteRecord?.value;
+    const binding=await enabled("charge"),quoteRecord=await read(quotePath(email,body.quoteId)),q=quoteRecord?.value;
     if(!q||q.customerEmail!==email)throw new PaymentError("This quote was not found.",404);
     if(!sameBinding(q.merchantBinding,binding))throw conflict();
-    const orderId=digest(`${email}:${q.manifestHash}`),path=orderPath(orderId),existing=await read(path);
+    await guardLegacyProductionOrder(q);
+    const orderId=paymentOrderId(q),path=orderPath(orderId),existing=await read(path);
     if(existing) {
       if(existing.value.customerEmail!==email||existing.value.checkoutKeyHash!==digest(body.idempotencyKey)||existing.value.quoteId!==q.id)throw conflict();
       return publicOrder(existing.value);
@@ -198,7 +230,7 @@ export function createPaymentsService(overrides={}) {
   async function order(actor,orderId) {return publicOrder((await readOrder(actor,orderId)).value);}
   async function reconcile(actor,{orderId}) {
     requireAdmin(actor);let record=await readOrder(actor,orderId),value=record.value;
-    const binding=await enabled();if(!sameBinding(value.merchantBinding,binding))throw conflict();
+    const binding=await enabled("read");if(!sameBinding(value.merchantBinding,binding))throw conflict();
     if(value.refundOperation) {
       const operation=value.refundOperation;
       if(!operation.providerRefundId)throw uncertain();
@@ -240,7 +272,7 @@ export function createPaymentsService(overrides={}) {
     }
     if(!["captured","partially-refunded"].includes(value.status)||!value.providerChargeId||body.amountCents>value.amountCents-value.refundedCents||value.refunds.length>=50)
       throw new PaymentError("The refund must not exceed the confirmed unrefunded payment.");
-    const binding=await enabled();if(!sameBinding(value.merchantBinding,binding))throw conflict();
+    const binding=await enabled("refund");if(!sameBinding(value.merchantBinding,binding))throw conflict();
     record=await save(orderPath(value.id),record,{...value,status:"refund-pending",refundOperation:{keyHash:digest(body.idempotencyKey),requestId:randomUUID(),amountCents:body.amountCents,
       reason:body.reason.trim(),requestedBy:actor.email,requestedAt:stamp(now()),providerRefundId:null}});
     let result=null;
@@ -252,13 +284,13 @@ export function createPaymentsService(overrides={}) {
     const value=(await readOrder(actor,orderId)).value;
     if(!value.capturedAt)throw new PaymentError("A receipt is available after the payment is confirmed.",409);
     return {receiptId:value.id,filmTitle:value.filmTitle,currency:value.currency,amountCents:value.amountCents,refundedCents:value.refundedCents,
-      capturedAt:value.capturedAt,description:"Lineage Theatre film production",status:value.status,sandbox:true,
-      notice:"Sandbox test receipt. No live payment or bank settlement is represented."};
+      capturedAt:value.capturedAt,description:"Lineage Theatre film production",status:value.status,sandbox:isSandbox(value),
+      notice:isSandbox(value)?"Sandbox test receipt. No live payment or bank settlement is represented.":"Payment captured. Film delivery is tracked separately."};
   }
   async function accountingExport(actor,orderId) {
     requireAdmin(actor);const value=(await readOrder(actor,orderId)).value;
     return {orderId:value.id,currency:value.currency,events:value.accounting.events,postingReady:false,mappingStatus:"unmapped",
-      settlementVerified:false,feesCents:null,providerExpenseCents:null,providerCostEstimateCents:value.providerCostEstimateCents,sandbox:true};
+      settlementVerified:false,feesCents:null,providerExpenseCents:null,providerCostEstimateCents:value.providerCostEstimateCents,sandbox:isSandbox(value)};
   }
   async function adminDiagnostics(actor,orderId) {
     requireAdmin(actor);const value=(await readOrder(actor,orderId)).value;
@@ -270,10 +302,10 @@ export function createPaymentsService(overrides={}) {
     if(!value||value.customerEmail!==email||value.manifestHash!==manifestHash||value.preparedId!==preparedId||value.status!=="captured"
       ||!value.capturedAt||value.refundedCents!==0||value.refundOperation||!bindingValid(value.merchantBinding))throw blocked();
     if(!Number.isFinite(Date.parse(value.quoteExpiresAt))||Date.parse(value.quoteExpiresAt)<=now())throw blocked();
-    const binding=await enabled();if(!sameBinding(value.merchantBinding,binding))throw blocked();
+    const binding=await enabled("render");if(!sameBinding(value.merchantBinding,binding))throw blocked();
     return {allowed:true,manifestHash,budgetCents:value.providerCostEstimateCents,quoteReference:value.quoteReference,
-      expiresAt:stamp(Math.min(Date.parse(value.quoteExpiresAt),now()+60_000)),environment:"sandbox",fictionalOnly:true};
+      expiresAt:stamp(Math.min(Date.parse(value.quoteExpiresAt),now()+60_000)),environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
   }
-  return {quote,checkout,order,reconcile,refund,receipt,accountingExport,adminDiagnostics,authorizeProduction};
+  return {checkoutConfiguration,quote,checkout,order,reconcile,refund,receipt,accountingExport,adminDiagnostics,authorizeProduction};
 }
 export const payments=createPaymentsService();
