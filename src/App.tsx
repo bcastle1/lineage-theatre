@@ -32,6 +32,11 @@ export default function App() {
   const submitLock = useRef(false);
   const registering = !user && mode === "register";
   useEffect(() => {
+    if (!loading && !user && window.location.hash.startsWith("#admin/payments")) {
+      document.getElementById("studio")?.scrollIntoView();
+    }
+  }, [loading, user]);
+  useEffect(() => {
     if (window.location.hash.startsWith("#admin-invite=")) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }

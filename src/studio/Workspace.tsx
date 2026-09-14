@@ -122,7 +122,16 @@ export default function Workspace({
   const [activeId, setActiveId] = useState(
     projects.find((p) => !p.archivedAt)?.id || projects[0].id,
   );
-  const [view, setView] = useState<"create" | "library" | "studios" | "admin">("create");
+  const [view, setView] = useState<"create" | "library" | "studios" | "admin">(() =>
+    (user.role === "owner" || user.role === "admin") && window.location.hash.startsWith("#admin/payments") ? "admin" : "create",
+  );
+  useEffect(() => {
+    const openPayments = () => {
+      if ((user.role === "owner" || user.role === "admin") && window.location.hash.startsWith("#admin/payments")) setView("admin");
+    };
+    window.addEventListener("hashchange", openPayments);
+    return () => window.removeEventListener("hashchange", openPayments);
+  }, [user.role]);
   const [step, setStep] = useState(0);
   const [saved, setSaved] = useState("Saved in this browser");
   const [notice, setNotice] = useState<Notice | null>(

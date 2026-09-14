@@ -11,7 +11,7 @@ import { roleForUser } from "./access.mjs";
 export function json(res, status, body) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
-  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Cache-Control", "no-cache, no-store");
   res.end(JSON.stringify(body));
 }
 export async function readBody(req, limit = 3_500_000) {

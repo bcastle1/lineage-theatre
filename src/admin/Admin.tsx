@@ -99,6 +99,29 @@ type PaymentsData = {
   reason?: string;
   cursor?: string;
 };
+type QuickBooksStatus = {
+  configured: boolean;
+  environment: "production" | "sandbox" | null;
+  authorizationStatus:
+    | "not-configured"
+    | "disconnected"
+    | "authorizing"
+    | "authorized"
+    | "expired"
+    | "configuration-changed"
+    | "needs-attention";
+  connected: boolean;
+  hasSavedAuthorization?: boolean;
+  remoteReviewRequired?: boolean;
+  revision: number;
+  pending: boolean | null;
+  lastConnectedAt: string | null;
+  realmId?: string | null;
+  revocationStatus?: string | null;
+  paymentReady: false;
+  refundReady: false;
+  message: string;
+};
 type FilmsData = { films: ArchivedFilm[]; cursor?: string };
 type AuditData = { events: AuditEvent[]; cursor?: string };
 type PersonAction = {
@@ -107,7 +130,11 @@ type PersonAction = {
   person: Person;
 };
 type RefundAction = { kind: "refund"; order: Order; idempotencyKey: string };
-type Dialog = PersonAction | RefundAction | { kind: "film"; film: ArchivedFilm };
+type Dialog =
+  | PersonAction
+  | RefundAction
+  | { kind: "film"; film: ArchivedFilm }
+  | { kind: "disconnectQuickBooks" };
 const tabs = [
   { id: "overview" as const, name: "Overview", icon: LayoutDashboard },
   { id: "people" as const, name: "People", icon: Users },
@@ -248,6 +275,14 @@ function SearchField({
   );
 }
 
+function paymentCallbackResult() {
+  if (typeof window === "undefined") return "";
+  if (!window.location.hash.startsWith("#admin/payments")) return "";
+  const query = window.location.hash.split("?")[1] || "";
+  const result = new URLSearchParams(query).get("quickbooks");
+  return result && ["connected", "denied", "error"].includes(result) ? result : "";
+}
+
 export default function Admin({
   user,
   notify,
@@ -257,10 +292,20 @@ export default function Admin({
   notify: (text: string, tone?: Notice["tone"]) => void;
   onPricingChanged: () => Promise<void>;
 }) {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(() =>
+    typeof window !== "undefined" && window.location.hash.startsWith("#admin/payments")
+      ? "payments"
+      : "overview",
+  );
   const [overview, setOverview] = useState<Overview | null>(null);
   const [people, setPeople] = useState<PeopleData | null>(null);
   const [payments, setPayments] = useState<PaymentsData | null>(null);
+  const [quickBooks, setQuickBooks] = useState<QuickBooksStatus | null>(null);
+  const [quickBooksError, setQuickBooksError] = useState("");
+  const [quickBooksReturn, setQuickBooksReturn] = useState(paymentCallbackResult);
+  const [authorizationCheck, setAuthorizationCheck] = useState(0);
+  const [authorizationTracking, setAuthorizationTracking] = useState(false);
+  const [authorizationMessage, setAuthorizationMessage] = useState("");
   const [films, setFilms] = useState<FilmsData | null>(null);
   const [audit, setAudit] = useState<AuditData | null>(null);
   const [pricing, setPricing] = useState<Pricing | null>(null);
@@ -285,6 +330,7 @@ export default function Admin({
   const requestNumber = useRef(0);
   const actionLock = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const authorizationPopup = useRef<Window | null>(null);
   const isOwner = user.role === "owner";
   const isAdministrator = isOwner || user.role === "admin";
   const refresh = useCallback(async () => {
@@ -292,6 +338,7 @@ export default function Admin({
     setLoading(true);
     setError("");
     setOverviewError("");
+    if (tab === "payments") setQuickBooksError("");
     const overviewResult = api<Overview>("/api/admin?action=overview")
       .then((result) => {
         if (request === requestNumber.current) setOverview(result);
@@ -308,8 +355,22 @@ export default function Admin({
         if (request === requestNumber.current) setPeople(result);
       }
       if (tab === "payments") {
-        const result = await api<PaymentsData>("/api/admin?action=payments");
-        if (request === requestNumber.current) setPayments(result);
+        const statusRequest = api<QuickBooksStatus>("/api/quickbooks?action=status")
+          .then((result) => {
+            if (request === requestNumber.current) setQuickBooks(result);
+          })
+          .catch((e) => {
+            if (request === requestNumber.current) {
+              setQuickBooks(null);
+              setQuickBooksError(errorText(e));
+            }
+          });
+        try {
+          const result = await api<PaymentsData>("/api/admin?action=payments");
+          if (request === requestNumber.current) setPayments(result);
+        } finally {
+          await statusRequest;
+        }
       }
       if (tab === "films") {
         const result = await api<FilmsData>("/api/archive?action=admin");
@@ -348,7 +409,88 @@ export default function Admin({
     return () => {
       requestNumber.current += 1;
     };
-  }, [refresh, isAdministrator]);
+  }, [refresh, isAdministrator, authorizationCheck]);
+  useEffect(() => {
+    const handleReturn = (event?: HashChangeEvent) => {
+      if (!window.location.hash.startsWith("#admin/payments")) return;
+      const outcome = paymentCallbackResult();
+      setTab("payments");
+      setQuery("");
+      if (outcome) {
+        setQuickBooksReturn(outcome);
+        if (event) setAuthorizationCheck((value) => value + 1);
+        window.history.replaceState(
+          null,
+          "",
+          `${window.location.pathname}${window.location.search}#admin/payments`,
+        );
+      }
+    };
+    handleReturn();
+    window.addEventListener("hashchange", handleReturn);
+    return () => window.removeEventListener("hashchange", handleReturn);
+  }, []);
+  useEffect(() => {
+    if (!authorizationTracking || !isAdministrator) return;
+    let active = true;
+    let checking = false;
+    let sawClosed = false;
+    const checkAuthorization = async () => {
+      if (!active || checking) return;
+      checking = true;
+      try {
+        const result = await api<QuickBooksStatus>("/api/quickbooks?action=status");
+        if (!active) return;
+        setQuickBooks(result);
+        if (!result.pending) {
+          setAuthorizationTracking(false);
+          authorizationPopup.current = null;
+          setAuthorizationMessage(
+            result.connected
+              ? "QuickBooks authorization is saved. You can close the Intuit window. Customer payments and refunds remain unavailable."
+              : "The authorization check has finished. Review the current connection status below; customer payments remain unavailable.",
+          );
+        }
+      } catch {
+        if (active)
+          setAuthorizationMessage(
+            "The saved authorization status could not be checked yet. Complete the Intuit window, then return here and use Refresh if needed.",
+          );
+      } finally {
+        checking = false;
+      }
+    };
+    const onFocus = () => void checkAuthorization();
+    const timer = window.setInterval(() => {
+      // Some browser isolation policies report a separated popup as closed.
+      // A closed window is never treated as proof of success or cancellation.
+      if (authorizationPopup.current?.closed && !sawClosed) {
+        sawClosed = true;
+        window.clearInterval(timer);
+        setAuthorizationMessage(
+          "The authorization window has closed or separated from this page. Checking the saved connection status…",
+        );
+        void checkAuthorization();
+      }
+    }, 1000);
+    const timeout = window.setTimeout(
+      () => {
+        setAuthorizationTracking(false);
+        authorizationPopup.current = null;
+        setAuthorizationMessage(
+          "Authorization window tracking has stopped. Complete or close the Intuit window, then use Refresh to check the saved status.",
+        );
+      },
+      10 * 60 * 1000,
+    );
+    window.addEventListener("focus", onFocus);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.clearTimeout(timeout);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [authorizationTracking, isAdministrator]);
   useEffect(() => {
     if (!dialog) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -511,6 +653,138 @@ export default function Admin({
       setBusy(false);
     }
   }
+  const hasQuickBooksAuthorization = Boolean(
+    quickBooks?.hasSavedAuthorization ??
+      (quickBooks?.authorizationStatus !== "disconnected" &&
+        (quickBooks?.connected || quickBooks?.realmId)),
+  );
+  const needsQuickBooksReconnect = Boolean(
+    hasQuickBooksAuthorization ||
+      (quickBooks &&
+        ["expired", "configuration-changed", "needs-attention"].includes(
+          quickBooks.authorizationStatus,
+        )),
+  );
+  async function connectQuickBooks() {
+    if (
+      !isOwner ||
+      !quickBooks?.configured ||
+      hasQuickBooksAuthorization ||
+      quickBooks.remoteReviewRequired ||
+      quickBooks.pending ||
+      authorizationTracking ||
+      !Number.isInteger(quickBooks.revision) ||
+      actionLock.current
+    )
+      return;
+    const width = Math.min(640, window.screen.availWidth || 640);
+    const height = Math.min(760, window.screen.availHeight || 760);
+    const left = Math.max(
+      0,
+      Math.round(window.screenX + (window.outerWidth - width) / 2),
+    );
+    const top = Math.max(
+      0,
+      Math.round(window.screenY + (window.outerHeight - height) / 2),
+    );
+    // Keep this synchronous with the owner's click so popup blockers can make
+    // their decision before any server-side authorization attempt is created.
+    let popup: Window | null = null;
+    try {
+      popup = window.open(
+        "about:blank",
+        "_blank",
+        `popup=yes,width=${width},height=${height},left=${left},top=${top}`,
+      );
+    } catch {
+      /* A restricted browser may throw instead of returning null. */
+    }
+    if (!popup) {
+      setQuickBooksError(
+        "Your browser blocked the QuickBooks authorization window. Allow popups for Lineage Theatre and select Connect again. No authorization request was started.",
+      );
+      return;
+    }
+    authorizationPopup.current = popup;
+    actionLock.current = true;
+    setBusy(true);
+    setQuickBooksError("");
+    setQuickBooksReturn("");
+    try {
+      popup.opener = null;
+      popup.document.title = "Opening QuickBooks authorization";
+      popup.document.body.textContent = "Opening secure QuickBooks authorization…";
+      const result = await api<{ authorizationUrl: string }>("/api/quickbooks", {
+        action: "start",
+        expectedRevision: quickBooks.revision,
+        replaceExisting: false,
+      });
+      const authorization = new URL(result.authorizationUrl);
+      if (
+        authorization.origin !== "https://appcenter.intuit.com" ||
+        authorization.pathname !== "/connect/oauth2" ||
+        authorization.username ||
+        authorization.password
+      )
+        throw new Error(
+          "The QuickBooks authorization link could not be verified. Refresh and try again.",
+        );
+      if (popup.closed)
+        throw new Error(
+          "The authorization window was closed before QuickBooks opened. Refresh the connection status before trying again.",
+        );
+      popup.location.replace(authorization.href);
+      setAuthorizationMessage(
+        "Complete authorization in the opened Intuit window, then return here. This page rechecks the saved status when you return or close the window.",
+      );
+      setAuthorizationTracking(true);
+    } catch (e) {
+      try {
+        popup.close();
+      } catch {
+        /* The owner may already have closed it. */
+      }
+      authorizationPopup.current = null;
+      setAuthorizationMessage("");
+      setQuickBooksError(errorText(e));
+    } finally {
+      actionLock.current = false;
+      setBusy(false);
+    }
+  }
+  async function disconnectQuickBooks() {
+    if (
+      !isOwner ||
+      !quickBooks ||
+      !Number.isInteger(quickBooks.revision) ||
+      actionLock.current
+    )
+      return;
+    actionLock.current = true;
+    setBusy(true);
+    setActionError("");
+    try {
+      const result = await api<QuickBooksStatus>("/api/quickbooks", {
+        action: "disconnect",
+        expectedRevision: quickBooks.revision,
+      });
+      setQuickBooks(result);
+      setQuickBooksReturn("");
+      setAuthorizationMessage("");
+      setDialog(null);
+      notify(
+        result.message ||
+          "QuickBooks authorization updated. Customer payments remain unavailable.",
+        "info",
+      );
+      await refresh();
+    } catch (e) {
+      setActionError(errorText(e));
+    } finally {
+      actionLock.current = false;
+      setBusy(false);
+    }
+  }
   const amountCents = /^\d+(\.\d{1,2})?$/.test(refundAmount)
     ? Math.round(Number(refundAmount) * 100)
     : 0;
@@ -518,8 +792,8 @@ export default function Admin({
     dialog?.kind === "refund"
       ? Math.max(0, dialog.order.amountCents - (dialog.order.refundedCents || 0))
       : 0;
-  const refundReady =
-    !!payments?.connectionReady && !!overview?.connections?.billing?.available;
+  // OAuth authorization alone never enables moving customer money.
+  const refundReady = false;
   async function submitRefund(action: RefundAction) {
     if (
       actionLock.current ||
@@ -1080,12 +1354,149 @@ export default function Admin({
         )}
         {tab === "payments" && (
           <section className="admin-card">
+            <section
+              className="admin-quickbooks-panel"
+              aria-labelledby="quickbooks-connection-title"
+            >
+              <div className="admin-quickbooks-heading">
+                <div className="admin-quickbooks-symbol">
+                  <CreditCard size={25} />
+                </div>
+                <div>
+                  <span className="admin-eyebrow">Business authorization</span>
+                  <h2 id="quickbooks-connection-title">QuickBooks connection</h2>
+                  <p>
+                    Connect the business account, then verify payment readiness
+                    separately.
+                  </p>
+                </div>
+                <Badge tone={quickBooks?.connected ? "good" : "pending"}>
+                  {quickBooks?.remoteReviewRequired
+                    ? "Review required"
+                    : quickBooks?.connected
+                      ? "Authorization saved"
+                      : !quickBooks
+                        ? loading
+                          ? "Checking status"
+                          : "Status unavailable"
+                        : quickBooks.authorizationStatus === "not-configured"
+                          ? "Setup required"
+                          : quickBooks.authorizationStatus === "authorizing"
+                            ? "Authorization in progress"
+                            : needsQuickBooksReconnect
+                              ? "Reconnect needed"
+                              : "Awaiting authorization"}
+                </Badge>
+              </div>
+              {quickBooksReturn && (
+                <div className="admin-quickbooks-return" role="status">
+                  {quickBooksReturn === "connected"
+                    ? "Returned from QuickBooks. This page checks the saved authorization with the server; returning here does not enable payments."
+                    : quickBooksReturn === "denied"
+                      ? "QuickBooks authorization was declined or cancelled. No new authorization was completed."
+                      : "QuickBooks could not complete the return. Review the current status below before trying again."}
+                </div>
+              )}
+              {authorizationMessage && (
+                <div className="admin-quickbooks-return" role="status">
+                  {authorizationMessage}
+                </div>
+              )}
+              <p className="admin-quickbooks-message">
+                {quickBooks?.message ||
+                  "The business authorization has not yet been verified."}
+              </p>
+              {quickBooksError && (
+                <div className="admin-inline-error" role="alert">
+                  {quickBooksError}
+                </div>
+              )}
+              <div className="admin-quickbooks-readiness">
+                <div>
+                  <span>Account authorization</span>
+                  <strong>
+                    {quickBooks?.connected ? "Saved for this app" : "Not verified"}
+                  </strong>
+                  <small>
+                    {quickBooks?.lastConnectedAt
+                      ? `Last authorized ${date(quickBooks.lastConnectedAt)}`
+                      : "Only the owner can authorize the connection."}
+                    {quickBooks?.environment === "sandbox" ? " Test environment." : ""}
+                  </small>
+                </div>
+                <div>
+                  <span>Customer payments & refunds</span>
+                  <strong>Unavailable</strong>
+                  <small>
+                    Saving QuickBooks authorization does not activate charges or refunds.
+                  </small>
+                </div>
+              </div>
+              <div className="admin-quickbooks-actions">
+                {isOwner ? (
+                  <>
+                    <button
+                      className="button primary"
+                      disabled={
+                        busy ||
+                        loading ||
+                        authorizationTracking ||
+                        quickBooks?.pending ||
+                        (quickBooks?.remoteReviewRequired &&
+                          !hasQuickBooksAuthorization) ||
+                        (!hasQuickBooksAuthorization && !quickBooks?.configured) ||
+                        !Number.isInteger(quickBooks?.revision)
+                      }
+                      onClick={() => {
+                        if (hasQuickBooksAuthorization) {
+                          setActionError("");
+                          setDialog({ kind: "disconnectQuickBooks" });
+                        } else void connectQuickBooks();
+                      }}
+                    >
+                      {busy && !dialog ? (
+                        <Loader2 size={16} className="spin" />
+                      ) : (
+                        <ShieldCheck size={16} />
+                      )}
+                      {hasQuickBooksAuthorization
+                        ? "Disconnect before reconnecting"
+                        : needsQuickBooksReconnect
+                          ? "Reconnect QuickBooks"
+                          : "Connect QuickBooks"}
+                    </button>
+                    {!hasQuickBooksAuthorization && quickBooks?.pending && (
+                      <button
+                        className="button secondary"
+                        disabled={busy || loading}
+                        onClick={() => {
+                          setActionError("");
+                          setDialog({ kind: "disconnectQuickBooks" });
+                        }}
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                    <p>
+                      {hasQuickBooksAuthorization
+                        ? "To change or renew authorization, disconnect the saved connection first. Existing order records stay here."
+                        : "Complete authorization in the opened Intuit window, then return here."}
+                    </p>
+                  </>
+                ) : (
+                  <p>
+                    The owner manages QuickBooks authorization. Administrators can review
+                    its status here.
+                  </p>
+                )}
+              </div>
+            </section>
             <div className="admin-section-heading">
               <div>
                 <h2>Payments & refunds</h2>
                 <p>
-                  Customer order records. Charges and refunds require the QuickBooks
-                  connection.
+                  Customer order records. Business authorization and payment readiness are
+                  verified separately.
                 </p>
               </div>
               <button
@@ -1100,19 +1511,17 @@ export default function Admin({
                 Export loaded rows
               </button>
             </div>
-            {!payments?.connectionReady && (
-              <div className="admin-feedback info">
-                <AlertCircle size={18} />
-                <div>
-                  <strong>Payments and refunds are not connected</strong>
-                  <p>
-                    {payments?.reason ||
-                      overview?.connections.billing.reason ||
-                      "QuickBooks payment access must be verified before this app can charge a customer or issue a refund."}
-                  </p>
-                </div>
+            <div className="admin-feedback info">
+              <AlertCircle size={18} />
+              <div>
+                <strong>Customer charges and refunds remain unavailable</strong>
+                <p>
+                  {payments?.reason ||
+                    overview?.connections.billing.reason ||
+                    "QuickBooks payment access must be verified before this app can charge a customer or issue a refund."}
+                </p>
               </div>
-            )}
+            </div>
             <div className="admin-list-toolbar">
               <SearchField
                 value={query}
@@ -1484,11 +1893,13 @@ export default function Admin({
                   ? dialog.film.title || "Family film"
                   : dialog.kind === "refund"
                     ? "Review customer refund"
-                    : dialog.action === "revokeAdmin"
-                      ? "Remove administrator access"
-                      : dialog.action === "suspend"
-                        ? "Suspend account access"
-                        : "Restore account access"}
+                    : dialog.kind === "disconnectQuickBooks"
+                      ? "Disconnect QuickBooks"
+                      : dialog.action === "revokeAdmin"
+                        ? "Remove administrator access"
+                        : dialog.action === "suspend"
+                          ? "Suspend account access"
+                          : "Restore account access"}
               </h2>
               <button
                 className="icon-button"
@@ -1499,6 +1910,36 @@ export default function Admin({
                 <X size={19} />
               </button>
             </div>
+            {dialog.kind === "disconnectQuickBooks" && (
+              <>
+                <p>
+                  Disconnecting removes this app's stored QuickBooks authorization and
+                  requests that Intuit revoke its access. Your customer accounts, order
+                  records, and archived films remain here.
+                </p>
+                <p>
+                  The owner will need to authorize QuickBooks again before this app can
+                  use the connection. Customer charges and refunds remain unavailable.
+                </p>
+                <div className="admin-modal-actions">
+                  <button
+                    className="button secondary"
+                    disabled={busy}
+                    onClick={() => setDialog(null)}
+                  >
+                    Keep connection
+                  </button>
+                  <button
+                    className="button admin-danger"
+                    disabled={busy || !isOwner || !quickBooks}
+                    onClick={() => void disconnectQuickBooks()}
+                  >
+                    {busy && <Loader2 size={16} className="spin" />}
+                    Disconnect QuickBooks
+                  </button>
+                </div>
+              </>
+            )}
             {dialog.kind === "film" && (
               <>
                 <p>
@@ -1573,9 +2014,9 @@ export default function Admin({
                   <div className="admin-feedback info">
                     <AlertCircle size={18} />
                     <p>
-                      Refunds are unavailable until QuickBooks payment access is verified.
-                      No refund will be submitted from this screen while the connection is
-                      pending.
+                      Refund submission is not enabled. QuickBooks account authorization
+                      alone does not activate customer payments or refunds. No refund will
+                      be submitted from this screen.
                     </p>
                   </div>
                 )}

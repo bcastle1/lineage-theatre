@@ -5,6 +5,7 @@ import studio from "../api/studio.mjs";
 import document from "../api/document.mjs";
 import admin from "../api/admin.mjs";
 import archive from "../api/archive.mjs";
+import quickbooks from "../api/quickbooks.mjs";
 const vite = await viteServer({
   server: { middlewareMode: true },
   appType: "spa",
@@ -17,6 +18,7 @@ createServer(async (req, res) => {
     if (path === "/api/document") return await document(req, res);
     if (path === "/api/admin") return await admin(req, res);
     if (path === "/api/archive") return await archive(req, res);
+    if (path === "/api/quickbooks") return await quickbooks(req, res);
     vite.middlewares(req, res);
   } catch {
     res.statusCode = 500;

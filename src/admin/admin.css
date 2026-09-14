@@ -830,3 +830,137 @@
     text-align: left;
   }
 }
+
+.admin-quickbooks-panel {
+  padding: 23px;
+  border: 1px solid #dce6d7;
+  border-radius: 11px;
+  background: #f3f7ee;
+  margin-bottom: 30px;
+}
+.admin-quickbooks-heading {
+  display: grid;
+  grid-template-columns: 43px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+.admin-quickbooks-symbol {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 43px;
+  height: 48px;
+  background: #e1ecd9;
+  color: #3f6f40;
+  border-radius: 9px;
+}
+.admin-quickbooks-heading .admin-eyebrow {
+  margin-bottom: 5px;
+  font-size: 9px;
+}
+.admin-quickbooks-heading h2 {
+  font-size: 24px;
+}
+.admin-quickbooks-heading p {
+  color: #66745e;
+  font-size: 12px;
+  line-height: 1.65;
+  margin-top: 7px;
+}
+.admin-quickbooks-message {
+  font-size: 12px;
+  color: #63715c;
+  margin: 20px 0;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.admin-quickbooks-return {
+  background: #fff;
+  border: 1px solid #dde5d5;
+  border-radius: 7px;
+  margin-top: 18px;
+  padding: 13px 15px;
+  color: #576e4e;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.admin-quickbooks-readiness {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  background: #ffffffbd;
+  border: 1px solid #e0e8d8;
+  border-radius: 8px;
+  margin: 18px 0;
+}
+.admin-quickbooks-readiness > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 17px;
+}
+.admin-quickbooks-readiness > div + div {
+  border-left: 1px solid #e0e8d8;
+}
+.admin-quickbooks-readiness span {
+  font-size: 10px;
+  color: var(--muted);
+}
+.admin-quickbooks-readiness strong {
+  font-size: 14px;
+  color: var(--forest);
+}
+.admin-quickbooks-readiness small {
+  font-size: 10px;
+  line-height: 1.7;
+}
+.admin-quickbooks-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.admin-quickbooks-actions > p {
+  font-size: 11px;
+  color: #6a7862;
+  line-height: 1.7;
+  flex: 1 1 240px;
+}
+.admin-quickbooks-actions .button {
+  white-space: normal;
+}
+@media (max-width: 700px) {
+  .admin-quickbooks-panel {
+    padding: 16px;
+  }
+  .admin-quickbooks-heading {
+    grid-template-columns: 33px minmax(0, 1fr);
+    gap: 12px;
+  }
+  .admin-quickbooks-symbol {
+    width: 33px;
+    height: 40px;
+  }
+  .admin-quickbooks-symbol svg {
+    width: 21px;
+  }
+  .admin-quickbooks-heading h2 {
+    font-size: 22px;
+  }
+  .admin-quickbooks-heading > .admin-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .admin-quickbooks-readiness {
+    grid-template-columns: 1fr;
+  }
+  .admin-quickbooks-readiness > div + div {
+    border-left: 0;
+    border-top: 1px solid #e0e8d8;
+  }
+  .admin-quickbooks-actions {
+    align-items: flex-start;
+  }
+  .admin-quickbooks-actions > p {
+    flex-basis: 100%;
+  }
+}

@@ -33,6 +33,9 @@
     },
     "api/archive.mjs": {
       "maxDuration": 300
+    },
+    "api/quickbooks.mjs": {
+      "maxDuration": 60
     }
   }
 }

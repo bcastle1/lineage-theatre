@@ -2,7 +2,7 @@
 
 GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds and tests. Publish the exact reviewed commit through the existing Vercel project.
 
-The authorized release includes public customer registration, owner-delegated administration, optional private finished-film archiving, and configurable future-quote markup. GPT-6 Astra generation, MagicLight film generation, and QuickBooks charges/refunds remain connection pending. Public and signed-in screens must disclose that status. See `docs/INTERNAL-FILM-INTEGRATION.md` for the remaining provider and merchant prerequisites.
+The authorized release includes public customer registration, owner-delegated administration, optional private finished-film archiving, configurable future-quote markup, and owner-managed QuickBooks OAuth connection controls. GPT-6 Astra generation, MagicLight film generation, and QuickBooks charges/refunds remain connection pending. Public and signed-in screens must disclose that status. See `docs/INTERNAL-FILM-INTEGRATION.md` for the remaining provider and merchant prerequisites.
 
 ## Runtime
 
