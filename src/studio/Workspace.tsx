@@ -3,7 +3,6 @@ import {
   Aperture,
   Video,
   Library,
-  SlidersHorizontal,
   Plus,
   LogOut,
   ArrowRight,
@@ -14,17 +13,18 @@ import {
   Film as FilmIcon,
   X,
   CloudOff,
-  Sparkles,
   ShieldCheck,
 } from "lucide-react";
 import {
   api,
+  customerProjectBackup,
   editorialPlan,
   editorialThemes,
   formatDuration,
   newFilm,
   normalizeFilm,
   productionBrief,
+  productionStatusMessage,
   steps,
   type Film,
   type Scene,
@@ -43,39 +43,16 @@ const Admin = lazy(() => import("../admin/Admin"));
 export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
   story: boolean;
-  magiclight: boolean;
+  production: boolean;
   billing: boolean;
   pricing?: {
     currency: "USD";
-    policy: "provider-cost-no-markup" | "provider-cost-plus-markup";
-    markupBasisPoints: number;
-    pricingRevision?: number;
-    referenceStatus: "available" | "configuration-pending";
-    referenceRate: {
-      credits: number;
-      amountCents: number;
-      source: "public-pro-api-pack" | "server-configuration";
-      sourceUrl: string | null;
-    } | null;
-    referenceReason: string;
     estimate: {
-      status: "awaiting-provider-quote";
+      status: "unavailable";
       amountCents: null;
-      providerCredits: null;
       reason: string;
     };
     chargeReady: false;
-  };
-  payment?: {
-    provider: "quickbooks";
-    label: "QuickBooks";
-    status: "connection-pending";
-    available: false;
-  };
-  connections?: {
-    story?: { reason: string };
-    magiclight?: { reason: string };
-    billing?: { reason: string };
   };
   quality?: { label: string; verified: boolean };
 };
@@ -122,7 +99,7 @@ export default function Workspace({
   const [activeId, setActiveId] = useState(
     projects.find((p) => !p.archivedAt)?.id || projects[0].id,
   );
-  const [view, setView] = useState<"create" | "library" | "studios" | "admin">(() =>
+  const [view, setView] = useState<"create" | "library" | "admin">(() =>
     (user.role === "owner" || user.role === "admin") && window.location.hash.startsWith("#admin/payments") ? "admin" : "create",
   );
   useEffect(() => {
@@ -194,7 +171,7 @@ export default function Workspace({
       .then(setCaps)
       .catch(() =>
         notify(
-          "Studio connections could not be checked. Your saved story remains available to edit.",
+          "Film creation availability could not be checked. You can keep editing your story.",
           "error",
         ),
       );
@@ -259,7 +236,7 @@ export default function Workspace({
           if (job.status === "completed")
             notify("Your film is ready to watch in Lineage Theatre.");
           if (job.status === "failed")
-            notify(job.message || "Film production could not finish.", "error");
+            notify(productionStatusMessage(job.status), "error");
         } catch {
           if (!stopped)
             notify(
@@ -363,15 +340,14 @@ export default function Workspace({
     if (!enoughStory()) return false;
     if (!caps?.story) {
       notify(
-        caps?.connections?.story?.reason ||
-          "GPT-6 Astra story development is awaiting a verified connection. You can keep editing your archive or start a manual outline.",
+        "Story development is temporarily unavailable. You can keep editing your archive or start a manual outline.",
         "info",
       );
       return false;
     }
     if (!aiConsent) {
       notify(
-        "Allow GPT-6 Astra to read your family material before developing the film.",
+        "Allow Lineage Theatre's AI tools to read your family material before developing the film.",
         "error",
       );
       return false;
@@ -408,7 +384,7 @@ export default function Workspace({
   }
   async function suggest() {
     if (!allowStory()) return;
-    await task("Finding story directions with GPT-6 Astra…", async () => {
+    await task("Finding story directions for your film…", async () => {
       const result = await api<{ themes: Omit<Theme, "id">[]; generatedBy: string }>(
         "/api/studio",
         {
@@ -423,7 +399,7 @@ export default function Workspace({
         themes: result.themes.map((t) => ({ ...t, id: crypto.randomUUID() })),
         generatedBy: result.generatedBy,
       });
-      setThemeOrigin(`${result.generatedBy} · grounded in the material read`);
+      setThemeOrigin("AI story ideas · grounded in the material read");
       notify(
         "Your story ideas are ready. Choose a favorite, or let the film develop automatically.",
       );
@@ -432,7 +408,7 @@ export default function Workspace({
   async function plan() {
     if (!allowStory()) return;
     await task(
-      "Developing your script, ensemble, and scenes with GPT-6 Astra…",
+      "Developing your script, cast, and scenes…",
       async () => {
         const selectedThemes = film.selectedThemes.length
           ? film.selectedThemes
@@ -519,7 +495,7 @@ export default function Workspace({
       );
       update({ job });
       notify(
-        job.message || `Film status: ${job.status}.`,
+        productionStatusMessage(job.status),
         job.status === "failed" ? "error" : "info",
       );
     });
@@ -528,7 +504,7 @@ export default function Workspace({
     // A verified server quote and in-app payment confirmation must be integrated
     // before any production request can create a provider expense.
     notify(
-      "Production is waiting for a verified MagicLight connection and an in-app price confirmation. Your film draft remains editable.",
+      "Film production is not available yet. You can continue writing and saving your screenplay. You will see the total price before approving a payment.",
       "info",
     );
   }
@@ -541,7 +517,7 @@ export default function Workspace({
   }
   function backup() {
     saveDownload(
-      new Blob([JSON.stringify(film, null, 2)], { type: "application/json" }),
+      new Blob([JSON.stringify(customerProjectBackup(film), null, 2)], { type: "application/json" }),
       `${cleanName(film.title)}-project.json`,
     );
     notify("Project backup downloaded. Original media files are stored separately.");
@@ -550,7 +526,6 @@ export default function Workspace({
   const nav = [
     { id: "create" as const, label: "Create a film", icon: Video },
     { id: "library" as const, label: "Film library", icon: Library },
-    { id: "studios" as const, label: "Studio status", icon: SlidersHorizontal },
     ...(user.role === "owner" || user.role === "admin"
       ? [{ id: "admin" as const, label: "Administration", icon: ShieldCheck }]
       : []),
@@ -884,82 +859,6 @@ export default function Workspace({
             </>
           )}
           {view === "library" && <CloudArchivePanel projects={projects} />}
-          {view === "studios" && (
-            <section className="panel">
-              <div className="section-title">
-                <div>
-                  <h1>Your Lineage Theatre studio</h1>
-                  <p>One place for your story, script, cast, and finished film.</p>
-                </div>
-                <FilmIcon size={24} />
-              </div>
-              <div className="studio-status-grid">
-                {(
-                  [
-                    [
-                      "Story development",
-                      "GPT-6 Astra",
-                      caps?.story,
-                      caps?.connections?.story?.reason,
-                    ],
-                    [
-                      "Animated film production",
-                      "MagicLight",
-                      caps?.magiclight,
-                      caps?.connections?.magiclight?.reason,
-                    ],
-                    [
-                      "Payment",
-                      "Pay within Lineage Theatre",
-                      caps?.billing,
-                      caps?.connections?.billing?.reason,
-                    ],
-                  ] as const
-                ).map(([label, name, ready, reason]) => (
-                  <article className="studio-status-card" key={label}>
-                    <span className="eyebrow">{label}</span>
-                    <h3>{name}</h3>
-                    <span className={`status-pill ${ready ? "ready" : "pending"}`}>
-                      {ready
-                        ? "Connection verified"
-                        : caps
-                          ? "Setup needed"
-                          : "Checking connection"}
-                    </span>
-                    <p>
-                      {reason ||
-                        (ready
-                          ? "Available in this app."
-                          : "Connection has not yet been verified.")}
-                    </p>
-                  </article>
-                ))}
-              </div>
-              <div className="story-promise">
-                <Sparkles size={22} />
-                <div>
-                  <h3>Highest quality, by default</h3>
-                  <p>
-                    Every new film requests MagicLight’s highest available animation and
-                    output quality.{" "}
-                    {caps?.quality?.verified
-                      ? caps.quality.label
-                      : "The available quality must be verified before production."}
-                  </p>
-                </div>
-              </div>
-              <p className="field-note">
-                A MagicLight account alone does not connect video production here. The
-                service connection and in-app payment setup must be verified before a film
-                can be generated. Your story and draft remain editable while setup is
-                pending.
-              </p>
-              <button className="button primary" onClick={() => navigate(0)}>
-                Return to my film
-                <ArrowRight size={16} />
-              </button>
-            </section>
-          )}
         </main>
         <footer className="workspace-footer">
           <span>Lineage Theatre · Lives remembered. Stories kept.</span>

@@ -112,6 +112,51 @@ export const newFilm = (): Film => ({
   updatedAt: new Date().toISOString(),
   music: true,
 });
+export function productionStatusMessage(status: Shot["status"]): string {
+  switch (status) {
+    case "submitting":
+      return "Your film request is being submitted.";
+    case "queued":
+      return "Your film is waiting to begin production.";
+    case "processing":
+      return "Your film is being created.";
+    case "completed":
+      return "Your film is ready to watch.";
+    case "failed":
+      return "Film production could not finish. Check its status before trying again.";
+    case "uncertain":
+      return "Your film's status is unconfirmed. Check its status before starting another request.";
+    default:
+      return "Your film's status is unavailable. Check production status for an update.";
+  }
+}
+function customerProduction(shot: Shot): Shot {
+  return {
+    ...shot,
+    provider:
+      shot.provider === "magiclight" || shot.provider === "lineage-theatre"
+        ? "lineage-theatre"
+        : "archived-production",
+    message: productionStatusMessage(shot.status),
+  };
+}
+export function customerProjectBackup(film: Film): Film {
+  return {
+    ...film,
+    providerId: "lineage-theatre",
+    generatedBy: film.generatedBy?.startsWith("Manual")
+      ? "Manual outline from source text"
+      : "Lineage Theatre",
+    ...(film.job ? { job: customerProduction(film.job) } : {}),
+    scenes: film.scenes.map((scene) => ({
+      ...scene,
+      ...(scene.shot ? { shot: customerProduction(scene.shot) } : {}),
+    })),
+  };
+}
+function restoreProduction(shot: Shot): Shot {
+  return shot.provider === "lineage-theatre" ? { ...shot, provider: "magiclight" } : shot;
+}
 export function normalizeFilm(raw: Partial<Film>): Film {
   const duration =
     raw.duration ??
@@ -132,9 +177,11 @@ export function normalizeFilm(raw: Partial<Film>): Film {
     selectedThemes: Array.isArray(raw.selectedThemes) ? raw.selectedThemes : [],
     characters: Array.isArray(raw.characters) ? raw.characters : [],
     assumptions: Array.isArray(raw.assumptions) ? raw.assumptions : [],
+    ...(raw.job ? { job: restoreProduction(raw.job) } : {}),
     scenes: Array.isArray(raw.scenes)
       ? raw.scenes.map((scene) => ({
           ...scene,
+          ...(scene.shot ? { shot: restoreProduction(scene.shot) } : {}),
           sourceIds: scene.sourceIds || [],
           characterIds: scene.characterIds || [],
           dialogue: scene.dialogue || "",
@@ -321,7 +368,7 @@ export function productionBrief(f: Film) {
     id === "@family-narrative"
       ? "Family narrative"
       : f.sources.find((s) => s.id === id)?.name || id;
-  return `LINEAGE THEATRE — PRODUCTION BRIEF\n${f.title}\nAncestor: ${f.ancestor}\nPeriod: ${f.era || "Not specified"}\nStyle: ${f.style}\nDuration: ${f.duration} seconds\nProduction: MagicLight within Lineage Theatre\nQuality preference: highest available animation and final film quality; subject to verified account availability\nTreatment: ${f.factuality === "documentary" ? "Documentary; verified evidence only" : "Based on a true story; some scenes and dialogue are dramatized"}\n\n${f.logline}\n\nThemes:\n${f.selectedThemes.map((t) => `${t.title}\nPlot: ${t.plot}\nClimax: ${t.climax}`).join("\n\n")}\n\nCast:\n${f.characters.map((c) => `${c.name} — ${c.role} [${c.basis}]\n${c.description}\nSources: ${c.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nAssumptions for review:\n${f.assumptions.map((a) => `${a.description}\nReason: ${a.reason}`).join("\n\n")}\n\nScenes:\n${f.scenes.map((s, i) => `${i + 1}. ${s.title}\nNarration: ${s.narration}\nDialogue: ${s.dialogue}\nVisual: ${s.visual}\nCast: ${s.characterIds.map((id) => f.characters.find((c) => c.id === id)?.name || id).join(", ")}\nDramatization: ${s.dramatization || "None identified; review required"}\nSources: ${s.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nFamily evidence:\n${f.script}\n${f.sources.map((s) => `${s.name}: ${s.text || s.note || "Attached source file; add context if its content has not been read."}`).join("\n")}\n\nCelebrate the ancestor with warmth and dignity. Preserve documented facts and distinguish inference and invention. Dramatic dialogue is not a verified quotation. Review the full ensemble and source coverage before production.`;
+  return `LINEAGE THEATRE — PRODUCTION BRIEF\n${f.title}\nAncestor: ${f.ancestor}\nPeriod: ${f.era || "Not specified"}\nStyle: ${f.style}\nDuration: ${f.duration} seconds\nProduction: Lineage Theatre\nFilm quality and final running time will be confirmed before production\nTreatment: ${f.factuality === "documentary" ? "Documentary; verified evidence only" : "Based on a true story; some scenes and dialogue are dramatized"}\n\n${f.logline}\n\nThemes:\n${f.selectedThemes.map((t) => `${t.title}\nPlot: ${t.plot}\nClimax: ${t.climax}`).join("\n\n")}\n\nCast:\n${f.characters.map((c) => `${c.name} — ${c.role} [${c.basis}]\n${c.description}\nSources: ${c.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nAssumptions for review:\n${f.assumptions.map((a) => `${a.description}\nReason: ${a.reason}`).join("\n\n")}\n\nScenes:\n${f.scenes.map((s, i) => `${i + 1}. ${s.title}\nNarration: ${s.narration}\nDialogue: ${s.dialogue}\nVisual: ${s.visual}\nCast: ${s.characterIds.map((id) => f.characters.find((c) => c.id === id)?.name || id).join(", ")}\nDramatization: ${s.dramatization || "None identified; review required"}\nSources: ${s.sourceIds.map(sourceName).join(", ")}`).join("\n\n")}\n\nFamily evidence:\n${f.script}\n${f.sources.map((s) => `${s.name}: ${s.text || s.note || "Attached source file; add context if its content has not been read."}`).join("\n")}\n\nCelebrate the ancestor with warmth and dignity. Preserve documented facts and distinguish inference and invention. Dramatic dialogue is not a verified quotation. Review the full ensemble and source coverage before production.`;
 }
 export const formatDuration = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;

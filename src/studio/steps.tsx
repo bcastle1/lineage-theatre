@@ -18,7 +18,7 @@ import {
   X,
   CheckCircle2,
 } from "lucide-react";
-import { type Source, type Scene, type Theme, formatDuration } from "./model";
+import { type Source, type Scene, type Theme, formatDuration, productionStatusMessage } from "./model";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -340,9 +340,8 @@ export function DirectionStep({
           </select>
         </label>
         <p className="field-note">
-          MagicLight · highest available animation and output quality requested.
-          <br />
-          Final runtime and quality depend on verified production availability.
+          Final running time and available film quality will be confirmed before you
+          approve production.
         </p>
       </div>
       <div className="ai-consent">
@@ -353,21 +352,22 @@ export function DirectionStep({
             disabled={!!busy}
             onChange={(e) => setAiConsent(e.target.checked)}
           />
-          Allow GPT-6 Astra to read my family story, extracted document text, photo
+          Allow Lineage Theatre's AI tools to read my family story, extracted document text, photo
           captions, and up to 8 reference photos to develop this film.
         </label>
         <small>
-          Text, context, and available reference photos are sent only when you request AI
-          development. Add captions for people and events that a photograph alone cannot
-          establish. Source coverage is shown with the draft.
+          Text, context, and available reference photos are sent to our AI service only
+          when you request development. See our <a href="/privacy.html" target="_blank"
+          rel="noreferrer">privacy information</a> for how these materials are processed.
+          Add captions for people and events that a photograph alone cannot establish.
+          Source coverage is shown with the draft.
         </small>
       </div>
       {!caps?.story && (
         <div className="feedback info" role="status">
-          {caps?.connections?.story?.reason ||
-            (caps
-              ? "GPT-6 Astra story development is awaiting a verified connection. You can edit your archive and prepare a manual outline."
-              : "Checking story development availability…")}
+          {caps
+            ? "Story development is temporarily unavailable. You can edit your archive and prepare a manual outline."
+            : "Checking story development availability…"}
         </div>
       )}
       <div className="develop-action">
@@ -963,7 +963,7 @@ export function CuttingStep({
         Add a scene
       </button>
       <p className="field-note">
-        {film.generatedBy || "Your editable film draft"} · Source links identify material
+        {film.generatedBy?.startsWith("Manual") ? "Manual outline from source text" : "Your editable film draft"} · Source links identify material
         used, not independent proof that every detail is true.
       </p>
       <div className="panel-actions">
@@ -1010,12 +1010,8 @@ export function CreateStep({
 }: CreateProps) {
   // A price must be returned and confirmed by the server before this can enable.
   const hasConfirmedQuote = false;
-  const referenceRate = caps?.pricing?.referenceRate;
-  const referencePrice = referenceRate && referenceRate.amountCents > 0
-    ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(referenceRate.amountCents / 100)
-    : null;
   const canGenerate = Boolean(
-    caps?.magiclight &&
+    caps?.production &&
       caps?.billing &&
       hasConfirmedQuote &&
       consent &&
@@ -1057,93 +1053,29 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <div className="production-settings">
-        <div>
-          <span>Film production</span>
-          <strong>MagicLight</strong>
-          <small>Managed within Lineage Theatre</small>
-        </div>
-        <div>
-          <span>Animation & final quality</span>
-          <strong>Highest available</strong>
-          <small>
-            {caps?.quality?.verified
-              ? caps.quality.label
-              : "Quality availability awaiting verification"}
-          </small>
-        </div>
-        <div>
-          <span>Story development</span>
-          <strong>GPT-6 Astra</strong>
-          <small>{film.generatedBy || "Film draft can be edited here"}</small>
-        </div>
-      </div>
       <section className="readiness-panel" aria-label="Film pricing">
-        <h3>Your estimated film cost</h3>
-        <div className="production-settings">
-          <div>
-            <span>Reference credit rate</span>
-            <strong>
-              {referencePrice && referenceRate
-                ? `${referencePrice} per ${referenceRate.credits.toLocaleString("en-US")} credits`
-                : caps ? "Reference rate unavailable" : "Checking reference rate…"}
-            </strong>
-            <small>
-              {caps?.pricing?.referenceReason || "The server must confirm the MagicLight credit-pack reference rate."}
-            </small>
-          </div>
-          <div>
-            <span>Estimated film cost</span>
-            <strong>Awaiting MagicLight quote</strong>
-            <small>A total is not available yet.</small>
-          </div>
-          <div>
-            <span>Payment provider</span>
-            <strong>QuickBooks</strong>
-            <small>Selected · connection pending</small>
-          </div>
-        </div>
-        <p>
-          Your film price will use MagicLight's quoted cost plus the current BROCOTech markup: {caps?.pricing ? `${caps.pricing.markupBasisPoints / 100}%` : "awaiting pricing settings"}. The total will be shown before payment.
-        </p>
+        <h3>Your film price</h3>
+        <p>Price not available yet.</p>
         <p className="field-note">
-          {caps?.pricing?.estimate.reason ||
-            "Waiting for MagicLight's credit quote for this complete film. Highest-quality animation and final-film settings have not been quoted."}
+          You will see the total price, running time, and available film quality before
+          you approve production and payment.
         </p>
       </section>
       <div className="readiness-panel" role="status">
         <h3>
-          {caps?.magiclight && caps?.billing
+          {caps?.production && caps?.billing
             ? "Price confirmation required"
-            : "Production setup is pending"}
+            : caps
+              ? "Film production is not available yet"
+              : "Film production availability is unconfirmed"}
         </h3>
-        <div className={`readiness-row ${caps?.magiclight ? "ready" : "pending"}`}>
-          <span>
-            {caps?.magiclight ? <CheckCircle2 size={18} /> : <FilmIcon size={18} />}
-          </span>
-          <div>
-            <strong>MagicLight production</strong>
-            <p>
-              {caps?.connections?.magiclight?.reason ||
-                "A verified service connection is needed to generate the complete film here."}
-            </p>
-          </div>
-        </div>
-        <div className={`readiness-row ${caps?.billing ? "ready" : "pending"}`}>
-          <span>
-            {caps?.billing ? <CheckCircle2 size={18} /> : <FileText size={18} />}
-          </span>
-          <div>
-            <strong>QuickBooks payments</strong>
-            <p>
-              {caps?.connections?.billing?.reason ||
-                "QuickBooks is selected for payments; its merchant connection is pending. A confirmed film price must be shown before you pay or production starts."}
-            </p>
-          </div>
-        </div>
+        <p>
+          You can continue writing and saving your screenplay. Review your script and
+          cast, or download your script to keep a copy.
+        </p>
         <p className="field-note">
-          No video generation or payment has started. You can continue refining your draft
-          and download the script while setup is completed.
+          Creating your film will stay unavailable until you can review the final price
+          and approve payment.
         </p>
       </div>
       <label className="check-label consent-final">
@@ -1190,7 +1122,7 @@ export function CreateStep({
             )}
             Film production: {film.job.status}
           </p>
-          <p>{film.job.message}</p>
+          <p>{productionStatusMessage(film.job.status)}</p>
           <button
             className="text-button"
             disabled={!!busy}

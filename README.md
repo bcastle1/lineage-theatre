@@ -12,6 +12,7 @@ The default film treatment is a hopeful, animated story based on a true story. S
 
 ## Accounts, archive, and administration
 
+- The customer studio shows story development, film availability, and price approval in Lineage Theatre language. Provider names, connection diagnostics, supplier rates, markup settings, and quality verification live under Administration → Overview → Studio status. Customer studio API responses and project exports omit operational provider attribution; privacy and payment disclosures remain in their policy context.
 - Public customer registration with normalized email, bounded name/password fields, explicit terms/privacy consent, IP/email request limits, and atomic private Blob account creation. Customer accounts begin unverified and cannot assign their own roles.
 - Salted scrypt hashes, secure HTTP-only signed sessions, same-origin mutation checks, and durable request limits. Existing temporary-password accounts retain first-login password setup. Suspended accounts lose session access.
 - Persisted owner/admin/customer roles. The owner delegates administrator access through private, expiring invitations and can revoke it. Administrators can review accounts, opted-in cloud films, recorded payment history, pricing settings, and activity records within their permitted scope. An email address alone never grants ownership.
