@@ -1,4 +1,4 @@
-# MagicLight integration inquiry — draft, not sent
+# MagicLight integration inquiry template
 
 To: support@magiclight.ai
 
@@ -24,4 +24,6 @@ BROCOTech / Lineage Theater
 
 ---
 
-This draft contains no account identifiers, credentials, private uploads, billing details or purchase commitment. It has not been sent.
+An email based on this template was sent to support@magiclight.ai on September 14, 2026 (UTC), after user authorization and with the user's requested signature. Its recipient, signature and presence in Sent Items were verified. A provider response is still required before implementing the undocumented generation contract.
+
+This template contains no account identifiers, credentials, private uploads, billing details or purchase commitment.

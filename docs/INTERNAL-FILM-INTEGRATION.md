@@ -31,6 +31,6 @@ This branch is not a verified production release. The previous production deploy
 - MagicLight product workflow: https://magiclight.ai/create/
 - MagicLight terms: https://magiclight.ai/terms/
 
-The authenticated API interface exposes keys, pricing and usage. No complete developer contract for the required screenplay, cast and finished-film workflow was available in the inspected interface. A reviewable vendor inquiry is in [MAGICLIGHT-API-REQUEST.md](MAGICLIGHT-API-REQUEST.md); it has not been sent. No API pack was purchased, and no credentials were created during this inspection.
+The authenticated API interface exposes keys, pricing and usage. No complete developer contract for the required screenplay, cast and finished-film workflow was available in the inspected interface. The vendor inquiry in [MAGICLIGHT-API-REQUEST.md](MAGICLIGHT-API-REQUEST.md) was sent after user authorization; a response is pending. The account now has user-purchased API credits, but no API key or verified film-generation contract is connected to this app. No credentials were created during this inspection.
 
 Do not store credentials, account documents, user uploads, or payment information in this file or in GitHub.
