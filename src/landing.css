@@ -88,6 +88,7 @@
 .landing-footer p { font-family: Georgia, serif; font-size: 17px; color: #6f7a6c; font-style: italic; }
 .landing-footer nav { display: flex; gap: 23px; font-size: 14px; }
 .landing-footer nav a { text-decoration: none; }
+.landing-footer .payment-disclosure { flex-basis: 100%; margin: 0; font-family: inherit; font-size: 12px; font-style: normal; line-height: 1.5; }
 @media (min-width: 1600px) { .cinema-hero { border-radius: 10px; } }
 @media (max-width: 1000px) {
   .landing-header nav { gap: 20px; }

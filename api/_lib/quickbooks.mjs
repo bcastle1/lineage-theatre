@@ -39,7 +39,8 @@ export function quickbooksConfig(env = process.env) {
       || typeof encodedKey !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(encodedKey)) throw setupError();
   const key = Buffer.from(encodedKey, "base64");
   if (key.length !== 32 || key.toString("base64") !== encodedKey) throw setupError();
-  return { environment, clientId, clientSecret, key, fingerprint: digest(`${environment}:${clientId}`) };
+  return { environment, clientId, clientSecret, key, fingerprint: digest(`${environment}:${clientId}`),
+    credentialVersion: digest(`${environment}:${clientId}:${clientSecret}:${encodedKey}`) };
 }
 function sameSecret(left, right) {
   return typeof left === "string" && typeof right === "string" && left.length === right.length
@@ -95,11 +96,17 @@ function validateTokenReply(data, realmId, now) {
   return {
     accessToken: data.access_token, refreshToken: data.refresh_token, tokenType: "Bearer", realmId,
     accessTokenExpiresAt: stamp(now + data.expires_in * 1000),
-    refreshTokenExpiresAt: Number.isFinite(data.x_refresh_token_expires_in) && data.x_refresh_token_expires_in > 0 && data.x_refresh_token_expires_in <= 10 * 366 * 86_400
-      ? stamp(now + data.x_refresh_token_expires_in * 1000) : null,
+    refreshTokenExpiresAt: tokenExpiry(data.x_refresh_token_expires_in, now),
+    refreshTokenHardExpiresAt: tokenExpiry(data.x_refresh_token_hard_expires_in, now),
     grantedScopes, scopeVerification: grantedScopes ? "token-response" : "not-returned",
     realmVerification: data.realmId !== undefined ? "token-response-matched" : "callback-only",
   };
+}
+function tokenExpiry(seconds, now) {
+  if (seconds === undefined) return null;
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 10 * 366 * 86_400)
+    throw new QuickBooksError("Intuit returned an invalid token expiry. The authorization needs review.", 502, "QUICKBOOKS_TOKEN_INVALID");
+  return stamp(now + seconds * 1000);
 }
 function checkRevision(record, expectedRevision) {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || expectedRevision !== (record?.value.revision ?? 0)) throw conflictError();
@@ -133,6 +140,7 @@ export function createQuickBooksService(overrides = {}) {
       provider: "quickbooks", configured: Boolean(config), environment: config?.environment || null,
       authorizationStatus: config ? "disconnected" : "not-configured", connected: false,
       hasSavedAuthorization: Boolean(value?.encryptedTokens), remoteReviewRequired: Boolean(value?.remoteReviewRequired),
+      refreshStatus: value?.refreshOperation ? "refreshing" : value?.refreshStatus || "idle", lastRefreshedAt: value?.lastRefreshedAt || null,
       revision: value?.revision ?? 0, pending: Boolean(value?.pending && (value.pending.stage === "exchanging" || Date.parse(value.pending.expiresAt) > now())),
       lastConnectedAt: value?.connectedAt || null, tokenExpiresAt: null, realmId: null,
       requestedScopes: [...QUICKBOOKS_SCOPES], grantedScopes: null, scopeVerification: "not-returned",
@@ -140,10 +148,11 @@ export function createQuickBooksService(overrides = {}) {
       paymentReady: false, refundReady: false, callbackUrl: QUICKBOOKS_CALLBACK,
       message: config ? "QuickBooks is not connected. Customer payments and refunds remain unavailable." : setupError().message,
     };
-    const configurationChanged = Boolean(config && value?.fingerprint && value.fingerprint !== config.fingerprint);
+    const configurationChanged = Boolean(config && value?.fingerprint && (value.fingerprint !== config.fingerprint
+      || (value.credentialVersion && value.credentialVersion !== config.credentialVersion)));
     if (configurationChanged) {
       output.authorizationStatus = "configuration-changed";
-      output.message = "The configured QuickBooks app or environment has changed. Disconnect the saved authorization and check the intended app before reconnecting; payments remain unavailable.";
+      output.message = "The configured QuickBooks app, environment or credentials have changed. Reconcile the saved authorization and server setup before reconnecting; payments remain unavailable.";
     }
     if (config && !configurationChanged && value?.status === "authorized" && value.encryptedTokens) {
       try {
@@ -154,7 +163,7 @@ export function createQuickBooksService(overrides = {}) {
         const expired = Date.parse(token.accessTokenExpiresAt) <= now();
         output.connected = !expired; output.authorizationStatus = expired ? "expired" : "authorized";
         output.message = expired
-          ? "The saved access token has expired. Refresh-token handling and customer checkout are not enabled. Disconnect the saved authorization before reconnecting."
+          ? "The saved access token has expired. A server-authorized token refresh or reconnection is required; customer checkout remains unavailable."
           : "Intuit authorization is saved. Company/merchant readiness and customer payments or refunds have not been verified or enabled.";
       } catch { output.authorizationStatus = "needs-attention"; output.message = "The saved authorization cannot be read. Disconnect it locally and check server setup before reconnecting."; }
     }
@@ -162,9 +171,16 @@ export function createQuickBooksService(overrides = {}) {
     if (value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending") {
       output.connected = false; output.pending = true; output.message = "Local access is disabled while Intuit revocation is being checked.";
     }
+    if (value?.refreshOperation) {
+      output.connected = false; output.pending = true; output.authorizationStatus = "authorizing";
+      output.message = "A token refresh is being verified. The saved tokens cannot be used until that operation completes.";
+    } else if (value?.status === "refresh-blocked") {
+      output.connected = false; output.authorizationStatus = "needs-attention";
+      output.message = "Token refresh is blocked. Review the connection and server configuration before disconnecting and reconnecting.";
+    }
     if (output.remoteReviewRequired) {
       output.connected = false; output.authorizationStatus = "needs-attention";
-      output.message = "A previous Intuit grant could not be confirmed as revoked. Review the app in Intuit connected apps and contact the administrator to reconcile the connection before starting another authorization.";
+      output.message = "A previous Intuit operation could not be verified. Review the app in Intuit connected apps and contact the administrator to reconcile the connection before starting another authorization.";
     }
     return output;
   }
@@ -173,7 +189,7 @@ export function createQuickBooksService(overrides = {}) {
     const config = configFor(), previous = await read(QUICKBOOKS_CONNECTION_PATH);
     checkRevision(previous, body.expectedRevision);
     const value = previous?.value;
-    if (value?.pending?.stage === "exchanging" || value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending")
+    if (value?.pending?.stage === "exchanging" || value?.refreshOperation || value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending")
       throw new QuickBooksError("A QuickBooks connection operation is still being verified. Refresh before starting another.", 409, "QUICKBOOKS_BUSY");
     if (value?.remoteReviewRequired)
       throw new QuickBooksError("Review the previous grant in Intuit connected apps and reconcile the connection with the administrator before authorizing again.", 409, "QUICKBOOKS_REMOTE_REVIEW_REQUIRED");
@@ -210,18 +226,25 @@ export function createQuickBooksService(overrides = {}) {
   }
   async function failedExchangeCleanup(attempt, token, config, exchangeSent) {
     if (!exchangeSent) { await clearPending(attempt.attemptId); return; }
-    // A token returned after local cancellation must not remain an orphan grant.
-    // An unknown response cannot be safely retried; preserve that uncertainty.
+    let current = await read(QUICKBOOKS_CONNECTION_PATH);
+    const matches = entry => {
+      if (!entry || entry.value.refreshOperation || entry.value.lastRefreshAttemptId) return false;
+      if (entry.value.pending) return entry.value.pending.attemptId === attempt.attemptId;
+      if (entry.value.remoteCleanup) return entry.value.remoteCleanup.attemptId === attempt.attemptId;
+      return entry.value.status === "authorized" && entry.value.authorizationAttemptId === attempt.attemptId;
+    };
+    if (!matches(current)) return; // A refresh or newer authorization now owns this grant.
+    // Claim and disable this exact generation before revocation. The final
+    // authorization put may have committed even when its response was lost.
+    const { encryptedTokens: removed, ...rest } = current.value;
+    await saveConnection(current, { ...rest, revision: current.value.revision + 1, changeId: randomUUID(), status: "disconnected",
+      pending: null, remoteCleanup: { attemptId: attempt.attemptId, status: "pending" }, updatedAt: stamp(now()) });
     const result = token ? await revokeToken(token, config) : "unconfirmed";
-    const current = await read(QUICKBOOKS_CONNECTION_PATH);
-    if (current && (current.value.pending?.attemptId === attempt.attemptId || current.value.remoteCleanup?.attemptId === attempt.attemptId || current.value.authorizationAttemptId === attempt.attemptId)) {
-      const { encryptedTokens: removed, ...rest } = current.value;
-      try {
-        await saveConnection(current, { ...rest, revision: current.value.revision + 1, changeId: randomUUID(),
-          status: "disconnected", pending: null, remoteCleanup: { attemptId: attempt.attemptId, status: result },
-          remoteReviewRequired: current.value.remoteReviewRequired || result !== "confirmed", updatedAt: stamp(now()) });
-      } catch { /* Do not overwrite a later authoritative operation. */ }
-    }
+    current = await read(QUICKBOOKS_CONNECTION_PATH);
+    if (!matches(current)) return;
+    await saveConnection(current, { ...current.value, revision: current.value.revision + 1, changeId: randomUUID(),
+      remoteCleanup: { attemptId: attempt.attemptId, status: result },
+      remoteReviewRequired: current.value.remoteReviewRequired || result !== "confirmed", updatedAt: stamp(now()) });
     await auditImpl(attempt.ownerEmail, "quickbooks.authorization.cleanup", "merchant-connection", { revocationStatus: result, remoteReviewRequired: result !== "confirmed" });
   }
   async function callback(query, browserSecret) {
@@ -252,7 +275,7 @@ export function createQuickBooksService(overrides = {}) {
       exchangeSent = true;
       const response = await fetchImpl(INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
-          Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+          Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "x-include-refresh-token-hard-expires-in": "true" },
         body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: QUICKBOOKS_CALLBACK }).toString() });
       if (!response.ok) throw new QuickBooksError("Intuit authorization could not be completed. Refresh the connection status and start again; no payment was enabled.", 502, "QUICKBOOKS_EXCHANGE_FAILED");
       const raw = await response.text();
@@ -263,7 +286,7 @@ export function createQuickBooksService(overrides = {}) {
       await ownerStillValid(value.ownerEmail, value.passwordVersion);
       const revision = locked.value.revision + 1;
       await saveConnection(locked, { version: 1, revision, changeId: randomUUID(), status: "authorized", environment: config.environment,
-        fingerprint: config.fingerprint, authorizationAttemptId: value.attemptId, encryptedTokens: encryptQuickBooksTokens(token, config), connectedAt: stamp(now()),
+        fingerprint: config.fingerprint, credentialVersion: config.credentialVersion, authorizationAttemptId: value.attemptId, encryptedTokens: encryptQuickBooksTokens(token, config), connectedAt: stamp(now()),
         connectedBy: value.ownerEmail, updatedAt: stamp(now()), pending: null, revocationStatus: "not-requested" });
       persisted = true;
       await auditImpl(value.ownerEmail, "quickbooks.authorization.saved", "merchant-connection", { environment: config.environment, revision,
@@ -275,6 +298,114 @@ export function createQuickBooksService(overrides = {}) {
       throw new QuickBooksError("Intuit authorization could not be verified. Refresh the connection status before starting again; no payment was enabled.", 502, "QUICKBOOKS_EXCHANGE_UNCERTAIN");
     }
   }
+  async function settleRefreshFailure(attemptId, actor, originalToken, acquiredToken, config, outcome) {
+    let current = await read(QUICKBOOKS_CONNECTION_PATH);
+    const matches = entry => {
+      if (!entry) return false;
+      if (entry.value.refreshOperation) return entry.value.refreshOperation.attemptId === attemptId;
+      if (entry.value.remoteCleanup) return entry.value.remoteCleanup.attemptId === attemptId;
+      return entry.value.status === "authorized" && entry.value.lastRefreshAttemptId === attemptId;
+    };
+    if (!matches(current)) return; // A newer operation has already disposed of this saved generation.
+    // A final put may have committed even when its response was lost. Lock that
+    // exact generation before revoking it; never revoke an unrelated newer grant.
+    if (current.value.lastRefreshAttemptId === attemptId && !current.value.refreshOperation && !current.value.remoteCleanup) {
+      current = await saveConnection(current, { ...current.value, revision: current.value.revision + 1, changeId: randomUUID(), status: "refreshing",
+        refreshOperation: { attemptId, stage: "cleanup" }, updatedAt: stamp(now()) });
+    }
+    const cancelled = current.value.remoteCleanup?.attemptId === attemptId;
+    let revocation = null;
+    if (acquiredToken || cancelled) revocation = await revokeToken(acquiredToken || originalToken, config);
+    current = await read(QUICKBOOKS_CONNECTION_PATH);
+    if (!matches(current)) return;
+    // Re-read cancellation after the provider request: disconnect may have
+    // removed the local pair while this attempt was cleaning up.
+    const disconnected = current.value.remoteCleanup?.attemptId === attemptId;
+    if (disconnected && !revocation) revocation = await revokeToken(originalToken, config);
+    const uncertain = outcome === "uncertain" || revocation === "unconfirmed";
+    const removeTokens = Boolean(acquiredToken || disconnected);
+    const { encryptedTokens, ...rest } = current.value;
+    await saveConnection(current, { ...rest, ...(!removeTokens && encryptedTokens ? { encryptedTokens } : {}),
+      revision: current.value.revision + 1, changeId: randomUUID(), status: removeTokens ? "disconnected" : "refresh-blocked",
+      refreshOperation: null, refreshStatus: uncertain ? "uncertain" : outcome,
+      ...(disconnected || acquiredToken ? { remoteCleanup: { attemptId, status: uncertain ? "unconfirmed" : "confirmed" },
+        revocationStatus: revocation || "unconfirmed" } : {}),
+      remoteReviewRequired: Boolean(current.value.remoteReviewRequired || uncertain), updatedAt: stamp(now()) });
+    await auditImpl(actor.email, "quickbooks.refresh.failed", "merchant-connection", { outcome, revocationStatus: revocation, remoteReviewRequired: uncertain });
+  }
+  async function refresh(actor, body = {}) {
+    try { return await performRefresh(actor, body); }
+    catch (error) {
+      if (error instanceof QuickBooksError) throw error;
+      throw new QuickBooksError("QuickBooks refresh could not be verified. Review connection status before another operation; no automatic retry was sent.", 502, "QUICKBOOKS_REFRESH_UNCERTAIN");
+    }
+  }
+  async function performRefresh(actor, body) {
+    if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can refresh QuickBooks.", 403);
+    const config = configFor(), previous = await read(QUICKBOOKS_CONNECTION_PATH);
+    checkRevision(previous, body.expectedRevision);
+    const value = previous?.value;
+    if (value?.refreshOperation || value?.pending || value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending")
+      throw new QuickBooksError("A QuickBooks connection operation is still being verified.", 409, "QUICKBOOKS_BUSY");
+    if (value?.remoteReviewRequired || value?.status !== "authorized" || !value?.encryptedTokens)
+      throw new QuickBooksError("The QuickBooks authorization cannot be refreshed. Review its status before reconnecting.", 409, "QUICKBOOKS_REFRESH_BLOCKED");
+    if (value.fingerprint !== config.fingerprint || (value.credentialVersion && value.credentialVersion !== config.credentialVersion))
+      throw new QuickBooksError("QuickBooks server credentials changed. Reconcile the saved authorization before refreshing.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
+    const token = decryptQuickBooksTokens(value.encryptedTokens, config), passwordVersion = digest(actor.passwordHash || "");
+    await ownerStillValid(actor.email, passwordVersion);
+    if (Date.parse(token.accessTokenExpiresAt) > now() + 60_000) return { ...(await status()), refreshed: false };
+    const refreshExpiry = Date.parse(token.refreshTokenExpiresAt), hardExpiry = token.refreshTokenHardExpiresAt ? Date.parse(token.refreshTokenHardExpiresAt) : null;
+    if (!Number.isFinite(refreshExpiry) || refreshExpiry <= now() || (hardExpiry !== null && (!Number.isFinite(hardExpiry) || hardExpiry <= now()))) {
+      await saveConnection(previous, { ...value, revision: value.revision + 1, changeId: randomUUID(), status: "refresh-blocked",
+        refreshStatus: "reconnect-required", updatedAt: stamp(now()) });
+      throw new QuickBooksError("The refresh token expiry cannot be validated or has passed. Disconnect and reconnect QuickBooks.", 409, "QUICKBOOKS_REFRESH_EXPIRED");
+    }
+    const attemptId = randomUUID();
+    const locked = await saveConnection(previous, { ...value, revision: value.revision + 1, changeId: randomUUID(), status: "refreshing",
+      refreshOperation: { attemptId, stage: "exchanging", startedAt: stamp(now()) }, updatedAt: stamp(now()) });
+    let acquiredToken = null, persisted = false, outcome = "uncertain";
+    try {
+      const response = await fetchImpl(INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+        headers: { Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
+          Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "x-include-refresh-token-hard-expires-in": "true" },
+        body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token.refreshToken }).toString() });
+      const raw = await response.text();
+      if (raw.length > 65_536) throw new Error("Oversized provider response");
+      const data = JSON.parse(raw);
+      if (!response.ok) {
+        if ([400, 401].includes(response.status) && data?.error === "invalid_grant") outcome = "reconnect-required";
+        if ([400, 401].includes(response.status) && ["invalid_client", "unauthorized_client"].includes(data?.error)) outcome = "credentials-rejected";
+        throw new QuickBooksError("Intuit did not complete token refresh. Review the connection status; no automatic retry was sent.", 502, "QUICKBOOKS_REFRESH_FAILED");
+      }
+      acquiredToken = [data?.refresh_token, data?.access_token].find(v => typeof v === "string" && v.length >= 8 && v.length <= 16_384 && !/[\s\x00-\x1f]/.test(v)) || null;
+      if (acquiredToken) outcome = "reconnect-required";
+      const rotated = validateTokenReply(data, token.realmId, now());
+      if (data.scope === undefined) { rotated.grantedScopes = token.grantedScopes; rotated.scopeVerification = token.scopeVerification; }
+      if (data.realmId === undefined) rotated.realmVerification = token.realmVerification;
+      if (data.x_refresh_token_expires_in === undefined) rotated.refreshTokenExpiresAt = token.refreshTokenExpiresAt;
+      // A hard expiry is an absolute limit, not a rolling lifetime. Never extend
+      // a known deadline or erase it when the provider omits the optional field.
+      if (hardExpiry !== null) rotated.refreshTokenHardExpiresAt = stamp(Math.min(hardExpiry,
+        rotated.refreshTokenHardExpiresAt ? Date.parse(rotated.refreshTokenHardExpiresAt) : hardExpiry));
+      if (Date.parse(rotated.refreshTokenExpiresAt) <= now() || (rotated.refreshTokenHardExpiresAt && Date.parse(rotated.refreshTokenHardExpiresAt) <= now()))
+        throw new QuickBooksError("The refreshed authorization has already expired.", 502, "QUICKBOOKS_TOKEN_INVALID");
+      await ownerStillValid(actor.email, passwordVersion);
+      if (!sameSecret(configFor().credentialVersion, config.credentialVersion)) throw new QuickBooksError("QuickBooks server configuration changed during refresh.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
+      await saveConnection(locked, { ...locked.value, revision: locked.value.revision + 1, changeId: randomUUID(), status: "authorized",
+        credentialVersion: config.credentialVersion, encryptedTokens: encryptQuickBooksTokens(rotated, config),
+        refreshOperation: null, lastRefreshAttemptId: attemptId, refreshStatus: "refreshed", lastRefreshedAt: stamp(now()), updatedAt: stamp(now()) });
+      persisted = true;
+      await auditImpl(actor.email, "quickbooks.refresh.saved", "merchant-connection", { environment: config.environment, revision: locked.value.revision + 1 });
+      return { ...(await status()), refreshed: true };
+    } catch (error) {
+      if (!persisted) {
+        try { await settleRefreshFailure(attemptId, actor, token.refreshToken, acquiredToken, config, outcome); }
+        catch { /* The durable operation remains blocked if reconciliation storage is unavailable. */ }
+      }
+      if (error instanceof QuickBooksError) throw error;
+      throw new QuickBooksError("QuickBooks refresh could not be verified. Review connection status before another operation; no automatic retry was sent.", 502, "QUICKBOOKS_REFRESH_UNCERTAIN");
+    }
+  }
   async function disconnect(actor, body) {
     if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can disconnect QuickBooks.", 403);
     const previous = await read(QUICKBOOKS_CONNECTION_PATH);
@@ -282,14 +413,15 @@ export function createQuickBooksService(overrides = {}) {
     const value = previous?.value, revision = (value?.revision || 0) + 1;
     if (value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending") throw new QuickBooksError("A disconnect is still being verified. Refresh its status before trying again.", 409, "QUICKBOOKS_BUSY");
     // Remove local tokens and invalidate in-flight callbacks before contacting Intuit.
-    const disconnectId = randomUUID();
+    const disconnectId = randomUUID(), deferredRefresh = value?.refreshOperation;
     await saveConnection(previous, { version: 1, revision, changeId: randomUUID(), disconnectId, status: "disconnected", pending: null,
       connectedAt: value?.connectedAt || null, updatedAt: stamp(now()), disconnectedAt: stamp(now()),
-      remoteCleanup: value?.pending?.stage === "exchanging" ? { attemptId: value.pending.attemptId, status: "pending" } : value?.remoteCleanup || null,
+      remoteCleanup: deferredRefresh ? { attemptId: deferredRefresh.attemptId, status: "pending" }
+        : value?.pending?.stage === "exchanging" ? { attemptId: value.pending.attemptId, status: "pending" } : value?.remoteCleanup || null,
       remoteReviewRequired: Boolean(value?.remoteReviewRequired),
       revocationStatus: value?.encryptedTokens ? "pending" : "not-needed" });
-    let revocationStatus = value?.encryptedTokens ? "unconfirmed" : "not-needed";
-    if (value?.encryptedTokens) {
+    let revocationStatus = deferredRefresh ? "pending" : value?.encryptedTokens ? "unconfirmed" : "not-needed";
+    if (value?.encryptedTokens && !deferredRefresh) {
       try {
         const config = configFor();
         if (value.fingerprint !== config.fingerprint) throw new Error("Configuration changed");
@@ -306,7 +438,7 @@ export function createQuickBooksService(overrides = {}) {
       ? "QuickBooks access is disabled locally and its saved tokens were removed. Intuit revocation could not be confirmed; review connected apps in Intuit before reconnecting. No retry was sent."
       : "QuickBooks authorization is disconnected. Customer payments and refunds remain unavailable." };
   }
-  return { status, start, callback, disconnect };
+  return { status, start, callback, disconnect, refresh };
 }
 
 export const quickbooks = createQuickBooksService();

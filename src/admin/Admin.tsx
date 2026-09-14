@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import {
   Activity,
   AlertCircle,
@@ -122,6 +129,28 @@ type QuickBooksStatus = {
   refundReady: false;
   message: string;
 };
+type AuthorizationAttempt = {
+  url: string;
+  revision: number;
+  expiresAt: number;
+};
+function authorizationAttemptCurrent(
+  attempt: AuthorizationAttempt | null,
+  status: QuickBooksStatus | null,
+  isOwner: boolean,
+) {
+  return Boolean(
+    isOwner &&
+      attempt &&
+      attempt.expiresAt > Date.now() &&
+      (!status ||
+        status.revision < attempt.revision ||
+        (status.revision === attempt.revision &&
+          status.pending &&
+          !status.connected &&
+          !status.remoteReviewRequired)),
+  );
+}
 type FilmsData = { films: ArchivedFilm[]; cursor?: string };
 type AuditData = { events: AuditEvent[]; cursor?: string };
 type PersonAction = {
@@ -304,7 +333,9 @@ export default function Admin({
   const [quickBooksError, setQuickBooksError] = useState("");
   const [quickBooksReturn, setQuickBooksReturn] = useState(paymentCallbackResult);
   const [authorizationCheck, setAuthorizationCheck] = useState(0);
-  const [authorizationTracking, setAuthorizationTracking] = useState(false);
+  const [authorizationAttempt, setAuthorizationAttempt] =
+    useState<AuthorizationAttempt | null>(null);
+  const authorizationTracking = Boolean(authorizationAttempt);
   const [authorizationMessage, setAuthorizationMessage] = useState("");
   const [films, setFilms] = useState<FilmsData | null>(null);
   const [audit, setAudit] = useState<AuditData | null>(null);
@@ -331,8 +362,16 @@ export default function Admin({
   const actionLock = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const authorizationPopup = useRef<Window | null>(null);
+  const adminMounted = useRef(true);
   const isOwner = user.role === "owner";
   const isAdministrator = isOwner || user.role === "admin";
+  useEffect(() => {
+    adminMounted.current = true;
+    return () => {
+      adminMounted.current = false;
+      authorizationPopup.current = null;
+    };
+  }, []);
   const refresh = useCallback(async () => {
     const request = ++requestNumber.current;
     setLoading(true);
@@ -417,6 +456,8 @@ export default function Admin({
       setTab("payments");
       setQuery("");
       if (outcome) {
+        setAuthorizationAttempt(null);
+        authorizationPopup.current = null;
         setQuickBooksReturn(outcome);
         if (event) setAuthorizationCheck((value) => value + 1);
         window.history.replaceState(
@@ -431,7 +472,19 @@ export default function Admin({
     return () => window.removeEventListener("hashchange", handleReturn);
   }, []);
   useEffect(() => {
-    if (!authorizationTracking || !isAdministrator) return;
+    if (!authorizationAttempt) return;
+    if (!authorizationAttemptCurrent(authorizationAttempt, quickBooks, isOwner)) {
+      setAuthorizationAttempt(null);
+      authorizationPopup.current = null;
+      setAuthorizationMessage(
+        quickBooks?.connected
+          ? "QuickBooks authorization is saved. You can close the Intuit window. Customer payments and refunds remain unavailable."
+          : "This authorization link is no longer active. Review the current connection status below; customer payments remain unavailable.",
+      );
+    }
+  }, [authorizationAttempt, quickBooks, isOwner]);
+  useEffect(() => {
+    if (!authorizationAttempt || !isOwner) return;
     let active = true;
     let checking = false;
     let sawClosed = false;
@@ -442,15 +495,6 @@ export default function Admin({
         const result = await api<QuickBooksStatus>("/api/quickbooks?action=status");
         if (!active) return;
         setQuickBooks(result);
-        if (!result.pending) {
-          setAuthorizationTracking(false);
-          authorizationPopup.current = null;
-          setAuthorizationMessage(
-            result.connected
-              ? "QuickBooks authorization is saved. You can close the Intuit window. Customer payments and refunds remain unavailable."
-              : "The authorization check has finished. Review the current connection status below; customer payments remain unavailable.",
-          );
-        }
       } catch {
         if (active)
           setAuthorizationMessage(
@@ -475,13 +519,13 @@ export default function Admin({
     }, 1000);
     const timeout = window.setTimeout(
       () => {
-        setAuthorizationTracking(false);
+        setAuthorizationAttempt(null);
         authorizationPopup.current = null;
         setAuthorizationMessage(
-          "Authorization window tracking has stopped. Complete or close the Intuit window, then use Refresh to check the saved status.",
+          "This authorization link has expired. Close the Intuit window and use Refresh to check the saved status before starting again.",
         );
       },
-      10 * 60 * 1000,
+      Math.max(0, authorizationAttempt.expiresAt - Date.now()),
     );
     window.addEventListener("focus", onFocus);
     return () => {
@@ -490,7 +534,7 @@ export default function Admin({
       window.clearTimeout(timeout);
       window.removeEventListener("focus", onFocus);
     };
-  }, [authorizationTracking, isAdministrator]);
+  }, [authorizationAttempt, isOwner]);
   useEffect(() => {
     if (!dialog) return;
     const previous = document.activeElement as HTMLElement | null;
@@ -710,34 +754,76 @@ export default function Admin({
     setBusy(true);
     setQuickBooksError("");
     setQuickBooksReturn("");
+    const startedAt = Date.now();
     try {
       popup.opener = null;
       popup.document.title = "Opening QuickBooks authorization";
       popup.document.body.textContent = "Opening secure QuickBooks authorization…";
-      const result = await api<{ authorizationUrl: string }>("/api/quickbooks", {
+      const result = await api<{
+        authorizationUrl: string;
+        revision: number;
+        expiresAt: string;
+      }>("/api/quickbooks", {
         action: "start",
         expectedRevision: quickBooks.revision,
         replaceExisting: false,
       });
       const authorization = new URL(result.authorizationUrl);
+      const expiresAt = Math.min(
+        Date.parse(result.expiresAt),
+        startedAt + 10 * 60 * 1000,
+      );
       if (
         authorization.origin !== "https://appcenter.intuit.com" ||
         authorization.pathname !== "/connect/oauth2" ||
         authorization.username ||
-        authorization.password
+        authorization.password ||
+        !Number.isInteger(result.revision) ||
+        result.revision !== quickBooks.revision + 1 ||
+        !Number.isFinite(expiresAt) ||
+        expiresAt <= Date.now()
       )
         throw new Error(
           "The QuickBooks authorization link could not be verified. Refresh and try again.",
         );
-      if (popup.closed)
-        throw new Error(
-          "The authorization window was closed before QuickBooks opened. Refresh the connection status before trying again.",
-        );
-      popup.location.replace(authorization.href);
-      setAuthorizationMessage(
-        "Complete authorization in the opened Intuit window, then return here. This page rechecks the saved status when you return or close the window.",
+      if (!adminMounted.current) {
+        popup.close();
+        return;
+      }
+      setAuthorizationAttempt({
+        url: authorization.href,
+        revision: result.revision,
+        expiresAt,
+      });
+      setQuickBooks((previous) =>
+        previous && previous.revision > result.revision
+          ? previous
+          : {
+              ...quickBooks,
+              revision: result.revision,
+              pending: true,
+              authorizationStatus: "authorizing",
+              message:
+                "An authorization request has started. Complete the Intuit authorization to connect this app.",
+            },
       );
-      setAuthorizationTracking(true);
+      setAuthorizationMessage(
+        "Complete authorization in the Intuit window, then return here. If the window did not appear, use Open QuickBooks authorization below. This page checks the saved status when you return.",
+      );
+      try {
+        if (popup.closed) throw new Error("Authorization window unavailable");
+        popup.location.replace(authorization.href);
+      } catch {
+        try {
+          popup.close();
+        } catch {
+          /* The browser may have separated this window. */
+        }
+        authorizationPopup.current = null;
+        setAuthorizationMessage(
+          "Your authorization request is ready, but this browser did not show the Intuit window. Use Open QuickBooks authorization below, then return here.",
+        );
+      }
     } catch (e) {
       try {
         popup.close();
@@ -745,12 +831,35 @@ export default function Admin({
         /* The owner may already have closed it. */
       }
       authorizationPopup.current = null;
-      setAuthorizationMessage("");
-      setQuickBooksError(errorText(e));
+      if (adminMounted.current) {
+        setAuthorizationAttempt(null);
+        setAuthorizationMessage("");
+        setQuickBooksError(errorText(e));
+      }
     } finally {
       actionLock.current = false;
-      setBusy(false);
+      if (adminMounted.current) setBusy(false);
     }
+  }
+  function reopenQuickBooksAuthorization(event: MouseEvent<HTMLAnchorElement>) {
+    if (
+      actionLock.current ||
+      !authorizationAttemptCurrent(authorizationAttempt, quickBooks, isOwner)
+    ) {
+      event.preventDefault();
+      if (!actionLock.current) {
+        setAuthorizationAttempt(null);
+        setAuthorizationMessage(
+          "This authorization link is no longer active. Use Refresh to check the connection before starting again.",
+        );
+      }
+      return;
+    }
+    // Let this direct, owner-driven link open the validated URL. It reuses the
+    // original request and never extends its expiry or creates another grant.
+    setAuthorizationMessage(
+      "Complete authorization in the Intuit window, then return here. Opening this link does not confirm a connection or enable customer payments.",
+    );
   }
   async function disconnectQuickBooks() {
     if (
@@ -761,12 +870,18 @@ export default function Admin({
     )
       return;
     actionLock.current = true;
+    setAuthorizationAttempt(null);
+    authorizationPopup.current = null;
+    setAuthorizationMessage("");
     setBusy(true);
     setActionError("");
     try {
       const result = await api<QuickBooksStatus>("/api/quickbooks", {
         action: "disconnect",
-        expectedRevision: quickBooks.revision,
+        expectedRevision: Math.max(
+          quickBooks.revision,
+          authorizationAttempt?.revision ?? 0,
+        ),
       });
       setQuickBooks(result);
       setQuickBooksReturn("");
@@ -1402,6 +1517,30 @@ export default function Admin({
                   {authorizationMessage}
                 </div>
               )}
+              {authorizationAttemptCurrent(authorizationAttempt, quickBooks, isOwner) &&
+                authorizationAttempt && (
+                  <div className="admin-quickbooks-fallback">
+                    <a
+                      className="button secondary"
+                      href={authorizationAttempt.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={reopenQuickBooksAuthorization}
+                      aria-disabled={busy}
+                    >
+                      Open QuickBooks authorization <ArrowRight size={16} />
+                    </a>
+                    <p>
+                      Use this if the Intuit window is missing. Opens the same request in
+                      a new window or tab; available until{" "}
+                      {new Date(authorizationAttempt.expiresAt).toLocaleTimeString([], {
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })}
+                      .
+                    </p>
+                  </div>
+                )}
               <p className="admin-quickbooks-message">
                 {quickBooks?.message ||
                   "The business authorization has not yet been verified."}
@@ -1428,7 +1567,8 @@ export default function Admin({
                   <span>Customer payments & refunds</span>
                   <strong>Unavailable</strong>
                   <small>
-                    Saving QuickBooks authorization does not activate charges or refunds.
+                    Planned payment services: Intuit Payments Inc. Saving QuickBooks
+                    authorization does not activate charges or refunds.
                   </small>
                 </div>
               </div>
