@@ -19,6 +19,11 @@ export default function App() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
+  const [useRecovery, setUseRecovery] = useState(false);
+  const [verificationToken, setVerificationToken] = useState(() => /^#verify-email=([a-f0-9]{64})$/.exec(window.location.hash)?.[1] || "");
+  const [verificationMessage, setVerificationMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [welcome, setWelcome] = useState("");
@@ -37,7 +42,7 @@ export default function App() {
     }
   }, [loading, user]);
   useEffect(() => {
-    if (window.location.hash.startsWith("#admin-invite=")) {
+    if (window.location.hash.startsWith("#admin-invite=") || window.location.hash.startsWith("#verify-email=")) {
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
     }
     api<{ user: User | null }>("/api/auth")
@@ -71,6 +76,7 @@ export default function App() {
     event.preventDefault();
     if (submitLock.current) return;
     setError("");
+    setWelcome("");
     if ((user?.mustChangePassword || registering) && password !== confirm) {
       setError("The two passwords do not match.");
       return;
@@ -82,15 +88,21 @@ export default function App() {
     submitLock.current = true;
     setBusy(true);
     try {
-      const result = await api<{ user: User }>(
+      const result = await api<{ user?: User; mfaRequired?: boolean }>(
         "/api/auth",
-        user?.mustChangePassword
+        mfaRequired
+          ? { action: "mfaChallenge", ...(useRecovery ? { recoveryCode: mfaCode } : { code: mfaCode }) }
+          : user?.mustChangePassword
           ? { action: "password", password }
           : registering
             ? { action: "register", name, email, password, termsAccepted }
             : { action: "login", email, password },
       );
+      setPassword("");
+      if (result.mfaRequired) { setMfaRequired(true); setMfaCode(""); setUseRecovery(false); return; }
+      if (!result.user) throw new Error("Sign-in could not be confirmed. Please try again.");
       setUser(result.user);
+      setMfaRequired(false); setMfaCode(""); setUseRecovery(false);
       setPassword("");
       setConfirm("");
       setWelcome(
@@ -116,6 +128,7 @@ export default function App() {
     setConfirm("");
     setTermsAccepted(false);
     setMode("login");
+    setMfaRequired(false); setMfaCode("");
     setWelcome("You have signed out.");
   }
   if (loading)
@@ -131,6 +144,17 @@ export default function App() {
       <Suspense
         fallback={<div className="loading-screen">Opening your studio…</div>}
       >
+        {verificationToken && <div className="feedback" role="status">
+          <span>{verificationMessage || `Confirm the verification link for ${user.email}.`}</span>
+          <button className="text-button" disabled={busy} onClick={() => {
+            if (submitLock.current) return;
+            submitLock.current = true; setBusy(true);
+            void api<{user:User;message:string}>("/api/auth", {action:"emailVerificationConfirm",token:verificationToken})
+              .then(result => { setUser(result.user); setVerificationToken(""); setWelcome(result.message); })
+              .catch(e => setVerificationMessage(e instanceof Error ? e.message : "Email verification could not complete."))
+              .finally(() => { submitLock.current = false; setBusy(false); });
+          }}>Confirm email address</button>
+        </div>}
         {inviteToken && (
           <div className={`feedback ${inviteError ? "error" : "success"}`} role="status">
             {inviteBusy ? "Accepting your administrator invitation…" : inviteError || "Administrator invitation pending."}
@@ -141,6 +165,7 @@ export default function App() {
         <Workspace
           key={user.email}
           user={user}
+          onUserChange={setUser}
           onLogout={logout}
           welcome={welcome}
         />
@@ -174,18 +199,18 @@ export default function App() {
         <div className="login-form-wrap">
           <LockKeyhole size={24} strokeWidth={1.3} />
           <AuthTitle>
-            {user?.mustChangePassword
+            {mfaRequired ? "Confirm your sign-in." : user?.mustChangePassword
               ? "Make this account yours."
               : registering ? "Create your family film studio." : "Your story starts here."}
           </AuthTitle>
           <p className="muted">
-            {user?.mustChangePassword
+            {mfaRequired ? "Enter a code from your authenticator app or use a saved recovery code." : user?.mustChangePassword
               ? `Welcome, ${user.name}. Set a personal password before entering your studio.`
               : registering
                 ? "Create an account to keep your family stories and develop your first film."
                 : "Sign in to turn photographs, records, and family memories into a film worth keeping."}
           </p>
-          {!user && (
+          {!user && !mfaRequired && (
             <div className="action-group" aria-label="Account access">
               <button
                 type="button"
@@ -204,7 +229,13 @@ export default function App() {
             </div>
           )}
           {inviteToken && <p className="feedback success">You have a private administrator invitation. Sign in or create an account using the email address the invitation was issued to.</p>}
+          {verificationToken && <p className="feedback">Sign in to the account that requested this email to complete verification.</p>}
           <form onSubmit={submit} className="login-form">
+            {mfaRequired && <>
+              <label>{useRecovery ? "Recovery code" : "Authenticator code"}<input autoComplete={useRecovery ? "off" : "one-time-code"} inputMode={useRecovery ? "text" : "numeric"} pattern={useRecovery ? undefined : "[0-9]{6}"} maxLength={useRecovery ? 80 : 6} required value={mfaCode} disabled={busy} onChange={e => setMfaCode(e.target.value)} /></label>
+              <button className="text-button" type="button" disabled={busy} onClick={() => { setUseRecovery(!useRecovery); setMfaCode(""); setError(""); }}>{useRecovery ? "Use my authenticator" : "Use a recovery code"}</button>
+              <button className="text-button" type="button" disabled={busy} onClick={() => { setMfaRequired(false); setMfaCode(""); setError(""); }}>Return to sign in</button>
+            </>}
             {registering && (
               <label>
                 Your name
@@ -219,7 +250,7 @@ export default function App() {
                 />
               </label>
             )}
-            {!user && (
+            {!user && !mfaRequired && (
               <label>
                 Email address
                 <input
@@ -234,7 +265,7 @@ export default function App() {
                 />
               </label>
             )}
-            <label>
+            {!mfaRequired && <label>
               {user ? "New password" : "Password"}
               <input
                 type="password"
@@ -246,7 +277,7 @@ export default function App() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
-            </label>
+            </label>}
             {(user || registering) && (
               <>
                 <p className="field-note">
@@ -300,7 +331,7 @@ export default function App() {
               )}{" "}
               {busy
                 ? "Please wait…"
-                : user
+                : mfaRequired ? "Confirm sign-in" : user
                   ? "Save password & enter studio"
                   : registering ? "Create account & enter studio" : "Sign in to your studio"}
             </button>

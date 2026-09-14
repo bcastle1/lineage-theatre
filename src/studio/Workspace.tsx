@@ -39,6 +39,7 @@ import { importSource } from "./sources";
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
 const Admin = lazy(() => import("../admin/Admin"));
+const AccountSecurity = lazy(() => import("../AccountSecurity"));
 
 export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
@@ -79,10 +80,12 @@ const cleanName = (name: string) =>
 export default function Workspace({
   user,
   onLogout,
+  onUserChange,
   welcome,
 }: {
   user: User;
   onLogout: () => Promise<void>;
+  onUserChange: (user: User) => void;
   welcome: string;
 }) {
   const storageKey = `lineage-studio-v3:${user.email}`;
@@ -122,6 +125,8 @@ export default function Workspace({
   const [consent, setConsent] = useState(false);
   const [aiConsent, setAiConsent] = useState(false);
   const [localLegacy, setLocalLegacy] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountBusy, setAccountBusy] = useState(false);
 
   const workLock = useRef(false);
 
@@ -602,11 +607,11 @@ export default function Workspace({
             {saved}
           </span>
           <div className="user-menu">
-            <span>{user.name}</span>
+            <button className="text-button" aria-label="Account security" disabled={!!busy || accountBusy} onClick={() => setAccountOpen(true)}>{user.name}</button>
             <button
               className="icon-button"
               aria-label="Sign out"
-              disabled={!!busy}
+              disabled={!!busy || accountBusy}
               onClick={() =>
                 void onLogout().catch(() =>
                   notify("Sign-out failed. Please try again.", "error"),
@@ -618,6 +623,9 @@ export default function Workspace({
           </div>
         </header>
         <main className="workspace">
+          {accountOpen ? <Suspense fallback={<div className="panel" role="status">Opening account settings…</div>}>
+            <AccountSecurity user={user} onUserChange={onUserChange} onClose={() => setAccountOpen(false)} onBusyChange={setAccountBusy} />
+          </Suspense> : <>
           {view === "admin" && (user.role === "owner" || user.role === "admin") && (
             <Suspense
               fallback={
@@ -859,6 +867,7 @@ export default function Workspace({
             </>
           )}
           {view === "library" && <CloudArchivePanel projects={projects} />}
+          </>}
         </main>
         <footer className="workspace-footer">
           <span>Lineage Theatre · Lives remembered. Stories kept.</span>

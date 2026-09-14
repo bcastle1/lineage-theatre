@@ -18,6 +18,26 @@ const STATE_TTL = 10 * 60_000;
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const REALM_PATTERN = /^[0-9]{1,30}$/;
 
+// A support correlation ID is useful; bodies, OAuth codes and credentials are not logs.
+export function intuitDiagnostic(operation,response,code="HTTP_RESPONSE",at=Date.now()) {
+  const raw=response?.headers?.get?.("intuit_tid");
+  const intuitTid=typeof raw==="string"&&/^[a-fA-F0-9-]{8,128}$/.test(raw)?raw:null;
+  return {operation,at:new Date(at).toISOString(),httpStatus:Number.isInteger(response?.status)?response.status:null,
+    intuitTid,code,outcome:response?[200,201,204].includes(response.status)?"response-received":"http-error":"network-or-connection-error"};
+}
+
+export async function verifyQuickBooksDiscovery({environment="sandbox",fetchImpl=fetch,now=Date.now}={}) {
+  if(!["sandbox","production"].includes(environment))throw new QuickBooksError("Choose a supported connection environment.");
+  const url=`https://developer.intuit.com/.well-known/${environment==="sandbox"?"openid_sandbox_configuration":"openid_configuration"}/`;
+  const response=await fetchImpl(url,{method:"GET",redirect:"error",signal:AbortSignal.timeout(10_000),headers:{Accept:"application/json"}});
+  if(!response.ok)throw new QuickBooksError("The authorization discovery document could not be verified.",503,"QUICKBOOKS_DISCOVERY_UNAVAILABLE");
+  const raw=await response.text();if(raw.length>65_536)throw new QuickBooksError("The authorization discovery document could not be verified.",503,"QUICKBOOKS_DISCOVERY_INVALID");
+  let data;try{data=JSON.parse(raw);}catch{throw new QuickBooksError("The authorization discovery document could not be verified.",503,"QUICKBOOKS_DISCOVERY_INVALID");}
+  if(data.issuer!=="https://oauth.platform.intuit.com/op/v1"||data.authorization_endpoint!==INTUIT_AUTHORIZE
+    ||data.token_endpoint!==INTUIT_TOKEN||data.revocation_endpoint!==INTUIT_REVOKE)throw new QuickBooksError("The authorization endpoints changed and need administrator review.",503,"QUICKBOOKS_DISCOVERY_CHANGED");
+  return {environment,verifiedAt:new Date(now()).toISOString(),source:url,issuer:data.issuer,authorizationEndpoint:INTUIT_AUTHORIZE,tokenEndpoint:INTUIT_TOKEN,revocationEndpoint:INTUIT_REVOKE};
+}
+
 export class QuickBooksError extends Error {
   constructor(message, status = 400, code = "QUICKBOOKS_REQUEST_FAILED") {
     super(message); this.status = status; this.code = code;
@@ -131,6 +151,16 @@ export function createQuickBooksService(overrides = {}) {
   const { read = readRecord, write = writeRecord, fetchImpl = fetch, now = Date.now,
     env = process.env, auditImpl = audit } = overrides;
   const configFor = () => quickbooksConfig(env);
+  async function observedFetch(operation,...args) {
+    let response;
+    try {response=await fetchImpl(...args);}
+    catch(error) {
+      try{await auditImpl(OWNER_EMAIL,"quickbooks.provider.request","merchant-connection",intuitDiagnostic(operation,null,"NETWORK_ERROR",now()));}catch{}
+      throw error;
+    }
+    try{await auditImpl(OWNER_EMAIL,"quickbooks.provider.request","merchant-connection",intuitDiagnostic(operation,response,"HTTP_RESPONSE",now()));}catch{}
+    return response;
+  }
   async function saveConnection(previous, value) {
     let result;
     try { result = await write(QUICKBOOKS_CONNECTION_PATH, value, previous?.etag); }
@@ -229,7 +259,7 @@ export function createQuickBooksService(overrides = {}) {
       if (!validAccess()) throw new QuickBooksError("The access token expired. Company verification does not refresh tokens; refresh or reconnect first.", 409, "QUICKBOOKS_ACCESS_EXPIRED");
       const passwordVersion = digest(actor.passwordHash || "");
       await ownerStillValid(actor.email, passwordVersion);
-      const response = await fetchImpl(`${INTUIT_ACCOUNTING_ORIGINS[config.environment]}/v3/company/${token.realmId}/companyinfo/${token.realmId}`, {
+      const response = await observedFetch("company-read",`${INTUIT_ACCOUNTING_ORIGINS[config.environment]}/v3/company/${token.realmId}/companyinfo/${token.realmId}`, {
         method: "GET", redirect: "error", signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${token.accessToken}`, Accept: "application/json" },
       });
       if (response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || ""))
@@ -292,7 +322,7 @@ export function createQuickBooksService(overrides = {}) {
   }
   async function revokeToken(token, config) {
     try {
-      const response = await fetchImpl(INTUIT_REVOKE, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+      const response = await observedFetch("token-revoke",INTUIT_REVOKE, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
           Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
       return response.ok ? "confirmed" : "unconfirmed";
@@ -347,7 +377,7 @@ export function createQuickBooksService(overrides = {}) {
       locked = await saveConnection(connection, { ...connection.value, revision: connection.value.revision + 1, changeId: randomUUID(),
         pending: { ...connection.value.pending, stage: "exchanging" }, updatedAt: stamp(now()) });
       exchangeSent = true;
-      const response = await fetchImpl(INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+      const response = await observedFetch("token-exchange",INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
           Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "x-include-refresh-token-hard-expires-in": "true" },
         body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: QUICKBOOKS_CALLBACK }).toString() });
@@ -439,7 +469,7 @@ export function createQuickBooksService(overrides = {}) {
       refreshOperation: { attemptId, stage: "exchanging", startedAt: stamp(now()) }, updatedAt: stamp(now()) });
     let acquiredToken = null, persisted = false, outcome = "uncertain";
     try {
-      const response = await fetchImpl(INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+      const response = await observedFetch("token-refresh",INTUIT_TOKEN, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
         headers: { Authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
           Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "x-include-refresh-token-hard-expires-in": "true" },
         body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token.refreshToken }).toString() });
@@ -516,3 +546,61 @@ export function createQuickBooksService(overrides = {}) {
 }
 
 export const quickbooks = createQuickBooksService();
+
+// Server-only Payments transport. No HTTP action exposes the decrypted grant.
+// Paths and methods follow Intuit's official PHP Payments SDK ChargeOperations.
+// Production money movement remains a code-level lock until merchant verification.
+export function createQuickBooksPaymentsTransport(overrides={}) {
+  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,
+    connection=quickbooks}=overrides;
+  const unavailable=()=>new QuickBooksError("The payment connection needs administrator review.",503,"PAYMENT_CONNECTION_UNAVAILABLE");
+  async function inspect(allowRefresh=false) {
+    const config=quickbooksConfig(env), record=await read(QUICKBOOKS_CONNECTION_PATH), value=record?.value;
+    if(value?.status!=="authorized"||!value.encryptedTokens||value.pending||value.refreshOperation||value.remoteReviewRequired
+      ||value.revocationStatus==="pending"||value.remoteCleanup?.status==="pending"
+      ||value.fingerprint!==config.fingerprint||value.credentialVersion!==config.credentialVersion
+      ||typeof value.authorizationAttemptId!=="string"||!value.authorizationAttemptId)throw unavailable();
+    const owner=(await read(userPath(value.connectedBy||OWNER_EMAIL)))?.value;
+    if(!isOwner(owner)||owner.status!=="active"||owner.mustChangePassword)throw unavailable();
+    const token=decryptQuickBooksTokens(value.encryptedTokens,config);
+    if(typeof token.accessToken!=="string"||token.accessToken.length<8||token.accessToken.length>16_384
+      ||/[\s\x00-\x1f]/.test(token.accessToken)||!REALM_PATTERN.test(token.realmId||"")
+      ||(token.grantedScopes!==null&&(!Array.isArray(token.grantedScopes)||!token.grantedScopes.includes("com.intuit.quickbooks.payment"))))throw unavailable();
+    const grantId=digest(`${config.credentialVersion}:${token.realmId}:${value.authorizationAttemptId}`);
+    const expires=Date.parse(token.accessTokenExpiresAt);
+    if(!Number.isFinite(expires))throw unavailable();
+    if(expires<=now()+60_000) {
+      if(!allowRefresh||config.environment!=="sandbox")throw unavailable();
+      await connection.refresh(owner,{expectedRevision:value.revision});
+      const fresh=await inspect(false);
+      if(fresh.binding.grantId!==grantId)throw unavailable();
+      return fresh;
+    }
+    return {record,config,token,binding:{environment:config.environment,grantId}};
+  }
+  async function binding({allowRefresh=false}={}) {return (await inspect(allowRefresh)).binding;}
+  async function request(expected,{method,path,requestId,body}) {
+    if(!expected||expected.environment!=="sandbox")throw new QuickBooksError("Production payments are not enabled.",503,"PRODUCTION_PAYMENTS_DISABLED");
+    const allowed=(method==="POST"&&/^\/charges(?:\/[A-Za-z0-9_-]{1,128}\/refunds)?$/.test(path))
+      ||(method==="GET"&&/^\/charges\/[A-Za-z0-9_-]{1,128}(?:\/refunds\/[A-Za-z0-9_-]{1,128})?$/.test(path));
+    if(!allowed||typeof requestId!=="string"||!/^[-A-Za-z0-9]{16,50}$/.test(requestId))throw unavailable();
+    if(method==="POST") {
+      const fields=path==="/charges"?["amount","currency","token","capture","context"]:["amount","description"];
+      if(!body||typeof body!=="object"||Array.isArray(body)||Object.keys(body).some(key=>!fields.includes(key)))throw unavailable();
+      if(path==="/charges"&&(body.capture!==true||body.currency!=="USD"||typeof body.token!=="string"
+        ||body.token.length<8||body.token.length>2048||!/[A-Za-z]/.test(body.token)||!/^[A-Za-z0-9_.=-]+$/.test(body.token)
+        ||body.context?.mobile!==false||body.context?.isEcommerce!==true||Object.keys(body.context).some(key=>!["mobile","isEcommerce"].includes(key))))throw unavailable();
+    }
+    const current=await inspect(true);
+    if(current.binding.environment!==expected.environment||current.binding.grantId!==expected.grantId)throw unavailable();
+    // Re-read immediately before sending; a changed or disconnected grant is never reused.
+    const latest=await read(QUICKBOOKS_CONNECTION_PATH);
+    if(latest?.etag!==current.record.etag||quickbooksConfig(env).credentialVersion!==current.config.credentialVersion)throw unavailable();
+    return fetchImpl(`https://sandbox.api.intuit.com/quickbooks/v4/payments${path}`,{
+      method,redirect:"error",signal:AbortSignal.timeout(20_000),
+      headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json","Content-Type":"application/json","Request-Id":requestId},
+      ...(method==="POST"?{body:JSON.stringify(body)}:{}),
+    });
+  }
+  return {binding,request};
+}
