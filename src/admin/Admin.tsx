@@ -53,6 +53,7 @@ type Overview = {
     currency: string;
   };
   connections: { story: Connection; magiclight: Connection; billing: Connection };
+  quality?: { preference: string; label: string; verified: boolean };
   pricing?: {
     markupBasisPoints: number;
     referenceReason?: string;
@@ -1216,8 +1217,11 @@ export default function Admin({
               <section className="admin-card">
                 <div className="admin-section-heading">
                   <div>
-                    <h2>Studio connections</h2>
-                    <p>Live readiness from the application server.</p>
+                    <h2>Studio status</h2>
+                    <p>
+                      Provider connections and production settings for administrators.
+                      Readiness is reported by the application server.
+                    </p>
                   </div>
                   <ShieldCheck size={23} />
                 </div>
@@ -1243,11 +1247,39 @@ export default function Admin({
                       <h3>{provider}</h3>
                       <p>{connection?.reason || "Availability has not been verified."}</p>
                     </div>
-                    <Badge tone={connection?.available ? "good" : "pending"}>
-                      {connection?.available ? "Connected" : "Setup pending"}
+                    <Badge
+                      tone={connection ? (connection.available ? "good" : "pending") : "neutral"}
+                    >
+                      {connection
+                        ? connection.available
+                          ? "Connection verified"
+                          : "Setup pending"
+                        : loading
+                          ? "Checking"
+                          : "Not verified"}
                     </Badge>
                   </div>
                 ))}
+                <div className="admin-quality-status">
+                  <div>
+                    <h3>Production quality</h3>
+                    <Badge tone={overview?.quality?.verified ? "good" : "pending"}>
+                      {overview?.quality?.verified ? "Quality verified" : "Not verified"}
+                    </Badge>
+                  </div>
+                  <p>
+                    {overview?.quality
+                      ? overview.quality.preference === "highest"
+                        ? "Default preference: highest available animation and output quality."
+                        : `Configured preference: ${overview.quality.preference}.`
+                      : "The production quality preference could not be verified."}
+                  </p>
+                  <p>
+                    {overview?.quality?.verified
+                      ? overview.quality.label
+                      : "Confirm MagicLight's supported settings before production. The final film also requires a verified service connection, production quote, and payment setup."}
+                  </p>
+                </div>
               </section>
               <section className="admin-card admin-price-card">
                 <span className="admin-eyebrow">Film pricing</span>

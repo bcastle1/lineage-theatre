@@ -68,7 +68,7 @@ export function createAdminHandler(overrides={}) {
           suspended:users.records.filter(u=>u.status==="suspended").length,films:films.records.length,paidOrders:paid.length,
           paymentTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.amountCents)?o.amountCents:0),0),
           refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),currency:"USD"},
-          statsPartial:Boolean(users.cursor||orders.cursor||films.cursor),connections:ready.connections,pricing:ready.pricing});
+          statsPartial:Boolean(users.cursor||orders.cursor||films.cursor),connections:ready.connections,pricing:ready.pricing,quality:ready.quality});
       }
       return resultError(res,400,"Unknown administrator view.");
     }

@@ -191,6 +191,29 @@
 .admin-connection > .admin-badge {
   margin-top: 4px;
 }
+.admin-quality-status {
+  padding: 17px;
+  border: 1px solid #dfe6d5;
+  border-radius: 8px;
+  background: #f2f5ec;
+  margin-top: 8px;
+}
+.admin-quality-status > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.admin-quality-status h3 {
+  font-size: 15px;
+}
+.admin-quality-status p {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+  margin-top: 9px;
+}
 .admin-price-card {
   background: #f2f5ec;
   border-color: #dfe6d5;
