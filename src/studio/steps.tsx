@@ -1079,7 +1079,7 @@ export function CreateStep({
         </div>
       </div>
       <section className="readiness-panel" aria-label="Film pricing">
-        <h3>Film cost, with no added markup</h3>
+        <h3>Your estimated film cost</h3>
         <div className="production-settings">
           <div>
             <span>Reference credit rate</span>
@@ -1104,7 +1104,7 @@ export function CreateStep({
           </div>
         </div>
         <p>
-          Your film price will match MagicLight's quoted cost. BROCOTech markup: 0%.
+          Your film price will use MagicLight's quoted cost plus the current BROCOTech markup: {caps?.pricing ? `${caps.pricing.markupBasisPoints / 100}%` : "awaiting pricing settings"}. The total will be shown before payment.
         </p>
         <p className="field-note">
           {caps?.pricing?.estimate.reason ||

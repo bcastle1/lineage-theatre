@@ -27,6 +27,12 @@
     },
     "api/document.mjs": {
       "maxDuration": 30
+    },
+    "api/admin.mjs": {
+      "maxDuration": 60
+    },
+    "api/archive.mjs": {
+      "maxDuration": 300
     }
   }
 }

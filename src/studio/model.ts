@@ -2,6 +2,8 @@ export interface User {
   email: string;
   name: string;
   mustChangePassword: boolean;
+  role: "owner" | "admin" | "customer";
+  emailVerified: boolean;
 }
 export interface Source {
   id: string;
