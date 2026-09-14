@@ -642,3 +642,148 @@ test("callback cleanup claims its committed generation before revocation and rem
   assert.equal((await h.service.status()).hasSavedAuthorization, false); assert.equal((await h.service.status()).pending, false);
   assert.equal(h.calls.length, 2);
 });
+
+function companyResponse(extra = {}, root = {}) {
+  return new Response(JSON.stringify({ CompanyInfo: { Id: "1", domain: "QBO", CompanyName: "Sandbox Company", LegalName: "Sandbox Legal Name", Country: "US", ...extra }, ...root }),
+    { status: 200, headers: { "Content-Type": "application/json; charset=utf-8" } });
+}
+async function verifyCurrent(h, service = h.service) { return service.verifyCompany(OWNER, { expectedRevision: (await h.service.status()).revision }); }
+function replaceStoredToken(h, extra) {
+  const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
+  h.putRecord(QUICKBOOKS_CONNECTION_PATH, { ...value, encryptedTokens: encryptQuickBooksTokens({ ...savedToken(h), ...extra }, quickbooksConfig(h.env)) });
+}
+
+test("company checks require owner same-origin POST and cannot accept client-supplied realm, token, or destination", async () => {
+  const h = harness(); await h.authorize(); h.setFetch(async (url, request) => {
+    assert.equal(url, `https://sandbox-quickbooks.api.intuit.com/v3/company/${REALM}/companyinfo/${REALM}`);
+    assert.equal(request.method, "GET"); assert.equal(request.body, undefined); assert.equal(request.redirect, "error");
+    assert.ok(request.signal); assert.equal(request.headers.Authorization, `Bearer ${ACCESS}`); assert.equal(request.headers.Accept, "application/json");
+    return companyResponse();
+  });
+  const revision = (await h.service.status()).revision;
+  for (const actor of [null, CUSTOMER, ADMIN, { ...OWNER, role: "customer" }]) {
+    h.setActor(actor);
+    assert.equal((await h.run("POST", "", { action: "verifyCompany", expectedRevision: revision })).status, actor ? 403 : 401);
+  }
+  h.setActor(OWNER);
+  assert.equal((await h.run("GET", "action=verifyCompany")).status, 405);
+  for (const headers of [{ origin: "https://evil.invalid" }, { origin: "" }, { host: "www.lineagetheater.com", origin: "https://www.lineagetheater.com" }])
+    assert.equal((await h.run("POST", "", { action: "verifyCompany", expectedRevision: revision }, headers)).status, 403);
+  const result = await h.run("POST", "", { action: "verifyCompany", expectedRevision: revision, realmId: "999999", token: "client-token", url: "https://evil.invalid" });
+  assert.equal(result.status, 200); assert.equal(h.calls.length, 2);
+  assert.equal(result.body.companyVerification.companyName, "Sandbox Company");
+});
+
+test("company evidence contains only minimal fields, proves Accounting access alone, and permits entity Id 1", async () => {
+  const h = harness(); await h.authorize(); h.setFetch(async () => companyResponse({
+    CompanyAddr: { Line1: "private address" }, Email: { Address: "private@example.invalid" }, secret: REFRESH,
+  }, { access_token: ACCESS, refresh_token: REFRESH }));
+  const result = await verifyCurrent(h);
+  assert.deepEqual(Object.keys(result.companyVerification).sort(), ["accountingAccessVerified", "companyName", "country", "legalName", "verifiedAt"]);
+  assert.equal(result.companyVerification.accountingAccessVerified, true);
+  assert.equal(result.scopeVerification, "not-returned"); assert.equal(result.realmVerification, "callback-only");
+  assert.equal(result.paymentReady, false); assert.equal(result.refundReady, false);
+  for (const secret of [ACCESS, REFRESH, "private address", "private@example.invalid", h.env.QUICKBOOKS_CLIENT_SECRET])
+    assert.equal(JSON.stringify([result, [...h.records.values()], h.events]).includes(secret), false);
+  h.setActor(ADMIN); assert.deepEqual((await h.run()).body.companyVerification, result.companyVerification);
+});
+
+test("company check uses the fixed production Accounting origin only for a saved production authorization", async () => {
+  const h = harness({ env: { ...testEnv(), QUICKBOOKS_ENVIRONMENT: "production" } }); await h.authorize();
+  h.setFetch(async url => { assert.equal(url, `https://quickbooks.api.intuit.com/v3/company/${REALM}/companyinfo/${REALM}`); return companyResponse(); });
+  assert.equal((await verifyCurrent(h)).companyVerification.accountingAccessVerified, true);
+});
+
+test("company scope, saved realm, owner, config, expiry and pending gates fail without reading or altering provider authorization", async () => {
+  for (const variant of ["scope", "malformed-scope", "realm", "token", "expired", "invalid-expiry", "password", "owner-setup", "suspended", "config", "refreshing", "review", "disconnected"]) {
+    const h = harness(); await h.authorize();
+    if (variant === "scope") replaceStoredToken(h, { grantedScopes: [QUICKBOOKS_SCOPES[0]] });
+    if (variant === "malformed-scope") replaceStoredToken(h, { grantedScopes: "com.intuit.quickbooks.accounting" });
+    if (variant === "realm") replaceStoredToken(h, { realmId: "../../other?token=bad" });
+    if (variant === "token") replaceStoredToken(h, { accessToken: "bad\nheader" });
+    if (variant === "expired") h.advance(3_600_001);
+    if (variant === "invalid-expiry") replaceStoredToken(h, { accessTokenExpiresAt: "invalid-date" });
+    if (variant === "password") h.putRecord(userPath(OWNER.email), { ...OWNER, passwordHash: "new-value" });
+    if (variant === "owner-setup") h.putRecord(userPath(OWNER.email), { ...OWNER, mustChangePassword: true });
+    if (variant === "suspended") h.putRecord(userPath(OWNER.email), { ...OWNER, status: "suspended" });
+    if (variant === "config") h.env.QUICKBOOKS_CLIENT_SECRET = "changed-secret";
+    if (["refreshing", "review", "disconnected"].includes(variant)) {
+      const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
+      h.putRecord(QUICKBOOKS_CONNECTION_PATH, { ...value, ...(variant === "refreshing" ? { refreshOperation: { attemptId: "other" } } : variant === "review" ? { remoteReviewRequired: true } : { status: "disconnected" }) });
+    }
+    const before = structuredClone([...h.records.values()]);
+    await assert.rejects(() => verifyCurrent(h));
+    assert.equal(h.calls.length, 1, variant); assert.deepEqual([...h.records.values()], before, variant);
+  }
+});
+
+test("company JSON/field faults, oversized bodies and echoed secrets never persist evidence or revoke tokens", async () => {
+  for (const response of [() => companyResponse({ CompanyName: "" }), () => companyResponse({ CompanyName: ["bad"] }),
+    () => companyResponse({ Country: { value: "US" } }), () => companyResponse({ LegalName: "bad\nname" }),
+    () => companyResponse({ domain: "other" }), () => companyResponse({}, { CompanyInfo: [] }),
+    () => companyResponse({}, { Fault: { Error: [{ Message: REFRESH }] } }), () => companyResponse({ CompanyName: ACCESS }),
+    () => companyResponse({ CompanyName: "x".repeat(1025) }), () => companyResponse({}, { oversized: "x".repeat(70_000) }),
+    () => new Response("bad-json", { status: 200, headers: { "Content-Type": "application/json" } }),
+    () => new Response("<html>login</html>", { status: 200, headers: { "Content-Type": "text/html" } })]) {
+    const h = harness(); await h.authorize(); const before = structuredClone([...h.records.values()]);
+    h.setFetch(async () => response());
+    await assert.rejects(() => verifyCurrent(h), error => !error.message.includes(ACCESS) && !error.message.includes(REFRESH));
+    assert.deepEqual([...h.records.values()], before); assert.equal(h.calls.length, 2);
+    assert.equal((await h.service.status()).companyVerification, null);
+  }
+  const optional = harness(); await optional.authorize(); optional.setFetch(async () => companyResponse({ LegalName: undefined, Country: undefined }));
+  const result = await verifyCurrent(optional); assert.equal(result.companyVerification.legalName, null); assert.equal(result.companyVerification.country, null);
+});
+
+test("failed company reads preserve prior timestamped evidence and never set monetary uncertainty or retry", async () => {
+  for (const code of [401, 403, 404, 429, 500, "network"]) {
+    const h = harness(); await h.authorize(); h.setFetch(async () => companyResponse());
+    const verified = await verifyCurrent(h), before = structuredClone([...h.records.values()]);
+    h.setFetch(async () => { if (code === "network") throw new Error(`network ${REFRESH}`); return new Response(REFRESH, { status: code }); });
+    await assert.rejects(() => verifyCurrent(h), error => !error.message.includes(REFRESH));
+    assert.deepEqual([...h.records.values()], before); assert.equal(h.calls.length, 3);
+    const status = await h.service.status(); assert.deepEqual(status.companyVerification, verified.companyVerification);
+    assert.equal(status.remoteReviewRequired, false); assert.equal(status.paymentReady, false); assert.equal(status.refundReady, false);
+  }
+});
+
+test("company checks discard evidence if disconnect, token rotation, expiry, owner, or config changes while GET is running", async () => {
+  for (const variant of ["disconnect", "rotation", "expired", "password", "role", "config"]) {
+    const h = harness(); await h.authorize();
+    h.setFetch(async url => {
+      if (url === INTUIT_REVOKE) return new Response(null, { status: 200 });
+      if (variant === "disconnect") await h.service.disconnect(OWNER, { expectedRevision: (await h.service.status()).revision });
+      if (variant === "rotation") replaceStoredToken(h, { accessToken: "newly-rotated-access" });
+      if (variant === "expired") h.advance(3_600_001);
+      if (variant === "password") h.putRecord(userPath(OWNER.email), { ...OWNER, passwordHash: "new-value" });
+      if (variant === "role") h.putRecord(userPath(OWNER.email), { ...OWNER, role: "admin" });
+      if (variant === "config") h.env.QUICKBOOKS_CLIENT_ID = "new-app";
+      return companyResponse();
+    });
+    await assert.rejects(() => verifyCurrent(h));
+    assert.equal(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.companyVerification, undefined);
+    assert.equal(Boolean(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.remoteReviewRequired), false);
+    assert.equal(h.calls.length, variant === "disconnect" ? 3 : 2);
+  }
+});
+
+test("concurrent company checks use the original ETag and save only one response", async () => {
+  const h = harness(); await h.authorize(); h.setFetch(async () => companyResponse());
+  const revision = (await h.service.status()).revision;
+  const results = await Promise.allSettled([h.service.verifyCompany(OWNER, { expectedRevision: revision }), h.peer().verifyCompany(OWNER, { expectedRevision: revision })]);
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
+  assert.equal((await h.service.status()).revision, revision + 1); assert.equal(h.calls.length, 3);
+});
+
+test("company evidence is hidden after token/config changes, expiry, pending work or disconnect", async () => {
+  for (const variant of ["rotation", "config", "expired", "pending", "disconnect"]) {
+    const h = harness(); await h.authorize(); h.setFetch(async () => companyResponse()); await verifyCurrent(h);
+    if (variant === "rotation") replaceStoredToken(h, { accessToken: "newly-rotated-access" });
+    if (variant === "config") h.env.QUICKBOOKS_CLIENT_SECRET = "new-secret";
+    if (variant === "expired") h.advance(3_600_001);
+    if (variant === "pending") { const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value; h.putRecord(QUICKBOOKS_CONNECTION_PATH, { ...value, refreshOperation: { attemptId: "other" } }); }
+    if (variant === "disconnect") { h.setFetch(async () => new Response(null, { status: 200 })); await h.service.disconnect(OWNER, { expectedRevision: (await h.service.status()).revision }); }
+    assert.equal((await h.service.status()).companyVerification, null, variant);
+  }
+});
