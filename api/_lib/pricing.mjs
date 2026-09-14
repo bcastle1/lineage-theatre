@@ -48,7 +48,23 @@ export function costFromProviderCredits(providerCredits, policy) {
   return Number(cents);
 }
 
-export function pricingReadiness(env = process.env) {
+// Apply only a trusted, versioned administrator setting to a verified provider
+// quote. Store this breakdown with the order so later pricing changes cannot reprice it.
+export function customerQuoteFromCredits(providerCredits, policy, settings={markupBasisPoints:0,revision:0}) {
+  const {markupBasisPoints,revision}=settings;
+  if (!Number.isInteger(markupBasisPoints) || markupBasisPoints<0 || markupBasisPoints>100_000
+      || !Number.isSafeInteger(revision) || revision<0)
+    throw new Error("A valid administrator pricing setting is required.");
+  const providerCostCents=costFromProviderCredits(providerCredits,policy);
+  const markup=(BigInt(providerCostCents)*BigInt(markupBasisPoints)+5_000n)/10_000n;
+  const total=BigInt(providerCostCents)+markup;
+  if(total>BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("The customer quote exceeds the supported currency amount.");
+  return Object.freeze({currency:"USD",providerCredits,providerCostCents,markupBasisPoints,markupCents:Number(markup),amountCents:Number(total),pricingRevision:revision});
+}
+
+export function pricingReadiness(env = process.env, settings={markupBasisPoints:0,revision:0}) {
+  if (!Number.isInteger(settings.markupBasisPoints) || settings.markupBasisPoints<0 || settings.markupBasisPoints>100_000)
+    throw new Error("A valid administrator pricing setting is required.");
   let referenceRate = null;
   let referenceStatus = "available";
   let referenceReason = "MagicLight Pro API credit-pack reference; this is not a complete-film quote.";
@@ -68,8 +84,9 @@ export function pricingReadiness(env = process.env) {
   }
   return {
     currency: "USD",
-    policy: "provider-cost-no-markup",
-    markupBasisPoints: 0,
+    policy: settings.markupBasisPoints===0 ? "provider-cost-no-markup" : "provider-cost-plus-markup",
+    markupBasisPoints: settings.markupBasisPoints,
+    pricingRevision: settings.revision,
     referenceStatus,
     referenceRate,
     referenceReason,

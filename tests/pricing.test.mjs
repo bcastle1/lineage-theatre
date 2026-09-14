@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { costFromProviderCredits, pricingPolicy, pricingReadiness } from "../api/_lib/pricing.mjs";
+import { costFromProviderCredits, customerQuoteFromCredits, pricingPolicy, pricingReadiness } from "../api/_lib/pricing.mjs";
 import { productionReadiness } from "../api/_lib/production.mjs";
 
 test("public Pro API pack produces the published unit cost with no markup", () => {
@@ -12,6 +12,20 @@ test("public Pro API pack produces the published unit cost with no markup", () =
   assert.equal(costFromProviderCredits(80_000, policy), 8_800);
   assert.equal(costFromProviderCredits(123_456, policy), 13_580);
   assert.equal(pricingReadiness({}).referenceRate.amountCents, 110);
+});
+
+test("customer quote separates provider cost and percentage markup with integer rounding",()=>{
+  const policy=pricingPolicy({});
+  const quote=customerQuoteFromCredits(1000,policy,{markupBasisPoints:2500,revision:3});
+  assert.deepEqual(quote,{currency:"USD",providerCredits:1000,providerCostCents:110,markupBasisPoints:2500,markupCents:28,amountCents:138,pricingRevision:3});
+  assert.equal(customerQuoteFromCredits(1000,policy).amountCents,110);
+  assert.equal(Object.isFrozen(quote),true);
+  for(const markupBasisPoints of [-1,100001,1.5,"2500",NaN]) assert.throws(()=>customerQuoteFromCredits(1000,policy,{markupBasisPoints,revision:1}));
+  const updated=pricingReadiness({},{markupBasisPoints:5000,revision:4});
+  assert.equal(updated.markupBasisPoints,5000);assert.equal(updated.pricingRevision,4);
+  assert.equal(updated.policy,"provider-cost-plus-markup");assert.equal(updated.estimate.amountCents,null);assert.equal(updated.chargeReady,false);
+  assert.equal(quote.amountCents,138);
+  assert.throws(()=>customerQuoteFromCredits(Number.MAX_SAFE_INTEGER,{currency:"USD",markupBasisPoints:0,packPriceCents:1,packCredits:1},{markupBasisPoints:10000,revision:1}),/exceeds/);
 });
 
 test("currency uses exact integer half-up rounding rather than floating-point rounding", () => {

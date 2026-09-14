@@ -1431,8 +1431,11 @@ button {
   .sidebar nav {
     display: flex;
     gap: 5px;
+    min-width: 0;
+    overflow-x: auto;
   }
   .nav-item {
+    flex-shrink: 0;
     padding: 8px 9px;
     font-size: 10px;
     gap: 6px;

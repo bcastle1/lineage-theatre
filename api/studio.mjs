@@ -1,8 +1,9 @@
 import { json, readBody, sameOrigin, getSession, digest, readRecord, limitAction } from "./_lib/auth.mjs";
 import { generateStory, STORY_MODEL } from "./_lib/story.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
+import { readPricingSettings } from "./_lib/admin.mjs";
 
-export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY}={}) {
+export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
   if(key) {
     try {
@@ -10,7 +11,7 @@ export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KE
       story={available:response.ok,reason:response.ok?"GPT-6 Astra is connected. Generation remains subject to the project's quota.":"The connected OpenAI project cannot access GPT-6 Astra. Check model access and the server credential."};
     } catch {story={available:false,reason:"The Astra connection could not be checked. Your materials remain saved."};}
   }
-  const production=productionReadiness();
+  const production=productionReadiness({pricingSettings});
   return {story:story.available,storyModel:STORY_MODEL,...production,connections:{story,...production.connections}};
 }
 
@@ -22,7 +23,7 @@ export default async function handler(req,res) {
     const url=new URL(req.url,`https://${req.headers.host}`);
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
-      if(action==="capabilities") return json(res,200,await connections());
+      if(action==="capabilities") return json(res,200,await connections({pricingSettings:await readPricingSettings()}));
       if(!["status","media"].includes(action)) return json(res,400,{message:"Unknown studio request."});
       const id=url.searchParams.get("id");
       if(!/^[a-z0-9-]{20,80}$/i.test(id??"")) return json(res,400,{message:"Invalid production reference."});

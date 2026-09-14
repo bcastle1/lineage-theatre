@@ -6,6 +6,7 @@ import {
   createHash,
 } from "node:crypto";
 import { get, put } from "@vercel/blob";
+import { roleForUser } from "./access.mjs";
 
 export function json(res, status, body) {
   res.statusCode = status;
@@ -66,8 +67,8 @@ export async function readRecord(path) {
     etag: result.blob.etag,
   };
 }
-export async function writeRecord(path, value, etag) {
-  return put(path, JSON.stringify(value), {
+export async function writeRecord(path, value, etag, { putImpl = put } = {}) {
+  return putImpl(path, JSON.stringify(value), {
     access: "private",
     contentType: "application/json",
     addRandomSuffix: false,
@@ -109,7 +110,7 @@ export function sessionCookie(user) {
   ).toString("base64url");
   return `lineage_session=${payload}.${signature(payload)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${user.mustChangePassword ? 900 : 43200}`;
 }
-export async function getSession(req, allowSetup = false) {
+export async function getSession(req, allowSetup = false, { readRecordImpl = readRecord } = {}) {
   const token = req.headers.cookie
     ?.split(";")
     .map((x) => x.trim())
@@ -127,9 +128,10 @@ export async function getSession(req, allowSetup = false) {
       return null;
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString());
     if (decoded.exp < Date.now()) return null;
-    const record = await readRecord(userPath(decoded.sub));
+    const record = await readRecordImpl(userPath(decoded.sub));
     if (!record || digest(record.value.passwordHash) !== decoded.version)
       return null;
+    if (record.value.status === "suspended") return null;
     if (record.value.mustChangePassword && !allowSetup) return null;
     return { user: record.value, etag: record.etag };
   } catch {
@@ -140,4 +142,6 @@ export const publicUser = (user) => ({
   email: user.email,
   name: user.name,
   mustChangePassword: user.mustChangePassword,
+  role: roleForUser(user),
+  emailVerified: user.emailVerified === true,
 });

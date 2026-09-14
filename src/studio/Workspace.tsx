@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   Aperture,
   Video,
@@ -15,6 +15,7 @@ import {
   X,
   CloudOff,
   Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 import {
   api,
@@ -36,6 +37,8 @@ import { getSourceBlob, getSourceObjectUrl } from "../lib/storage";
 import { importSource } from "./sources";
 
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
+import CloudArchivePanel from "./CloudArchivePanel";
+const Admin = lazy(() => import("../admin/Admin"));
 
 export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
@@ -44,8 +47,9 @@ export type Capabilities = {
   billing: boolean;
   pricing?: {
     currency: "USD";
-    policy: "provider-cost-no-markup";
+    policy: "provider-cost-no-markup" | "provider-cost-plus-markup";
     markupBasisPoints: number;
+    pricingRevision?: number;
     referenceStatus: "available" | "configuration-pending";
     referenceRate: {
       credits: number;
@@ -118,7 +122,7 @@ export default function Workspace({
   const [activeId, setActiveId] = useState(
     projects.find((p) => !p.archivedAt)?.id || projects[0].id,
   );
-  const [view, setView] = useState<"create" | "library" | "studios">("create");
+  const [view, setView] = useState<"create" | "library" | "studios" | "admin">("create");
   const [step, setStep] = useState(0);
   const [saved, setSaved] = useState("Saved in this browser");
   const [notice, setNotice] = useState<Notice | null>(
@@ -538,6 +542,9 @@ export default function Workspace({
     { id: "create" as const, label: "Create a film", icon: Video },
     { id: "library" as const, label: "Film library", icon: Library },
     { id: "studios" as const, label: "Studio status", icon: SlidersHorizontal },
+    ...(user.role === "owner" || user.role === "admin"
+      ? [{ id: "admin" as const, label: "Administration", icon: ShieldCheck }]
+      : []),
   ];
   const props: StepProps = { film, update, notify, busy, navigate };
   return (
@@ -627,6 +634,26 @@ export default function Workspace({
           </div>
         </header>
         <main className="workspace">
+          {view === "admin" && (user.role === "owner" || user.role === "admin") && (
+            <Suspense
+              fallback={
+                <div className="panel" role="status">
+                  <Loader2 className="spin" size={20} /> Opening administration…
+                </div>
+              }
+            >
+              <Admin
+                user={user}
+                notify={notify}
+                onPricingChanged={async () => {
+                  const current = await api<Capabilities>(
+                    "/api/studio?action=capabilities",
+                  );
+                  setCaps(current);
+                }}
+              />
+            </Suspense>
+          )}
           {view === "create" && (
             <>
               <div className="page-heading">
@@ -847,6 +874,7 @@ export default function Workspace({
               )}
             </>
           )}
+          {view === "library" && <CloudArchivePanel projects={projects} />}
           {view === "studios" && (
             <section className="panel">
               <div className="section-title">

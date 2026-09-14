@@ -1,0 +1,123 @@
+import { json, readBody, sameOrigin, getSession, readRecord, writeRecord, userPath, publicUser, digest, limitAction } from "./_lib/auth.mjs";
+import { hasAdminAccess, isOwner, OWNER_EMAIL } from "./_lib/access.mjs";
+import { recordPage, safeUser, validEmail, audit, newInvitation, validateInvitation, validateUserAction, validateRefund, readPricingSettings, markupFromPercent, PRICING_PATH } from "./_lib/admin.mjs";
+import { productionReadiness } from "./_lib/production.mjs";
+import { connections } from "./studio.mjs";
+
+const safeOrder=(order)=>({id:order.id,customerEmail:order.customerEmail,filmTitle:order.filmTitle||"",status:order.status,
+  currency:order.currency,amountCents:order.amountCents,refundedCents:order.refundedCents??0,createdAt:order.createdAt,provider:order.provider});
+function resultError(res,status,message) { return json(res,status,{message}); }
+
+export function createAdminHandler(overrides={}) {
+ const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,...overrides};
+ return async function handler(req,res) {
+  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections}=dependencies;
+  try {
+    const session=await getSession(req);
+    if (!session) return resultError(res,401,"Sign in to continue.");
+    const actor=session.user;
+    if (req.method==="POST" && !sameOrigin(req)) return resultError(res,403,"Begin this action inside Lineage Theatre.");
+    const url=new URL(req.url,`https://${req.headers.host}`);
+    const body=req.method==="POST"?await readBody(req,12_000):null;
+    const action=body?.action || url.searchParams.get("action") || "overview";
+    if (req.method==="POST" && action==="acceptInvite") {
+      if (!(await limitAction(`admin-invite-claim:${actor.email}`,10,3600_000))) return resultError(res,429,"Please wait before trying another invitation.");
+      if (typeof body.token!=="string" || !/^[a-f0-9]{64}$/.test(body.token)) return resultError(res,400,"This administrator invitation is invalid.");
+      const path=`admin/invitations/${digest(body.token)}.json`;
+      const record=await readRecord(path);
+      validateInvitation(record?.value,actor);
+      if (!record.value.usedBy) await writeRecord(path,{...record.value,usedBy:actor.email,usedAt:new Date().toISOString()},record.etag);
+      const current=await readRecord(userPath(actor.email));
+      if (!current || current.value.status==="suspended") return resultError(res,403,"This account is not active.");
+      validateInvitation(record.value,current.value);
+      if (current.value.role!=="admin") {
+        const updated={...current.value,role:"admin",adminGrantedBy:record.value.createdBy,updatedAt:new Date().toISOString()};
+        await writeRecord(userPath(actor.email),updated,current.etag);
+        await audit(actor.email,"administrator.invitation.accepted",actor.email,{invitationId:record.value.id});
+        return json(res,200,{user:publicUser(updated),message:"Administrator access is active."});
+      }
+      return json(res,200,{user:publicUser(current.value),message:"Administrator access is active."});
+    }
+    if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
+    if (req.method==="GET") {
+      const cursor=url.searchParams.get("cursor")||undefined;
+      if (cursor && cursor.length>2048) return resultError(res,400,"Invalid page reference.");
+      if(action==="users") {
+        const page=await recordPage("auth/users/",{cursor});
+        return json(res,200,{users:page.records.map(safeUser),cursor:page.cursor});
+      }
+      if(action==="payments") {
+        const page=await recordPage("payments/orders/",{cursor});
+        return json(res,200,{orders:page.records.map(safeOrder),cursor:page.cursor,connectionReady:false,
+          reason:"QuickBooks merchant authorization for this app is pending. No refund can be submitted yet."});
+      }
+      if(action==="audit") {
+        const page=await recordPage("admin/audit/",{cursor});
+        return json(res,200,{events:page.records,cursor:page.cursor});
+      }
+      if(action==="pricing") {
+        const settings=await readPricingSettings();
+        const pricing=productionReadiness({pricingSettings:settings}).pricing;
+        return json(res,200,{...settings,currency:"USD",referenceRate:pricing.referenceRate});
+      }
+      if(action==="overview") {
+        const [users,orders,films,settings]=await Promise.all([recordPage("auth/users/",{limit:100}),recordPage("payments/orders/",{limit:100}),recordPage("archive/metadata/",{limit:100}),readPricingSettings()]);
+        const ready=await connections({pricingSettings:settings});
+        const paid=orders.records.filter(order=>["paid","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
+        return json(res,200,{stats:{users:users.records.length,administrators:users.records.filter(hasAdminAccess).length,
+          suspended:users.records.filter(u=>u.status==="suspended").length,films:films.records.length,paidOrders:paid.length,
+          paymentTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.amountCents)?o.amountCents:0),0),
+          refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),currency:"USD"},
+          statsPartial:Boolean(users.cursor||orders.cursor||films.cursor),connections:ready.connections,pricing:ready.pricing});
+      }
+      return resultError(res,400,"Unknown administrator view.");
+    }
+    if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
+    if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="invite") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can invite administrators.");
+      const email=validEmail(body.email);
+      if(email===OWNER_EMAIL) return resultError(res,400,"The owner already has administrator access.");
+      const invite=newInvitation(email,actor.email);
+      await writeRecord(invite.path,invite.record);
+      await audit(actor.email,"administrator.invitation.created",email,{expiresAt:invite.record.expiresAt});
+      return json(res,201,{inviteUrl:`https://lineagetheater.com/#admin-invite=${invite.token}`,expiresAt:invite.record.expiresAt,
+        message:"Share this private one-time invitation with the named person. It expires in seven days."});
+    }
+    if(["revokeAdmin","suspend","activate"].includes(action)) {
+      const email=validEmail(body.email),path=userPath(email),record=await readRecord(path);
+      validateUserAction(actor,record?.value,action);
+      const update=action==="revokeAdmin"?{role:"customer",adminRevokedAt:new Date().toISOString()}:{status:action==="suspend"?"suspended":"active"};
+      const updated={...record.value,...update,updatedAt:new Date().toISOString()};
+      await writeRecord(path,updated,record.etag);
+      await audit(actor.email,`account.${action}`,email,update);
+      return json(res,200,{user:safeUser(updated)});
+    }
+    if(action==="updatePricing") {
+      const markupBasisPoints=markupFromPercent(body.markupPercent);
+      const record=await readRecord(PRICING_PATH);
+      const current=record?.value || {markupBasisPoints:0,revision:0};
+      if(!Number.isInteger(body.expectedRevision) || body.expectedRevision!==current.revision)
+        return resultError(res,409,"Pricing was changed by another administrator. Refresh before saving.");
+      const settings={markupBasisPoints,revision:current.revision+1,updatedAt:new Date().toISOString(),updatedBy:actor.email};
+      await writeRecord(PRICING_PATH,settings,record?.etag);
+      await audit(actor.email,"pricing.updated","customer-markup",{previousBasisPoints:current.markupBasisPoints,markupBasisPoints,revision:settings.revision});
+      return json(res,200,{...settings,currency:"USD",referenceRate:productionReadiness({pricingSettings:settings}).pricing.referenceRate});
+    }
+    if(action==="refund") {
+      if(typeof body.orderId!=="string" || !/^[a-zA-Z0-9-]{16,80}$/.test(body.orderId)) return resultError(res,400,"Invalid order reference.");
+      const record=await readRecord(`payments/orders/${body.orderId}.json`);
+      validateRefund(record?.value,body);
+      // No request is sent and no order is marked refunded without the real
+      // merchant connection. Browser success is never proof of a refund.
+      return json(res,503,{code:"QUICKBOOKS_CONNECTION_REQUIRED",refunded:false,message:"QuickBooks merchant authorization for this app is pending. No refund has been issued."});
+    }
+    return resultError(res,400,"Unknown administrator action.");
+  }catch(error){
+    const text=error instanceof Error?error.message:"";
+    if(/^(Enter |Choose |Use no more|Only |The owner|You cannot|Sign in with|This administrator|That account|The refund|A unique refund|This order|The saved pricing)/.test(text)) return resultError(res,400,text);
+    return resultError(res,503,"The administrator action could not complete. Refresh to verify the current state before retrying.");
+  }
+}
+}
+export default createAdminHandler();

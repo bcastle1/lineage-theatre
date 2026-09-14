@@ -33,24 +33,43 @@
     <a href="/">Return to Lineage Theatre</a>
     <h1>Security at Lineage Theatre</h1>
     <p>
-      Studio access requires an invited account and a personal password.
-      Temporary passwords must be changed before the studio can be used.
-      Passwords are stored as salted scrypt hashes in private server storage.
-      Sessions use signed, HTTP-only cookies with expiry and are invalidated
-      when a password changes.
+      Public registration creates a customer account with a personal password
+      of 12–128 characters and explicit terms/privacy consent. Registration
+      cannot grant an administrator role or claim a verified email address.
+      Passwords are stored as salted scrypt hashes in private Vercel Blob
+      storage. Sessions use signed, secure, HTTP-only cookies with expiry.
+      Changing a password invalidates older sessions, and suspended accounts
+      cannot sign in or continue using a session. Existing temporary passwords
+      must be changed before the studio can be used.
     </p>
     <p>
-      Family projects and original source files are stored in your browser. They
-      do not sync across devices and are not an encrypted cloud vault. Use a
-      trusted device, sign out when finished, and keep copies of original
-      sources and downloaded films.
+      Family working projects and original source files are stored in your
+      browser. Use a trusted device and keep independent copies. A separate,
+      optional cloud archive stores selected finished films and limited film
+      details in private Vercel Blob storage. Archive access is checked on the
+      server for the film owner or an authorized administrator; it is not a
+      public sharing link or an automatic backup of all your materials.
     </p>
     <p>
-      Provider credentials stay on the server. Paid shot requests require
-      authentication, are subject to request limits, and are tied to the
-      signed-in account. Uncertain submissions are not automatically repeated.
-      AI assistance and external studios process the material you choose to
-      send, as described in our <a href="/privacy.html">privacy information</a>.
+      The service owner delegates administrator access through private,
+      expiring invitations. Roles come from stored server records. Registration,
+      sign-in, archive uploads, and administrative changes have request limits;
+      app mutations check their origin. New account records are created without
+      overwriting an existing account. Administrative changes are logged in
+      private storage.
+    </p>
+    <p>
+      Provider credentials stay on the server. GPT-6 Astra story generation,
+      MagicLight film generation, and QuickBooks charges and refunds remain
+      pending verified connections. They do not activate when a credential or
+      pricing setting is entered. The default 0% markup can be changed by an
+      administrator for future quotes; confirmed provider costs and customer
+      approval are still required before a charge.
+    </p>
+    <p>
+      Read our <a href="/privacy.html">privacy information</a> for the material
+      stored locally, saved to the optional cloud archive, or supplied to a
+      connected AI provider with your consent.
     </p>
     <p>
       Report security concerns or request account help at
