@@ -10,6 +10,7 @@ export const QUICKBOOKS_CALLBACK = `${QUICKBOOKS_ORIGIN}/api/quickbooks?action=c
 export const INTUIT_AUTHORIZE = "https://appcenter.intuit.com/connect/oauth2";
 export const INTUIT_TOKEN = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
 export const INTUIT_REVOKE = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke";
+const INTUIT_ACCOUNTING_ORIGINS = Object.freeze({ sandbox: "https://sandbox-quickbooks.api.intuit.com", production: "https://quickbooks.api.intuit.com" });
 export const QUICKBOOKS_SCOPES = Object.freeze(["com.intuit.quickbooks.payment", "com.intuit.quickbooks.accounting"]);
 export const QUICKBOOKS_CONNECTION_PATH = "integrations/quickbooks/connection.json";
 export const QUICKBOOKS_STATE_COOKIE = "__Host-lineage_quickbooks_state";
@@ -111,6 +112,20 @@ function tokenExpiry(seconds, now) {
 function checkRevision(record, expectedRevision) {
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || expectedRevision !== (record?.value.revision ?? 0)) throw conflictError();
 }
+function companyFields(data) {
+  const company = data?.CompanyInfo;
+  const invalid = () => new QuickBooksError("Intuit did not return usable company information. The saved authorization was not changed.", 502, "QUICKBOOKS_COMPANY_INVALID");
+  if (!company || typeof company !== "object" || Array.isArray(company) || data.Fault || (company.domain !== undefined && company.domain !== "QBO")) throw invalid();
+  const field = (name, max, required = false) => {
+    const value = company[name];
+    if (!required && (value === undefined || value === null || value === "")) return null;
+    if (typeof value !== "string" || !value.trim() || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw invalid();
+    return value.trim();
+  };
+  // CompanyInfo.Id can be the entity ID "1", not the OAuth realm. Identity is
+  // established by the authenticated saved-realm route, never by that field.
+  return { companyName: field("CompanyName", 1024, true), legalName: field("LegalName", 1024), country: field("Country", 80) };
+}
 
 export function createQuickBooksService(overrides = {}) {
   const { read = readRecord, write = writeRecord, fetchImpl = fetch, now = Date.now,
@@ -145,6 +160,7 @@ export function createQuickBooksService(overrides = {}) {
       lastConnectedAt: value?.connectedAt || null, tokenExpiresAt: null, realmId: null,
       requestedScopes: [...QUICKBOOKS_SCOPES], grantedScopes: null, scopeVerification: "not-returned",
       realmVerification: "unverified", revocationStatus: value?.revocationStatus || "not-requested",
+      companyVerification: null,
       paymentReady: false, refundReady: false, callbackUrl: QUICKBOOKS_CALLBACK,
       message: config ? "QuickBooks is not connected. Customer payments and refunds remain unavailable." : setupError().message,
     };
@@ -182,7 +198,65 @@ export function createQuickBooksService(overrides = {}) {
       output.connected = false; output.authorizationStatus = "needs-attention";
       output.message = "A previous Intuit operation could not be verified. Review the app in Intuit connected apps and contact the administrator to reconcile the connection before starting another authorization.";
     }
+    const evidence = value?.companyVerification;
+    if (output.connected && !output.pending && evidence && evidence.credentialVersion === config?.credentialVersion
+        && evidence.tokenVersion === digest(JSON.stringify(value.encryptedTokens)) && Number.isFinite(Date.parse(evidence.verifiedAt))) {
+      output.companyVerification = { verifiedAt: evidence.verifiedAt, companyName: evidence.companyName,
+        legalName: evidence.legalName, country: evidence.country, accountingAccessVerified: true };
+      output.message = "Accounting access to the connected company was verified. Merchant readiness and customer payments or refunds remain unverified and unavailable.";
+    }
     return output;
+  }
+  async function verifyCompany(actor, body = {}) {
+    try {
+      if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can verify the QuickBooks company.", 403);
+      const config = configFor(), previous = await read(QUICKBOOKS_CONNECTION_PATH);
+      checkRevision(previous, body.expectedRevision);
+      const value = previous?.value;
+      if (value?.status !== "authorized" || !value?.encryptedTokens || value.pending || value.refreshOperation
+          || value.remoteReviewRequired || value.revocationStatus === "pending" || value.remoteCleanup?.status === "pending")
+        throw new QuickBooksError("The QuickBooks connection is not ready for a company check. Refresh its status first.", 409, "QUICKBOOKS_COMPANY_BLOCKED");
+      if (value.fingerprint !== config.fingerprint || (value.credentialVersion && value.credentialVersion !== config.credentialVersion))
+        throw new QuickBooksError("QuickBooks server credentials changed. Reconcile the saved authorization before checking the company.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
+      const token = decryptQuickBooksTokens(value.encryptedTokens, config), tokenVersion = digest(JSON.stringify(value.encryptedTokens));
+      if (typeof token.accessToken !== "string" || token.accessToken.length < 8 || token.accessToken.length > 16_384 || /[\s\x00-\x1f]/.test(token.accessToken))
+        throw new QuickBooksError("The saved QuickBooks access token cannot be used for a company check.", 409, "QUICKBOOKS_TOKEN_INVALID");
+      if (typeof token.realmId !== "string" || !REALM_PATTERN.test(token.realmId))
+        throw new QuickBooksError("The saved QuickBooks company reference is invalid.", 409, "QUICKBOOKS_REALM_MISMATCH");
+      if (token.grantedScopes != null && (!Array.isArray(token.grantedScopes) || !token.grantedScopes.includes("com.intuit.quickbooks.accounting")))
+        throw new QuickBooksError("The saved authorization does not include Accounting access.", 403, "QUICKBOOKS_SCOPE_INVALID");
+      const validAccess = () => Number.isFinite(Date.parse(token.accessTokenExpiresAt)) && Date.parse(token.accessTokenExpiresAt) > now();
+      if (!validAccess()) throw new QuickBooksError("The access token expired. Company verification does not refresh tokens; refresh or reconnect first.", 409, "QUICKBOOKS_ACCESS_EXPIRED");
+      const passwordVersion = digest(actor.passwordHash || "");
+      await ownerStillValid(actor.email, passwordVersion);
+      const response = await fetchImpl(`${INTUIT_ACCOUNTING_ORIGINS[config.environment]}/v3/company/${token.realmId}/companyinfo/${token.realmId}`, {
+        method: "GET", redirect: "error", signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${token.accessToken}`, Accept: "application/json" },
+      });
+      if (response.status !== 200 || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || ""))
+        throw new QuickBooksError("Intuit did not complete the company check. The saved authorization was not changed.", 502, "QUICKBOOKS_COMPANY_UNAVAILABLE");
+      const raw = await response.text();
+      if (raw.length > 65_536) throw new QuickBooksError("Intuit returned too much company information to verify safely.", 502, "QUICKBOOKS_COMPANY_INVALID");
+      const fields = companyFields(JSON.parse(raw));
+      // Never propagate accidentally echoed bearer/refresh/client secrets, even
+      // if a provider response places them inside an otherwise allowed field.
+      const secrets = [token.accessToken, token.refreshToken, config.clientSecret, config.key.toString("base64")];
+      if (Object.values(fields).some(text => text && secrets.some(secret => typeof secret === "string" && text.includes(secret))))
+        throw new QuickBooksError("Intuit returned company information that cannot be displayed safely.", 502, "QUICKBOOKS_COMPANY_INVALID");
+      await ownerStillValid(actor.email, passwordVersion);
+      if (!validAccess()) throw new QuickBooksError("The access token expired during the company check. No verification was saved.", 409, "QUICKBOOKS_ACCESS_EXPIRED");
+      if (!sameSecret(configFor().credentialVersion, config.credentialVersion)) throw new QuickBooksError("QuickBooks configuration changed during the company check.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
+      const current = await read(QUICKBOOKS_CONNECTION_PATH);
+      if (!current || current.etag !== previous.etag || current.value.revision !== value.revision
+          || digest(JSON.stringify(current.value.encryptedTokens)) !== tokenVersion) throw conflictError();
+      const revision = value.revision + 1;
+      await saveConnection(previous, { ...value, revision, changeId: randomUUID(),
+        companyVerification: { ...fields, verifiedAt: stamp(now()), credentialVersion: config.credentialVersion, tokenVersion }, updatedAt: stamp(now()) });
+      await auditImpl(actor.email, "quickbooks.company.verified", "merchant-connection", { environment: config.environment, revision, accountingAccessVerified: true });
+      return await status();
+    } catch (error) {
+      if (error instanceof QuickBooksError) throw error;
+      throw new QuickBooksError("The company check could not be verified. Refresh its status before trying again; no payment was enabled.", 502, "QUICKBOOKS_COMPANY_UNAVAILABLE");
+    }
   }
   async function start(actor, body) {
     if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can connect QuickBooks.", 403);
@@ -438,7 +512,7 @@ export function createQuickBooksService(overrides = {}) {
       ? "QuickBooks access is disabled locally and its saved tokens were removed. Intuit revocation could not be confirmed; review connected apps in Intuit before reconnecting. No retry was sent."
       : "QuickBooks authorization is disconnected. Customer payments and refunds remain unavailable." };
   }
-  return { status, start, callback, disconnect, refresh };
+  return { status, start, callback, disconnect, refresh, verifyCompany };
 }
 
 export const quickbooks = createQuickBooksService();

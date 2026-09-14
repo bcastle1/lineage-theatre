@@ -938,6 +938,54 @@
   align-items: center;
   flex-wrap: wrap;
 }
+.admin-quickbooks-company {
+  border-top: 1px solid #dde5d5;
+  border-bottom: 1px solid #dde5d5;
+  padding: 18px 0;
+  margin-bottom: 18px;
+}
+.admin-quickbooks-company-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.admin-quickbooks-company-heading > div {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.admin-quickbooks-company h3 {
+  color: var(--forest);
+  font-size: 14px;
+  margin: 0 0 7px;
+}
+.admin-quickbooks-company p {
+  color: #63715c;
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 0;
+}
+.admin-quickbooks-company .admin-fineprint {
+  margin-top: 12px;
+}
+.admin-quickbooks-company dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: 14px;
+  margin: 17px 0 0;
+}
+.admin-quickbooks-company dt {
+  color: var(--muted);
+  font-size: 10px;
+  margin-bottom: 5px;
+}
+.admin-quickbooks-company dd {
+  color: var(--forest);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .admin-quickbooks-actions > p {
   font-size: 11px;
   color: #6a7862;

@@ -26,11 +26,11 @@ export function createQuickBooksHandler(overrides = {}) {
       if (req.method === "GET" && (url.searchParams.get("action") || "status") === "status")
         return json(res, 200, await service.status());
       if (req.method !== "POST") return json(res, 405, { message: "Method not allowed." });
-      if (!isOwner(session.user)) return json(res, 403, { message: "Only the owner can connect or disconnect QuickBooks." });
+      if (!isOwner(session.user)) return json(res, 403, { message: "Only the owner can manage the QuickBooks connection." });
       if (!sameOrigin(req) || req.headers.origin !== QUICKBOOKS_ORIGIN || req.headers.host !== new URL(QUICKBOOKS_ORIGIN).host)
         return json(res, 403, { message: "Begin this action at https://lineagetheater.com inside Administration." });
       const body = await readBody(req, 2048);
-      if (!body || typeof body !== "object" || Array.isArray(body) || !["start", "disconnect"].includes(body.action))
+      if (!body || typeof body !== "object" || Array.isArray(body) || !["start", "disconnect", "verifyCompany"].includes(body.action))
         return json(res, 400, { message: "Unknown QuickBooks connection action." });
       if (!(await limiter(`quickbooks-${body.action}:${session.user.email}`, 10, 3600_000)))
         return json(res, 429, { message: "Please wait before making more QuickBooks connection changes." });
@@ -38,6 +38,7 @@ export function createQuickBooksHandler(overrides = {}) {
         const { stateCookie, ...result } = await service.start(session.user, body);
         res.setHeader("Set-Cookie", stateCookie); return json(res, 200, result);
       }
+      if (body.action === "verifyCompany") return json(res, 200, await service.verifyCompany(session.user, body));
       const disconnected = await service.disconnect(session.user, body);
       return json(res, 200, disconnected);
     } catch (error) {

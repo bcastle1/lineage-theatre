@@ -125,10 +125,25 @@ type QuickBooksStatus = {
   lastConnectedAt: string | null;
   realmId?: string | null;
   revocationStatus?: string | null;
+  companyVerification?: {
+    verifiedAt: string;
+    companyName: string;
+    legalName: string | null;
+    country: string | null;
+    accountingAccessVerified: true;
+  } | null;
   paymentReady: false;
   refundReady: false;
   message: string;
 };
+function verifiedQuickBooksCompany(status: QuickBooksStatus | null) {
+  return status?.connected &&
+    !status.pending &&
+    !status.remoteReviewRequired &&
+    status.companyVerification?.accountingAccessVerified === true
+    ? status.companyVerification
+    : null;
+}
 type AuthorizationAttempt = {
   url: string;
   revision: number;
@@ -331,6 +346,7 @@ export default function Admin({
   const [payments, setPayments] = useState<PaymentsData | null>(null);
   const [quickBooks, setQuickBooks] = useState<QuickBooksStatus | null>(null);
   const [quickBooksError, setQuickBooksError] = useState("");
+  const [verifyingCompany, setVerifyingCompany] = useState(false);
   const [quickBooksReturn, setQuickBooksReturn] = useState(paymentCallbackResult);
   const [authorizationCheck, setAuthorizationCheck] = useState(0);
   const [authorizationAttempt, setAuthorizationAttempt] =
@@ -709,6 +725,53 @@ export default function Admin({
           quickBooks.authorizationStatus,
         )),
   );
+  const companyVerification = verifiedQuickBooksCompany(quickBooks);
+  async function verifyQuickBooksCompany() {
+    if (
+      !isOwner ||
+      !quickBooks?.connected ||
+      quickBooks.pending ||
+      quickBooks.remoteReviewRequired ||
+      !Number.isInteger(quickBooks.revision) ||
+      actionLock.current
+    )
+      return;
+    actionLock.current = true;
+    setBusy(true);
+    setVerifyingCompany(true);
+    setQuickBooksError("");
+    try {
+      const result = await api<QuickBooksStatus>("/api/quickbooks", {
+        action: "verifyCompany",
+        expectedRevision: quickBooks.revision,
+      });
+      if (!adminMounted.current) return;
+      setQuickBooks(result);
+      if (verifiedQuickBooksCompany(result)) {
+        notify(
+          "Company verified for accounting access. Customer payments and refunds remain unavailable.",
+          "info",
+        );
+      } else {
+        setQuickBooksError(
+          "Company verification was not confirmed. Refresh the connection status before trying again.",
+        );
+      }
+    } catch (e) {
+      if (adminMounted.current) {
+        setQuickBooks((previous) =>
+          previous ? { ...previous, companyVerification: null } : previous,
+        );
+        setQuickBooksError(errorText(e));
+      }
+    } finally {
+      actionLock.current = false;
+      if (adminMounted.current) {
+        setBusy(false);
+        setVerifyingCompany(false);
+      }
+    }
+  }
   async function connectQuickBooks() {
     if (
       !isOwner ||
@@ -1572,6 +1635,76 @@ export default function Admin({
                   </small>
                 </div>
               </div>
+              <div className="admin-quickbooks-company">
+                <div className="admin-quickbooks-company-heading">
+                  <div>
+                    <h3>
+                      {companyVerification
+                        ? "Accounting access verified"
+                        : "Company verification"}
+                    </h3>
+                    <p>
+                      This checks accounting access only. Merchant eligibility, customer
+                      payments, and refunds remain unverified.
+                    </p>
+                  </div>
+                  {isOwner && (
+                    <button
+                      className="button secondary small"
+                      disabled={
+                        busy ||
+                        loading ||
+                        !quickBooks?.connected ||
+                        quickBooks.pending ||
+                        quickBooks.remoteReviewRequired ||
+                        !Number.isInteger(quickBooks?.revision)
+                      }
+                      onClick={() => void verifyQuickBooksCompany()}
+                    >
+                      {verifyingCompany ? (
+                        <Loader2 className="spin" size={16} />
+                      ) : (
+                        <CheckCircle2 size={16} />
+                      )}
+                      {verifyingCompany
+                        ? "Checking company…"
+                        : companyVerification
+                          ? "Verify company again"
+                          : "Verify company"}
+                    </button>
+                  )}
+                </div>
+                {companyVerification ? (
+                  <dl>
+                    <div>
+                      <dt>Company</dt>
+                      <dd>{companyVerification.companyName}</dd>
+                    </div>
+                    {companyVerification.legalName && (
+                      <div>
+                        <dt>Legal name</dt>
+                        <dd>{companyVerification.legalName}</dd>
+                      </div>
+                    )}
+                    {companyVerification.country && (
+                      <div>
+                        <dt>Country</dt>
+                        <dd>{companyVerification.country}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Verified</dt>
+                      <dd>{date(companyVerification.verifiedAt)}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="admin-fineprint">
+                    {quickBooks?.connected
+                      ? "The owner can verify which company this authorization can access."
+                      : "Authorize QuickBooks before verifying the company."}
+                  </p>
+                )}
+              </div>
               <div className="admin-quickbooks-actions">
                 {isOwner ? (
                   <>
@@ -1594,7 +1727,7 @@ export default function Admin({
                         } else void connectQuickBooks();
                       }}
                     >
-                      {busy && !dialog ? (
+                      {busy && !dialog && !verifyingCompany ? (
                         <Loader2 size={16} className="spin" />
                       ) : (
                         <ShieldCheck size={16} />
