@@ -68,22 +68,50 @@ function sameSecret(left, right) {
   return typeof left === "string" && typeof right === "string" && left.length === right.length
     && timingSafeEqual(Buffer.from(left), Buffer.from(right));
 }
-function aad(config, secretId) { return Buffer.from(`lineage-quickbooks-v1:${QUICKBOOKS_CONNECTION_PATH}:${config.fingerprint}:${secretId}`); }
-export function encryptQuickBooksTokens(value, config, secretId = randomUUID()) {
+function aad(config, secretId, version) { return Buffer.from(`lineage-quickbooks-v${version}:${QUICKBOOKS_CONNECTION_PATH}:${config.fingerprint}:${secretId}`); }
+function sealTokenValue(value, config, secretId, version) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", config.key, iv);
-  cipher.setAAD(aad(config, secretId));
+  cipher.setAAD(aad(config, secretId, version));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
-  return { version: 1, secretId, iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+  return { version, secretId, iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+}
+// Process memory only: never serialize this map into Blob, a database, a
+// response, or a log. An exact durable envelope and current credentials are
+// required to retrieve its encrypted access token. Cold workers renew by CAS.
+const volatileAccessTokens = new Map();
+const accessKey = (envelope, config) => digest(`${config.credentialVersion}:${JSON.stringify(envelope)}`);
+export function forgetQuickBooksAccessToken(envelope, config) {
+  volatileAccessTokens.delete(accessKey(envelope, config));
+}
+export function readQuickBooksAccessToken(envelope, config, now = Date.now()) {
+  const key = accessKey(envelope, config), cached = volatileAccessTokens.get(key);
+  if (!cached) return null;
+  if (!Number.isFinite(cached.expiresAt) || cached.expiresAt <= now) {
+    volatileAccessTokens.delete(key); return null;
+  }
+  return decryptQuickBooksTokens(cached.encrypted, config).accessToken;
+}
+export function encryptQuickBooksTokens(value, config, secretId = randomUUID()) {
+  // Explicit allowlist prevents new provider fields from persisting credentials.
+  const durable = Object.fromEntries(["refreshToken", "tokenType", "realmId", "accessTokenExpiresAt", "refreshTokenExpiresAt",
+    "refreshTokenHardExpiresAt", "grantedScopes", "scopeVerification", "realmVerification"].map(key => [key, value[key]]));
+  const envelope = sealTokenValue(durable, config, secretId, 2);
+  if (typeof value.accessToken === "string") {
+    while (volatileAccessTokens.size >= 64) volatileAccessTokens.delete(volatileAccessTokens.keys().next().value);
+    volatileAccessTokens.set(accessKey(envelope, config), { expiresAt: Date.parse(value.accessTokenExpiresAt),
+      encrypted: sealTokenValue({ accessToken: value.accessToken }, config, randomUUID(), 2) });
+  }
+  return envelope;
 }
 export function decryptQuickBooksTokens(envelope, config) {
   try {
-    if (envelope?.version !== 1 || typeof envelope.secretId !== "string"
+    if (![1, 2].includes(envelope?.version) || typeof envelope.secretId !== "string"
         || typeof envelope.ciphertext !== "string" || envelope.ciphertext.length > 65_536) throw new Error();
     const iv = Buffer.from(envelope.iv, "base64"), tag = Buffer.from(envelope.tag, "base64");
     if (iv.length !== 12 || tag.length !== 16) throw new Error();
     const decipher = createDecipheriv("aes-256-gcm", config.key, iv);
-    decipher.setAAD(aad(config, envelope.secretId)); decipher.setAuthTag(tag);
+    decipher.setAAD(aad(config, envelope.secretId, envelope.version)); decipher.setAuthTag(tag);
     return JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, "base64")), decipher.final()]).toString("utf8"));
   } catch { throw new QuickBooksError("The saved QuickBooks authorization cannot be read. Disconnect it locally and reconnect after checking server setup.", 503, "QUICKBOOKS_TOKEN_UNREADABLE"); }
 }
@@ -192,6 +220,8 @@ export function createQuickBooksService(overrides = {}) {
       requestedScopes: [...QUICKBOOKS_SCOPES], grantedScopes: null, scopeVerification: "not-returned",
       realmVerification: "unverified", revocationStatus: value?.revocationStatus || "not-requested",
       companyVerification: null,
+      accessTokenStorage: value?.encryptedTokens ? value.encryptedTokens.version === 2 ? "memory-only" : "migration-required" : "none",
+      accessTokenAvailable: false,
       paymentReady: false, refundReady: false, callbackUrl: QUICKBOOKS_CALLBACK,
       message: config ? "QuickBooks is not connected. Customer payments and refunds remain unavailable." : setupError().message,
     };
@@ -207,11 +237,13 @@ export function createQuickBooksService(overrides = {}) {
         output.realmId = token.realmId; output.grantedScopes = token.grantedScopes;
         output.scopeVerification = token.scopeVerification; output.realmVerification = token.realmVerification;
         output.tokenExpiresAt = token.accessTokenExpiresAt;
-        const expired = Date.parse(token.accessTokenExpiresAt) <= now();
-        output.connected = !expired; output.authorizationStatus = expired ? "expired" : "authorized";
+        output.accessTokenAvailable = Boolean(readQuickBooksAccessToken(value.encryptedTokens, config, now()));
+        const expired = !Number.isFinite(Date.parse(token.accessTokenExpiresAt)) || Date.parse(token.accessTokenExpiresAt) <= now();
+        output.connected = !expired && output.accessTokenStorage === "memory-only"; output.authorizationStatus = expired ? "expired" : "authorized";
         output.message = expired
-          ? "The saved access token has expired. A server-authorized token refresh or reconnection is required; customer checkout remains unavailable."
-          : "Intuit authorization is saved. Company/merchant readiness and customer payments or refunds have not been verified or enabled.";
+          ? "The previous access token has expired. Renew authorization before checking the company; customer checkout remains unavailable."
+          : "Intuit authorization is saved. Access tokens are held only in server memory and renewed when needed. Customer payments and refunds remain unavailable.";
+        if (output.accessTokenStorage === "migration-required") output.message = "Refresh authorization to remove the legacy stored access token and use memory-only access tokens. Payments remain unavailable.";
       } catch { output.authorizationStatus = "needs-attention"; output.message = "The saved authorization cannot be read. Disconnect it locally and check server setup before reconnecting."; }
     }
     if (output.pending) { output.connected = false; output.authorizationStatus = "authorizing"; output.message = "An owner authorization is in progress. Customer payments and refunds remain unavailable."; }
@@ -241,24 +273,37 @@ export function createQuickBooksService(overrides = {}) {
   async function verifyCompany(actor, body = {}) {
     try {
       if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can verify the QuickBooks company.", 403);
-      const config = configFor(), previous = await read(QUICKBOOKS_CONNECTION_PATH);
+      const config = configFor(); let previous = await read(QUICKBOOKS_CONNECTION_PATH);
       checkRevision(previous, body.expectedRevision);
-      const value = previous?.value;
+      let value = previous?.value;
       if (value?.status !== "authorized" || !value?.encryptedTokens || value.pending || value.refreshOperation
           || value.remoteReviewRequired || value.revocationStatus === "pending" || value.remoteCleanup?.status === "pending")
         throw new QuickBooksError("The QuickBooks connection is not ready for a company check. Refresh its status first.", 409, "QUICKBOOKS_COMPANY_BLOCKED");
       if (value.fingerprint !== config.fingerprint || (value.credentialVersion && value.credentialVersion !== config.credentialVersion))
         throw new QuickBooksError("QuickBooks server credentials changed. Reconcile the saved authorization before checking the company.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
-      const token = decryptQuickBooksTokens(value.encryptedTokens, config), tokenVersion = digest(JSON.stringify(value.encryptedTokens));
-      if (typeof token.accessToken !== "string" || token.accessToken.length < 8 || token.accessToken.length > 16_384 || /[\s\x00-\x1f]/.test(token.accessToken))
-        throw new QuickBooksError("The saved QuickBooks access token cannot be used for a company check.", 409, "QUICKBOOKS_TOKEN_INVALID");
+      if (value.encryptedTokens.version !== 2) throw new QuickBooksError("Refresh authorization to update token storage before checking the company.", 409, "QUICKBOOKS_STORAGE_MIGRATION_REQUIRED");
+      let token = decryptQuickBooksTokens(value.encryptedTokens, config);
       if (typeof token.realmId !== "string" || !REALM_PATTERN.test(token.realmId))
         throw new QuickBooksError("The saved QuickBooks company reference is invalid.", 409, "QUICKBOOKS_REALM_MISMATCH");
       if (token.grantedScopes != null && (!Array.isArray(token.grantedScopes) || !token.grantedScopes.includes("com.intuit.quickbooks.accounting")))
         throw new QuickBooksError("The saved authorization does not include Accounting access.", 403, "QUICKBOOKS_SCOPE_INVALID");
       const validAccess = () => Number.isFinite(Date.parse(token.accessTokenExpiresAt)) && Date.parse(token.accessTokenExpiresAt) > now();
-      if (!validAccess()) throw new QuickBooksError("The access token expired. Company verification does not refresh tokens; refresh or reconnect first.", 409, "QUICKBOOKS_ACCESS_EXPIRED");
+      if (!validAccess()) throw new QuickBooksError("The previous access token expired. Refresh authorization before checking the company.", 409, "QUICKBOOKS_ACCESS_EXPIRED");
       const passwordVersion = digest(actor.passwordHash || "");
+      await ownerStillValid(actor.email, passwordVersion);
+      if (!readQuickBooksAccessToken(value.encryptedTokens, config, now())) {
+        const authorizationAttemptId = value.authorizationAttemptId;
+        await refresh(actor, { expectedRevision: value.revision });
+        previous = await read(QUICKBOOKS_CONNECTION_PATH); value = previous?.value;
+        if (value?.status !== "authorized" || value.pending || value.refreshOperation || value.remoteReviewRequired
+            || !value.encryptedTokens || value.authorizationAttemptId !== authorizationAttemptId
+            || value.fingerprint !== config.fingerprint || value.credentialVersion !== config.credentialVersion)
+          throw conflictError();
+      }
+      token = { ...decryptQuickBooksTokens(value.encryptedTokens, config), accessToken: readQuickBooksAccessToken(value.encryptedTokens, config, now()) };
+      const tokenVersion = digest(JSON.stringify(value.encryptedTokens));
+      if (typeof token.accessToken !== "string" || token.accessToken.length < 8 || token.accessToken.length > 16_384 || /[\s\x00-\x1f]/.test(token.accessToken))
+        throw new QuickBooksError("The saved QuickBooks access token cannot be used for a company check.", 409, "QUICKBOOKS_TOKEN_INVALID");
       await ownerStillValid(actor.email, passwordVersion);
       const response = await observedFetch("company-read",`${INTUIT_ACCOUNTING_ORIGINS[config.environment]}/v3/company/${token.realmId}/companyinfo/${token.realmId}`, {
         method: "GET", redirect: "error", signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${token.accessToken}`, Accept: "application/json" },
@@ -447,9 +492,9 @@ export function createQuickBooksService(overrides = {}) {
   }
   async function performRefresh(actor, body) {
     if (!isOwner(actor) || actor.mustChangePassword) throw new QuickBooksError("Only the owner with a completed password setup can refresh QuickBooks.", 403);
-    const config = configFor(), previous = await read(QUICKBOOKS_CONNECTION_PATH);
+    const config = configFor(); let previous = await read(QUICKBOOKS_CONNECTION_PATH);
     checkRevision(previous, body.expectedRevision);
-    const value = previous?.value;
+    let value = previous?.value;
     if (value?.refreshOperation || value?.pending || value?.revocationStatus === "pending" || value?.remoteCleanup?.status === "pending")
       throw new QuickBooksError("A QuickBooks connection operation is still being verified.", 409, "QUICKBOOKS_BUSY");
     if (value?.remoteReviewRequired || value?.status !== "authorized" || !value?.encryptedTokens)
@@ -458,7 +503,14 @@ export function createQuickBooksService(overrides = {}) {
       throw new QuickBooksError("QuickBooks server credentials changed. Reconcile the saved authorization before refreshing.", 409, "QUICKBOOKS_CONFIGURATION_CHANGED");
     const token = decryptQuickBooksTokens(value.encryptedTokens, config), passwordVersion = digest(actor.passwordHash || "");
     await ownerStillValid(actor.email, passwordVersion);
-    if (Date.parse(token.accessTokenExpiresAt) > now() + 60_000) return { ...(await status()), refreshed: false };
+    if (value.encryptedTokens.version !== 2) {
+      previous = await saveConnection(previous, { ...value, revision: value.revision + 1, changeId: randomUUID(),
+        encryptedTokens: encryptQuickBooksTokens(token, config), companyVerification: null, updatedAt: stamp(now()) });
+      value = previous.value;
+      await auditImpl(actor.email, "quickbooks.storage.migrated", "merchant-connection", { accessTokenStorage: "memory-only", revision: value.revision });
+    }
+    if (readQuickBooksAccessToken(value.encryptedTokens, config, now()) && Date.parse(token.accessTokenExpiresAt) > now() + 60_000)
+      return { ...(await status()), refreshed: false };
     const refreshExpiry = Date.parse(token.refreshTokenExpiresAt), hardExpiry = token.refreshTokenHardExpiresAt ? Date.parse(token.refreshTokenHardExpiresAt) : null;
     if (!Number.isFinite(refreshExpiry) || refreshExpiry <= now() || (hardExpiry !== null && (!Number.isFinite(hardExpiry) || hardExpiry <= now()))) {
       await saveConnection(previous, { ...value, revision: value.revision + 1, changeId: randomUUID(), status: "refresh-blocked",
@@ -500,6 +552,7 @@ export function createQuickBooksService(overrides = {}) {
         credentialVersion: config.credentialVersion, encryptedTokens: encryptQuickBooksTokens(rotated, config),
         refreshOperation: null, lastRefreshAttemptId: attemptId, refreshStatus: "refreshed", lastRefreshedAt: stamp(now()), updatedAt: stamp(now()) });
       persisted = true;
+      forgetQuickBooksAccessToken(value.encryptedTokens, config);
       await auditImpl(actor.email, "quickbooks.refresh.saved", "merchant-connection", { environment: config.environment, revision: locked.value.revision + 1 });
       return { ...(await status()), refreshed: true };
     } catch (error) {
@@ -525,6 +578,7 @@ export function createQuickBooksService(overrides = {}) {
         : value?.pending?.stage === "exchanging" ? { attemptId: value.pending.attemptId, status: "pending" } : value?.remoteCleanup || null,
       remoteReviewRequired: Boolean(value?.remoteReviewRequired),
       revocationStatus: value?.encryptedTokens ? "pending" : "not-needed" });
+    if (value?.encryptedTokens) { try { forgetQuickBooksAccessToken(value.encryptedTokens, configFor()); } catch {} }
     let revocationStatus = deferredRefresh ? "pending" : value?.encryptedTokens ? "unconfirmed" : "not-needed";
     if (value?.encryptedTokens && !deferredRefresh) {
       try {
@@ -562,26 +616,26 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
     if(!paymentAuthorizationMatches(authorization,binding,operation,now()))
       throw new QuickBooksError("Production payments are not enabled.",503,"PRODUCTION_PAYMENTS_DISABLED");
   }
-  async function inspect(allowRefresh=false) {
+  async function inspect(allowRefresh=false, requireAccess=false) {
     const config=quickbooksConfig(env), record=await read(QUICKBOOKS_CONNECTION_PATH), value=record?.value;
-    if(value?.status!=="authorized"||!value.encryptedTokens||value.pending||value.refreshOperation||value.remoteReviewRequired
+    if(value?.status!=="authorized"||value.encryptedTokens?.version!==2||value.pending||value.refreshOperation||value.remoteReviewRequired
       ||value.revocationStatus==="pending"||value.remoteCleanup?.status==="pending"
       ||value.fingerprint!==config.fingerprint||value.credentialVersion!==config.credentialVersion
       ||typeof value.authorizationAttemptId!=="string"||!value.authorizationAttemptId)throw unavailable();
     const owner=(await read(userPath(value.connectedBy||OWNER_EMAIL)))?.value;
     if(!isOwner(owner)||owner.status!=="active"||owner.mustChangePassword)throw unavailable();
-    const token=decryptQuickBooksTokens(value.encryptedTokens,config);
-    if(typeof token.accessToken!=="string"||token.accessToken.length<8||token.accessToken.length>16_384
-      ||/[\s\x00-\x1f]/.test(token.accessToken)||!REALM_PATTERN.test(token.realmId||"")
+    const token={...decryptQuickBooksTokens(value.encryptedTokens,config),accessToken:readQuickBooksAccessToken(value.encryptedTokens,config,now())};
+    if(token.accessToken!==null&&(typeof token.accessToken!=="string"||token.accessToken.length<8||token.accessToken.length>16_384||/[\s\x00-\x1f]/.test(token.accessToken)))throw unavailable();
+    if(!REALM_PATTERN.test(token.realmId||"")
       ||(token.grantedScopes!==null&&(!Array.isArray(token.grantedScopes)||!token.grantedScopes.includes("com.intuit.quickbooks.payment"))))throw unavailable();
     const grantId=digest(`${config.credentialVersion}:${token.realmId}:${value.authorizationAttemptId}`);
     const expires=Date.parse(token.accessTokenExpiresAt);
     if(!Number.isFinite(expires))throw unavailable();
-    if(expires<=now()+60_000) {
+    if(expires<=now()+60_000 || ((allowRefresh || requireAccess) && !token.accessToken)) {
       if(!allowRefresh)throw unavailable();
       await authorize({environment:config.environment,grantId},"refresh");
       await connection.refresh(owner,{expectedRevision:value.revision});
-      const fresh=await inspect(false);
+      const fresh=await inspect(false,true);
       if(fresh.binding.grantId!==grantId)throw unavailable();
       return fresh;
     }

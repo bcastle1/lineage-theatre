@@ -284,6 +284,8 @@ export function createPaymentsService(overrides={}) {
     const value=(await readOrder(actor,orderId)).value;
     if(!value.capturedAt)throw new PaymentError("A receipt is available after the payment is confirmed.",409);
     return {receiptId:value.id,filmTitle:value.filmTitle,currency:value.currency,amountCents:value.amountCents,refundedCents:value.refundedCents,
+      transactionId:typeof value.providerChargeId==="string"&&providerIdPattern.test(value.providerChargeId)?value.providerChargeId:null,
+      processorDisclosure:"Payment is processed by: Intuit Payments Inc., 2700 Coast Avenue, Mountain View, CA 94043, Phone number 1-888-536-4801, NMLS #1098819",
       capturedAt:value.capturedAt,description:"Lineage Theatre film production",status:value.status,sandbox:isSandbox(value),
       notice:isSandbox(value)?"Sandbox test receipt. No live payment or bank settlement is represented.":"Payment captured. Film delivery is tracked separately."};
   }

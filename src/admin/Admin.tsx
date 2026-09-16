@@ -138,6 +138,7 @@ type QuickBooksStatus = {
   lastConnectedAt: string | null;
   refreshStatus?: string;
   lastRefreshedAt?: string | null;
+  accessTokenStorage?: "memory-only" | "migration-required" | "none";
   realmId?: string | null;
   revocationStatus?: string | null;
   companyVerification?: {
@@ -1821,6 +1822,8 @@ export default function Admin({
                       ? `Last authorized ${date(quickBooks.lastConnectedAt)}`
                       : "Only the owner can authorize the connection."}
                     {quickBooks?.environment === "sandbox" ? " Test environment." : ""}
+                    {quickBooks?.accessTokenStorage === "memory-only" ? " Access tokens stay in server memory only."
+                      : quickBooks?.accessTokenStorage === "migration-required" ? " Refresh authorization to update token storage." : ""}
                   </small>
                 </div>
                 <div>
@@ -1842,7 +1845,8 @@ export default function Admin({
                     </h3>
                     <p>
                       This checks accounting access only. Merchant eligibility, customer
-                      payments, and refunds remain unverified.
+                      payments, and refunds remain unverified. The check may renew a
+                      temporary access token if this server no longer has it in memory.
                     </p>
                   </div>
                   {isOwner && (

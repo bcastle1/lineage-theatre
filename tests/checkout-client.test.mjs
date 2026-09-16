@@ -35,7 +35,11 @@ test("card destinations accept only documented exact Intuit token endpoints and 
 test("fresh receipt normalization preserves refund changes and the original capture date", () => {
   const receipt = { receiptId: quote().orderId, filmTitle: quote().filmTitle, currency: "USD", amountCents: 100,
     refundedCents: 100, status: "refunded", capturedAt: new Date(now - 60_000).toISOString(), sandbox: true };
-  assert.deepEqual(normalizeFilmReceipt({ ...receipt, paymentToken: token }), receipt);
+  const normalized=normalizeFilmReceipt({ ...receipt, paymentToken: token, transactionId:"synthetic-charge-123", processorDisclosure:"untrusted disclosure" });
+  assert.deepEqual({...normalized,transactionId:undefined,processorDisclosure:undefined}, {...receipt,transactionId:undefined,processorDisclosure:undefined});
+  assert.equal(normalized.transactionId,"synthetic-charge-123");
+  assert.match(normalized.processorDisclosure,/Intuit Payments Inc\..*1-888-536-4801.*1098819/);
+  assert.equal(normalizeFilmReceipt({...receipt,transactionId:"bad\nreference"}).transactionId,null);
   assert.equal(normalizeFilmReceipt({ ...receipt, refundedCents: 101 }), null);
   assert.equal(normalizeFilmReceipt({ ...receipt, capturedAt: "unknown" }), null);
 });

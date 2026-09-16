@@ -13,7 +13,8 @@ export type FilmOrder = {
   currency: "USD"; amountCents: number; refundedCents: number; charged: boolean | null;
   requiresReview: boolean; receiptAvailable: boolean; createdAt: string; updatedAt: string; sandbox: boolean;
 };
-export type FilmReceipt = { receiptId: string; filmTitle: string; currency: "USD"; amountCents: number; refundedCents: number; capturedAt: string; status: FilmOrder["status"]; sandbox: boolean };
+export type FilmReceipt = { receiptId: string; filmTitle: string; currency: "USD"; amountCents: number; refundedCents: number; capturedAt: string; status: FilmOrder["status"]; sandbox: boolean; transactionId: string | null; processorDisclosure: string };
+const processorDisclosure = "Payment is processed by: Intuit Payments Inc., 2700 Coast Avenue, Mountain View, CA 94043, Phone number 1-888-536-4801, NMLS #1098819";
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 const amount = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 100_000_000;
@@ -61,7 +62,9 @@ export function normalizeFilmReceipt(value: unknown): FilmReceipt | null {
     || !timestamp(value.capturedAt) || !["captured", "uncertain", "refund-pending", "partially-refunded", "refunded"].includes(String(value.status))
     || typeof value.sandbox !== "boolean") return null;
   return { receiptId: value.receiptId, filmTitle: value.filmTitle, currency: "USD", amountCents: value.amountCents,
-    refundedCents: value.refundedCents as number, capturedAt: value.capturedAt, status: value.status as FilmOrder["status"], sandbox: value.sandbox };
+    refundedCents: value.refundedCents as number, capturedAt: value.capturedAt, status: value.status as FilmOrder["status"], sandbox: value.sandbox,
+    transactionId: typeof value.transactionId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value.transactionId) ? value.transactionId : null,
+    processorDisclosure };
 }
 
 export function quoteMatchesConfiguration(quote: FilmQuote | null, configuration: CheckoutConfiguration | null): boolean {

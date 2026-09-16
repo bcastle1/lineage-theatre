@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {randomBytes} from "node:crypto";
 import {createPaymentsService,createIntuitPaymentsAdapter,PaymentError} from "../api/_lib/payments.mjs";
-import {createQuickBooksPaymentsTransport,quickbooksConfig,encryptQuickBooksTokens,QUICKBOOKS_CONNECTION_PATH,QUICKBOOKS_SCOPES,verifyQuickBooksDiscovery,INTUIT_AUTHORIZE,INTUIT_TOKEN,INTUIT_REVOKE} from "../api/_lib/quickbooks.mjs";
+import {createQuickBooksPaymentsTransport,quickbooksConfig,encryptQuickBooksTokens,forgetQuickBooksAccessToken,QUICKBOOKS_CONNECTION_PATH,QUICKBOOKS_SCOPES,verifyQuickBooksDiscovery,INTUIT_AUTHORIZE,INTUIT_TOKEN,INTUIT_REVOKE} from "../api/_lib/quickbooks.mjs";
 import {tokenizeSandboxFixture,checkSandboxTokenCors} from "../scripts/test-intuit-sandbox-token.mjs";
 import {digest,userPath} from "../api/_lib/auth.mjs";
 import {OWNER_EMAIL} from "../api/_lib/access.mjs";
@@ -93,14 +93,16 @@ test("checkout never accepts card data, client amounts, missing consent, cross-t
   assert.equal(h.requests.length,0);
 });
 
-test("a durable capture uses the quoted amount and returns a provider-neutral receipt without storing tokens or cards",async()=>{
+test("a durable capture returns a receipt with the confirmed transaction and processor disclosure without tokens or cards",async()=>{
   const h=fixture(),result=await h.pay();
   assert.equal(result.status,"captured");assert.equal(result.charged,true);noInternalData(result);
   const operation=h.requests[0];assert.equal(operation.method,"POST");assert.equal(operation.path,"/charges");
   assert.deepEqual(operation.body,{amount:"11.25",currency:"USD",token:TOKEN,capture:true,context:{mobile:false,isEcommerce:true}});
   assert.match(operation.requestId,/^[a-f0-9-]{36}$/);
   const stored=JSON.stringify([...h.records.values()]);assert.equal(stored.includes(TOKEN),false);assert.equal(stored.includes("4111111111111111"),false);assert.equal(stored.includes('"cvc"'),false);
-  const receipt=await h.service.receipt(CUSTOMER,result.id);assert.equal(receipt.amountCents,1125);assert.equal(receipt.sandbox,true);noInternalData(receipt);
+  const receipt=await h.service.receipt(CUSTOMER,result.id);assert.equal(receipt.amountCents,1125);assert.equal(receipt.sandbox,true);
+  assert.equal(receipt.transactionId,"synthetic-charge-123");assert.match(receipt.processorDisclosure,/Intuit Payments Inc\..*1-888-536-4801.*1098819/);
+  noInternalData({...receipt,processorDisclosure:undefined});
   const ledger=await h.service.accountingExport(ADMIN,result.id);assert.equal(ledger.postingReady,false);assert.equal(ledger.settlementVerified,false);assert.equal(ledger.feesCents,null);assert.equal(ledger.providerExpenseCents,null);assert.equal(ledger.events.length,1);
   assert.equal((await h.service.authorizeProduction({email:CUSTOMER.email,orderId:result.id,manifestHash:REF,preparedId})).allowed,true);
   await expectError(h.service.authorizeProduction({email:OTHER.email,orderId:result.id,manifestHash:REF,preparedId}),"PRODUCTION_UNAVAILABLE");
@@ -216,6 +218,15 @@ test("only an explicit internal payment operation may refresh a near-expired san
   const refreshed=await h.transport.binding({allowRefresh:true});assert.deepEqual(refreshed,original);assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],"refresh");
 });
 
+test("cold payment workers inspect metadata without refresh and renew memory access once for an authorized operation",async()=>{
+  const h=grantFixture({refresh:async({records,put,tokens,config})=>put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-cold-worker-access"},config)})});
+  forgetQuickBooksAccessToken(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens,h.config);
+  const binding=await h.transport.binding();assert.equal(h.calls.length,0);
+  await h.transport.request(binding,{method:"GET",path:"/charges/synthetic-charge-123",requestId:"synthetic-cold-request-123"});
+  assert.equal(h.calls.length,2);assert.equal(h.calls[0][0],"refresh");
+  assert.equal(h.calls[1][1].headers.Authorization,"Bearer synthetic-cold-worker-access");
+});
+
 test("bounded processor diagnostics capture correlation IDs and HTTP outcomes without leaking raw failures to customers",async()=>{
   const tid="12345678-abcd-4321-baad-123456789abc";
   const h=fixture({dispatch:async()=>new Response(JSON.stringify({error:"sensitive token "+TOKEN,card:"4111111111111111"}),{status:503,headers:{intuit_tid:tid}})});
@@ -284,7 +295,7 @@ test("production service plumbing uses current grant-scoped server authorization
   const q=await h.makeQuote();assert.equal(q.sandbox,false);
   const paid=await h.pay();assert.equal(paid.sandbox,false);
   const receipt=await h.service.receipt(CUSTOMER,paid.id);assert.equal(receipt.sandbox,false);assert.doesNotMatch(receipt.notice,/sandbox/i);
-  noInternalData(receipt);
+  noInternalData({...receipt,processorDisclosure:undefined});
   const grant=await h.service.authorizeProduction({email:CUSTOMER.email,orderId:paid.id,manifestHash:REF,preparedId});
   assert.equal(grant.environment,"production");assert.equal(grant.fictionalOnly,false);
   const refunded=await h.service.refund(ADMIN,{orderId:paid.id,amountCents:100,reason:"Fictional test",idempotencyKey:"synthetic-refund-1234"});

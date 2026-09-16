@@ -212,8 +212,10 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     await work("Opening your receipt…", async () => {
       const value = normalizeFilmReceipt(await api(`/api/studio?action=receipt&id=${encodeURIComponent(paymentReference.orderId)}`));
       if (!value || value.receiptId !== order.id || value.amountCents !== order.amountCents || value.sandbox !== paymentReference.sandbox) throw new Error("The receipt could not be verified. Check the order status and try again.");
-      const receipt = { receiptId: value.receiptId, filmTitle: value.filmTitle, amount: money(value.amountCents), refunded: money(value.refundedCents), status: value.status,
+      const receipt = { receiptId: value.receiptId, transactionId: value.transactionId, filmTitle: value.filmTitle, currency: value.currency,
+        paymentAmount: money(value.amountCents), totalAmount: money(value.amountCents), refunded: money(value.refundedCents), status: value.status,
         type: value.sandbox ? "Sandbox test receipt — no real money" : "Payment receipt", paidAt: value.capturedAt,
+        processorDisclosure: `${value.sandbox ? "Sandbox test only. " : ""}${value.processorDisclosure}`,
         notice: "A payment receipt does not confirm bank settlement or completion of your film." };
       const blob = new Blob([JSON.stringify(receipt, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob), link = document.createElement("a");

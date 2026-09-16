@@ -48,6 +48,14 @@ Final resubmission needs an accurate review of existing answers beyond reCAPTCHA
 
 Only the supported reCAPTCHA answer was changed. These observations are not a complete assessment audit, and no unverified company/legal answers were changed or submitted.
 
+## Authorized follow-up implementation
+
+The user authorized resolving these remaining gaps before resubmission. The OAuth implementation now writes version 2 envelopes with an explicit allowlist of refresh-token and grant metadata, never access tokens. Access tokens are AES-GCM encrypted in bounded volatile process memory, bound to current credentials and the exact saved envelope. Cold workers use the existing conditional-write refresh lock; read-only status does not rotate tokens. The owner refresh action conditionally migrates legacy records before renewal, and old storage is blocked from company/Payments use until migrated. Live migration remains a required checkpoint.
+
+In-app receipt downloads now include explicit payment and total amounts, date, confirmed processor transaction reference when present, refund amount/status, and the exact Intuit processor/contact disclosure listed by the questionnaire. Sandbox receipts remain labeled test-only. Email delivery, card last-four and fee details are not represented. Remove those unsupported questionnaire selections after deployment and retain In-App delivery; changing source code does not itself change the saved questionnaire.
+
+Local verification: 264 automated tests cover refresh-only persistence, expiry, credential/envelope binding, cold-worker renewal, legacy migration (including expired refresh), the existing concurrency/cancellation/ambiguous-save cases, and receipt sanitization. TypeScript/Vite build and the isolated checkout harness pass. These tests use synthetic provider responses; live migration, company verification and assessment resubmission remain pending at this code checkpoint.
+
 ## Assessment answer after live verification
 
 Only after the rollout checks above succeed, the supported description is:

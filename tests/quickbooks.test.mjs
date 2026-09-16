@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createCipheriv } from "node:crypto";
 import { createQuickBooksHandler } from "../api/quickbooks.mjs";
 import { userPath } from "../api/_lib/auth.mjs";
 import { OWNER_EMAIL } from "../api/_lib/access.mjs";
-import { createQuickBooksService, quickbooksConfig, encryptQuickBooksTokens, decryptQuickBooksTokens,
+import { createQuickBooksService, quickbooksConfig, encryptQuickBooksTokens, decryptQuickBooksTokens, readQuickBooksAccessToken, forgetQuickBooksAccessToken,
   QUICKBOOKS_CONNECTION_PATH, QUICKBOOKS_SCOPES, QUICKBOOKS_CALLBACK, QUICKBOOKS_STATE_COOKIE,
   INTUIT_AUTHORIZE, INTUIT_TOKEN, INTUIT_REVOKE, quickbooksStatePath, readQuickBooksStateCookie,
   callbackLocation } from "../api/_lib/quickbooks.mjs";
@@ -96,7 +96,7 @@ test("QuickBooks config requires explicit allowlisted environment, app credentia
 test("AES-GCM ciphertext hides tokens and rejects tampering, key changes, app/environment changes, and envelope swaps", () => {
   const env = testEnv(), config = quickbooksConfig(env), payload = { accessToken: ACCESS, refreshToken: REFRESH, realmId: REALM };
   const encrypted = encryptQuickBooksTokens(payload, config), second = encryptQuickBooksTokens(payload, config);
-  assert.deepEqual(decryptQuickBooksTokens(encrypted, config), payload);
+  assert.deepEqual(decryptQuickBooksTokens(encrypted, config), {refreshToken: REFRESH, realmId: REALM});
   assert.notEqual(encrypted.iv, second.iv);
   for (const text of [ACCESS, REFRESH, REALM]) assert.equal(JSON.stringify(encrypted).includes(text), false);
   for (const field of ["tag", "iv", "ciphertext"]) {
@@ -442,7 +442,8 @@ test("refresh atomically rotates both tokens and the next refresh uses the newes
   const result = await refreshCurrent(h);
   assert.equal(result.refreshed, true); assert.equal(result.refreshStatus, "refreshed"); assert.equal(result.connected, true);
   assert.notEqual(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens.ciphertext, originalCiphertext);
-  assert.equal(savedToken(h).refreshToken, "synthetic-rotated-refresh"); assert.equal(savedToken(h).accessToken, "synthetic-rotated-access");
+  assert.equal(savedToken(h).refreshToken, "synthetic-rotated-refresh"); assert.equal(savedToken(h).accessToken, undefined);
+  assert.equal(readQuickBooksAccessToken(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens, quickbooksConfig(h.env), Date.parse("2026-09-14T01:00:01Z")), "synthetic-rotated-access");
   h.advance(3_600_001); await refreshCurrent(h); assert.equal(h.calls.length, 3);
   for (const secret of [ACCESS, REFRESH, "synthetic-rotated-access", "synthetic-rotated-refresh"])
     assert.equal(JSON.stringify([result, [...h.records.values()], h.events]).includes(secret), false);
@@ -674,8 +675,76 @@ function companyResponse(extra = {}, root = {}) {
 async function verifyCurrent(h, service = h.service) { return service.verifyCompany(OWNER, { expectedRevision: (await h.service.status()).revision }); }
 function replaceStoredToken(h, extra) {
   const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
-  h.putRecord(QUICKBOOKS_CONNECTION_PATH, { ...value, encryptedTokens: encryptQuickBooksTokens({ ...savedToken(h), ...extra }, quickbooksConfig(h.env)) });
+  h.putRecord(QUICKBOOKS_CONNECTION_PATH, { ...value, encryptedTokens: encryptQuickBooksTokens({ ...savedToken(h), accessToken: ACCESS, ...extra }, quickbooksConfig(h.env)) });
 }
+
+function legacyTokenEnvelope(h, extra = {}) {
+  const config = quickbooksConfig(h.env), secretId = "synthetic-legacy-envelope", iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", config.key, iv);
+  cipher.setAAD(Buffer.from(`lineage-quickbooks-v1:${QUICKBOOKS_CONNECTION_PATH}:${config.fingerprint}:${secretId}`));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify({ ...savedToken(h), accessToken: ACCESS, ...extra })), cipher.final()]);
+  return { version: 1, secretId, iv: iv.toString("base64"), ciphertext: ciphertext.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+}
+
+test("durable authorizations exclude access tokens; memory tokens expire and cannot cross credentials or envelope generations", async () => {
+  const h = harness(); await h.authorize();
+  const envelope = h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens, config = quickbooksConfig(h.env);
+  assert.equal(envelope.version, 2); assert.equal(savedToken(h).accessToken, undefined);
+  assert.equal(readQuickBooksAccessToken(envelope, config, Date.parse("2026-09-14T00:00:01Z")), ACCESS);
+  assert.equal(readQuickBooksAccessToken({...envelope, secretId:"changed"}, config, 0), null);
+  assert.equal(readQuickBooksAccessToken(envelope, quickbooksConfig({...h.env, QUICKBOOKS_CLIENT_SECRET:"changed"}), 0), null);
+  h.advance(3_600_001);
+  assert.equal((await h.service.status()).accessTokenAvailable, false);
+  assert.equal(readQuickBooksAccessToken(envelope, config, 0), null);
+});
+
+test("cold worker status stays read-only and explicit renewal uses encrypted refresh material without persisting access", async () => {
+  const h = harness(); await h.authorize();
+  const envelope = h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens;
+  forgetQuickBooksAccessToken(envelope, quickbooksConfig(h.env));
+  const before = structuredClone([...h.records.values()]);
+  const status = await h.peer().status();
+  assert.equal(status.connected, true); assert.equal(status.accessTokenAvailable, false); assert.equal(status.accessTokenStorage, "memory-only");
+  assert.deepEqual([...h.records.values()], before); assert.equal(h.calls.length, 1);
+  h.setFetch(async () => rotatedResponse());
+  const renewed = await refreshCurrent(h, h.peer());
+  assert.equal(renewed.refreshed, true); assert.equal(renewed.accessTokenAvailable, true);
+  assert.equal(savedToken(h).accessToken, undefined); assert.equal(h.calls.length, 2);
+});
+
+test("cold worker company check renews once before its read and preserves the saved grant", async () => {
+  const h = harness(); await h.authorize();
+  forgetQuickBooksAccessToken(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.encryptedTokens, quickbooksConfig(h.env));
+  h.setFetch(async url => url === INTUIT_TOKEN ? rotatedResponse() : companyResponse());
+  const result = await verifyCurrent(h, h.peer());
+  assert.equal(result.companyVerification.accountingAccessVerified, true);
+  assert.deepEqual(h.calls.map(call => call[0]), [INTUIT_TOKEN, INTUIT_TOKEN, `https://sandbox-quickbooks.api.intuit.com/v3/company/${REALM}/companyinfo/${REALM}`]);
+  assert.equal(savedToken(h).accessToken, undefined);
+});
+
+test("legacy storage is blocked until an owner CAS migration removes access without changing the grant", async () => {
+  const h = harness(); await h.authorize();
+  const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
+  h.putRecord(QUICKBOOKS_CONNECTION_PATH, {...value, encryptedTokens:legacyTokenEnvelope(h)});
+  const status = await h.service.status();
+  assert.equal(status.accessTokenStorage, "migration-required"); assert.equal(status.connected, false);
+  await assert.rejects(() => verifyCurrent(h), error => error.code === "QUICKBOOKS_STORAGE_MIGRATION_REQUIRED");
+  const result = await refreshCurrent(h);
+  assert.equal(result.accessTokenStorage, "memory-only"); assert.equal(result.refreshed, false);
+  assert.equal(savedToken(h).accessToken, undefined); assert.equal(savedToken(h).refreshToken, REFRESH);
+  assert.equal(h.records.get(QUICKBOOKS_CONNECTION_PATH).value.authorizationAttemptId, value.authorizationAttemptId);
+  assert.equal(h.calls.length, 1);
+});
+
+test("legacy migration removes durable access before an expired refresh is blocked", async () => {
+  const h = harness(); await h.authorize();
+  const value = h.records.get(QUICKBOOKS_CONNECTION_PATH).value;
+  h.putRecord(QUICKBOOKS_CONNECTION_PATH, {...value, encryptedTokens:legacyTokenEnvelope(h, {refreshTokenExpiresAt:"2026-09-13T00:00:00Z"})});
+  h.advance(3_600_001);
+  await assert.rejects(() => refreshCurrent(h), error => error.code === "QUICKBOOKS_REFRESH_EXPIRED");
+  assert.equal(savedToken(h).accessToken, undefined);
+  assert.equal((await h.service.status()).accessTokenStorage, "memory-only"); assert.equal(h.calls.length, 1);
+});
 
 test("company checks require owner same-origin POST and cannot accept client-supplied realm, token, or destination", async () => {
   const h = harness(); await h.authorize(); h.setFetch(async (url, request) => {
