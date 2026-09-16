@@ -41,7 +41,10 @@ const [apexA, wwwCname, nameservers, httpResult, httpsResult] = await Promise.al
 
 const buildMatch = httpsResult.body.match(/<meta name="lineage-build" content="([^"]+)"/i);
 const deployedCommit = buildMatch?.[1]?.toLowerCase() || "";
-const namecheapAuthority = nameservers.length > 0 && nameservers.every((server) => server.toLowerCase().endsWith("registrar-servers.com"));
+// Namecheap domains can use BasicDNS or the existing Namecheap hosting zone.
+// Recognize both without changing the domain's DNS during an app release.
+const namecheapAuthority = nameservers.length > 0 && nameservers.every((server) =>
+  server.toLowerCase().endsWith(".registrar-servers.com") || /^dns[12]\.namecheaphosting\.com$/i.test(server));
 const servedByVercel = String(httpsResult.headers.server || "").toLowerCase() === "vercel";
 const hasApp = httpsResult.body.includes("Lineage Theatre") && httpsResult.body.includes('id="root"');
 const commitMatches = expectedCommit ? deployedCommit === expectedCommit : Boolean(deployedCommit && deployedCommit !== "local");

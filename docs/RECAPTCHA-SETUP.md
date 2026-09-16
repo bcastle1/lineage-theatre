@@ -22,12 +22,31 @@ The browser retains the existing one-POST payment behavior and read-only recover
 
 ## Evidence at implementation checkpoint
 
-The Google site was registered in Edge under the requested account after explicit approval. The matching `RECAPTCHA_SECRET_KEY` (Secret) and `RECAPTCHA_SITE_KEY` (Config) were saved in the existing Vercel project's Production environment; successful saves and environment names were verified without logging credential values. Deployment, actual Google verification, and assessment resubmission are still pending at this checkpoint.
+The Google site was registered in Edge under the requested account after explicit approval. The matching `RECAPTCHA_SECRET_KEY` (Secret) and `RECAPTCHA_SITE_KEY` (Config) were saved in the existing Vercel project's Production environment; successful saves and environment names were verified without logging credential values.
 
 - `pnpm test`: **258 passed**, zero failures or skips. Tests cover configuration, Google request/response validation, single-use account/quote binding, concurrent consumption, auth rejection before account side effects, payment rejection before processor calls, and preserved GET order recovery.
 - `pnpm run build`: TypeScript and Vite passed. The existing large-bundle warning remains.
 - Both `node scripts/test-workflow-server.mjs --check` and `node scripts/test-workflow-server.mjs --checkout-fixtures --check` passed. The isolated loopback harness explicitly injects synthetic Google responses and memory-only storage. Its Vite transform redirects only the local reCAPTCHA loader to the harness script; no bypass exists in the deployed app. Captured, declined and uncertain payment fixtures, replay denial and GET recovery passed with zero outbound requests.
 - Edge UI: sign-in, preparation, quote, reCAPTCHA notice and simulated checkout succeeded. Reload followed by **Check payment status** recovered the same confirmed order; the synthetic processor count stayed at one. Desktop and 390-by-844 viewport checks showed no horizontal overflow. The duplicate React key shared by the preparation and checkout panels was corrected; no new browser warnings/errors appeared on the rechecked route. Browser fixture data and Google/Intuit responses were synthetic, so these checks do not establish live provider behavior.
+
+## Live rollout — September 16, 2026
+
+- Application revision `0c937106eb0c18bcb32249a1eb9e801503a7150a` was pushed to GitHub main. GitHub's build/test workflow succeeded. Vercel deployment `dpl_8KyPFAePJGxwELe6QB615zYJZ6tV` reached READY with both `lineagetheater.com` and `www.lineagetheater.com` aliases. The HTTPS custom domain returned that exact build marker. Six existing API functions remain; no new function was added.
+- `/api/auth?action=captcha` returned required/available true, provider `recaptcha-v3`, and the public site key without a secret. Google settings confirmed v3, the requested owner, `lineagetheater.com`, and enabled origin verification.
+- A real Edge request on the custom domain loaded Google's script and passed the server's action/domain/score/time verification. A deliberately nonexistent `example.invalid` account then received the expected incorrect-credentials response. This demonstrates a real accepted Google check; it does not claim a successful real-account sign-in. The browser recorded no warnings or errors for this check.
+- A direct same-origin login request without a CAPTCHA response returned HTTP 403 / `CAPTCHA_REQUIRED` before account lookup. No customer account, card, payment or film was created by these production checks.
+- The existing deployment script incorrectly rejected the domain's already-configured `dns1.namecheaphosting.com` / `dns2.namecheaphosting.com` nameservers. Its allowlist now recognizes both Namecheap BasicDNS and these exact hosting nameservers; DNS was not changed. The exact-SHA, HTTPS, Vercel and DNS check then passed.
+- The existing Lineage Theater questionnaire in BROCOTech was reopened, the **Payment Recaptcha** answer changed to **Yes. My site or app includes reCaptcha**, and Intuit displayed its successful-save confirmation. Final assessment resubmission and approval have not occurred.
+
+## Additional existing assessment mismatches
+
+Final resubmission needs an accurate review of existing answers beyond reCAPTCHA:
+
+- The Payments API tab currently confirms that access tokens are stored in volatile memory only. The current OAuth service encrypts and durably saves access and refresh tokens in private Blob. The linked [Intuit payment-security rules](https://developer.intuit.com/app/developer/qbpayments/docs/learn/ensure-data-security#security-rules-for-your-application) also state the volatile-memory requirement. Encrypted-at-rest storage is not proof of a memory-only implementation. Resolve the actual requirement and implementation before attesting.
+- Receipt answers currently include email delivery, fees, masked card information, and the specified Intuit processor/contact disclosure. The app currently offers an in-app JSON download with amount, refunded amount, status, date and its order reference; email delivery and those additional fields are not implemented by this checkout. These selections must be reconciled with supported behavior before resubmission.
+- The existing declined/voided/refunded testing answer remains **No**. Synthetic unit and harness outcomes do not establish actual provider transaction-lifecycle verification.
+
+Only the supported reCAPTCHA answer was changed. These observations are not a complete assessment audit, and no unverified company/legal answers were changed or submitted.
 
 ## Assessment answer after live verification
 
