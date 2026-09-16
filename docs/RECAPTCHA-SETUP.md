@@ -12,7 +12,7 @@ The browser retains the existing one-POST payment behavior and read-only recover
 
 ## Provision before deployment
 
-1. In Google's reCAPTCHA console, use the specified Google account, label **Lineage Theater**, **Score based (v3)**, and domain **lineagetheater.com**. The existing Google Cloud project shown in the prepared form is **Default Gemini Project**. No billing purchase is part of this setup. Credential creation is pending confirmation.
+1. In Google's reCAPTCHA console, use the specified Google account, label **Lineage Theater**, **Score based (v3)**, and domain **lineagetheater.com**. The existing Google Cloud project is **Default Gemini Project**. With the user's explicit approval, the site was registered on September 16, 2026, and Google's origin verification was confirmed enabled. No billing purchase was made.
 2. Set the matching `RECAPTCHA_SITE_KEY` and `RECAPTCHA_SECRET_KEY` in the existing Vercel `lineage-theater` project's Production environment. Store the secret as a sensitive server-only variable. Never commit either credential or expose the secret through a `VITE_` variable.
 3. Default `RECAPTCHA_ALLOWED_HOSTNAMES` is `lineagetheater.com,www.lineagetheater.com`; `RECAPTCHA_MIN_SCORE` defaults to `0.5`. Keep Google's domain validation enabled. Development/preview hosts require a separately scoped key and explicit hostname configuration, not a production bypass.
 4. Deploy the exact tested commit only after credentials are available. This version requires reCAPTCHA for sign-in; deploying without working credentials would block new sign-ins. Configuration is available publicly at `/api/auth?action=captcha`, exposing the public site key only.
@@ -22,7 +22,7 @@ The browser retains the existing one-POST payment behavior and read-only recover
 
 ## Evidence at implementation checkpoint
 
-The Google form is prepared in Edge under the requested account. Credentials, production environment configuration, deployment, actual Google verification, and assessment resubmission are still pending.
+The Google site was registered in Edge under the requested account after explicit approval. The matching `RECAPTCHA_SECRET_KEY` (Secret) and `RECAPTCHA_SITE_KEY` (Config) were saved in the existing Vercel project's Production environment; successful saves and environment names were verified without logging credential values. Deployment, actual Google verification, and assessment resubmission are still pending at this checkpoint.
 
 - `pnpm test`: **258 passed**, zero failures or skips. Tests cover configuration, Google request/response validation, single-use account/quote binding, concurrent consumption, auth rejection before account side effects, payment rejection before processor calls, and preserved GET order recovery.
 - `pnpm run build`: TypeScript and Vite passed. The existing large-bundle warning remains.
