@@ -24,7 +24,7 @@ if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new 
 
 // Remove inherited provider settings before importing application services.
 for (const name of Object.keys(process.env)) {
-  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
+  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
 }
 process.env.LINEAGE_SESSION_SECRET = "synthetic-workflow-session-key-local-only-never-production";
 process.env.LINEAGE_MFA_ENCRYPTION_KEY = "cd".repeat(32);
@@ -56,6 +56,21 @@ const write = async (path, value, etag) => {
   records.set(path, next);
   return { etag: next.etag };
 };
+// Real verification/proof logic, explicitly injected fake Google transport and
+// memory storage. No application environment flag can enable this fixture.
+const { createCaptchaService } = await import("../api/_lib/captcha.mjs");
+const fixtureCaptchaToken = action => `synthetic_captcha_${action}_${randomUUID()}`;
+const seenCaptchaTokens = new Set();
+const captcha = createCaptchaService({ read, write,
+  env: { RECAPTCHA_SITE_KEY: "synthetic-site-key-local-only", RECAPTCHA_SECRET_KEY: "synthetic-secret-local-only", RECAPTCHA_ALLOWED_HOSTNAMES: HOST },
+  fetchImpl: async (url, options) => {
+    assert.equal(url, "https://www.google.com/recaptcha/api/siteverify");
+    const token = options.body.get("response"), match = /^synthetic_captcha_(login|register|mfa|checkout)_/.exec(token || "");
+    const valid = Boolean(match) && !seenCaptchaTokens.has(token);
+    seenCaptchaTokens.add(token);
+    return new Response(JSON.stringify({ success: valid, action: match?.[1], hostname: HOST, score: 0.9, challenge_ts: new Date().toISOString() }));
+  },
+});
 const limit = async (key, maximum, windowMs) => {
   const path = `limits/${auth.digest(key)}-${Math.floor(Date.now() / windowMs)}.json`;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -114,7 +129,7 @@ const recordPage = async (prefix, { cursor, limit: size = 50 } = {}) => {
   return { records: page, ...(offset + size < all.length ? { cursor: String(offset + size) } : {}) };
 };
 const shared = { getSession: session, readRecord: read, writeRecord: write, limitAction: limit,
-  connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, payments };
+  connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, payments, captcha };
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
@@ -181,6 +196,10 @@ const server = createServer(async (req, res) => {
     if (path === "/__workflow/seed.js") {
       res.setHeader("Content-Type", "text/javascript; charset=utf-8"); return res.end(seedScript);
     }
+    if (path === "/__workflow/captcha.js") {
+      res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      return res.end('/* SYNTHETIC LOCAL TEST ONLY: no Google service call. */ window.grecaptcha={ready:callback=>callback(),execute:async(_key,{action})=>"synthetic_captcha_"+action+"_"+crypto.randomUUID()};');
+    }
     if (path === "/__workflow") {
       // This helper exposes only the intentionally public fixture accounts, never real users.
       const visible = [];
@@ -204,7 +223,12 @@ if (!checkOnly) {
   const [{ createServer: createViteServer }, { default: react }] = await Promise.all([import("vite"), import("@vitejs/plugin-react")]);
   vite = await createViteServer({ root, configFile: false, envFile: false, appType: "spa",
     define: { __BUILD_COMMIT__: JSON.stringify("synthetic-local-test") },
-    plugins: [react(), { name: "synthetic-workflow-label", transformIndexHtml(html) {
+    plugins: [react(), { name: "synthetic-workflow-label",
+    transform(code, id) {
+      if (id.replaceAll("\\", "/").endsWith("/src/lib/captcha.ts"))
+        return code.replace("https://www.google.com/recaptcha/api.js?render=", "/__workflow/captcha.js?render=");
+    },
+    transformIndexHtml(html) {
       return html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/i,
         `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' blob: ws://${HOST}:${PORT}">`)
         .replace("</head>", '<script src="/__workflow/seed.js"></script></head>')
@@ -223,6 +247,8 @@ process.once("SIGTERM", () => void close());
 
 function route(path, { body, cookie, suppliedOrigin = origin } = {}) {
   return new Promise((resolve, reject) => {
+    if (["login", "register", "mfaChallenge"].includes(body?.action))
+      body = { ...body, captchaToken: fixtureCaptchaToken(body.action === "mfaChallenge" ? "mfa" : body.action) };
     const data = body ? JSON.stringify(body) : null;
     const req = httpRequest(`${origin}${path}`, { method: data ? "POST" : "GET",
       headers: { Origin: suppliedOrigin, ...(cookie ? { Cookie: cookie } : {}),
@@ -258,7 +284,7 @@ async function check() {
   assert.equal((await route(`/api/studio?action=manifest&id=${job.id}`, { cookie: customer })).status, 200);
   assert.equal((await route(`/api/studio?action=productionStatus&id=${job.id}`, { cookie: other })).status, 404);
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "quote", project: fixture, idempotencyKey: "synthetic-workflow-quote-001" } })).status, 503);
-  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "checkout", quoteId: "a".repeat(64), idempotencyKey: "synthetic-workflow-pay-001", paymentToken: "synthetic_token_never_real", consent: true } })).status, 503);
+  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "checkout", quoteId: "a".repeat(64), idempotencyKey: "synthetic-workflow-pay-001", paymentToken: "synthetic_token_never_real", consent: true } })).status, 403);
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "generate" } })).status, 503);
   assert.equal((await route("/api/admin", { cookie: customer, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 403);
   assert.equal((await route("/api/admin", { cookie: owner, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 201);
@@ -331,13 +357,17 @@ async function checkCheckout() {
     assert.equal(quoted.body.manifestHash, prepared.body.manifestHash);
     assert.equal(quoted.body.amountCents, 100);
     assert.equal(quoted.body.sandbox, true);
-    const body = { action: "checkout", quoteId: quoted.body.id, idempotencyKey: `checkout-fixture-charge-${index}`, paymentToken: `fixture_card_${status}`, consent: true };
+    const preflight = await route("/api/studio", { cookie: customer, body: { action: "checkoutCheck", quoteId: quoted.body.id, captchaToken: fixtureCaptchaToken("checkout") } });
+    assert.equal(preflight.status, 200);
+    const body = { action: "checkout", quoteId: quoted.body.id, checkoutProof: preflight.body.checkoutProof, idempotencyKey: `checkout-fixture-charge-${index}`, paymentToken: `fixture_card_${status}`, consent: true };
     const paid = await route("/api/studio", { cookie: customer, body });
     assert.equal(paid.status, 200);
     assert.equal(paid.body.id, quoted.body.orderId);
     assert.equal(paid.body.status, status);
     assert.equal(paid.body.sandbox, true);
     const charges = syntheticCharges;
+    assert.equal((await route("/api/studio", { cookie: customer, body })).status, 403);
+    assert.equal(syntheticCharges, charges, "Replaying a consumed CAPTCHA proof must not call the processor");
     for (let readNumber = 0; readNumber < 2; readNumber++) {
       const checked = await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: customer });
       assert.equal(checked.status, 200); assert.equal(checked.body.status, status);

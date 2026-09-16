@@ -26,7 +26,7 @@ The earlier [QuickBooks setup record](QUICKBOOKS-SETUP.md) and [film integration
 
 These results do not establish live email delivery, real payment/refund behavior, provider quality, deployed account security or a successful production release. Record further runtime evidence with time, environment, exact commit and result; omit tokens, passwords, card data and source materials.
 
-The Intuit questionnaire's corrected AI description was saved and read back on September 14. The assessment remains unsubmitted; saved questionnaire text does not establish approved production access.
+The Intuit questionnaire's corrected AI description was saved and read back on September 14. This was an unsubmitted assessment at that checkpoint. On September 16, Intuit support case 00227847 confirmed that the subsequently submitted assessment was rejected for missing Payment ReCaptcha and reopened for correction. See [the reCAPTCHA rollout record](RECAPTCHA-SETUP.md); saved questionnaire text does not establish approved production access.
 
 ## Server configuration
 

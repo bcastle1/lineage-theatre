@@ -4,6 +4,7 @@ import { productionReadiness } from "./_lib/production.mjs";
 import { readPricingSettings } from "./_lib/admin.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
+import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -63,6 +64,7 @@ function customerStory(result,action) {
 }
 
 export function createStudioHandler(overrides={}) {
+ const humanCheck=overrides.captcha||captcha;
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
  return async function handler(req,res) {
   const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments}=dependencies;
@@ -90,6 +92,15 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(body?.action==="checkoutCheck") {
+      if(Object.keys(body).some(key=>!["action","quoteId","captchaToken"].includes(key)))
+        return json(res,400,{message:"The payment security request is invalid."});
+      if(!(await limitAction(`captcha-checkout:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before making another payment security request."});
+      if(!(await payments.checkoutConfiguration(session.user)).available)
+        return json(res,503,{message:productionUnavailable,charged:false});
+      return json(res,200,await humanCheck.prepareCheckout(email,body.quoteId,body.captchaToken));
+    }
     if(body?.action==="prepare") {
       if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});
       if(!(await limitAction(`prepare:${email}`,30,3600_000))) return json(res,429,{message:"Please wait before preparing another production plan."});
@@ -109,7 +120,8 @@ export function createStudioHandler(overrides={}) {
     }
     if(["quote","checkout"].includes(body?.action)) {
       if(!(await limitAction(`payment:${email}`,20,3600_000))) return json(res,429,{message:"Please wait before making another payment request. Check an existing order before trying to pay again.",charged:null});
-      const {action,...input}=body;
+      const {action,checkoutProof,...input}=body;
+      if(action==="checkout") await humanCheck.consumeCheckout(email,input.quoteId,checkoutProof);
       return json(res,200,await payments[action](session.user,input));
     }
     if(["themes","plan"].includes(body.action)) {
@@ -124,6 +136,8 @@ export function createStudioHandler(overrides={}) {
     }
     return json(res,400,{message:"Unknown studio action."});
   } catch(e) {
+    // A rejected proof says nothing about an earlier request for this order.
+    if(e instanceof CaptchaError) return json(res,e.status,{code:e.code,message:e.message,charged:null});
     if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof PaymentError) return json(res,e.status,{code:e.code,message:e.message,charged:e.charged});
     return json(res,503,{message:e instanceof Error&&customerValidationMessages.has(e.message)?e.message:storyRequest?storyUnavailable:"The studio could not complete this action. Your saved film is unchanged."});

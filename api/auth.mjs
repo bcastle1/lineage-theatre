@@ -19,6 +19,7 @@ import { AccountSecurityError, validatePassword, passwordUpdate, PASSWORD_MAX_AG
 import { createAccountSecurityService, clearMfaCookie } from "./_lib/account-security-service.mjs";
 import { verificationMail } from "./_lib/verification-mail.mjs";
 import { readRegistrationPolicy } from "./_lib/registration-policy.mjs";
+import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 
 const unavailableRegistration = "This email cannot be registered. If you already have an account, sign in or contact the administrator.";
 const dependencies = { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction };
@@ -44,6 +45,7 @@ export function validateRegistration(body) {
 }
 
 export function createAuthHandler(overrides = {}) {
+  const humanCheck = overrides.captcha || captcha;
   const { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction } = { ...dependencies, ...overrides };
   const clock = overrides.now || (() => Date.now());
   const registrationPolicy = overrides.readRegistrationPolicy || (() => readRegistrationPolicy(readRecord));
@@ -54,6 +56,8 @@ export function createAuthHandler(overrides = {}) {
   return async function handler(req, res) {
   try {
     if (req.method === "GET") {
+      if (new URL(req.url || "/api/auth", "https://lineagetheater.com").searchParams.get("action") === "captcha")
+        return json(res, 200, humanCheck.configuration());
       const session = await getSession(req, true);
       if (new URL(req.url || "/api/auth", `https://${req.headers.host || "lineagetheater.com"}`).searchParams.get("action") === "security") {
         if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in and complete password setup to manage account security." });
@@ -74,9 +78,15 @@ export function createAuthHandler(overrides = {}) {
     if (!sameOrigin(req))
       return json(res, 403, { message: "Open Lineage Theatre to manage your account." });
     let body;
-    try { body = await readBody(req, 6000); }
+    try { body = await readBody(req, 16000); }
     catch { return json(res, 400, { message: "The account request is invalid or too large." }); }
     if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { message: "The account request is invalid." });
+    if (["login", "register", "mfaChallenge"].includes(body.action)) {
+      const ip = String(req.headers["x-forwarded-for"] ?? req.socket?.remoteAddress ?? "unknown").split(",")[0].trim();
+      if (!(await limitAction(`captcha-auth:${ip}`, 30, 15 * 60_000)))
+        return json(res, 429, { message: "Too many security checks. Please wait 15 minutes and try again." });
+      await humanCheck.verify(body.captchaToken, body.action === "mfaChallenge" ? "mfa" : body.action);
+    }
     if (body.action === "register") {
       let registration;
       try { registration = validateRegistration(body); }
@@ -214,6 +224,7 @@ export function createAuthHandler(overrides = {}) {
     setSession(res, record.value);
     return json(res, 200, { user: publicUser(record.value) });
   } catch (error) {
+    if (error instanceof CaptchaError) return json(res, error.status, { code: error.code, message: error.message });
     if (error instanceof AccountSecurityError) return json(res, error.status, { code: error.code, message: error.message });
     return json(res, 503, {
       message: "Sign-in is temporarily unavailable. Please try again.",

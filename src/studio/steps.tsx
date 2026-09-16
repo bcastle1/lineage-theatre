@@ -1049,7 +1049,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <ProductionPreparation key={film.id} film={film} disabled={Boolean(busy)} onPrepared={prepared=>update({productionPreparation:prepared})} />
+      <ProductionPreparation key={`preparation:${film.id}`} film={film} disabled={Boolean(busy)} onPrepared={prepared=>update({productionPreparation:prepared})} />
       <label className="check-label consent-final">
         <input
           type="checkbox"
@@ -1060,7 +1060,7 @@ export function CreateStep({
         I have permission to use these materials and have reviewed the facts, cast,
         dialogue, and dramatized details.
       </label>
-      <FilmCheckout key={film.id} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

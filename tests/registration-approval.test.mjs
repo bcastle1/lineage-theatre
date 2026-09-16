@@ -1,3 +1,4 @@
+import { captchaStub } from "./fixtures/captcha.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createAuthHandler } from "../api/auth.mjs";
@@ -44,11 +45,11 @@ function harness(overrides = {}) {
     operations.push([action, actor.email]); return { status: "synthetic-service-reached" };
   }]));
   const handlers = {
-    auth: createAuthHandler({ ...shared, env: { LINEAGE_MFA_ENCRYPTION_KEY: "ab".repeat(32) }, verificationMail: { available: () => false } }),
+    auth: createAuthHandler({ captcha: captchaStub, ...shared, env: { LINEAGE_MFA_ENCRYPTION_KEY: "ab".repeat(32) }, verificationMail: { available: () => false } }),
     admin: createAdminHandler({ ...shared, recordPage: async prefix => ({ records: [...records.entries()]
       .filter(([path]) => path.startsWith(prefix)).map(([, record]) => structuredClone(record.value)) }),
       connections: async () => ({}), readPricingSettings: async () => ({ markupBasisPoints: 0, revision: 0 }) }),
-    studio: createStudioHandler({ ...shared, payments, filmProduction, connections: async () => ({}), readPricingSettings: async () => ({}) }),
+    studio: createStudioHandler({ captcha: captchaStub, ...shared, payments, filmProduction, connections: async () => ({}), readPricingSettings: async () => ({}) }),
     archive: createArchiveHandler({ ...shared, archive: { listArchive: async () => { operations.push(["archive"]); return { films: [] }; } } }),
   };
   const cookie = user => sessionCookie(user).split(";")[0];

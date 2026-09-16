@@ -1,3 +1,4 @@
+import { captchaStub } from "./fixtures/captcha.mjs";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createAuthHandler, validateRegistration } from "../api/auth.mjs";
@@ -29,7 +30,7 @@ function harness(overrides = {}) {
     if (records.has(path) && !etag) throw new Error("Atomic create conflict");
     records.set(path, user);
   };
-  const handler = createAuthHandler({
+  const handler = createAuthHandler({ captcha: captchaStub,
     readRecord: read,
     writeRecord: write,
     getSession: (req, allowSetup) => getSession(req, allowSetup, { readRecordImpl: read, writeRecordImpl: write }),
@@ -67,8 +68,9 @@ test("public signup creates a pending unverified customer with a restricted auth
   assert.equal(current.body.user.email, "ada@example.invalid");
   assert.equal(current.body.user.role, "customer");
   assert.equal(current.body.registrationApprovalRequired, true);
-  assert.equal(h.limits[0][0], "register-ip:198.51.100.7");
-  assert.equal(h.limits[1][0], "register-email:ada@example.invalid");
+  assert.equal(h.limits[0][0], "captcha-auth:198.51.100.7");
+  assert.equal(h.limits[1][0], "register-ip:198.51.100.7");
+  assert.equal(h.limits[2][0], "register-email:ada@example.invalid");
 });
 
 test("registration rejects all supplied privilege or verification fields", async () => {
@@ -115,7 +117,7 @@ test("concurrent signup requests atomically create one user and never overwrite 
   const records = new Map(), writes = [];
   let earlyReads = 0, release;
   const gate = new Promise(resolve => { release = resolve; });
-  const handler = createAuthHandler({
+  const handler = createAuthHandler({ captcha: captchaStub,
     limitAction: async () => true,
     readRecord: async path => {
       if (earlyReads < 2) { earlyReads++; if (earlyReads === 2) release(); await gate; return null; }

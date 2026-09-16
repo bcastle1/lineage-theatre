@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { api, type User } from "./studio/model";
 import Landing from "./Landing";
+import { captchaToken } from "./lib/captcha";
+import CaptchaNotice from "./CaptchaNotice";
 const Workspace = lazy(() => import("./studio/Workspace"));
 const AccountSecurity = lazy(() => import("./AccountSecurity"));
 
@@ -173,15 +175,16 @@ export default function App() {
     submitLock.current = true;
     setBusy(true);
     try {
+      const humanToken = user?.mustChangePassword ? undefined : await captchaToken(mfaRequired ? "mfa" : registering ? "register" : "login");
       const result = await api<{ user?: User; mfaRequired?: boolean }>(
         "/api/auth",
         mfaRequired
-          ? { action: "mfaChallenge", ...(useRecovery ? { recoveryCode: mfaCode } : { code: mfaCode }) }
+          ? { action: "mfaChallenge", captchaToken: humanToken, ...(useRecovery ? { recoveryCode: mfaCode } : { code: mfaCode }) }
           : user?.mustChangePassword
           ? { action: "password", password }
           : registering
-            ? { action: "register", name, email, password, termsAccepted }
-            : { action: "login", email, password },
+            ? { action: "register", name, email, password, termsAccepted, captchaToken: humanToken }
+            : { action: "login", email, password, captchaToken: humanToken },
       );
       setPassword("");
       if (result.mfaRequired) { setMfaRequired(true); setMfaCode(""); setUseRecovery(false); return; }
@@ -328,6 +331,7 @@ export default function App() {
           {inviteToken && <p className="feedback success">You have a private administrator invitation. Sign in or create an account using the email address the invitation was issued to.</p>}
           {verificationToken && <p className="feedback">Sign in to the account that requested this email to complete verification.</p>}
           <form onSubmit={submit} className="login-form">
+            {!user && <CaptchaNotice />}
             {mfaRequired && <>
               <label>{useRecovery ? "Recovery code" : "Authenticator code"}<input autoComplete={useRecovery ? "off" : "one-time-code"} inputMode={useRecovery ? "text" : "numeric"} pattern={useRecovery ? undefined : "[0-9]{6}"} maxLength={useRecovery ? 80 : 6} required value={mfaCode} disabled={busy} onChange={e => setMfaCode(e.target.value)} /></label>
               <button className="text-button" type="button" disabled={busy} onClick={() => { setUseRecovery(!useRecovery); setMfaCode(""); setError(""); }}>{useRecovery ? "Use my authenticator" : "Use a recovery code"}</button>

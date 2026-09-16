@@ -4,7 +4,9 @@ The user selected Intuit Payments for BROCO Technologies LLC and authorized impl
 
 ## Verified setup on September 14, 2026
 
-The Intuit app details and developer profile are complete. Production credentials remain locked pending the unsubmitted assessment. The development callback is saved with the exact URL below.
+The Intuit app details and developer profile are complete. At this checkpoint, production credentials remained locked pending the assessment. The development callback is saved with the exact URL below.
+
+**September 16 update — case 00227847:** Intuit Developer Support reported that the submitted assessment was rejected for missing Payment ReCaptcha, and unlocked the questionnaire for correction and resubmission. See [the reCAPTCHA implementation and rollout record](RECAPTCHA-SETUP.md). Code or credential creation alone is not evidence of a deployed control or Intuit approval.
 
 With the owner's explicit approval, the matching sandbox client ID and secret, `QUICKBOOKS_ENVIRONMENT=sandbox`, and a new dedicated 32-byte token-encryption key were saved as server-only Vercel secrets for the existing `lineage-theater` project. No credential values were saved in the repository or printed.
 

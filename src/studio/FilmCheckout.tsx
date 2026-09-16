@@ -3,13 +3,15 @@ import { CreditCard, Download, Loader2, RefreshCw, ShieldCheck } from "lucide-re
 import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference } from "./model";
 import { normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
 import { commitFilmPayment, recoverFilmPayment } from "./checkout-payment";
+import { captchaToken } from "../lib/captcha";
+import CaptchaNotice from "../CaptchaNotice";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
 
 function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onBusyChange }: {
   configuration: Extract<CheckoutConfiguration, { available: true }>;
-  quote: FilmQuote; consent: boolean; disabled: boolean; onToken: (token: string) => Promise<void>;
+  quote: FilmQuote; consent: boolean; disabled: boolean; onToken: (token: string, checkoutProof: string) => Promise<void>;
   onBusyChange: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -18,8 +20,9 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
   async function tokenize(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (lock.current || disabled || !consent || Date.parse(quote.expiresAt) <= Date.now()) return;
-    lock.current = true; setBusy(true); setError(""); onBusyChange("Checking your card…");
+    lock.current = true; setBusy(true); setError(""); onBusyChange("Completing the payment security check…");
     const form = event.currentTarget;
+    let securityCheckPending = false;
     try {
       // Uncontrolled fields stay out of application state, logs, and storage.
       // Only a token from Intuit is passed to the Lineage Theatre payment route.
@@ -33,6 +36,14 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
       }
       const body = JSON.stringify({ card });
       form.reset();
+      // Check for automated abuse before sending even a test card to Intuit.
+      securityCheckPending = true;
+      const proof = await api<{checkoutProof: string}>("/api/studio", {
+        action: "checkoutCheck", quoteId: quote.id, captchaToken: await captchaToken("checkout"),
+      });
+      if (!/^[a-f0-9]{64}$/.test(proof.checkoutProof || "")) throw new Error("The security check could not be confirmed.");
+      securityCheckPending = false;
+      onBusyChange("Checking your card…");
       const response = await fetch(configuration.tokenization.url, {
         method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
         credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer", redirect: "error", body, signal: AbortSignal.timeout(20_000),
@@ -45,9 +56,10 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
       if (typeof token !== "string" || token.length < 8 || token.length > 2048 || !/^[A-Za-z0-9_.=-]+$/.test(token) || !/[A-Za-z]/.test(token)) {
         throw new Error("The secure card response could not be verified. No payment request was sent to Lineage Theatre.");
       }
-      await onToken(token);
+      await onToken(token, proof.checkoutProof);
     } catch (cause) {
-      setError(cause instanceof Error && cause.message.startsWith("Check your card") ? cause.message
+      setError(securityCheckPending ? `${problem(cause)} Your card has not been submitted. Re-enter your card details to retry.`
+        : cause instanceof Error && cause.message.startsWith("Check your card") ? cause.message
         : "The secure card step did not complete. No new payment request was sent. Check the order status before trying again.");
     } finally { form.reset(); lock.current = false; setBusy(false); onBusyChange(""); }
   }
@@ -56,6 +68,7 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
       <legend>Card and billing details</legend>
       {configuration.environment === "sandbox" && <p className="feedback">Test payment only. Use a test card; do not enter a real card.</p>}
       <p className="field-note">Payment processing provided by Intuit Payments Inc. Lineage Theatre does not store your card details.</p>
+      <CaptchaNotice />
       <label>Name on card<input name="cardName" autoComplete="cc-name" required maxLength={100} /></label>
       <label>Card number<input name="cardNumber" autoComplete="cc-number" inputMode="numeric" pattern="[0-9 ]{12,23}" maxLength={23} required /></label>
       <div className="film-card-row">
@@ -180,14 +193,14 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     setOrder(result);
     return result;
   }
-  async function submitPayment(paymentToken: string) {
+  async function submitPayment(paymentToken: string, checkoutProof: string) {
     if (!quote || !quoteCurrent || !consent || !reviewed || paymentReference || !configuration?.available) return;
     await work("Confirming your payment…", async () => {
       if (Date.parse(quote.expiresAt) <= Date.now()) throw new Error("Your price expired before payment. Request a new price.");
       const reference = { preparedId: quote.preparedId, manifestHash: quote.manifestHash, quoteId: quote.id, orderId: quote.orderId, checkoutKey: checkoutKey.current, submittedAt: new Date().toISOString(), sandbox: quote.sandbox };
       // Verify durable local recovery before the single charge request. Never
       // persist the card, its token, or a browser-supplied amount.
-      const result = await commitFilmPayment({ request: api, quote, reference, paymentToken, persist: saved => {
+      const result = await commitFilmPayment({ request: api, quote, reference, paymentToken, checkoutProof, persist: saved => {
         persistPaymentReference(saved);
         attemptedPayment.current = saved;
       } });

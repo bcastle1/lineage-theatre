@@ -1,3 +1,4 @@
+import { captchaStub } from "./fixtures/captcha.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createStudioHandler } from "../api/studio.mjs";
@@ -14,7 +15,7 @@ async function request(handler, action, body) {
 
 test("failed production lookups never assert an order was not charged", async () => {
   const unavailable = async () => { throw new FilmProductionError("This production does not belong to your account.", 404, "PRODUCTION_NOT_FOUND"); };
-  const handler = createStudioHandler({ getSession: async () => ({ user }), filmProduction: { status: unavailable, manifest: unavailable } });
+  const handler = createStudioHandler({ captcha: captchaStub, getSession: async () => ({ user }), filmProduction: { status: unavailable, manifest: unavailable } });
   for (const action of ["productionStatus", "manifest"]) {
     const response = await request(handler, action);
     assert.equal(response.status, 404);
@@ -24,7 +25,7 @@ test("failed production lookups never assert an order was not charged", async ()
 
 test("throttled payment retries leave previous charge status unknown and never call the payment service", async () => {
   let calls = 0;
-  const handler = createStudioHandler({ getSession: async () => ({ user }), limitAction: async () => false,
+  const handler = createStudioHandler({ captcha: captchaStub, getSession: async () => ({ user }), limitAction: async () => false,
     payments: { quote: async () => { calls++; }, checkout: async () => { calls++; } } });
   for (const action of ["quote", "checkout"]) {
     const response = await request(handler, action, { idempotencyKey: "repeated-existing-order-request" });

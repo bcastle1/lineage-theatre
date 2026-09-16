@@ -1,3 +1,4 @@
+import { captchaStub } from "./fixtures/captcha.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
@@ -34,7 +35,7 @@ function harness(overrides = {}) {
   const deps = { readRecord: read, writeRecord: write, verifyPassword, verificationMail: mail,
     now: () => time, env, ...overrides };
   const service = createAccountSecurityService(deps);
-  const handler = createAuthHandler({ ...deps,
+  const handler = createAuthHandler({ captcha: captchaStub, ...deps,
     getSession: (req, allowSetup) => getSession(req, allowSetup, { readRecordImpl: deps.readRecord,
       writeRecordImpl: deps.writeRecord, now: time }),
     publicUser: user => publicUser({ ...user, mustChangePassword: passwordSetupRequired(user, time) }),
@@ -142,7 +143,7 @@ test("session storage failure cannot claim successful logout and cannot grant an
   const failingWrite = async () => { throw new Error("Synthetic storage outage"); };
   assert.equal(await getSession(request(undefined, cookie, "GET"), false,
     { readRecordImpl: h.read, writeRecordImpl: failingWrite, now: h.now() }), null);
-  const fail = createAuthHandler({ readRecord: h.read, writeRecord: failingWrite, verificationMail: {available:()=>false}, now:h.now });
+  const fail = createAuthHandler({ captcha: captchaStub, readRecord: h.read, writeRecord: failingWrite, verificationMail: {available:()=>false}, now:h.now });
   let status, body, headers = {};
   await fail(request({action:"logout"},cookie), {set statusCode(value){status=value;},setHeader(name,value){headers[name]=value;},end(value){body=JSON.parse(value);}});
   assert.equal(status,503);assert.equal(headers["Set-Cookie"],undefined);assert.doesNotMatch(body.message,/Synthetic/);

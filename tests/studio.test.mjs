@@ -1,3 +1,4 @@
+import { captchaStub } from "./fixtures/captcha.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { connections, createStudioHandler } from "../api/studio.mjs";
@@ -20,7 +21,7 @@ const story=()=>({themes:[{title:"A fictional family garden",plot:"A family grow
 
 function harness(overrides={},user=actor) {
   const calls={connections:0,pricing:0,generation:[],limits:[],reads:[]};
-  const handler=createStudioHandler({getSession:async()=>user?{user}:null,
+  const handler=createStudioHandler({ captcha: captchaStub,getSession:async()=>user?{user}:null,
     connections:async()=>{calls.connections++;return ready();},
     readPricingSettings:async()=>{calls.pricing++;return {markupBasisPoints:1250,revision:2};},
     generateStory:async body=>{calls.generation.push(body);return story();},

@@ -39,6 +39,19 @@
       secure, HTTP-only, and expire. Accounts issued temporary passwords must
       replace them before using the studio.
     </p>
+    <h2>Protection against automated abuse</h2>
+    <p>
+      Sign-in, account creation, and payment submission use Google reCAPTCHA
+      to detect automated activity. When you submit these actions, Google's
+      script processes browser and device signals under the
+      <a href="https://policies.google.com/privacy">Google Privacy Policy</a>
+      and <a href="https://policies.google.com/terms">Terms of Service</a>.
+      Our server checks the resulting token before allowing the action.
+      We do not send your password, family materials, or payment card details
+      to the reCAPTCHA verification endpoint. A short-lived payment verification
+      record links your account and quote; reCAPTCHA response tokens are not
+      retained in that record.
+    </p>
     <h2>Your family archive</h2>
     <p>
       Working project details and original source files stay in this browser.
@@ -112,6 +125,6 @@
       Contact the administrator to request deletion of those records. Download
       anything you want to retain first.
     </p>
-    <p>Policy version: public-registration-v1.</p>
+    <p>Policy version: recaptcha-2026-09-16.</p>
   </body>
 </html>

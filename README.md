@@ -40,6 +40,9 @@ The development server serves Vite and API handlers at http://127.0.0.1:5173. Us
 
 - `BLOB_READ_WRITE_TOKEN`: existing private Vercel Blob account, request-limit, administrator, pricing, and opted-in finished-film archive store.
 - `LINEAGE_SESSION_SECRET`: existing server session-signing secret.
+- `RECAPTCHA_SITE_KEY` and `RECAPTCHA_SECRET_KEY`: matching Google reCAPTCHA v3 credentials for this domain. Only the site key is public. Missing configuration blocks sign-in, registration, MFA sign-in, and new payment requests. Provision before deploying this change; see [reCAPTCHA setup and verification](docs/RECAPTCHA-SETUP.md).
+- `RECAPTCHA_ALLOWED_HOSTNAMES`: exact comma-separated hostnames, default `lineagetheater.com,www.lineagetheater.com`. Register the same domain with Google. No wildcards.
+- `RECAPTCHA_MIN_SCORE`: optional minimum v3 score, default `0.5`; only values from `0.5` through `1` are accepted.
 - `OPENAI_API_KEY`: selected existing OpenAI project's credential with GPT-6 Astra access.
 - `QUICKBOOKS_ENVIRONMENT`: explicitly `sandbox` or `production`; no environment is inferred.
 - `QUICKBOOKS_CLIENT_ID` and `QUICKBOOKS_CLIENT_SECRET`: matching Intuit application credentials, server-only.

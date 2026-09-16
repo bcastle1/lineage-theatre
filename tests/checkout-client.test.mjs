@@ -42,18 +42,18 @@ test("fresh receipt normalization preserves refund changes and the original capt
 
 test("checkout stores only recovery references before one server-priced payment POST", async () => {
   const events = [], posted = [];
-  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, now: () => now,
+  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, checkoutProof: "d".repeat(64), now: () => now,
     persist: value => { events.push("persist"); assert.deepEqual(value, reference()); },
     request: async (path, body) => { events.push("post"); posted.push({ path, body }); return order("captured"); } });
   assert.deepEqual(events, ["persist", "post"]);
   assert.equal(result.status, "captured");
-  assert.deepEqual(posted, [{ path: "/api/studio", body: { action: "checkout", quoteId: quote().id, idempotencyKey: reference().checkoutKey, paymentToken: token, consent: true } }]);
+  assert.deepEqual(posted, [{ path: "/api/studio", body: { action: "checkout", quoteId: quote().id, idempotencyKey: reference().checkoutKey, paymentToken: token, checkoutProof: "d".repeat(64), consent: true } }]);
   assert.doesNotMatch(JSON.stringify(reference()), /SYNTHETIC_TOKEN|amountCents|card|cvc/);
 });
 
 test("lost checkout response recovers the captured order by GET without posting again", async () => {
   const calls = [];
-  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, now: () => now, persist: () => {},
+  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, checkoutProof: "d".repeat(64), now: () => now, persist: () => {},
     request: async (path, body) => { calls.push({ path, body }); if (body) throw new Error("simulated response loss after capture"); return order("captured"); } });
   assert.equal(result.status, "captured");
   assert.equal(calls.length, 2);
@@ -65,7 +65,7 @@ test("lost checkout response recovers the captured order by GET without posting 
 test("unknown payment remains uncertain and repeated status checks never replay checkout", async () => {
   let posts = 0, reads = 0;
   const request = async (_path, body) => { if (body) { posts++; throw new Error("timeout"); } reads++; return order("uncertain"); };
-  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, now: () => now, persist: () => {}, request });
+  const result = await commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, checkoutProof: "d".repeat(64), now: () => now, persist: () => {}, request });
   assert.equal(result.charged, null);
   assert.match(paymentStatusMessage(result), /Do not submit another payment/);
   await recoverFilmPayment(request, reference());
@@ -76,7 +76,7 @@ test("unknown payment remains uncertain and repeated status checks never replay 
 
 test("storage failure, expired quote, or changed manifest prevents checkout entirely", async () => {
   let requests = 0;
-  const run = overrides => commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, now: () => now, persist: () => {}, request: async () => { requests++; return order("captured"); }, ...overrides });
+  const run = overrides => commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, checkoutProof: "d".repeat(64), now: () => now, persist: () => {}, request: async () => { requests++; return order("captured"); }, ...overrides });
   await assert.rejects(run({ persist: () => { throw new Error("Storage full"); } }), /Storage full/);
   await assert.rejects(run({ now: () => now + 60_001 }), /expired or changed/);
   await assert.rejects(run({ reference: { ...reference(), manifestHash: "d".repeat(64) } }), /expired or changed/);
@@ -86,7 +86,7 @@ test("storage failure, expired quote, or changed manifest prevents checkout enti
 test("mismatched or unreadable payment responses cannot be presented as a confirmed charge", async () => {
   for (const value of [{}, { ...order("captured"), amountCents: 999 }, { ...order("captured"), id: "f".repeat(64) }, { ...order("captured"), sandbox: false }]) {
     let posts = 0;
-    await assert.rejects(commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, now: () => now, persist: () => {}, request: async (_path, body) => { if (body) posts++; return value; } }), /not confirmed/);
+    await assert.rejects(commitFilmPayment({ quote: quote(), reference: reference(), paymentToken: token, checkoutProof: "d".repeat(64), now: () => now, persist: () => {}, request: async (_path, body) => { if (body) posts++; return value; } }), /not confirmed/);
     assert.equal(posts, 1);
   }
   assert.equal(normalizeFilmOrder({ ...order("captured"), charged: false }), null);
@@ -97,7 +97,7 @@ test("a declined order is read-only and payment references survive reload and ba
   const result = await recoverFilmPayment(async (_path, body) => { assert.equal(body, undefined); return order("declined"); }, reference());
   assert.equal(result.charged, false);
   assert.match(paymentStatusMessage(result), /declined/);
-  const unsafe = { ...reference(), paymentToken: token, card: { number: "SYNTHETIC" }, amountCents: 100 };
+  const unsafe = { ...reference(), paymentToken: token, checkoutProof: "d".repeat(64), card: { number: "SYNTHETIC" }, amountCents: 100 };
   assert.deepEqual(normalizePaymentReference(unsafe), reference());
   const film = { ...newFilm(), paymentReference: unsafe };
   assert.deepEqual(normalizeFilm(JSON.parse(JSON.stringify(film))).paymentReference, reference());
