@@ -2,6 +2,12 @@
 
 The user selected Intuit Payments for BROCO Technologies LLC and authorized implementation and deployment. The existing Intuit Developer workspace is BROCOTech; its Lineage Theater application is the one to continue. Do not create duplicate apps or confuse an Intuit Developer workspace ID with a QuickBooks company/realm ID.
 
+## Current assessment evidence — September 20, 2026
+
+The signed-in existing BROCOTech / Lineage Theater compliance page displayed **Submission Completed** and **Results Approved**. Its approved, read-only Payments questionnaire selects **In-App** receipt delivery with payment amount, total amount, date, transaction ID and processor disclosure. Email delivery, fees and card last-four are unselected. The declined/voided/refunded testing answer remains **No**. This supersedes the earlier pending-assessment status below; no new assessment was submitted during this inspection.
+
+Approval is not evidence of an activated production merchant, installed production credentials, a migrated live authorization record, or actual sandbox lifecycle verification. Those remain separate checks; customer charges and refunds remain disabled. See [the assessment rollout record](RECAPTCHA-SETUP.md).
+
 ## Verified setup on September 14, 2026
 
 The Intuit app details and developer profile are complete. At this checkpoint, production credentials remained locked pending the assessment. The development callback is saved with the exact URL below.
@@ -68,10 +74,10 @@ Status adds `refreshStatus` (`idle`, `refreshing`, `refreshed`, `reconnect-requi
 ## Before production authorization
 
 1. Keep using the completed existing developer profile and app details. The user confirmed legal name BROCO Technologies LLC, 5513 W 11000 North #104, Highland, UT 84003, and business phone 801-948-9048. The production deployment's function region was verified as `iad1`; no fixed outbound IP was claimed.
-2. Complete the Intuit assessment accurately. Company regulatory history, legal-counsel involvement, sanctions disclosures, legal certifications, and operational evidence require actual company information. Do not mark controls implemented merely because they are planned, or submit unverified certifications.
+2. Retain the approved assessment and keep its answers accurate as the app changes. Company regulatory history, legal-counsel involvement, sanctions disclosures, legal certifications, and operational evidence require actual company information. Do not mark controls implemented merely because they are planned, or submit unverified certifications.
 3. Resolve the currently linked Intuit Password Policy requirements before a production-security attestation and clarify applicability if Intuit uses newer standards. The earlier deployed app had only length/rate-limit controls. The September 14 integration branch now implements password screening, lockout, history, change frequency, expiry, optional MFA/email verification and server-side logout revocation; its local tests do not establish deployment, exhaustive dictionary coverage or policy compliance. A dedicated Production MFA encryption secret was saved, but deployed operation and real-account enrollment remain unverified. See [the readiness record](INTEGRATION-READINESS.md) for exact controls and evidence.
 4. Preserve the matching sandbox credentials and dedicated encryption key in the server vault and the exact registered callback. Sandbox consent and code exchange were verified above; complete actual company-read, denial, refresh, revocation and reconnect checks. Tests with fabricated tokens do not prove runtime behavior.
-5. Complete production approval and obtain explicit merchant consent for Payments and Accounting scopes. Verify the intended company/merchant and capabilities before any transaction. Callback realm IDs and absent response scopes are reported as unverified; they are not merchant proof.
+5. Following the verified assessment approval, establish production credential availability and merchant activation, and obtain explicit merchant consent for Payments and Accounting scopes. Verify the intended company/merchant and capabilities before any transaction. Callback realm IDs and absent response scopes are reported as unverified; they are not merchant proof.
 6. Verify serialized refresh-token rotation with the intended sandbox grant, supported hosted card entry, charge/refund lifecycle and approved accounting mappings. The integration branch implements disabled-by-default durable quote/order idempotency and reconciliation; these are tested with synthetic responses, not actual captures or refunds. A September 14 driver successfully tokenized Intuit's published fabricated card through the actual sandbox endpoint and discarded the token without charging it. That is not browser card-entry, hosted-fields or PCI approval. Keep provider charges, customer revenue, fees and MagicLight usage expense separate. Verify sandbox transactions before a bounded real transaction approved by the user.
 
 ## Official references

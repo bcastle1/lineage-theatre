@@ -36,7 +36,7 @@ Captions are generated and retained privately alongside the MP4 when upload succ
 - Approved production merchant credentials and the reviewed payment activation evidence described in `PAYMENT-READINESS-REVIEW.md`. Sandbox review is separate and restricted to the genuine owner's fixed fictional operator test.
 - Provisioned worker host, monitored scheduling, intended private storage, recovery operations, and real authenticated provider/output acceptance.
 
-The Intuit assessment remains an owner/account task: complete the legacy grant migration and company check, reconcile unsupported emailed/card-detail/fee receipt selections, and review the final certification before resubmission. This code does not submit an assessment or attest company facts.
+On September 20, the signed-in Intuit dashboard showed the existing Lineage Theater assessment as **Completed / Approved**. Its read-only questionnaire has the corrected In-App receipt delivery and supported receipt fields; email, fees and card last-four are unselected. No further assessment submission was needed or performed in this task. Actual sandbox transaction lifecycle verification is still marked No, and live grant migration/company verification and merchant activation remain separate checkpoints.
 
 ## Implementation verification — September 20, 2026
 

@@ -58,6 +58,10 @@ Local verification: 264 automated tests cover refresh-only persistence, expiry, 
 
 ## Assessment answer after live verification
 
+### September 20 status update
+
+The signed-in existing BROCOTech / Lineage Theater compliance page now reports **Submission status: Completed** and **Results: Approved**. The read-only Payments API answers retain reCAPTCHA Yes, volatile-memory access-token storage, and transaction-lifecycle testing No. Receipt selections are corrected: In-App delivery; payment amount, total, transaction date, transaction ID and the Intuit processor disclosure. Email delivery, fees and card last-four are not selected. This observation supersedes the pending-resubmission and receipt-correction status above. This task did not submit or change the approved questionnaire. Approval does not establish merchant activation, live token migration, processor transaction testing or MagicLight readiness.
+
 Only after the rollout checks above succeed, the supported description is:
 
 > Lineage Theater uses Google reCAPTCHA v3 in its payment submission flow. The server verifies each response's action, hostname, timestamp and risk score before card tokenization is allowed through the app. A short-lived, single-use verification is bound to the authenticated customer and quoted purchase and consumed before checkout. Missing, invalid, expired, reused or low-score verification prevents a new payment attempt. Sign-in and registration are protected as well. Existing-order status checks remain available without submitting another payment.
