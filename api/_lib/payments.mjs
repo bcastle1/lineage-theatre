@@ -4,6 +4,7 @@ import {hasAdminAccess,accessStatusForUser} from "./access.mjs";
 import {readPricingSettings} from "./admin.mjs";
 import {createQuickBooksPaymentsTransport,intuitDiagnostic} from "./quickbooks.mjs";
 import {INTUIT_PAYMENT_ORIGINS,paymentAuthorizationMatches} from "./payment-authorization.mjs";
+import {paymentReadiness} from "./payment-readiness.mjs";
 
 // Contracts checked against Intuit's own SDK, not inferred endpoints:
 // https://github.com/intuit/PHP-Payments-SDK/blob/master/src/Operations/ChargeOperations.php
@@ -110,9 +111,9 @@ export function createPaymentsService(overrides={}) {
   const {read=readRecord,write=writeRecord,now=Date.now,provider=createIntuitPaymentsAdapter(),
     pricingSettings=readPricingSettings,
     quoteProvider=async(...args)=>(await import("./film-production.mjs")).quoteForPayment(...args),
-    readiness=async()=>({sandboxEnabled:false,merchantVerified:false})}=overrides;
-  async function enabled(operation="quote",{allowRefresh=true}={}) {
-    const ready=await readiness();
+    readiness=paymentReadiness.readiness}=overrides;
+  async function enabled(operation="quote",{allowRefresh=true,actor,subjectEmail}={}) {
+    const ready=await readiness({actor,subjectEmail,operation});
     // Legacy sandbox test injection cannot enable production. Production needs
     // a fresh current-grant authorization from a trusted server evidence verifier.
     if(!(ready?.sandboxEnabled===true&&ready?.merchantVerified===true)&&!ready?.authorization)throw blocked();
@@ -126,7 +127,7 @@ export function createPaymentsService(overrides={}) {
   async function checkoutConfiguration(actor) {
     actorEmail(actor);
     try {
-      const binding=await enabled("card-entry",{allowRefresh:false}),ready=await readiness();
+      const binding=await enabled("card-entry",{allowRefresh:false,actor}),ready=await readiness({actor,operation:"card-entry"});
       // Browser-direct entry makes the merchant page part of card-data handling.
       // Require a separately reviewed entry authorization even for sandbox UI.
       if(!paymentAuthorizationMatches(ready?.authorization,binding,"card-entry",now()))return {available:false};
@@ -160,7 +161,7 @@ export function createPaymentsService(overrides={}) {
   async function quote(actor,body) {
     const email=actorEmail(actor);exactFields(body,["project","preparedId","idempotencyKey"]);key(body.idempotencyKey);
     if(body.preparedId!==undefined)key(body.preparedId);
-    const binding=await enabled();
+    const binding=await enabled("quote",{actor});
     const supplied=await quoteProvider(body.project,actor,{idempotencyKey:body.idempotencyKey,...(body.preparedId?{preparedId:body.preparedId}:{})});
     const until=Date.parse(supplied?.expiresAt);
     if(!supplied||(body.preparedId&&supplied.preparedId!==body.preparedId)||supplied.environment!==binding.environment||supplied.currency!=="USD"||!amountValid(supplied.providerCostCents)||!idPattern.test(supplied.manifestHash||"")
@@ -206,7 +207,7 @@ export function createPaymentsService(overrides={}) {
   async function checkout(actor,body) {
     const email=actorEmail(actor);exactFields(body,["quoteId","idempotencyKey","paymentToken","consent"]);
     id(body.quoteId);key(body.idempotencyKey);if(body.consent!==true)throw new PaymentError("Confirm the total price before paying.");token(body.paymentToken);
-    const binding=await enabled("charge"),quoteRecord=await read(quotePath(email,body.quoteId)),q=quoteRecord?.value;
+    const binding=await enabled("charge",{actor}),quoteRecord=await read(quotePath(email,body.quoteId)),q=quoteRecord?.value;
     if(!q||q.customerEmail!==email)throw new PaymentError("This quote was not found.",404);
     if(!sameBinding(q.merchantBinding,binding))throw conflict();
     await guardLegacyProductionOrder(q);
@@ -230,7 +231,7 @@ export function createPaymentsService(overrides={}) {
   async function order(actor,orderId) {return publicOrder((await readOrder(actor,orderId)).value);}
   async function reconcile(actor,{orderId}) {
     requireAdmin(actor);let record=await readOrder(actor,orderId),value=record.value;
-    const binding=await enabled("read");if(!sameBinding(value.merchantBinding,binding))throw conflict();
+    const binding=await enabled("read",{actor});if(!sameBinding(value.merchantBinding,binding))throw conflict();
     if(value.refundOperation) {
       const operation=value.refundOperation;
       if(!operation.providerRefundId)throw uncertain();
@@ -272,7 +273,7 @@ export function createPaymentsService(overrides={}) {
     }
     if(!["captured","partially-refunded"].includes(value.status)||!value.providerChargeId||body.amountCents>value.amountCents-value.refundedCents||value.refunds.length>=50)
       throw new PaymentError("The refund must not exceed the confirmed unrefunded payment.");
-    const binding=await enabled("refund");if(!sameBinding(value.merchantBinding,binding))throw conflict();
+    const binding=await enabled("refund",{actor});if(!sameBinding(value.merchantBinding,binding))throw conflict();
     record=await save(orderPath(value.id),record,{...value,status:"refund-pending",refundOperation:{keyHash:digest(body.idempotencyKey),requestId:randomUUID(),amountCents:body.amountCents,
       reason:body.reason.trim(),requestedBy:actor.email,requestedAt:stamp(now()),providerRefundId:null}});
     let result=null;
@@ -304,7 +305,7 @@ export function createPaymentsService(overrides={}) {
     if(!value||value.customerEmail!==email||value.manifestHash!==manifestHash||value.preparedId!==preparedId||value.status!=="captured"
       ||!value.capturedAt||value.refundedCents!==0||value.refundOperation||!bindingValid(value.merchantBinding))throw blocked();
     if(!Number.isFinite(Date.parse(value.quoteExpiresAt))||Date.parse(value.quoteExpiresAt)<=now())throw blocked();
-    const binding=await enabled("render");if(!sameBinding(value.merchantBinding,binding))throw blocked();
+    const binding=await enabled("render",{subjectEmail:email});if(!sameBinding(value.merchantBinding,binding))throw blocked();
     return {allowed:true,manifestHash,budgetCents:value.providerCostEstimateCents,quoteReference:value.quoteReference,
       expiresAt:stamp(Math.min(Date.parse(value.quoteExpiresAt),now()+60_000)),environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
   }

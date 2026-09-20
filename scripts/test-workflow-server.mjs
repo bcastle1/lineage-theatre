@@ -4,6 +4,8 @@
  * Route proof, then exit: node scripts/test-workflow-server.mjs --check
  * Checkout UI fixtures: node scripts/test-workflow-server.mjs --checkout-fixtures
  * Checkout route proof: node scripts/test-workflow-server.mjs --checkout-fixtures --check
+ * Finished-film playback fixture: node scripts/test-workflow-server.mjs --delivery-fixture
+ * Private media route proof: node scripts/test-workflow-server.mjs --delivery-fixture --check
  * URL: http://127.0.0.1:5178
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
@@ -14,17 +16,20 @@
 import { createServer, request as httpRequest } from "node:http";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 
 const HOST = "127.0.0.1", PORT = 5178, origin = `http://${HOST}:${PORT}`;
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
 const checkoutFixtures = process.argv.includes("--checkout-fixtures");
+const deliveryFixture = process.argv.includes("--delivery-fixture");
+if (checkoutFixtures && deliveryFixture) throw new Error("Choose either checkout fixtures or the delivery fixture for this local run.");
 if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new Error("Test server must not load environment files.");
 
 // Remove inherited provider settings before importing application services.
 for (const name of Object.keys(process.env)) {
-  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
+  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|PAYMENT_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
 }
 process.env.LINEAGE_SESSION_SECRET = "synthetic-workflow-session-key-local-only-never-production";
 process.env.LINEAGE_MFA_ENCRYPTION_KEY = "cd".repeat(32);
@@ -36,12 +41,13 @@ globalThis.fetch = async () => {
 };
 
 const [{ createAuthHandler }, { createStudioHandler }, { createAdminHandler }, auth,
-  { OWNER_EMAIL }, { createFilmProductionService, fictionalOperatorProject },
-  { createPaymentsService }, { productionReadiness }, securityHelpers] = await Promise.all([
+  { OWNER_EMAIL }, { createFilmProductionService, fictionalOperatorProject, productionJobPath },
+  { createPaymentsService }, { productionReadiness }, securityHelpers, { parseRange }] = await Promise.all([
   import("../api/auth.mjs"), import("../api/studio.mjs"), import("../api/admin.mjs"),
   import("../api/_lib/auth.mjs"), import("../api/_lib/access.mjs"),
   import("../api/_lib/film-production.mjs"), import("../api/_lib/payments.mjs"),
   import("../api/_lib/production.mjs"), import("../api/_lib/auth-security.mjs"),
+  import("../api/_lib/archive.mjs"),
 ]);
 const records = new Map();
 let revision = 0;
@@ -89,6 +95,20 @@ const connections = async () => ({ story: false, ...productionReadiness({ env: {
     story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } });
 const refuseProvider = async () => { throw new Error("Synthetic test cannot call an external provider."); };
 const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write });
+let deliveryMedia, deliveryProject;
+let deliveryBlobReads = 0;
+const getDeliveryBlob = async (pathname, options) => {
+  assert.equal(deliveryFixture, true);
+  assert.equal(options.access, "private");
+  assert.equal(options.useCache, false);
+  deliveryBlobReads++;
+  if (!deliveryMedia || pathname !== deliveryMedia.pathname) return null;
+  const range = parseRange(options.headers?.Range, deliveryMedia.bytes.length);
+  const bytes = range ? deliveryMedia.bytes.subarray(range.start, range.end + 1) : deliveryMedia.bytes;
+  return { statusCode: 200, stream: new Response(bytes).body,
+    headers: new Headers({ "content-type": "video/mp4", "content-length": String(bytes.length), ...(range ? { "content-range": range.contentRange } : {}) }),
+    blob: { pathname, contentType: "video/mp4", size: bytes.length } };
+};
 let syntheticCharges = 0;
 const simulatedBinding = { environment: "sandbox", grantId: "c".repeat(64) };
 const fakePaymentsProvider = {
@@ -133,7 +153,7 @@ const shared = { getSession: session, readRecord: read, writeRecord: write, limi
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
-  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider }),
+  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider, ...(deliveryFixture ? { getBlob: getDeliveryBlob } : {}) }),
   "/api/admin": createAdminHandler({ ...shared, audit, recordPage }),
 };
 
@@ -157,8 +177,55 @@ fixture.themes = structuredClone(fixture.selectedThemes);
 fixture.sources = fixture.sources.map(source => ({ ...source, size: Buffer.byteLength(source.text), extraction: "Synthetic fixture text" }));
 Object.assign(fixture, { providerId: "magiclight", quality: "highest", generatedBy: "Lineage Theatre", updatedAt: new Date().toISOString() });
 const checkoutProjects = ["captured", "declined", "uncertain"].map((scenario, index) => ({ ...structuredClone(fixture), id: `00000000-0000-4000-8000-${String(index + 11).padStart(12, "0")}`, title: `SAMPLE ONLY - ${scenario} payment: The shared garden` }));
-const seedMarker = `lineage-checkout-fixture:${randomUUID()}`;
-const seedScript = checkoutFixtures ? `// SYNTHETIC LOCAL TEST ONLY. This script is never in an application build.
+if (deliveryFixture) {
+  // Exercise delivery of an existing public illustration, never claim this is
+  // provider-generated output of the fictional screenplay or a paid transaction.
+  const bytes = await readFile(new URL("../public/assets/the-journey-of-thomas-wilson.mp4", import.meta.url));
+  const sha256 = auth.digest(bytes);
+  assert.equal(sha256, "68f017454bf2619b972db7b062badf765829e85f0d8f315ca0f674d763bc708d");
+  assert.equal(bytes.length, 17_193_754);
+  const { default: ts } = await import("typescript");
+  const modelSource = await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(modelSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+  const { normalizeFilm, productionPreparationInput, productionInputHash } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+  deliveryProject = normalizeFilm({ ...structuredClone(fixture), id: "00000000-0000-4000-8000-000000000021", duration: 79,
+    title: "SAMPLE ONLY - illustrative playback fixture",
+    logline: "Fictional garden screenplay. Playback reuses the existing Thomas Wilson demonstration video solely to verify private delivery; it is not a generated result of this plan." });
+  const requestId = randomUUID();
+  const prepared = await filmProduction.prepare({ email: accounts[0].email, project: deliveryProject, idempotencyKey: requestId, preparationConsent: true });
+  const path = productionJobPath(accounts[0].email, prepared.id), record = await read(path);
+  deliveryMedia = { bytes, pathname: `production/media/${auth.digest(accounts[0].email)}/${prepared.id}/${sha256}.mp4`, sha256 };
+  await write(path, { ...record.value, status: "completed", updatedAt: new Date().toISOString(),
+    shots: record.value.shots.map(shot => ({ ...shot, status: "completed" })),
+    media: { pathname: deliveryMedia.pathname, sha256, contentType: "video/mp4", sizeBytes: bytes.length, durationSeconds: 78.506 },
+    syntheticFixture: { purpose: "existing-sample-playback-only", providerGenerated: false },
+  }, record.etag);
+  const quoteId = auth.digest("synthetic-delivery-fixture-quote"), orderId = auth.digest(`${accounts[0].email}:${prepared.manifestHash}`);
+  const timestamp = new Date().toISOString();
+  await write(`payments/orders/${orderId}.json`, { id: orderId, quoteId, preparedId: prepared.id, manifestHash: prepared.manifestHash,
+    customerEmail: accounts[0].email, filmId: deliveryProject.id, filmTitle: deliveryProject.title, status: "captured",
+    currency: "USD", amountCents: 100, refundedCents: 0, createdAt: timestamp, updatedAt: timestamp, capturedAt: timestamp,
+    merchantBinding: simulatedBinding, providerChargeId: "synthetic_delivery_only_no_charge", syntheticFixture: true,
+  });
+  deliveryProject.productionPreparation = { ...prepared, inputHash: await productionInputHash(JSON.stringify(productionPreparationInput(deliveryProject))),
+    requestId, status: "completed", issues: [] };
+  deliveryProject.paymentReference = { preparedId: prepared.id, manifestHash: prepared.manifestHash, quoteId, orderId,
+    checkoutKey: "synthetic-delivery-checkout", submittedAt: timestamp, sandbox: true };
+  assert.deepEqual(normalizeFilm(deliveryProject).paymentReference, deliveryProject.paymentReference);
+  assert.equal(normalizeFilm(deliveryProject).productionPreparation.inputHash, deliveryProject.productionPreparation.inputHash);
+}
+const seedMarker = `lineage-${deliveryFixture ? "delivery" : "checkout"}-fixture:${randomUUID()}`;
+const seedScript = deliveryFixture ? `// SYNTHETIC PLAYBACK ONLY: existing illustrative sample, no new render or charge.
+if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
+  for(const email of ${JSON.stringify(accounts.map(account=>account.email))}) localStorage.setItem('lineage-studio-v3:'+email,JSON.stringify(email===${JSON.stringify(accounts[0].email)}?[${JSON.stringify(deliveryProject)}]:[${JSON.stringify(fixture)}]));
+  localStorage.setItem(${JSON.stringify(seedMarker)},'seeded');
+}
+const originalFetch=window.fetch.bind(window);
+window.fetch=(input,options)=>{
+  const url=new URL(typeof input==='string'?input:input.url,location.href);
+  if(url.origin!==location.origin) throw new Error('Synthetic playback fixture forbids external fetch requests.');
+  return originalFetch(input,options);
+};` : checkoutFixtures ? `// SYNTHETIC LOCAL TEST ONLY. This script is never in an application build.
 if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
   for(const email of ${JSON.stringify(accounts.map(account=>account.email))}) localStorage.setItem('lineage-studio-v3:'+email,${JSON.stringify(JSON.stringify(checkoutProjects))});
   localStorage.setItem(${JSON.stringify(seedMarker)},'seeded');
@@ -189,10 +256,11 @@ const server = createServer(async (req, res) => {
       code: "SYNTHETIC_SERVICE_DISABLED", message: "This service is disabled in the synthetic local workflow test." });
     if (path === "/__workflow/status") return auth.json(res, 200, {
       synthetic: true, memoryOnly: true, providersEnabled: false, mailEnabled: false,
-      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures,
+      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures, deliveryFixture, deliveryBlobReads,
+      ...(deliveryFixture ? { deliveryPreparedId: deliveryProject.productionPreparation.id, illustrativePlaybackOnly: true } : {}),
       preparedFilms: [...records.keys()].filter(key=>key.startsWith("production/jobs/")).length,
     });
-    if (path === "/__workflow/fixture") return auth.json(res, 200, { synthetic: true, project: fixture });
+    if (path === "/__workflow/fixture") return auth.json(res, 200, { synthetic: true, project: deliveryFixture ? deliveryProject : fixture });
     if (path === "/__workflow/seed.js") {
       res.setHeader("Content-Type", "text/javascript; charset=utf-8"); return res.end(seedScript);
     }
@@ -210,6 +278,7 @@ const server = createServer(async (req, res) => {
         visible.push(`<tr><td>${account.email}</td><td>${account.password}</td><td>${code}</td></tr>`);
       }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and captured sandbox order exist only in memory.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
       return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? '<h2>Fake checkout fixtures — no real card data</h2><p>Use separate preloaded films for each payment. Card 4111111111111111 captures; 4000000000000002 declines; 4000000000009995 stays uncertain. Expiry 12/2030, CVC 123, Sample Person, 1 Fictional Street, Test City, UT 84003. The browser intercepts fabricated tokenization locally. No card data or payment request leaves this computer.</p>' : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
     if (checkOnly) { res.statusCode = 404; return res.end("Synthetic route-check mode."); }
@@ -232,7 +301,7 @@ if (!checkOnly) {
       return html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/i,
         `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' blob: ws://${HOST}:${PORT}">`)
         .replace("</head>", '<script src="/__workflow/seed.js"></script></head>')
-        .replace("<body>", '<body style="padding-bottom:38px"><div role="note" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:#641c24;color:white;padding:9px 16px;text-align:center;font:13px Arial,sans-serif">SYNTHETIC LOCAL TEST · FICTIONAL DATA · MEMORY-ONLY STORAGE · EMAIL, AI, VIDEO AND PAYMENTS DISABLED</div>');
+        .replace("<body>", `<body style="padding-bottom:38px"><div role="note" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:#641c24;color:white;padding:9px 16px;text-align:center;font:13px Arial,sans-serif">${deliveryFixture ? "SYNTHETIC PLAYBACK FIXTURE · EXISTING DEMONSTRATION VIDEO · NO NEW RENDER OR REAL CHARGE · MEMORY ONLY" : "SYNTHETIC LOCAL TEST · FICTIONAL DATA · MEMORY-ONLY STORAGE · EMAIL, AI, VIDEO AND PAYMENTS DISABLED"}</div>`);
     } }],
     server: { middlewareMode: true, host: HOST, hmr: { server }, fs: { strict: true, allow: [root] } },
   });
@@ -384,8 +453,56 @@ async function checkCheckout() {
   assert.doesNotMatch(JSON.stringify([...records.values()]), /fixture_card_|4111111111111111|4000000000009995|"cvc"/);
   console.log("PASS: actual-handler synthetic checkout quotes, captured/declined/uncertain outcomes, GET-only recovery, sandbox receipts, ownership, no stored card tokens, and zero outbound calls.");
 }
+function mediaRoute(path, { cookie, method = "GET", headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(`${origin}${path}`, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...headers } }, res => {
+      const chunks = [];
+      res.on("data", value => chunks.push(value));
+      res.on("error", reject);
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, bytes: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject); req.end();
+  });
+}
+async function checkDelivery() {
+  const customer = await login(accounts[0]), other = await login(accounts[2]);
+  const preparation = deliveryProject.productionPreparation, payment = deliveryProject.paymentReference;
+  const statusUrl = `/api/studio?action=productionStatus&id=${preparation.id}`;
+  const mediaUrl = `/api/studio?action=productionMedia&id=${preparation.id}`;
+  const status = await route(statusUrl, { cookie: customer });
+  assert.equal(status.status, 200); assert.equal(status.body.id, preparation.id);
+  assert.equal(status.body.manifestHash, preparation.manifestHash);
+  assert.equal(status.body.status, "completed"); assert.equal(status.body.mediaReady, true);
+  assert.equal(status.body.completedShots, status.body.shotCount);
+  assert.doesNotMatch(JSON.stringify(status.body), /production\/media|vercel-storage|providerJobId/);
+  const order = await route(`/api/studio?action=order&id=${payment.orderId}`, { cookie: customer });
+  assert.equal(order.status, 200); assert.equal(order.body.status, "captured");
+  assert.equal(order.body.preparedId, preparation.id); assert.equal(order.body.quoteId, payment.quoteId);
+  assert.equal(order.body.receiptAvailable, true); assert.equal(order.body.sandbox, true);
+  assert.equal((await route(`/api/studio?action=receipt&id=${payment.orderId}`, { cookie: customer })).body.sandbox, true);
+  assert.equal((await route(statusUrl, { cookie: other })).status, 404);
+  const reads = deliveryBlobReads;
+  assert.equal((await mediaRoute(mediaUrl)).status, 401);
+  assert.equal((await mediaRoute(mediaUrl, { cookie: other })).status, 404);
+  assert.equal(deliveryBlobReads, reads, "Unauthorized requests must never reach private media storage");
+  const partial = await mediaRoute(mediaUrl, { cookie: customer, headers: { Range: "bytes=0-63" } });
+  assert.equal(partial.status, 206); assert.deepEqual(partial.bytes, deliveryMedia.bytes.subarray(0, 64));
+  assert.equal(partial.headers["content-range"], `bytes 0-63/${deliveryMedia.bytes.length}`);
+  assert.equal(partial.headers["content-length"], "64"); assert.equal(partial.headers["content-type"], "video/mp4");
+  assert.equal(partial.headers["cache-control"], "private, no-store"); assert.equal(partial.headers.vary, "Cookie");
+  const head = await mediaRoute(mediaUrl, { cookie: customer, method: "HEAD" });
+  assert.equal(head.status, 200); assert.equal(head.bytes.length, 0);
+  assert.equal(head.headers["content-length"], String(deliveryMedia.bytes.length));
+  const invalid = await mediaRoute(mediaUrl, { cookie: customer, headers: { Range: "bytes=0-1,3-4" } });
+  assert.equal(invalid.status, 416); assert.equal(invalid.headers["content-range"], `bytes */${deliveryMedia.bytes.length}`);
+  const download = await mediaRoute(`${mediaUrl}&download=1`, { cookie: customer });
+  assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), deliveryMedia.sha256);
+  assert.equal(download.headers["content-disposition"], `attachment; filename="${preparation.id}.mp4"`);
+  assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
+  console.log("PASS: actual-handler completed status, persisted sandbox order, private MP4 playback/ranges, HEAD, verified download bytes, ownership denial, and zero outbound calls or charges. Media is an existing illustrative sample, not new provider output.");
+}
 if (checkOnly) {
-  try { if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
+  try { if (deliveryFixture) await checkDelivery(); else if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
 } else {
-  console.log(`Synthetic workflow test running at ${origin}. Fictional account helpers: ${origin}/__workflow . No production data or provider calls.`);
+  console.log(`Synthetic ${deliveryFixture ? "illustrative playback fixture" : "workflow test"} running at ${origin}. Fictional account helpers: ${origin}/__workflow . No production data or provider calls.`);
 }
