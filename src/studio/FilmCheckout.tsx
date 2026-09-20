@@ -92,7 +92,7 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
   </form>;
 }
 
-type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean };
+type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
 
 export default function FilmCheckout({ film, reviewed, productionAvailable, persistPaymentReference, onBusyChange }: {
   film: Film; reviewed: boolean; productionAvailable: boolean;
@@ -152,6 +152,23 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     }).catch(() => { if (active) setError("A payment request is saved, but its result could not be confirmed. Do not pay again. Check this order's status or contact the administrator."); });
     return () => { active = false; };
   }, [payment?.orderId, payment?.quoteId, payment?.preparedId, payment?.sandbox]);
+  useEffect(() => {
+    if (!paymentReference || !order?.receiptAvailable) return;
+    const reference = paymentReference;
+    let active = true, timer: ReturnType<typeof setTimeout> | undefined;
+    async function refresh() {
+      try {
+        const value = await api<ProductionStatus>(`/api/studio?action=productionStatus&id=${encodeURIComponent(reference.preparedId)}`);
+        if (!active) return;
+        if (value.id !== reference.preparedId || value.manifestHash !== reference.manifestHash
+          || !["prepared", "queued", "submitting", "processing", "uncertain", "failed", "completed"].includes(value.status)) return;
+        setProduction(value);
+        if (!["prepared", "failed", "completed"].includes(value.status) && !value.needsAttention) timer = setTimeout(() => void refresh(), 10_000);
+      } catch { /* Manual status recovery remains available after a temporary outage. */ }
+    }
+    void refresh();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, production?.status === "queued"]);
 
   async function work(label: string, operation: () => Promise<void>) {
     if (lock.current) return;
@@ -271,11 +288,16 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
         <h4>Film production</h4>
         <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
           : "Your payment is confirmed. Starting production uses the reviewed plan associated with this order."}</p>
-        {!productionAvailable && <p>Film production is currently unavailable. Your order remains recorded; contact the administrator for help or a refund.</p>}
+        {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
+        {!productionAvailable && !production?.mediaReady && <p>Film production is currently unavailable. Your order remains recorded; contact the administrator for help or a refund.</p>}
         <div className="action-group">
-          {(!production || production.preparationOnly) && <button className="button primary small" disabled={Boolean(busy) || !productionAvailable || !paidPlanCurrent || !reviewed} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />Start my film</button>}
+          {(!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !productionAvailable || !paidPlanCurrent || !reviewed} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume production" : "Start my film"}</button>}
           <button className="text-button" disabled={Boolean(busy)} onClick={() => void productionRequest(false)}><RefreshCw size={15} />Check production status</button>
         </div>
+        {production?.status === "completed" && production.mediaReady && <div className="finished-production">
+          <video controls preload="metadata" aria-label="Your finished film" src={`/api/studio?action=productionMedia&id=${encodeURIComponent(production.id)}`} />
+          <a className="button secondary small" href={`/api/studio?action=productionMedia&id=${encodeURIComponent(production.id)}&download=1`} download><Download size={15} />Download finished film</a>
+        </div>}
       </div>}
     </div>}
     {busy && <p role="status"><Loader2 className="spin" size={15} /> {busy}</p>}

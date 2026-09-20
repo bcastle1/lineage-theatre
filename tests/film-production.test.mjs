@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildFilmManifest, createFilmProductionService, fictionalOperatorProject, productionJobPath, validateProviderOutput } from "../api/_lib/film-production.mjs";
+import { userPath } from "../api/_lib/auth.mjs";
 
 const email = "customer@example.invalid";
 const owner = { email: "erik@brocotech.ai", role: "owner", status: "active" };
@@ -17,7 +18,9 @@ function store() {
   };
 }
 function adapter(overrides = {}) {
-  return { id: "magiclight", environment: "sandbox", available: true,
+  // In-memory mock of production branching only. These fabricated capabilities,
+  // grants and outputs are not provider approval or production readiness evidence.
+  return { id: "magiclight", environment: "production", available: true,
     evidence: { apiVerified: true, qualityVerified: true, commercialTermsVerified: true, reconciliationVerified: true }, outputHosts: ["media.example.invalid"],
     validateManifest: async () => ({ ready: true, maximumCostCents: 300 }),
     quote: async ({ manifestHash }) => ({ manifestHash, quoteReference: "fixture-price-1", currency: "USD", providerCostCents: 300, expiresAt: new Date(at + 60_000).toISOString() }),
@@ -27,7 +30,7 @@ function adapter(overrides = {}) {
     ...overrides,
   };
 }
-const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, environment: "sandbox", budgetCents: 300, expiresAt: new Date(at + 600_000).toISOString(), fictionalOnly: true });
+const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, environment: "production", budgetCents: 300, expiresAt: new Date(at + 600_000).toISOString(), fictionalOnly: false });
 const prepare = (service, overrides = {}) => service.prepare({ email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, ...overrides });
 
 test("manifest preserves reviewed screenplay, hashes evidence, sets exact target timing and excludes client provider flags", () => {
@@ -99,7 +102,7 @@ test("server quote is bound to validated immutable manifest and exact cost, neve
   const project = { ...fictionalOperatorProject(), preparationConsent: true, providerCostCents: 1, amountCents: 1 };
   const quote = await service.quoteForPayment(project, { email }, { idempotencyKey });
   assert.equal(quote.providerCostCents, 300); assert.equal(quote.manifestHash, buildFilmManifest(project).manifestHash);
-  assert.equal(quote.amountCents, undefined); assert.equal(quote.environment, "sandbox");
+  assert.equal(quote.amountCents, undefined); assert.equal(quote.environment, "production");
   const invalid = createFilmProductionService({ ...data, adapter: adapter({ quote: async () => ({ currency: "USD", providerCostCents: 1, manifestHash: "wrong" }) }), now: () => at });
   await assert.rejects(invalid.quoteForPayment(project, { email }, { idempotencyKey }), e => e.code === "PRODUCTION_UNAVAILABLE");
 });
@@ -151,6 +154,7 @@ test("a started plan cannot be priced again and owner test plans retain owner au
   const project = fictionalOperatorProject(), prepared = await prepare(service);
   await service.advance({ email, id: prepared.id });
   await assert.rejects(service.quoteForPayment(project, { email }, { preparedId: prepared.id, idempotencyKey }), e => e.code === "PRODUCTION_ALREADY_STARTED");
+  await data.writeRecordImpl(userPath(owner.email), owner);
   const operatorPlan = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
   await assert.rejects(service.quoteForPayment(project, { email: owner.email, role: "customer", status: "active" }, { preparedId: operatorPlan.id, idempotencyKey }), e => e.code === "OWNER_REQUIRED");
   assert.equal(priceCalls, 0);
@@ -158,7 +162,7 @@ test("a started plan cannot be priced again and owner test plans retain owner au
 
 test("no submit before trusted budget and matching environment authorization", async () => {
   let submissions = 0; const data = store();
-  for (const authorize of [undefined, async args => ({ ...await grant(args), budgetCents: 299 }), async args => ({ ...await grant(args), environment: "production" }), async args => ({ ...await grant(args), expiresAt: "invalid" })]) {
+  for (const authorize of [undefined, async args => ({ ...await grant(args), budgetCents: 299 }), async args => ({ ...await grant(args), environment: "sandbox" }), async args => ({ ...await grant(args), expiresAt: "invalid" }), async args => ({ ...await grant(args), fictionalOnly: true })]) {
     const service = createFilmProductionService({ ...data, adapter: adapter({ submitShot: async () => { submissions++; } }), now: () => at, authorize });
     const job = await prepare(service);
     await assert.rejects(service.advance({ email, id: job.id, paid: true, budgetCents: 999999 }));
@@ -238,10 +242,82 @@ test("completed clips remain processing until actual private assembled media pas
 });
 
 test("owner test uses fixed fictional material and still requires a server budget; customer role cannot invoke it", async () => {
-  const service = createFilmProductionService({ ...store(), now: () => at, adapter: adapter() });
+  const data = store(), service = createFilmProductionService({ ...data, now: () => at, adapter: adapter({ environment: "sandbox" }) });
   await assert.rejects(service.prepareOperatorTest({ actor: { email, role: "customer" }, idempotencyKey }), e => e.status === 403);
+  await assert.rejects(service.prepareOperatorTest({ actor: owner, idempotencyKey }), e => e.code === "OWNER_REQUIRED");
+  await data.writeRecordImpl(userPath(owner.email), owner);
   const job = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
   assert.match((await service.manifest({ email: owner.email, id: job.id })).manifest.title, /SAMPLE ONLY - FICTIONAL DATA/);
   await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
   await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: { email: owner.email, role: "customer" } }), e => e.status === 403);
+});
+
+test("sandbox refuses normal customer plans even for the owner and ignores a caller's fictional-only claim", async () => {
+  const data = store(); let calls = 0;
+  await data.writeRecordImpl(userPath(owner.email), owner);
+  const service = createFilmProductionService({ ...data, now: () => at,
+    adapter: adapter({ environment: "sandbox", validateManifest: async () => { calls++; return { ready: true, maximumCostCents: 300 }; },
+      quote: async () => { calls++; }, submitShot: async () => { calls++; } }),
+    authorize: async args => ({ ...await grant(args), environment: "sandbox", fictionalOnly: true }) });
+  for (const actor of [{ email, role: "customer", status: "active" }, owner]) {
+    const project = fictionalOperatorProject();
+    const job = await prepare(service, { email: actor.email, project });
+    await assert.rejects(service.quoteForPayment(project, actor, { preparedId: job.id, idempotencyKey }), e => e.code === "SANDBOX_OPERATOR_REQUIRED");
+    await assert.rejects(service.advance({ email: actor.email, id: job.id, actor, fictionalOnly: true }), e => e.code === "SANDBOX_OPERATOR_REQUIRED");
+  }
+  assert.equal(calls, 0);
+});
+
+test("operator-test mode cannot authorize altered family material or a tampered saved sample", async () => {
+  const mutations = [
+    job => { job.manifest.title = "A real family story"; },
+    job => { job.manifestHash = "f".repeat(64); },
+    job => { job.shots[0].id = "arbitrary-shot"; },
+  ];
+  for (const mutate of mutations) {
+    const data = store(); let calls = 0;
+    await data.writeRecordImpl(userPath(owner.email), owner);
+    const service = createFilmProductionService({ ...data, now: () => at,
+      adapter: adapter({ environment: "sandbox", validateManifest: async () => { calls++; }, submitShot: async () => { calls++; } }),
+      authorize: async args => ({ ...await grant(args), environment: "sandbox", fictionalOnly: true }) });
+    const job = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
+    mutate(data.records.get(productionJobPath(owner.email, job.id)).value);
+    await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "OPERATOR_PLAN_REQUIRED");
+    await assert.rejects(service.quoteForPayment(fictionalOperatorProject(), owner, { preparedId: job.id, idempotencyKey }),
+      e => ["OPERATOR_PLAN_REQUIRED", "PRODUCTION_PLAN_CHANGED"].includes(e.code));
+    assert.equal(calls, 0);
+  }
+  const data = store(); await data.writeRecordImpl(userPath(owner.email), owner);
+  const service = createFilmProductionService({ ...data, now: () => at, adapter: adapter({ environment: "sandbox" }) });
+  const project = fictionalOperatorProject(); project.scenes[0].narration = "User-provided private family history.";
+  const forged = await prepare(service, { email: owner.email, project, mode: "operator-test" });
+  await assert.rejects(service.quoteForPayment(project, owner, { preparedId: forged.id, idempotencyKey }), e => e.code === "OPERATOR_PLAN_REQUIRED");
+});
+
+test("a fixed sandbox sample quotes and submits only for the persisted active owner and a fictional grant", async () => {
+  const data = store(); let submits = 0, polls = 0;
+  await data.writeRecordImpl(userPath(owner.email), owner);
+  const service = createFilmProductionService({ ...data, now: () => at,
+    adapter: adapter({ environment: "sandbox", submitShot: async () => { submits++; return { status: "queued", providerJobId: "fictional-job" }; },
+      pollShot: async () => { polls++; return { status: "processing", providerJobId: "fictional-job" }; } }),
+    authorize: async args => ({ ...await grant(args), environment: "sandbox", fictionalOnly: true }) });
+  const job = await service.prepareOperatorTest({ actor: owner, idempotencyKey });
+  assert.equal((await service.quoteForPayment(fictionalOperatorProject(), owner, { preparedId: job.id, idempotencyKey })).environment, "sandbox");
+  for (const mutation of [{ role: "customer" }, { status: "suspended" }, { mustChangePassword: true }]) {
+    data.records.get(userPath(owner.email)).value = { ...owner, ...mutation };
+    await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "OWNER_REQUIRED");
+    await assert.rejects(service.quoteForPayment(fictionalOperatorProject(), owner, { preparedId: job.id, idempotencyKey }), e => e.code === "OWNER_REQUIRED");
+  }
+  assert.equal(submits, 0);
+  data.records.get(userPath(owner.email)).value = { ...owner };
+  await service.advance({ email: owner.email, id: job.id, actor: owner }); assert.equal(submits, 1);
+  data.records.get(userPath(owner.email)).value.status = "suspended";
+  await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "OWNER_REQUIRED");
+  assert.equal(polls, 0);
+  data.records.get(userPath(owner.email)).value = { ...owner };
+  await service.advance({ email: owner.email, id: job.id, actor: owner }); assert.equal(polls, 1);
+  const unrestricted = createFilmProductionService({ ...data, now: () => at, adapter: adapter({ environment: "sandbox" }),
+    authorize: async args => ({ ...await grant(args), environment: "sandbox", fictionalOnly: false }) });
+  const next = await unrestricted.prepareOperatorTest({ actor: owner, idempotencyKey: "fictional-other-test-002" });
+  await assert.rejects(unrestricted.advance({ email: owner.email, id: next.id, actor: owner }), e => e.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
 });

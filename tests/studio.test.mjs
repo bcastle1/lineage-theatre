@@ -187,17 +187,17 @@ test("legacy production messages are neutral and records remain scoped to the si
 });
 
 test("starting production requires exact saved references, consent, same origin and an approved session",async()=>{
-  const calls=[],filmProduction={advance:async args=>{calls.push(args);return {id:args.id,status:"prepared"};}};
+  const calls=[],productionQueue={enqueue:async args=>{calls.push(args);return {id:args.id,status:"queued"};}};
   const body={preparedId:"synthetic-prepared-1234",orderId:"a".repeat(64),productionConsent:true};
-  const h=harness({filmProduction});
-  assert.equal((await h.run("startProduction",post(body))).status,200);
-  assert.deepEqual(calls,[{email:actor.email,id:body.preparedId,authorizationReference:body.orderId,actor}]);
+  const h=harness({productionQueue});
+  assert.equal((await h.run("startProduction",post(body))).status,202);
+  assert.deepEqual(calls,[{id:body.preparedId,orderId:body.orderId,actor}]);
   for(const invalid of [{...body,productionConsent:false},{...body,productionConsent:"true"},{...body,preparedId:"bad"},
     {...body,orderId:"bad"},{...body,allowed:true},{...body,manifestHash:"b".repeat(64)},{...body,amountCents:1},
     {...body,actor:{role:"owner"}},{...body,environment:"production"}])
     assert.equal((await h.run("startProduction",post(invalid))).status,400);
   assert.equal((await h.run("startProduction",{...post(body),headers:{origin:"https://other.invalid"}})).status,403);
-  assert.equal((await harness({filmProduction},null).run("startProduction",post(body))).status,401);
+  assert.equal((await harness({productionQueue},null).run("startProduction",post(body))).status,401);
   assert.equal((await h.run("startProduction")).status,400);
   assert.equal(calls.length,1);
   assert.deepEqual(h.calls.limits,[[`production-start:${actor.email}`,20,3600_000]]);
@@ -205,9 +205,9 @@ test("starting production requires exact saved references, consent, same origin 
 
 test("production-start rate limits and film authorization failures never bypass the film service",async()=>{
   let calls=0;const body={preparedId:"synthetic-prepared-1234",orderId:"a".repeat(64),productionConsent:true};
-  const filmProduction={advance:async()=>{calls++;throw new FilmProductionError("Film production is unavailable.",503,"PRODUCTION_UNAVAILABLE");}};
-  assert.equal((await harness({filmProduction,limitAction:async()=>false}).run("startProduction",post(body))).status,429);
+  const productionQueue={enqueue:async()=>{calls++;throw new FilmProductionError("Film production is unavailable.",503,"PRODUCTION_UNAVAILABLE");}};
+  assert.equal((await harness({productionQueue,limitAction:async()=>false}).run("startProduction",post(body))).status,429);
   assert.equal(calls,0);
-  const failed=await harness({filmProduction}).run("startProduction",post(body));
+  const failed=await harness({productionQueue}).run("startProduction",post(body));
   assert.equal(failed.status,503);assert.equal(failed.body.code,"PRODUCTION_UNAVAILABLE");assertCustomerSafe(failed);assert.equal(calls,1);
 });

@@ -191,7 +191,8 @@ function grantFixture(overrides={}) {
   put(userPath(OWNER.email),OWNER);
   put(QUICKBOOKS_CONNECTION_PATH,{status:"authorized",revision:3,encryptedTokens:encryptQuickBooksTokens(tokens,config),fingerprint:config.fingerprint,credentialVersion:config.credentialVersion,authorizationAttemptId:"synthetic-authorization-attempt",connectedBy:OWNER.email});
   const read=async path=>{await overrides.beforeRead?.(path,records);return records.has(path)?structuredClone(records.get(path)):null;};
-  const transport=createQuickBooksPaymentsTransport({read,env,now:()=>time,authorizeProduction:overrides.authorizeProduction,connection:{refresh:async(...args)=>{calls.push(["refresh",args]);await overrides.refresh?.({records,put,tokens,config});}},
+  const transport=createQuickBooksPaymentsTransport({read,env,now:()=>time,authorizeProduction:overrides.authorizeProduction,
+    authorizeSandbox:overrides.authorizeSandbox|| (async({binding})=>authorization(binding)),connection:{refresh:async(...args)=>{calls.push(["refresh",args]);await overrides.refresh?.({records,put,tokens,config});}},
     fetchImpl:async(...args)=>{calls.push(args);return processorResponse(chargeReply());}});
   return {transport,calls,records,env,put,tokens,config,advance:ms=>{time+=ms;}};
 }

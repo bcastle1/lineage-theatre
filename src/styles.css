@@ -2213,6 +2213,9 @@ button {
 .account-waiting-card strong { overflow-wrap: anywhere; }
 .account-waiting-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; padding: 1.5rem clamp(1rem, 4vw, 3rem); font-size: 11px; color: var(--muted); }
 .film-checkout { display: grid; gap: 1rem; }
+.finished-production { display: grid; gap: .75rem; min-width: 0; }
+.finished-production video { display: block; width: 100%; max-height: 70vh; background: #111; border-radius: .5rem; }
+.finished-production > a { justify-self: start; }
 .film-checkout > .button { justify-self: start; }
 .film-price-review, .film-order-status, .film-paid-production { display: grid; gap: .9rem; }
 .film-price-review, .film-paid-production { border-top: 1px solid var(--line); padding-top: 1rem; }

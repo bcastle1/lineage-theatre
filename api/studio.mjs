@@ -5,6 +5,8 @@ import { readPricingSettings } from "./_lib/admin.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
+import { createProductionQueue } from "./_lib/production-queue.mjs";
+import { streamProductionMedia } from "./_lib/production-media.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -66,6 +68,8 @@ function customerStory(result,action) {
 export function createStudioHandler(overrides={}) {
  const humanCheck=overrides.captcha||captcha;
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
+ const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
+   read:dependencies.readRecord,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
  return async function handler(req,res) {
   const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments}=dependencies;
   let storyRequest=false;
@@ -74,11 +78,14 @@ export function createStudioHandler(overrides={}) {
     if(!session) return json(res,401,{message:"Sign in and set your password to use the studio."});
     const email=session.user.email;
     const url=new URL(req.url,`https://${req.headers.host}`);
+    if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
+      return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,
+        ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
       if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings()})));
       if(action==="checkoutConfiguration") return json(res,200,await payments.checkoutConfiguration(session.user));
-      if(action==="productionStatus") return json(res,200,await filmProduction.status({email,id:url.searchParams.get("id")}));
+      if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id")}));
       if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
       if(action==="order") return json(res,200,await payments.order(session.user,url.searchParams.get("id")));
       if(action==="receipt") return json(res,200,await payments.receipt(session.user,url.searchParams.get("id")));
@@ -116,7 +123,7 @@ export function createStudioHandler(overrides={}) {
         return json(res,429,{message:"Please wait before requesting production again. Check the current film status."});
       // A browser order reference grants nothing: the film service validates its
       // saved manifest and trusted payment authorization before any provider work.
-      return json(res,200,await filmProduction.advance({email,id:body.preparedId,authorizationReference:body.orderId,actor:session.user}));
+      return json(res,202,await queue.enqueue({id:body.preparedId,orderId:body.orderId,actor:session.user}));
     }
     if(["quote","checkout"].includes(body?.action)) {
       if(!(await limitAction(`payment:${email}`,20,3600_000))) return json(res,429,{message:"Please wait before making another payment request. Check an existing order before trying to pay again.",charged:null});

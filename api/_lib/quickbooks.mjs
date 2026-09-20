@@ -3,6 +3,7 @@ import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner, OWNER_EMAIL } from "./access.mjs";
 import { audit } from "./admin.mjs";
 import { INTUIT_PAYMENT_ORIGINS, paymentAuthorizationMatches } from "./payment-authorization.mjs";
+import { paymentReadiness } from "./payment-readiness.mjs";
 
 // Verified against Intuit's official oauth-jsclient, src/OAuthClient.js.
 // These URLs are never derived from a request, callback query, or environment override.
@@ -604,17 +605,19 @@ export const quickbooks = createQuickBooksService();
 
 // Server-only Payments transport. No HTTP action exposes the decrypted grant.
 // Paths and methods follow Intuit's official PHP Payments SDK ChargeOperations.
-// Production needs an explicitly wired trusted evidence verifier. The default
-// denies every production request; environment configuration cannot enable it.
+// Both environments require current signed review evidence. The default
+// verifier cannot be enabled by an environment selection alone.
 export function createQuickBooksPaymentsTransport(overrides={}) {
   const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,
-    connection=quickbooks,authorizeProduction=async()=>null}=overrides;
+    connection=quickbooks,authorizeProduction=paymentReadiness.authorizeTransport,
+    authorizeSandbox=paymentReadiness.authorizeTransport}=overrides;
   const unavailable=()=>new QuickBooksError("The payment connection needs administrator review.",503,"PAYMENT_CONNECTION_UNAVAILABLE");
   async function authorize(binding,operation) {
-    if(binding?.environment!=="production")return;
-    const authorization=await authorizeProduction({binding,operation});
+    const authorizeBinding=binding?.environment==="production"?authorizeProduction:authorizeSandbox;
+    const authorization=await authorizeBinding({binding,operation});
     if(!paymentAuthorizationMatches(authorization,binding,operation,now()))
-      throw new QuickBooksError("Production payments are not enabled.",503,"PRODUCTION_PAYMENTS_DISABLED");
+      throw new QuickBooksError(binding?.environment==="production"?"Production payments are not enabled.":"Sandbox payment testing is not enabled.",
+        503,binding?.environment==="production"?"PRODUCTION_PAYMENTS_DISABLED":"SANDBOX_PAYMENTS_DISABLED");
   }
   async function inspect(allowRefresh=false, requireAccess=false) {
     const config=quickbooksConfig(env), record=await read(QUICKBOOKS_CONNECTION_PATH), value=record?.value;

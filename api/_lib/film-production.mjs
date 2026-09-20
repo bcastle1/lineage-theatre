@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { digest, readRecord, writeRecord } from "./auth.mjs";
+import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { prepareStory, validateStory } from "./story.mjs";
 
@@ -142,6 +142,27 @@ export function createFilmProductionService(dependencies = {}) {
     if (!record || record.value.ownerHash !== digest(owner(email))) throw new FilmProductionError("This production does not belong to your account.", 404, "PRODUCTION_NOT_FOUND");
     return record;
   }
+  async function requireOperator(actor, email) {
+    if (!isOwner(actor) || actor.status !== "active" || actor.mustChangePassword || actor.email !== email)
+      throw new FilmProductionError("Only the owner can run this production test.", 403, "OWNER_REQUIRED");
+    const current = (await read(userPath(email)))?.value;
+    if (!isOwner(current) || current.email !== email || current.status !== "active" || current.mustChangePassword)
+      throw new FilmProductionError("Only the current active owner can run this production test.", 403, "OWNER_REQUIRED");
+  }
+  async function requireProductionContext(job, actor, email) {
+    if (adapter.environment === "sandbox" && job.mode !== "operator-test")
+      throw new FilmProductionError("Sandbox production is limited to the owner's fixed fictional test.", 403, "SANDBOX_OPERATOR_REQUIRED");
+    if (job.mode !== "operator-test") return;
+    await requireOperator(actor, email);
+    // Mode and a fictionalOnly flag cannot make an arbitrary family project a
+    // sandbox test. Verify the saved content against the fixed server sample.
+    const fixed = buildFilmManifest(fictionalOperatorProject());
+    if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
+        || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
+        || !Array.isArray(job.shots) || job.shots.length !== fixed.manifest.shots.length
+        || job.shots.some((shot, index) => shot.id !== fixed.manifest.shots[index].id))
+      throw new FilmProductionError("Prepare a new fixed fictional production test from Administration.", 403, "OPERATOR_PLAN_REQUIRED");
+  }
   async function prepare({ email, project, idempotencyKey, preparationConsent, mode = "customer" }) {
     email = owner(email); key(idempotencyKey);
     if (preparationConsent !== true) invalid("Allow your screenplay, cast, and production plan to be saved privately before preparing your film.");
@@ -178,7 +199,7 @@ export function createFilmProductionService(dependencies = {}) {
     if (job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) {
       throw new FilmProductionError("Production has already started for this plan. Check the existing film before making another payment.", 409, "PRODUCTION_ALREADY_STARTED");
     }
-    if (job.mode === "operator-test" && !isOwner(actor)) throw new FilmProductionError("Only the owner can price this production test.", 403, "OWNER_REQUIRED");
+    await requireProductionContext(job, actor, actor.email);
     const validated = await adapter.validateManifest(clone(record.value.manifest));
     if (validated?.ready !== true) throw new FilmProductionError("Review your production plan before requesting a price.", 409, "PRODUCTION_REVIEW_REQUIRED");
     const quote = await adapter.quote({ manifest: clone(record.value.manifest), manifestHash: prepared.manifestHash, idempotencyKey: digest(`quote:${prepared.id}:${idempotencyKey}`) });
@@ -189,7 +210,7 @@ export function createFilmProductionService(dependencies = {}) {
       environment: adapter.environment, apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
   }
   async function prepareOperatorTest({ actor, idempotencyKey }) {
-    if (!isOwner(actor)) throw new FilmProductionError("Only the owner can prepare a production test.", 403, "OWNER_REQUIRED");
+    await requireOperator(actor, actor?.email);
     return prepare({ email: actor.email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, mode: "operator-test" });
   }
   async function save(path, job, etag) { await write(path, { ...job, revision: job.revision + 1, updatedAt: stamp() }, etag); }
@@ -200,8 +221,8 @@ export function createFilmProductionService(dependencies = {}) {
     email = owner(email);
     let record = await get(email, id);
     let job = clone(record.value);
+    await requireProductionContext(job, actor, email);
     if (["completed", "failed", "awaiting-assembly"].includes(job.status)) return customerJob(job);
-    if (job.mode === "operator-test" && (!isOwner(actor) || actor.email !== email)) throw new FilmProductionError("Only the owner can run this production test.", 403, "OWNER_REQUIRED");
     if (job.lease && job.lease.expiresAt > now()) return customerJob(job);
     const shot = job.shots.find(s => s.status !== "completed");
     if (!shot) return customerJob(job);
@@ -211,7 +232,8 @@ export function createFilmProductionService(dependencies = {}) {
       grant = await authorize({ email, id, manifestHash: job.manifestHash, mode: job.mode, authorizationReference });
       if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash || grant.environment !== adapter.environment
         || !Number.isSafeInteger(grant.budgetCents) || grant.budgetCents < 0 || Date.parse(grant.expiresAt) <= now() || !Number.isFinite(Date.parse(grant.expiresAt))
-        || (job.mode === "operator-test" && grant.fictionalOnly !== true)) throw new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
+        || (job.mode === "operator-test" && grant.fictionalOnly !== true)
+        || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
       const validation = await adapter.validateManifest(clone(job.manifest));
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
@@ -256,12 +278,15 @@ export function createFilmProductionService(dependencies = {}) {
     return customerJob((await get(email, id)).value);
   }
   // A media worker must verify the actual private file before this transition.
-  async function acceptAssembly({ email, id, manifestHash, artifact }) {
+  async function acceptAssembly({ email, id, manifestHash, artifact, stillOwned = async () => true }) {
     if (typeof dependencies.verifyAssembledMedia !== "function") throw unavailable();
     const record = await get(email, id), job = clone(record.value);
     if (job.status === "completed" && job.manifestHash === manifestHash) return customerJob(job);
     if (job.status !== "awaiting-assembly" || job.manifestHash !== manifestHash) throw new FilmProductionError("This film is not ready for assembly.", 409, "ASSEMBLY_NOT_READY");
     const verified = await dependencies.verifyAssembledMedia({ email: owner(email), id, manifestHash, artifact, manifest: clone(job.manifest) });
+    // Verification can stream a large private artifact. Recheck the worker's
+    // claim after that await, before the conditional write that marks delivery.
+    if (!await stillOwned()) throw new FilmProductionError("The assembly claim expired. Production will resume safely.", 409, "ASSEMBLY_CLAIM_EXPIRED");
     const expectedPrefix = `production/media/${digest(owner(email))}/${id}/`;
     if (verified?.playable !== true || verified.manifestHash !== manifestHash || typeof verified.pathname !== "string" || !verified.pathname.startsWith(expectedPrefix)
       || verified.pathname.includes("..") || !HASH.test(verified.sha256 || "") || !["video/mp4", "video/webm"].includes(verified.contentType)
@@ -277,9 +302,18 @@ export function createFilmProductionService(dependencies = {}) {
     status: async ({ email, id }) => customerJob((await get(email, id)).value),
     manifest: async ({ email, id }) => { const job = (await get(email, id)).value; return { id: job.id, manifestHash: job.manifestHash, manifest: clone(job.manifest) }; },
     getPrepared: async ({ email, id }) => clone((await get(email, id)).value),
-    readiness: () => ({ available: false, preparationAvailable: true, adapter: adapter.id, environment: adapter.environment, gaps: [...MAGICLIGHT_GAPS] }),
+    readiness: () => {
+      let available = false;
+      try { checkAdapter(adapter); available = true; } catch { /* Keep undocumented providers disabled. */ }
+      return { available, preparationAvailable: true, adapter: adapter.id, environment: adapter.environment, gaps: available ? [] : [...MAGICLIGHT_GAPS] };
+    },
   };
 }
 
-export const filmProduction = createFilmProductionService();
+export const filmProduction = createFilmProductionService({
+  // Lazy import avoids a construction-time cycle with payment quotes. The
+  // payment service verifies the saved account, plan, order and merchant grant.
+  authorize: async ({ email, id, manifestHash, authorizationReference }) =>
+    (await import("./payments.mjs")).payments.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
+});
 export const quoteForPayment = (...args) => filmProduction.quoteForPayment(...args);
