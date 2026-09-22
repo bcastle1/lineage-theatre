@@ -32,7 +32,7 @@ function fixture({ unavailable = false, submitFails = false } = {}) {
   const dependencies = { read, write, listBlobs, now: () => time, film, paymentService: { authorizeProduction: grant } };
   const queue = createProductionQueue(dependencies);
   const assemble = async ({ id, job }) => { calls.assembly++; return { playable: true, manifestHash: job.manifestHash,
-    pathname: `production/media/${digest(email)}/${id}/${"b".repeat(64)}.mp4`, sha256: "b".repeat(64), contentType: "video/mp4", sizeBytes: 100, durationSeconds: 15 }; };
+    pathname: `production/media/${digest(email)}/${id}/${"b".repeat(64)}.mp4`, sha256: "b".repeat(64), contentType: "video/mp4", sizeBytes: 100, durationSeconds: 15, width: 1920, height: 1080, frameRate: 24 }; };
   return { queue, film, records, calls, read, write, dependencies, assemble, advanceTime: () => { time += 400_000; },
     async prepare() { await write(userPath(email), actor); return film.prepare({ email, project: fictionalOperatorProject(), preparationConsent: true, idempotencyKey: "queue-test-preparation-001" }); } };
 }

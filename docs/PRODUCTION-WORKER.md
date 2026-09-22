@@ -25,6 +25,8 @@ Temporary clips live only in a dedicated `lineage-production-worker` system-temp
 
 ## Private output
 
+The [September 22 media development change](MAGICLIGHT-MEDIA-INTEGRATION.md) adds native-profile assembly and optional separate reviewed audio tracks. Those checks operate on real decoded media and retain verified dimensions/frame rate; they do not establish a working Magiclight API connection.
+
 Outputs use `production/media/<owner hash>/<job id>/<SHA-256>.mp4` with private Blob access and overwrite disabled. Actual byte length/hash, manifest binding, audio and decoded duration must pass verification before completion. Provider output URLs are allowlisted HTTPS, redirects are rejected, and downloads are bounded. The browser receives only its same-origin authenticated playback URL. Working sources and cloud archive consent remain separate.
 
 Captions are generated and retained privately alongside the MP4 when upload succeeds. A customer caption-download UI and retention/deletion operations are not added by this change. Media streaming enforces session ownership, exact storage path, content type, byte count and requested range; no provider/storage URL is exposed.

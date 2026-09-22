@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { prepareStory, validateStory } from "./story.mjs";
+import { verifiedMediaProfile } from "./media-profile.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -96,17 +97,28 @@ function checkAdapter(adapter) {
 }
 
 // Exact hostnames must come from a verified server adapter, never request data.
-export function validateProviderOutput(output, allowedHosts = []) {
+function validateProviderMedia(output, allowedHosts, contentTypes) {
   let url;
   try { url = new URL(output?.url); } catch { throw new FilmProductionError("Film output needs verification.", 502, "OUTPUT_UNVERIFIED"); }
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash
     || !allowedHosts.includes(url.hostname) || !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(url.hostname)
-    || typeof output.url !== "string" || output.url.length > 8192 || !["video/mp4", "video/webm"].includes(output.contentType)
+    || typeof output.url !== "string" || output.url.length > 8192 || !contentTypes.includes(output.contentType)
     || !Number.isSafeInteger(output.sizeBytes) || output.sizeBytes < 16 || output.sizeBytes > 250 * 1024 * 1024
     || !Number.isFinite(output.durationSeconds) || output.durationSeconds <= 0 || output.durationSeconds > 600) {
     throw new FilmProductionError("Film output needs verification.", 502, "OUTPUT_UNVERIFIED");
   }
   return { url: output.url, contentType: output.contentType, sizeBytes: output.sizeBytes, durationSeconds: output.durationSeconds };
+}
+
+// A server adapter may return a separate, reviewed narration/dialogue mix.
+// It stays private and must pass the same host/byte checks as the video, then
+// actual full decoding and timeline checks in the media worker.
+export function validateProviderAudio(output, allowedHosts = []) {
+  return validateProviderMedia(output, allowedHosts, ["audio/mp4", "audio/mpeg", "audio/wav", "audio/webm"]);
+}
+export function validateProviderOutput(output, allowedHosts = []) {
+  const video = validateProviderMedia(output, allowedHosts, ["video/mp4", "video/webm"]);
+  return { ...video, ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}) };
 }
 
 function customerJob(job) {
@@ -292,7 +304,10 @@ export function createFilmProductionService(dependencies = {}) {
       || verified.pathname.includes("..") || !HASH.test(verified.sha256 || "") || !["video/mp4", "video/webm"].includes(verified.contentType)
       || !Number.isSafeInteger(verified.sizeBytes) || verified.sizeBytes < 16 || verified.sizeBytes > 250 * 1024 * 1024 || !Number.isFinite(verified.durationSeconds)
       || Math.abs(verified.durationSeconds - job.manifest.targetDurationSeconds) > 1) throw new FilmProductionError("The finished film needs playback verification.", 502, "OUTPUT_UNVERIFIED");
-    job.media = select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]);
+    let profile;
+    try { profile = verifiedMediaProfile(verified); }
+    catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
+    job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     job.status = "completed";
     await save(productionJobPath(email, id), job, record.etag);
     return customerJob(job);

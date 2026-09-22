@@ -225,10 +225,44 @@ test("provider output must be approved HTTPS media and cannot expose internal UR
   assert.throws(() => validateProviderOutput({ ...output, contentType: "text/html" }, ["media.example.invalid"]));
 });
 
+test("separate reviewed audio is validated, retained privately and never exposed in customer status", async () => {
+  const audio = { url: "https://media.example.invalid/voice.m4a?token=private-audio", contentType: "audio/mp4", sizeBytes: 100, durationSeconds: 5 };
+  const output = { url: "https://media.example.invalid/clip.mp4", contentType: "video/mp4", sizeBytes: 200, durationSeconds: 5, audio };
+  assert.deepEqual(validateProviderOutput({ ...output, audio: { ...audio, apiKey: "do-not-retain", localPath: "private-file" } }, ["media.example.invalid"]), output);
+  for (const invalidAudio of [null, { ...audio, url: "https://untrusted.invalid/voice.m4a" },
+    { ...audio, url: "file:///voice.m4a" }, { ...audio, contentType: "text/html" },
+    { ...audio, sizeBytes: 0 }, { ...audio, durationSeconds: Infinity }]) {
+    assert.throws(() => validateProviderOutput({ ...output, audio: invalidAudio }, ["media.example.invalid"]));
+  }
+  const data = store();
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter({
+    pollShot: async ({ providerJobId }) => ({ status: "completed", providerJobId, output }),
+  }) });
+  const job = await prepare(service);
+  await service.advance({ email, id: job.id });
+  const status = await service.advance({ email, id: job.id });
+  assert.deepEqual((await service.getPrepared({ email, id: job.id })).shots[0].output.audio, audio);
+  assert.doesNotMatch(JSON.stringify(status), /voice\.m4a|media\.example|private-audio/);
+});
+
+test("untrusted separate audio cannot move a completed provider result into assembly", async () => {
+  const data = store();
+  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter({
+    pollShot: async ({ providerJobId }) => ({ status: "completed", providerJobId, output: {
+      url: "https://media.example.invalid/clip.mp4", contentType: "video/mp4", sizeBytes: 200, durationSeconds: 5,
+      audio: { url: "https://other.invalid/voice.mp3", contentType: "audio/mpeg", sizeBytes: 100, durationSeconds: 5 },
+    } }),
+  }) });
+  const job = await prepare(service);
+  await service.advance({ email, id: job.id });
+  assert.equal((await service.advance({ email, id: job.id })).status, "uncertain");
+  assert.equal((await service.getPrepared({ email, id: job.id })).shots[0].output, undefined);
+});
+
 test("completed clips remain processing until actual private assembled media passes playback and duration verification", async () => {
   const data = store(); let verified = false;
   const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter(),
-    verifyAssembledMedia: async ({ email, id, manifestHash }) => ({ playable: verified, manifestHash, pathname: productionJobPath(email, id).replace("jobs", "media").replace(".json", "/final.mp4"), sha256: "a".repeat(64), contentType: "video/mp4", sizeBytes: 2000, durationSeconds: 15 }),
+    verifyAssembledMedia: async ({ email, id, manifestHash }) => ({ playable: verified, manifestHash, pathname: productionJobPath(email, id).replace("jobs", "media").replace(".json", "/final.mp4"), sha256: "a".repeat(64), contentType: "video/mp4", sizeBytes: 2000, durationSeconds: 15, width: 1920, height: 1080, frameRate: 24 }),
   });
   const job = await prepare(service);
   for (let i = 0; i < 6; i++) await service.advance({ email, id: job.id });
@@ -238,6 +272,7 @@ test("completed clips remain processing until actual private assembled media pas
   verified = true;
   const result = await service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash });
   assert.equal(result.status, "completed"); assert.equal(result.mediaReady, true);
+  assert.equal((await service.getPrepared({ email, id: job.id })).media.height, 1080);
   assert.doesNotMatch(JSON.stringify(result), /private-test-token|media\.example|pathname|provider/);
 });
 
