@@ -988,8 +988,6 @@ export function CuttingStep({
 type CreateProps = StepProps & {
   caps: Capabilities | null;
   checkFilm: () => Promise<void>;
-  consent: boolean;
-  setConsent: (v: boolean) => void;
   resultUrl: string;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
   onCheckoutBusy: (message: string) => void;
@@ -1003,8 +1001,6 @@ export function CreateStep({
   busy,
   caps,
   checkFilm,
-  consent,
-  setConsent,
   resultUrl,
   persistPaymentReference,
   onCheckoutBusy,
@@ -1048,17 +1044,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <label className="check-label consent-final">
-        <input
-          type="checkbox"
-          checked={consent}
-          disabled={!!busy}
-          onChange={(e) => setConsent(e.target.checked)}
-        />
-        I have permission to use these materials and have reviewed the facts, cast,
-        dialogue, and dramatized details.
-      </label>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

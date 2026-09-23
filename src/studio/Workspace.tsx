@@ -124,7 +124,6 @@ export default function Workspace({
   const [themePage, setThemePage] = useState(0);
   const [themeOrigin, setThemeOrigin] = useState("");
   const [resultUrl, setResultUrl] = useState("");
-  const [consent, setConsent] = useState(false);
   const [aiConsent, setAiConsent] = useState(false);
   const [localLegacy, setLocalLegacy] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -303,7 +302,6 @@ export default function Workspace({
     setActiveId(project.id);
     setStep(0);
     setView("create");
-    setConsent(false);
     notify("A new family film is ready to develop.");
   }
   async function upload(files: FileList | File[]) {
@@ -594,7 +592,6 @@ export default function Workspace({
               disabled={!!busy}
               onChange={(e) => {
                 setActiveId(e.target.value);
-                setConsent(false);
                 notify("Film opened.");
               }}
             >
@@ -739,8 +736,6 @@ export default function Workspace({
                       {...props}
                       caps={caps}
                       checkFilm={checkFilm}
-                      consent={consent}
-                      setConsent={setConsent}
                       resultUrl={resultUrl}
                       persistPaymentReference={persistPaymentReference}
                       onCheckoutBusy={setBusy}

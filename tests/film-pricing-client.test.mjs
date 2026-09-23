@@ -11,12 +11,16 @@ const NOW=Date.now(),input=JSON.stringify({id:"film-example",title:"Fictional ga
 const prepared={id:"00000000-0000-4000-8000-000000000001",manifestHash:"a".repeat(64),status:"prepared",sceneCount:4,shotCount:4,durationSeconds:30,createdAt:new Date(NOW).toISOString(),issues:[]};
 const price={preparedId:prepared.id,manifestHash:prepared.manifestHash,filmId:"film-example",filmTitle:"Fictional garden",currency:"USD",amountCents:378,
   expiresAt:new Date(NOW+60_000).toISOString(),sandbox:false,kind:"confirmed",note:"This is the fixed price for this saved film."};
-const options={input,filmId:"film-example",preparationKey:"00000000-0000-4000-8000-000000000002",priceKey:"price-key-12345678",reviewed:true,preparationConsent:true,now:()=>NOW};
+const options={input,filmId:"film-example",preparationKey:"00000000-0000-4000-8000-000000000002",priceKey:"price-key-12345678",preparationConsent:true,now:()=>NOW};
 
-test("one action saves the reviewed plan, persists its reference and gets a fixed price without payment configuration",async()=>{
+test("one action saves the plan and gets a fixed price without a screenplay-review flag or payment configuration",async()=>{
   const events=[];
   const result=await prepareFilmPrice({...options,persist:value=>{events.push("persist");assert.equal(value.id,prepared.id);},
-    request:async(path,body)=>{events.push(body.action);assert.equal(path,"/api/studio");return body.action==="prepare"?prepared:price;}});
+    request:async(path,body)=>{
+      events.push(body.action);assert.equal(path,"/api/studio");assert.equal(Object.hasOwn(body,"reviewed"),false);
+      if(body.action==="prepare")assert.deepEqual(body,{action:"prepare",project:JSON.parse(input),preparationConsent:true,idempotencyKey:options.preparationKey});
+      return body.action==="prepare"?prepared:price;
+    }});
   assert.deepEqual(events,["prepare","persist","price"]);assert.equal(result.price.amountCents,378);
 });
 test("an unchanged saved plan can be priced again without another preparation or a new storage consent",async()=>{
@@ -24,9 +28,11 @@ test("an unchanged saved plan can be priced again without another preparation or
   const result=await prepareFilmPrice({...options,existing,preparationConsent:false,persist:()=>assert.fail(),request:async(path,body)=>{calls.push(body);return price;}});
   assert.deepEqual(result.prepared,existing);assert.equal(calls.length,1);assert.equal(calls[0].action,"price");
 });
-test("review and new-plan consent remain required before saving or pricing",async()=>{
-  for(const patch of [{reviewed:false},{preparationConsent:false}]) {
-    await assert.rejects(prepareFilmPrice({...options,...patch,request:async()=>assert.fail(),persist:()=>assert.fail()}));
+test("saving a new or changed plan still requires storage consent before any request",async()=>{
+  const existing={...prepared,inputHash:await productionInputHash(JSON.stringify({id:"film-example",title:"Earlier draft"})),requestId:options.preparationKey};
+  for(const preparationConsent of [false,undefined]) {
+    for(const prior of [undefined,existing])await assert.rejects(prepareFilmPrice({...options,existing:prior,preparationConsent,
+      request:async()=>assert.fail("No request without storage consent"),persist:()=>assert.fail("No saved reference without storage consent")}),/Allow your production plan to be saved/);
   }
 });
 test("a price failure retains the persisted plan and never starts checkout",async()=>{
