@@ -1,6 +1,6 @@
 # Shared payment checkout contract
 
-September 14, 2026. This describes implemented plumbing and the remaining activation evidence. It does not certify merchant approval or authorize a transaction.
+Originally September 14, 2026; checkout preparation and readable receipt documentation updated September 23, 2026. This describes implemented plumbing and the remaining activation evidence. It does not certify merchant approval or authorize a transaction.
 
 Approved customers, employees and administrators use the same studio quote, checkout, order and receipt actions. Registration approval governs account access. Administrator permissions are required for refunds, reconciliation and diagnostic details, not for purchases.
 
@@ -15,12 +15,20 @@ The supported fixed hosts are `https://sandbox.api.intuit.com` and `https://api.
 ## Customer API
 
 - GET `checkoutConfiguration`: unavailable returns only `{available:false}`. When a trusted server verifier authorizes card entry for the current grant, returns `{available:true,environment,tokenization:{method:'intuit-browser-direct',url}}`. It does not refresh credentials, expose a grant, or submit a payment.
+- POST `prepareCheckout`: `{action:'prepareCheckout'}` is the explicit same-origin, rate-limited preparation used by Continue to payment. It requires current account/card-entry authorization before it may renew expired or unavailable in-memory OAuth access; the transport separately requires refresh authorization and preserves the grant binding. It returns the same minimal configuration as GET and never charges. Production owner-only access, when configured, also applies before renewal. GET remains read-only.
 - POST `quote`: `{project,preparedId,idempotencyKey}` loads and checks the saved preparation through the film service. The response includes `id`, `orderId`, `preparedId`, `manifestHash`, film display details, currency, total amount, expiry and sandbox status. The server supplies the provider quote and markup; clients cannot supply costs, totals or evidence.
-- POST `checkout`: `{quoteId,idempotencyKey,paymentToken,consent:true}`. An immutable order claim precedes any processor request. Tokens are neither persisted nor returned.
+- POST `checkoutCheck`: `{quoteId,captchaToken}` rechecks checkout preparation, including authorized renewal when needed, then validates CAPTCHA and returns a short-lived, one-use proof bound to the account and quote. It does not charge.
+- POST `checkout`: `{quoteId,idempotencyKey,paymentToken,checkoutProof,consent:true}`. The route consumes the account/quote-bound proof before invoking checkout. An immutable order claim precedes any processor request. Tokens are neither persisted nor returned.
 - GET `order&id=...` and `receipt&id=...` are scoped to the signed-in account (or an administrator). The quoted `orderId` is known before checkout, so a timeout or reload can recover by GET without replaying a POST. A missing order immediately after a timeout is not proof that no request is still running. A declined or uncertain same-manifest order does not automatically create another charge attempt.
 - POST `startProduction`: `{preparedId,orderId,productionConsent:true}` advances the saved plan only after the film service checks trusted payment authorization. The client supplies no grant, environment, amount or manifest evidence. This route requires the approved account session, same origin and a per-user rate limit.
 
 Existing sandbox order IDs are retained. Production orders use a separate identity for the same customer and manifest, excluding the OAuth grant so reconnecting cannot trigger another charge. Existing unscoped production orders, or records whose environment cannot be established, remain readable by their original ID but block creation of a new production order. The UI must match the recovered order's environment and quote/preparation references before treating it as this purchase.
+
+## Customer receipt download
+
+Download receipt creates a self-contained HTML document from a fresh authenticated receipt response, after matching its order, amount and environment to the saved payment reference. Customers can open it in a browser and use Print to print or save a PDF. It shows the published merchant name, BROCO Technologies LLC, film, current status, original amount, confirmed refunds, recorded capture date in UTC, transaction/receipt references and the existing processor disclosure. Receipt data (JSON) remains available separately.
+
+The HTML escapes every dynamic value, contains no scripts or external resources, and does not collect or retain card data. Sandbox receipts state that no real money moved; uncertain records do not claim a confirmed payment. Refund-pending and confirmed refund outcomes have distinct labels. Neither format proves settlement or film delivery. The existing API does not supply cardholder/card summary fields, refund transaction dates or merchant address; this presentation change does not establish that every applicable processor receipt requirement is satisfied. No delivery promise, cancellation term or refund policy is added.
 
 ## Server activation boundary
 

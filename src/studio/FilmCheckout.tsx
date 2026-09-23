@@ -4,6 +4,7 @@ import { api, ApiError, normalizePaymentReference, productionInputHash, producti
 import {prepareFilmPrice,type FilmPrice} from "./film-pricing";
 import { normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
 import { commitFilmPayment, recoverFilmPayment } from "./checkout-payment";
+import { createFilmReceiptHtml } from "./payment-receipt";
 import { captchaToken } from "../lib/captcha";
 import CaptchaNotice from "../CaptchaNotice";
 
@@ -254,21 +255,22 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       setOrder(result);
     });
   }
-  async function downloadReceipt() {
+  async function downloadReceipt(format: "html" | "json" = "html") {
     if (!paymentReference || !order?.receiptAvailable) return;
     await work("Opening your receipt…", async () => {
       const value = normalizeFilmReceipt(await api(`/api/studio?action=receipt&id=${encodeURIComponent(paymentReference.orderId)}`));
       if (!value || value.receiptId !== order.id || value.amountCents !== order.amountCents || value.sandbox !== paymentReference.sandbox) throw new Error("The receipt could not be verified. Check the order status and try again.");
       const receipt = { receiptId: value.receiptId, transactionId: value.transactionId, filmTitle: value.filmTitle, currency: value.currency,
         paymentAmount: money(value.amountCents), totalAmount: money(value.amountCents), refunded: money(value.refundedCents), status: value.status,
-        type: value.sandbox ? "Sandbox test receipt — no real money" : "Payment receipt", paidAt: value.capturedAt,
+        type: value.sandbox ? "Sandbox test receipt — no real money" : value.status === "uncertain" ? "Payment record — status needs review" : "Payment receipt", paidAt: value.capturedAt,
         processorDisclosure: `${value.sandbox ? "Sandbox test only. " : ""}${value.processorDisclosure}`,
         notice: "A payment receipt does not confirm bank settlement or completion of your film." };
-      const blob = new Blob([JSON.stringify(receipt, null, 2)], { type: "application/json" });
+      const blob = new Blob([format === "html" ? createFilmReceiptHtml(value) : JSON.stringify(receipt, null, 2)],
+        { type: format === "html" ? "text/html;charset=utf-8" : "application/json" });
       const url = URL.createObjectURL(blob), link = document.createElement("a");
-      link.href = url; link.download = `Lineage-Theatre-receipt-${order.id.slice(0, 12)}.json`; document.body.append(link); link.click(); link.remove();
+      link.href = url; link.download = `Lineage-Theatre-receipt-${order.id.slice(0, 12)}.${format}`; document.body.append(link); link.click(); link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 30_000);
-      setMessage("Your receipt download has started.");
+      setMessage(format === "html" ? "Your receipt download has started. Open it in your browser to print or save as PDF." : "Your receipt data download has started.");
     });
   }
   async function productionRequest(start: boolean) {
@@ -321,6 +323,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       <div className="action-group">
         <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { await readOrder(paymentReference); })}><RefreshCw size={15} />Check payment status</button>
         {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt()}><Download size={15} />Download receipt</button>}
+        {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt("json")}>Receipt data (JSON)</button>}
         <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Contact the administrator</a>
       </div>
       {order?.status === "captured" && <div className="film-paid-production">
