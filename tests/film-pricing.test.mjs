@@ -4,6 +4,7 @@ import { createFilmPricingService } from "../api/_lib/film-pricing.mjs";
 import { createFilmProductionService, fictionalOperatorProject, FilmProductionError } from "../api/_lib/film-production.mjs";
 import { readPricingSettings, PRICING_PATH } from "../api/_lib/admin.mjs";
 import { createStudioHandler } from "../api/studio.mjs";
+import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 
 const NOW = Date.parse("2026-09-22T12:00:00.000Z");
 const actor = { email: "customer@example.invalid", role: "customer", status: "active",
@@ -61,13 +62,32 @@ test("invalid actors and unsupported client fields fail before any production qu
   const h = fixture();
   for (const user of [null, { ...actor, status: "pending" }, { ...actor, status: "suspended" },
     { ...actor, approvedAt: undefined }, { ...actor, mustChangePassword: true },
-    { ...actor, email: "Customer@example.invalid" }, { ...actor, email: "invalid" }])
+    { ...actor, email: "Customer@example.invalid" }, { ...actor, email: "invalid" },
+    { ...actor, status: undefined }, { email: OWNER_EMAIL }, { email: OWNER_EMAIL, status: "active" },
+    { email: actor.email, role: "owner", status: "active" },
+    { email: OWNER_EMAIL, role: "owner", status: "suspended" },
+    { email: OWNER_EMAIL, role: "owner", mustChangePassword: true }])
     await assert.rejects(h.service.price(user, input()), error => error instanceof FilmProductionError && error.status === 401);
   for (const body of [null, [], {}, { ...input(), preparedId: undefined }, { ...input(), preparedId: "short" },
     { ...input(), idempotencyKey: 123 }, { ...input(), project: [] }, { ...input(), project: null },
     ...["amountCents", "providerCostCents", "currency", "markupBasisPoints", "paymentToken", "card", "environment", "checkoutProof"].map(field => ({ ...input(), [field]: 1 }))])
     await assert.rejects(h.service.price(actor, body), error => error instanceof FilmProductionError && error.status === 400);
   assert.equal(h.calls.length, 0);
+});
+
+test("legacy approved owner and administrator roles can price their saved plan without account changes", async () => {
+  for (const legacy of [{ email: OWNER_EMAIL, role: "owner" }, { email: "admin@example.invalid", role: "admin" }]) {
+    const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
+    const plan = await production.prepare({ email: legacy.email, project, preparationConsent: true, idempotencyKey: "fictional-legacy-prepare-001" });
+    const before = structuredClone([...data.records]);
+    const h = fixture({ filmProduction: production });
+    const result = await h.service.price(legacy, { ...input(), preparedId: plan.id });
+    assert.equal(result.amountCents, 141);
+    assert.equal(result.pricingBasis, "planning-rate");
+    assert.equal(result.preparedId, plan.id);
+    assert.deepEqual([...data.records], before);
+    assert.equal(Object.hasOwn(legacy, "status"), false);
+  }
 });
 
 test("every trusted provider field must be valid before returning a numeric price", async () => {
@@ -261,6 +281,16 @@ test("studio price POST is independently limited and returns a numeric price wit
   assert.deepEqual(h.calls.limits, [[`price:${actor.email}`, 20, 3_600_000]]);
   const bad = await h.run({ body: { action: "price", ...input(), amountCents: 1 } });
   assert.equal(bad.status, 400); assert.equal(h.calls.quotes, 1);
+});
+
+test("studio price uses the same approved legacy owner role as the studio session", async () => {
+  const legacy = { email: OWNER_EMAIL, role: "owner" };
+  const h = routeHarness({ getSession: async () => ({ user: legacy }) });
+  const result = await h.run();
+  assert.equal(result.status, 200);
+  assert.equal(result.body.amountCents, 1500);
+  assert.equal(h.calls.quotes, 1);
+  assert.deepEqual(h.calls.limits, [[`price:${legacy.email}`, 20, 3_600_000]]);
 });
 
 test("studio price enforces POST, same origin, session approval and rate limit before provider access", async () => {
