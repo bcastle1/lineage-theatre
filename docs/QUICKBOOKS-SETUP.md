@@ -1,5 +1,11 @@
 # QuickBooks setup and activation
 
+## Current hosted-checkout path — September 23, 2026
+
+The owner selected QuickBooks-hosted checkout. Production OAuth and a separate company-information read verified the intended BROCO Tech company. The dedicated `Lineage Theater Film Production` Service item was saved with the existing Services income account and no fixed rate; its QuickBooks item reference is `2`. No customer, invoice, email, payment, or refund was created by that setup. Complete the versioned owner settings described in [Hosted checkout](HOSTED-CHECKOUT.md). Deployment alone does not enable checkout, prove a payment, or activate MagicLight.
+
+The earlier direct-card activation checkpoints below are historical and remain relevant only to that separate legacy adapter. Hosted checkout uses the accounting invoice API and does not silently activate direct-card operations.
+
 The user selected Intuit Payments for BROCO Technologies LLC and authorized implementation and deployment. The existing Intuit Developer workspace is BROCOTech; its Lineage Theater application is the one to continue. Do not create duplicate apps or confuse an Intuit Developer workspace ID with a QuickBooks company/realm ID.
 
 ## Production migration checkpoint — September 23, 2026

@@ -31,6 +31,7 @@ import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
+import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import "./admin.css";
 
@@ -57,6 +58,7 @@ type Overview = {
     paidOrders: number;
     paymentTotalCents: number;
     refundTotalCents: number;
+    hostedRefundsUnverified?: number;
     testOrders?: number;
     currency: string;
   };
@@ -91,6 +93,7 @@ type Order = {
   provider: string;
   sandbox?: boolean;
   managedPayment?: boolean;
+  checkoutMethod?: string | null;
   requiresReview?: boolean;
 };
 type ArchivedFilm = {
@@ -249,18 +252,20 @@ function exportPayments(orders: Order[]) {
       "Created",
       "Provider",
       "Payment type",
+      "Refund verification",
     ],
     ...orders.map((o) => [
       o.id,
       o.customerEmail,
       o.filmTitle,
-      o.status,
+      o.checkoutMethod === "quickbooks-hosted-invoice" && o.status === "captured" ? "Payment recorded by QuickBooks" : o.status,
       o.currency,
       (o.amountCents / 100).toFixed(2),
-      ((o.refundedCents || 0) / 100).toFixed(2),
+      o.checkoutMethod === "quickbooks-hosted-invoice" ? "" : ((o.refundedCents || 0) / 100).toFixed(2),
       o.createdAt,
       o.provider,
       o.sandbox ? "Test payment" : "Live payment",
+      o.checkoutMethod === "quickbooks-hosted-invoice" ? "Not verified; check QuickBooks" : "Recorded confirmed refunds",
     ]),
   ];
   const url = URL.createObjectURL(
@@ -540,8 +545,8 @@ export default function Admin({
       authorizationPopup.current = null;
       setAuthorizationMessage(
         quickBooks?.connected
-          ? "QuickBooks authorization is saved. You can close the Intuit window. Customer payments and refunds remain unavailable."
-          : "This authorization link is no longer active. Review the current connection status below; customer payments remain unavailable.",
+          ? "QuickBooks authorization is saved. Check the hosted checkout setup below."
+          : "This authorization link is no longer active. Review the current connection status below.",
       );
     }
   }, [authorizationAttempt, quickBooks, isOwner]);
@@ -868,7 +873,7 @@ export default function Admin({
       setQuickBooks(result);
       if (verifiedQuickBooksCompany(result)) {
         notify(
-          "Company verified for accounting access. Customer payments and refunds remain unavailable.",
+          "Company verified for accounting access. Review the hosted checkout setup below.",
           "info",
         );
       } else {
@@ -1071,7 +1076,7 @@ export default function Admin({
       setDialog(null);
       notify(
         result.message ||
-          "QuickBooks authorization updated. Customer payments remain unavailable.",
+          "QuickBooks authorization updated. Review the current checkout settings.",
         "info",
       );
       await refresh();
@@ -1353,7 +1358,9 @@ export default function Admin({
                   value: overview
                     ? money(overview.stats.refundTotalCents, overview.stats.currency)
                     : undefined,
-                  detail: "Confirmed refund records",
+                  detail: overview?.stats.hostedRefundsUnverified
+                    ? `Excludes ${overview.stats.hostedRefundsUnverified} hosted payments; check QuickBooks for their refunds`
+                    : "Confirmed refund records",
                   icon: Activity,
                 },
               ].map((metric) => (
@@ -1856,11 +1863,10 @@ export default function Admin({
                   </small>
                 </div>
                 <div>
-                  <span>Customer payments & refunds</span>
-                  <strong>Unavailable</strong>
+                  <span>Hosted checkout</span>
+                  <strong>{payments?.connectionReady ? "Configured" : "Setup required"}</strong>
                   <small>
-                    Planned payment services: Intuit Payments Inc. Saving QuickBooks
-                    authorization does not activate charges or refunds.
+                    Customers pay on QuickBooks. Refunds for hosted invoices are managed there.
                   </small>
                 </div>
               </div>
@@ -2010,6 +2016,7 @@ export default function Admin({
                 onBusyChange={setBusy}
               />}
             </section>
+            <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />
             <div className="admin-section-heading">
               <div>
                 <h2>Payments & refunds</h2>
@@ -2033,7 +2040,7 @@ export default function Admin({
             <div className="admin-feedback info">
               <AlertCircle size={18} />
               <div>
-                <strong>Live charges and refunds remain unavailable</strong>
+                <strong>{payments?.connectionReady ? "QuickBooks-hosted checkout is configured" : "Hosted checkout setup is incomplete"}</strong>
                 <p>
                   {payments?.reason ||
                     overview?.connections.billing.reason ||
@@ -2101,13 +2108,13 @@ export default function Admin({
                                     : "neutral"
                               }
                             >
-                              {humanize(order.status)}
+                              {order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured" ? "Payment recorded by QuickBooks" : humanize(order.status)}
                             </Badge>
                           </td>
                           <td>
                             <strong>{money(order.amountCents, order.currency)}</strong>
                             <small>
-                              {money(order.refundedCents || 0, order.currency)} refunded
+                              {order.checkoutMethod === "quickbooks-hosted-invoice" ? "Refunds: check QuickBooks" : `${money(order.refundedCents || 0, order.currency)} refunded`}
                             </small>
                           </td>
                           <td>{date(order.createdAt)}</td>
@@ -2122,14 +2129,15 @@ export default function Admin({
                                   "partially_refunded",
                                   "partially-refunded",
                                 ].includes(order.status) ||
-                                order.amountCents <= (order.refundedCents || 0)
+                                order.amountCents <= (order.refundedCents || 0) || order.checkoutMethod === "quickbooks-hosted-invoice"
                               }
                               onClick={() => openRefund(order)}
                             >
                               {order.sandbox ? "Review test refund" : "Review refund"}
                             </button>
+                            {order.checkoutMethod === "quickbooks-hosted-invoice" && <a className="text-button" href="https://qbo.intuit.com/app/invoices" target="_blank" rel="noopener noreferrer">Manage invoice in QuickBooks</a>}
                             {order.managedPayment && <>
-                              {order.requiresReview && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
+                              {(order.requiresReview || order.checkoutMethod === "quickbooks-hosted-invoice") && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "paymentDiagnostics")}>Download support details</button>
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "accountingExport")}>Export accounting review</button>
                             </>}
@@ -2268,6 +2276,7 @@ export default function Admin({
             </div>
           </section>
         )}
+        {tab === "pricing" && <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />}
         {tab === "films" && (
           <section className="admin-card">
             <div className="admin-section-heading">

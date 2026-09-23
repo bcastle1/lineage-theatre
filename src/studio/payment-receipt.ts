@@ -7,21 +7,45 @@ const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "curren
 // Published Source Materials Ownership and Use Agreement, section 1.
 const merchantName = "BROCO Technologies LLC";
 
+export function createFilmReceiptData(value: unknown) {
+  const receipt = normalizeFilmReceipt(value);
+  if (!receipt) throw new Error("The receipt could not be verified.");
+  const accounting = receipt.confirmationSource === "quickbooks-accounting";
+  return {
+    receiptId: receipt.receiptId, transactionId: receipt.transactionId, filmTitle: receipt.filmTitle, currency: receipt.currency,
+    paymentAmount: money(receipt.amountCents), totalAmount: money(receipt.amountCents), status: receipt.status,
+    type: receipt.sandbox ? "Sandbox test receipt — no real money" : receipt.status === "uncertain" ? "Payment record — status needs review"
+      : accounting ? "QuickBooks payment record" : "Payment receipt",
+    paidAt: receipt.capturedAt,
+    processorDisclosure: `${receipt.sandbox ? "Sandbox test only. " : ""}${receipt.processorDisclosure}`,
+    ...(accounting ? {
+      confirmationSource: receipt.confirmationSource,
+      refundStatus: "Not verified. Contact the administrator for the latest refund status.",
+      notice: "This accounting record does not confirm payment processor capture, bank settlement, film completion, or any later refund.",
+    } : {
+      refunded: money(receipt.refundedCents),
+      notice: "A payment receipt does not confirm bank settlement or completion of your film.",
+    }),
+  };
+}
+
 export function createFilmReceiptHtml(value: unknown): string {
   const receipt = normalizeFilmReceipt(value);
   if (!receipt) throw new Error("The receipt could not be verified.");
   const needsReview = receipt.status === "uncertain";
-  const title = receipt.sandbox ? "Sandbox test receipt" : needsReview ? "Payment record" : "Payment receipt";
+  const accounting = receipt.confirmationSource === "quickbooks-accounting";
+  const title = receipt.sandbox ? "Sandbox test receipt" : needsReview ? "Payment record" : accounting ? "QuickBooks payment record" : "Payment receipt";
   const status = {
-    captured: "Payment confirmed", uncertain: "Payment status needs review", "refund-pending": "Refund pending",
+    captured: accounting ? "Payment recorded by QuickBooks" : "Payment confirmed", uncertain: "Payment status needs review", "refund-pending": "Refund pending",
     "partially-refunded": "Partially refunded", refunded: "Fully refunded",
   }[receipt.status as "captured" | "uncertain" | "refund-pending" | "partially-refunded" | "refunded"];
   const capturedDate = new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeStyle: "long", timeZone: "UTC" }).format(new Date(receipt.capturedAt));
   const rows = [
     ["Merchant", merchantName], ["Film", receipt.filmTitle], ["Status", status],
-    [needsReview ? "Recorded capture amount" : "Original payment", `${money(receipt.amountCents)} USD`],
-    ["Confirmed refunds", `${money(receipt.refundedCents)} USD`], ["Recorded capture date", capturedDate],
-    ["Transaction reference", receipt.transactionId || "Not available"], ["Receipt reference", receipt.receiptId],
+    [accounting ? "Invoice payment recorded" : needsReview ? "Recorded capture amount" : "Original payment", `${money(receipt.amountCents)} USD`],
+    ...(!accounting ? [["Confirmed refunds", `${money(receipt.refundedCents)} USD`]] : []),
+    [accounting ? "Payment recorded at" : "Recorded capture date", capturedDate],
+    [accounting ? "QuickBooks payment reference" : "Transaction reference", receipt.transactionId || "Not available"], ["Receipt reference", receipt.receiptId],
   ].map(([label, content]) => `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(content)}</td></tr>`).join("\n");
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -39,8 +63,8 @@ th,td{padding:12px 0;border-bottom:1px solid #ddd;text-align:left;vertical-align
 ${receipt.sandbox ? '<p class="notice">Sandbox test only. No real money was charged. This is not a live payment receipt.</p>' : ""}
 ${needsReview ? '<p class="notice">The current payment status needs review. This record does not confirm a successful payment. Do not submit another payment; contact the administrator.</p>' : ""}
 <table aria-label="Payment details"><tbody>${rows}</tbody></table>
-<h2>Payment processing</h2><p>${escapeHtml(receipt.processorDisclosure)}</p>
-<p>A payment receipt does not confirm bank settlement or completion of your film. Refund amounts show only confirmed refunds in this record.</p>
+<h2>${accounting ? "Payment record source" : "Payment processing"}</h2><p>${escapeHtml(receipt.processorDisclosure)}</p>
+<p>${accounting ? "This accounting record does not confirm payment processor capture, bank settlement, film completion, or any later refund. Contact the administrator for the latest refund status." : "A payment receipt does not confirm bank settlement or completion of your film. Refund amounts show only confirmed refunds in this record."}</p>
 <footer>Questions about this record? Contact admin@brocotech.ai and include the receipt reference.</footer>
 </body></html>`;
 }

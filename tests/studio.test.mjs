@@ -2,7 +2,8 @@ import { captchaStub } from "./fixtures/captcha.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { connections, createStudioHandler } from "../api/studio.mjs";
-import { digest } from "../api/_lib/auth.mjs";
+import { digest, userPath } from "../api/_lib/auth.mjs";
+import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { generateStory, prepareStory } from "../api/_lib/story.mjs";
 import { FilmProductionError } from "../api/_lib/film-production.mjs";
 
@@ -180,12 +181,15 @@ test("production rejects activation and payment inputs reject client provider na
   assert.deepEqual(h.calls.limits,Array.from({length:6},()=>[`payment:${actor.email}`,20,3600_000]));
 });
 
-test("well-formed quote and checkout requests remain unavailable with default service readiness",async()=>{
-  const h=harness();
+test("well-formed hosted quote and checkout requests remain unavailable until owner settings are enabled",async()=>{
+  const hostedCheckout=createHostedCheckoutService({env:{QUICKBOOKS_ENVIRONMENT:"production"},
+    read:async path=>path===userPath(actor.email)?{value:actor}:null,
+    transport:{binding:async()=>assert.fail("Disabled checkout must not refresh a provider grant")}});
+  const h=harness({hostedCheckout});
   for(const [action,body] of [["quote",{project:{title:"Fictional family garden"},idempotencyKey:"synthetic-quote-1234"}],
-    ["checkout",{quoteId:"a".repeat(64),idempotencyKey:"synthetic-checkout-1234",paymentToken:"synthetic-payment-token",consent:true}]]) {
+    ["checkout",{quoteId:"a".repeat(64),idempotencyKey:"synthetic-checkout-1234",consent:true}]]) {
     const result=await h.run(action,post(body));
-    assert.equal(result.status,503);assert.equal(result.body.code,"PRODUCTION_UNAVAILABLE");assert.equal(result.body.charged,false);
+    assert.equal(result.status,503);assert.equal(result.body.code,"HOSTED_CHECKOUT_UNAVAILABLE");assert.equal(result.body.charged,false);
     assertCustomerSafe(result);
   }
 });

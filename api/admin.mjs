@@ -5,6 +5,7 @@ import { productionReadiness } from "./_lib/production.mjs";
 import { connections } from "./studio.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
+import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { readRegistrationPolicy as readPolicy, REGISTRATION_POLICY_PATH } from "./_lib/registration-policy.mjs";
 import { createSourceAgreementService, SourceAgreementError } from "./_lib/source-agreement.mjs";
 
@@ -17,6 +18,7 @@ const safeOrder=(order)=>({id:order.id,customerEmail:order.customerEmail,filmTit
 function resultError(res,status,message) { return json(res,status,{message}); }
 
 export function createAdminHandler(overrides={}) {
+ const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
  const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
@@ -54,11 +56,22 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="hostedCheckout") return json(res,200,await hosted.settings(actor));
       if(action==="agreement") return json(res,200,{agreement:url.searchParams.has("version")?await sourceAgreement.version(url.searchParams.get("version")):await sourceAgreement.current()});
       if(action==="registrationPolicy") return json(res,200,await readRegistrationPolicy());
       if(action==="productionReadiness") return json(res,200,filmProduction.readiness());
-      if(action==="paymentDiagnostics") return json(res,200,await payments.adminDiagnostics(actor,url.searchParams.get("id")));
-      if(action==="accountingExport") return json(res,200,await payments.accountingExport(actor,url.searchParams.get("id")));
+      if(["paymentDiagnostics","accountingExport"].includes(action)) {
+        const id=url.searchParams.get("id");
+        if(hosted&&await hosted.ownsOrder(id)) {
+          const order=await hosted.order(actor,id);
+          return json(res,200,{orderId:order.id,status:order.status,invoiceNumber:order.invoiceNumber||null,
+            checkoutMethod:order.checkoutMethod,currency:order.currency,amountCents:order.amountCents,
+            requiresReview:order.requiresReview,confirmationSource:order.confirmationSource||null,
+            settlementVerified:false,postingReady:false,
+            note:"Review the existing hosted invoice in QuickBooks. This export does not post to your books or verify settlement or refunds."});
+        }
+        return json(res,200,await payments[action==="paymentDiagnostics"?"adminDiagnostics":"accountingExport"](actor,id));
+      }
       const cursor=url.searchParams.get("cursor")||undefined;
       if (cursor && cursor.length>2048) return resultError(res,400,"Invalid page reference.");
       if(action==="users") {
@@ -67,8 +80,9 @@ export function createAdminHandler(overrides={}) {
       }
       if(action==="payments") {
         const page=await recordPage("payments/orders/",{cursor});
-        return json(res,200,{orders:page.records.map(safeOrder),cursor:page.cursor,connectionReady:false,
-          reason:"Live payments and refunds remain disabled. Test payments are labeled and excluded from live totals; test refunds still require verified sandbox access."});
+        const ready=hosted?await hosted.configuration(actor):{available:false};
+        return json(res,200,{orders:page.records.map(order=>({...safeOrder(order),checkoutMethod:order.checkoutMethod||null})),cursor:page.cursor,connectionReady:ready.available===true,
+          reason:ready.available?"Hosted checkout is configured. Customers complete payment on QuickBooks; refunds for hosted invoices are managed in QuickBooks. Film production is verified separately.":"Complete the hosted checkout setup below. Existing payment records remain available; no new invoice or payment is created by viewing this page."});
       }
       if(action==="audit") {
         const page=await recordPage("admin/audit/",{cursor});
@@ -81,13 +95,14 @@ export function createAdminHandler(overrides={}) {
       }
       if(action==="overview") {
         const [users,orders,films,settings]=await Promise.all([recordPage("auth/users/",{limit:100}),recordPage("payments/orders/",{limit:100}),recordPage("archive/metadata/",{limit:100}),readPricingSettings()]);
-        const ready=await connections({pricingSettings:settings});
+        const ready=await connections({pricingSettings:settings,...(hosted?{checkoutConfiguration:await hosted.configuration(actor)}:{})});
         const paid=orders.records.filter(order=>!isTestOrder(order)&&["paid","captured","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
         return json(res,200,{stats:{users:users.records.length,administrators:users.records.filter(hasAdminAccess).length,
           pending:users.records.filter(u=>accessStatusForUser(u)==="pending").length,
           suspended:users.records.filter(u=>u.status==="suspended").length,films:films.records.length,paidOrders:paid.length,
           paymentTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.amountCents)?o.amountCents:0),0),
-          refundTotalCents:paid.reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),
+          refundTotalCents:paid.filter(o=>o.checkoutMethod!=="quickbooks-hosted-invoice").reduce((sum,o)=>sum+(Number.isSafeInteger(o.refundedCents)?o.refundedCents:0),0),
+          hostedRefundsUnverified:paid.filter(o=>o.checkoutMethod==="quickbooks-hosted-invoice").length,
           testOrders:orders.records.filter(isTestOrder).length,currency:"USD"},
           statsPartial:Boolean(users.cursor||orders.cursor||films.cursor),connections:ready.connections,pricing:ready.pricing,quality:ready.quality});
       }
@@ -95,6 +110,18 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="hostedCheckoutCatalog") {
+      if(!isOwner(actor))return resultError(res,403,"Only the owner can manage hosted checkout.");
+      if(Object.keys(body).some(key=>key!=="action"))return resultError(res,400,"The catalog request is invalid.");
+      return json(res,200,await hosted.catalog(actor));
+    }
+    if(action==="saveHostedCheckout") {
+      if(!isOwner(actor))return resultError(res,403,"Only the owner can manage hosted checkout.");
+      const {action,...input}=body;
+      const settings=await hosted.saveSettings(actor,input);
+      await audit(actor.email,"checkout.hosted.updated","quickbooks-hosted",{revision:settings.revision,enabled:settings.enabled,serviceItemId:settings.serviceItemId});
+      return json(res,200,settings);
+    }
     if(action==="updateAgreement") {
       const {action,...input}=body;
       const agreement=await sourceAgreement.update(actor,input);
@@ -133,7 +160,8 @@ export function createAdminHandler(overrides={}) {
       await audit(actor.email,"production.test.prepared",job.id,{manifestHash:job.manifestHash});
       return json(res,201,{...job,message:"Fictional test plan saved. No render request or charge has been sent."});
     }
-    if(action==="reconcilePayment") return json(res,200,await payments.reconcile(actor,{orderId:body.orderId}));
+    if(action==="reconcilePayment") return json(res,200,hosted&&await hosted.ownsOrder(body.orderId)
+      ?await hosted.check(actor,{orderId:body.orderId}):await payments.reconcile(actor,{orderId:body.orderId}));
     if(action==="invite") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can invite administrators.");
       const email=validEmail(body.email);
@@ -174,6 +202,7 @@ export function createAdminHandler(overrides={}) {
     if(action==="refund") {
       if(typeof body.orderId!=="string" || !/^[a-zA-Z0-9-]{16,80}$/.test(body.orderId)) return resultError(res,400,"Invalid order reference.");
       const record=await readRecord(`payments/orders/${body.orderId}.json`);
+      if(record?.value?.checkoutMethod==="quickbooks-hosted-invoice")return json(res,409,{code:"HOSTED_REFUND_IN_QUICKBOOKS",refunded:false,message:"Manage this invoice's refund in QuickBooks. No refund has been submitted by Lineage Theatre."});
       if(record?.value&&isManagedOrder(record.value)) {
         const {action,...input}=body;
         return json(res,200,await payments.refund(actor,input));
