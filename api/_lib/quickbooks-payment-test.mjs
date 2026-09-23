@@ -25,8 +25,10 @@ export function createQuickBooksPaymentTestService(overrides={}) {
 
   async function owner(actor) {
     const current=actor?.email?(await read(userPath(actor.email)))?.value:null;
-    if(!isOwner(actor)||actor.status!=="active"||actor.mustChangePassword
-      ||!isOwner(current)||current.status!=="active"||current.mustChangePassword)
+    // Shared owner authorization includes suspension and legacy records;
+    // both the session and the current private account must still qualify.
+    if(!isOwner(actor)||actor.mustChangePassword
+      ||!isOwner(current)||current.mustChangePassword)
       throw new QuickBooksError("Only the active owner can run the payment connection test.",403,"PAYMENT_TEST_OWNER_REQUIRED");
   }
   async function context(actor,allowRefresh) {

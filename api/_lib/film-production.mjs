@@ -143,10 +143,12 @@ export function createFilmProductionService(dependencies = {}) {
     return record;
   }
   async function requireOperator(actor, email) {
-    if (!isOwner(actor) || actor.status !== "active" || actor.mustChangePassword || actor.email !== email)
+    // isOwner includes the shared suspension check and supports legacy owner
+    // records. Revalidate the current private role before every test action.
+    if (!isOwner(actor) || actor.mustChangePassword || actor.email !== email)
       throw new FilmProductionError("Only the owner can run this production test.", 403, "OWNER_REQUIRED");
     const current = (await read(userPath(email)))?.value;
-    if (!isOwner(current) || current.email !== email || current.status !== "active" || current.mustChangePassword)
+    if (!isOwner(current) || current.email !== email || current.mustChangePassword)
       throw new FilmProductionError("Only the current active owner can run this production test.", 403, "OWNER_REQUIRED");
   }
   async function requireProductionContext(job, actor, email) {

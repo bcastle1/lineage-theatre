@@ -81,6 +81,26 @@ test("signed sandbox reviews allow only the designated current owner, including 
   await assert.rejects(h.transport.binding()); assert.equal(h.requests.length, 0);
 });
 
+test("signed readiness uses persisted legacy owner approval and still requires current reviews and account access", async () => {
+  const legacy = { email: OWNER_EMAIL, role: "owner" };
+  for (const environment of ["sandbox", "production"]) {
+    const h = fixture(environment);
+    h.put(userPath(OWNER_EMAIL), legacy);
+    assert.deepEqual(await h.readiness.readiness({ actor: legacy }), {});
+    h.save(); h.save("card-entry");
+    assert.equal((await h.readiness.readiness({ actor: legacy })).authorization.environment, environment);
+    assert.equal((await h.readiness.readiness({ subjectEmail: OWNER_EMAIL, operation: "render" })).authorization.environment, environment);
+    assert.equal((await h.payments.checkoutConfiguration(legacy)).environment, environment);
+    for (const account of [{ email: OWNER_EMAIL }, { ...legacy, role: "customer" },
+      { ...legacy, status: "suspended" }, { ...legacy, mustChangePassword: true }]) {
+      h.put(userPath(OWNER_EMAIL), account);
+      assert.deepEqual(await h.readiness.readiness({ actor: legacy }), {});
+      assert.deepEqual(await h.readiness.readiness({ subjectEmail: OWNER_EMAIL, operation: "render" }), {});
+    }
+    assert.equal(h.requests.length, 0);
+  }
+});
+
 test("card entry needs its own review in addition to payment operations, on the same grant", async () => {
   const h = fixture("production"); h.save();
   assert.equal((await h.readiness.readiness({ actor: CUSTOMER, operation: "charge" })).authorization.environment, "production");

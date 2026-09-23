@@ -626,7 +626,7 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
       ||value.fingerprint!==config.fingerprint||value.credentialVersion!==config.credentialVersion
       ||typeof value.authorizationAttemptId!=="string"||!value.authorizationAttemptId)throw unavailable();
     const owner=(await read(userPath(value.connectedBy||OWNER_EMAIL)))?.value;
-    if(!isOwner(owner)||owner.status!=="active"||owner.mustChangePassword)throw unavailable();
+    if(!isOwner(owner)||owner.mustChangePassword)throw unavailable();
     const token={...decryptQuickBooksTokens(value.encryptedTokens,config),accessToken:readQuickBooksAccessToken(value.encryptedTokens,config,now())};
     if(token.accessToken!==null&&(typeof token.accessToken!=="string"||token.accessToken.length<8||token.accessToken.length>16_384||/[\s\x00-\x1f]/.test(token.accessToken)))throw unavailable();
     if(!REALM_PATTERN.test(token.realmId||"")

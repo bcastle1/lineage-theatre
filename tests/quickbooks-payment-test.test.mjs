@@ -84,13 +84,27 @@ test("production, nonowners, suspended owners and unpersisted owner claims canno
   const status=await prod.status();assert.equal(status.available,false);assert.match(status.message,/sandbox connection/);
   await assert.rejects(prod.run("charge"),e=>e.code==="PAYMENT_TEST_SANDBOX_REQUIRED");
   assert.equal(prod.providerCount(),0);assert.equal(prod.tokenCount(),0);
-  for(const actor of [null,{...OWNER,role:"admin"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true},{...OWNER,email:"other@example.invalid"}]) {
+  for(const actor of [null,{email:OWNER_EMAIL},{...OWNER,role:"admin"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true},{...OWNER,email:"other@example.invalid"}]) {
     const h=fixture();await assert.rejects(h.service.run(actor,{operation:"charge"}),e=>e.status===403);
     await assert.rejects(h.service.status(actor),e=>e.status===403);assert.equal(h.providerCount(),0);
   }
-  for(const current of [null,{...OWNER,role:"customer"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true}]) {
+  for(const current of [null,{email:OWNER_EMAIL},{...OWNER,role:"customer"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true}]) {
     const h=fixture();h.records.set(userPath(OWNER.email),{value:current,etag:"owner-2"});
     await assert.rejects(h.run("charge"),e=>e.status===403);assert.equal(h.tokenCount(),0);
+  }
+});
+
+test("legacy owners reach sandbox configuration checks without enabling a fictional test in production",async()=>{
+  const legacy={email:OWNER_EMAIL,role:"owner"};
+  for(const [actor,current] of [[legacy,legacy],[OWNER,legacy],[legacy,OWNER]]) {
+    const h=fixture();h.environment("production");
+    h.records.set(userPath(OWNER_EMAIL),{value:current,etag:"legacy-owner"});
+    const before=structuredClone([...h.records]);
+    const status=await h.service.status(actor);
+    assert.equal(status.available,false);assert.match(status.message,/sandbox connection/);
+    await assert.rejects(h.service.run(actor,{operation:"charge"}),error=>error.code==="PAYMENT_TEST_SANDBOX_REQUIRED");
+    assert.equal(h.providerCount(),0);assert.equal(h.tokenCount(),0);assert.equal(h.requests.length,0);
+    assert.deepEqual([...h.records],before);
   }
 });
 
