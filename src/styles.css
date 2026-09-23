@@ -324,6 +324,51 @@ button {
 .login-form .button {
   height: 44px;
 }
+.source-agreement-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.75;
+}
+.registration-source-agreement {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 17px;
+  border: 1px solid #dce1d9;
+  border-radius: 8px;
+  background: #f7f8f4;
+}
+.registration-source-agreement h3 {
+  line-height: 1.45;
+  color: var(--forest);
+}
+.registration-source-agreement > p,
+.registration-source-agreement details {
+  font-size: 12px;
+  line-height: 1.7;
+}
+.registration-source-agreement summary {
+  cursor: pointer;
+  padding: 3px 0;
+}
+.registration-source-agreement .source-agreement-text {
+  max-height: 26rem;
+  overflow-y: auto;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+.registration-source-agreement .source-agreement-text:focus-visible {
+  outline: 3px solid #91b8a7;
+  outline-offset: 2px;
+}
+.login-form .check-label input {
+  height: 16px;
+  width: 16px;
+  flex: 0 0 16px;
+}
 .login-panel footer {
   display: flex;
   justify-content: space-between;

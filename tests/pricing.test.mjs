@@ -118,6 +118,6 @@ test("rate configuration and connection flags cannot activate MagicLight or Quic
   assert.equal(readiness.pricing.estimate.amountCents, null);
   assert.equal(readiness.pricing.chargeReady, false);
   assert.equal(readiness.quality.verified, false);
-  assert.match(readiness.connections.billing.reason, /no BROCOTech markup/);
+  assert.match(readiness.connections.billing.reason, /planning estimate plus the saved administrator markup/);
   assert.equal(JSON.stringify(readiness).includes("synthetic-test-value"), false);
 });

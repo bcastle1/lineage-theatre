@@ -6,9 +6,10 @@ export const INTUIT_PAYMENT_ORIGINS = Object.freeze({
 });
 
 // This is a contract for a trusted server evidence verifier, not a verifier of
-// merchant approval itself. No browser route, setting or environment flag mints
-// this authorization. payment-readiness verifies signed human review records;
-// that provenance is not automated proof of the underlying provider decisions.
+// merchant approval itself. Customer checkout uses signed human review records
+// from payment-readiness; that provenance is not automated provider verification.
+// The separate owner-only fixed fictional-card test authorizes only its own
+// sandbox transport. It cannot mint checkout reviews or production permissions.
 export function paymentAuthorizationMatches(authorization, binding, operation, now = Date.now()) {
   const checked = Date.parse(authorization?.validatedAt), expires = Date.parse(authorization?.expiresAt);
   return Boolean(binding && Object.hasOwn(INTUIT_PAYMENT_ORIGINS, binding.environment)

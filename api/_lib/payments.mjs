@@ -110,7 +110,7 @@ export function createIntuitPaymentsAdapter({transport=createQuickBooksPaymentsT
 export function createPaymentsService(overrides={}) {
   const {read=readRecord,write=writeRecord,now=Date.now,provider=createIntuitPaymentsAdapter(),
     pricingSettings=readPricingSettings,
-    quoteProvider=async(...args)=>(await import("./film-production.mjs")).quoteForPayment(...args),
+    quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
     readiness=paymentReadiness.readiness}=overrides;
   async function enabled(operation="quote",{allowRefresh=true,actor,subjectEmail}={}) {
     const ready=await readiness({actor,subjectEmail,operation});
@@ -162,14 +162,18 @@ export function createPaymentsService(overrides={}) {
     const email=actorEmail(actor);exactFields(body,["project","preparedId","idempotencyKey"]);key(body.idempotencyKey);
     if(body.preparedId!==undefined)key(body.preparedId);
     const binding=await enabled("quote",{actor});
-    const supplied=await quoteProvider(body.project,actor,{idempotencyKey:body.idempotencyKey,...(body.preparedId?{preparedId:body.preparedId}:{})});
+    const supplied=await quoteProvider(body.project,actor,{idempotencyKey:body.idempotencyKey,environment:binding.environment,...(body.preparedId?{preparedId:body.preparedId}:{})});
+    // The owner may sell a film at an app-calculated fixed price before its
+    // eventual provider expense is exact. This trusted server quote does not
+    // assert API readiness, quality verification, or production authorization.
+    const planningPrice=supplied?.pricingBasis==="planning-rate";
     const until=Date.parse(supplied?.expiresAt);
     if(!supplied||(body.preparedId&&supplied.preparedId!==body.preparedId)||supplied.environment!==binding.environment||supplied.currency!=="USD"||!amountValid(supplied.providerCostCents)||!idPattern.test(supplied.manifestHash||"")
       ||typeof supplied.preparedId!=="string"||!keyPattern.test(supplied.preparedId)
       ||typeof supplied.filmId!=="string"||supplied.filmId.length>100
       ||typeof supplied.filmTitle!=="string"||supplied.filmTitle.length>300
       ||typeof supplied.quoteReference!=="string"||!supplied.quoteReference||supplied.quoteReference.length>200
-      ||supplied.qualityVerified!==true||supplied.apiVerified!==true||supplied.commercialTermsVerified!==true
+      ||(!planningPrice&&(supplied.qualityVerified!==true||supplied.apiVerified!==true||supplied.commercialTermsVerified!==true))
       ||!Number.isFinite(until)||until<=now())throw blocked();
     const quoteId=digest(`${email}:${body.idempotencyKey}`),path=quotePath(email,quoteId),existing=await read(path);
     await guardLegacyProductionOrder({customerEmail:email,manifestHash:supplied.manifestHash,merchantBinding:binding});
@@ -179,6 +183,8 @@ export function createPaymentsService(overrides={}) {
       return publicQuote(existing.value);
     }
     const settings=await pricingSettings();
+    if(supplied.pricingRevision!==undefined&&supplied.pricingRevision!==settings.revision)
+      throw new PaymentError("Pricing settings changed while this price was being prepared. Request your price again.",409,"PRICE_CHANGED");
     if(!Number.isInteger(settings.markupBasisPoints)||settings.markupBasisPoints<0||settings.markupBasisPoints>100_000
       ||!Number.isSafeInteger(settings.revision)||settings.revision<0)throw blocked();
     const markupCents=Number((BigInt(supplied.providerCostCents)*BigInt(settings.markupBasisPoints)+5_000n)/10_000n);
@@ -186,6 +192,7 @@ export function createPaymentsService(overrides={}) {
     if(!amountValid(amountCents))throw blocked();
     const value={version:1,id:quoteId,customerEmail:email,preparedId:supplied.preparedId,filmId:supplied.filmId,filmTitle:supplied.filmTitle,
       manifestHash:supplied.manifestHash,quoteReference:supplied.quoteReference,currency:"USD",providerCostCents:supplied.providerCostCents,
+      pricingBasis:planningPrice?"planning-rate":"provider-quote",
       markupBasisPoints:settings.markupBasisPoints,markupCents,pricingRevision:settings.revision,amountCents,
       merchantBinding:binding,createdAt:stamp(now()),expiresAt:stamp(Math.min(until,now()+15*60_000))};
     try {return publicQuote((await save(path,null,value)).value);}catch(error) {
@@ -220,6 +227,7 @@ export function createPaymentsService(overrides={}) {
     let record=await save(path,null,{version:1,id:orderId,customerEmail:email,quoteId:q.id,preparedId:q.preparedId,
       filmId:q.filmId,filmTitle:q.filmTitle,manifestHash:q.manifestHash,quoteReference:q.quoteReference,quoteExpiresAt:q.expiresAt,currency:q.currency,amountCents:q.amountCents,
       provider:"quickbooks",merchantBinding:q.merchantBinding,providerCostEstimateCents:q.providerCostCents,pricingRevision:q.pricingRevision,
+      pricingBasis:q.pricingBasis||"provider-quote",
       checkoutKeyHash:digest(body.idempotencyKey),chargeRequestId:randomUUID(),providerChargeId:null,status:"submitting",refundedCents:0,
       refunds:[],refundOperation:null,accounting:{status:"unmapped",events:[],settlementVerified:false,feesCents:null,providerExpenseCents:null},createdAt:stamp(now())});
     let result=null;
@@ -302,8 +310,45 @@ export function createPaymentsService(overrides={}) {
   }
   async function authorizeProduction({email,orderId,manifestHash,preparedId}) {
     const record=await read(orderPath(id(orderId))),value=record?.value;
-    if(!value||value.customerEmail!==email||value.manifestHash!==manifestHash||value.preparedId!==preparedId||value.status!=="captured"
-      ||!value.capturedAt||value.refundedCents!==0||value.refundOperation||!bindingValid(value.merchantBinding))throw blocked();
+    const captured=order=>order&&order.customerEmail===email&&order.manifestHash===manifestHash&&order.preparedId===preparedId&&order.status==="captured"
+      &&order.capturedAt&&order.refundedCents===0&&!order.refundOperation&&bindingValid(order.merchantBinding);
+    if(!captured(value))throw blocked();
+    if(value.pricingBasis==="planning-rate") {
+      if(typeof record.etag!=="string"||!amountValid(value.providerCostEstimateCents)
+        ||!Number.isFinite(Date.parse(value.capturedAt))||Date.parse(value.capturedAt)>now())throw blocked();
+      const binding=await enabled("render",{subjectEmail:email});if(!sameBinding(value.merchantBinding,binding))throw blocked();
+      const quoteValid=fresh=>fresh&&fresh.preparedId===preparedId&&fresh.manifestHash===manifestHash&&fresh.environment===binding.environment&&fresh.currency==="USD"
+        &&fresh.apiVerified===true&&fresh.qualityVerified===true&&fresh.commercialTermsVerified===true
+        &&Number.isSafeInteger(fresh.providerCostCents)&&fresh.providerCostCents>=0&&fresh.providerCostCents<=value.providerCostEstimateCents
+        &&Number.isSafeInteger(fresh.maximumCostCents)&&fresh.maximumCostCents>=fresh.providerCostCents&&fresh.maximumCostCents<=value.providerCostEstimateCents
+        &&typeof fresh.quoteReference==="string"&&fresh.quoteReference.trim()&&fresh.quoteReference.length<=200
+        &&typeof fresh.expiresAt==="string"&&Number.isFinite(Date.parse(fresh.expiresAt));
+      let fresh=value.fulfillmentQuote,authorizedRecord=record;
+      if(fresh&&!quoteValid(fresh))throw blocked();
+      if(!fresh||Date.parse(fresh.expiresAt)<=now()) {
+        const productionQuote=overrides.productionQuote||((input)=>import("./film-production.mjs").then(module=>module.filmProduction.quoteForProductionBudget(input)));
+        fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:value.providerCostEstimateCents});
+        if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw blocked();
+        const checkedBinding=await enabled("render",{subjectEmail:email});
+        const checked=await read(orderPath(orderId));
+        if(!sameBinding(binding,checkedBinding)||checked?.etag!==record.etag||!captured(checked?.value)
+          ||!sameBinding(checked.value.merchantBinding,checkedBinding)||Date.parse(fresh.expiresAt)<=now())throw blocked();
+        // All later shots must use this same actual full-film quote. The film
+        // helper refuses fresh whole-film quotes after any shot has started.
+        const fulfillmentQuote=Object.fromEntries(["preparedId","manifestHash","environment","currency","providerCostCents","maximumCostCents",
+          "quoteReference","expiresAt","apiVerified","qualityVerified","commercialTermsVerified"].map(field=>[field,fresh[field]]));
+        authorizedRecord=await save(orderPath(orderId),record,{...value,fulfillmentQuote});
+      }
+      const until=Date.parse(fresh.expiresAt);
+      // Recheck the current grant and captured order after the provider await:
+      // a refund or merchant reconnect must revoke this fresh spending grant.
+      const currentBinding=await enabled("render",{subjectEmail:email});
+      const current=await read(orderPath(orderId));
+      if(!sameBinding(binding,currentBinding)||current?.etag!==authorizedRecord.etag||!captured(current?.value)
+        ||!sameBinding(current.value.merchantBinding,currentBinding)||until<=now())throw blocked();
+      return {allowed:true,manifestHash,budgetCents:fresh.maximumCostCents,quoteReference:fresh.quoteReference,
+        expiresAt:stamp(Math.min(until,now()+60_000)),environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
+    }
     if(!Number.isFinite(Date.parse(value.quoteExpiresAt))||Date.parse(value.quoteExpiresAt)<=now())throw blocked();
     const binding=await enabled("render",{subjectEmail:email});if(!sameBinding(value.merchantBinding,binding))throw blocked();
     return {allowed:true,manifestHash,budgetCents:value.providerCostEstimateCents,quoteReference:value.quoteReference,

@@ -8,7 +8,8 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
-import { api, type User } from "./studio/model";
+import { api, ApiError, type User } from "./studio/model";
+import { normalizeSourceAgreement, sourceAgreementAcceptance, type SourceAgreement } from "./source-agreement";
 import Landing from "./Landing";
 import { captchaToken } from "./lib/captcha";
 import CaptchaNotice from "./CaptchaNotice";
@@ -103,6 +104,11 @@ export default function App() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [name, setName] = useState("");
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [sourceAgreement, setSourceAgreement] = useState<SourceAgreement | null>(null);
+  const [sourceAgreementAccepted, setSourceAgreementAccepted] = useState(false);
+  const [agreementLoading, setAgreementLoading] = useState(false);
+  const [agreementError, setAgreementError] = useState("");
+  const [agreementReload, setAgreementReload] = useState(0);
   const [registrationApprovalRequired, setRegistrationApprovalRequired] = useState(true);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -123,6 +129,19 @@ export default function App() {
   const inviteAttempt = useRef("");
   const submitLock = useRef(false);
   const registering = !user && mode === "register";
+  useEffect(() => {
+    let active = true;
+    setSourceAgreementAccepted(false);
+    setSourceAgreement(null);
+    setAgreementError("");
+    if (!registering) { setAgreementLoading(false); return; }
+    setAgreementLoading(true);
+    void api<unknown>("/api/auth?action=agreement")
+      .then(value => { if (active) setSourceAgreement(normalizeSourceAgreement(value)); })
+      .catch(cause => { if (active) setAgreementError(cause instanceof Error ? cause.message : "The source agreement could not be loaded. Please try again."); })
+      .finally(() => { if (active) setAgreementLoading(false); });
+    return () => { active = false; };
+  }, [registering, agreementReload]);
   useEffect(() => {
     if (!loading && !user && window.location.hash.startsWith("#admin/payments")) {
       document.getElementById("studio")?.scrollIntoView();
@@ -172,6 +191,10 @@ export default function App() {
       setError("Accept the terms of use and acknowledge the privacy information to create your account.");
       return;
     }
+    if (registering && (agreementLoading || !sourceAgreement || !sourceAgreementAccepted)) {
+      setError("Read and accept the source ownership and sharing agreement before creating your account.");
+      return;
+    }
     submitLock.current = true;
     setBusy(true);
     try {
@@ -183,7 +206,8 @@ export default function App() {
           : user?.mustChangePassword
           ? { action: "password", password }
           : registering
-            ? { action: "register", name, email, password, termsAccepted, captchaToken: humanToken }
+            ? { action: "register", name, email, password, termsAccepted,
+                ...sourceAgreementAcceptance(sourceAgreement, sourceAgreementAccepted), captchaToken: humanToken }
             : { action: "login", email, password, captchaToken: humanToken },
       );
       setPassword("");
@@ -203,6 +227,11 @@ export default function App() {
               : registering ? "Your account is created and awaiting administrator approval." : "Signed in successfully. Your account is awaiting approval.",
       );
     } catch (e) {
+      if (registering && e instanceof ApiError && e.code === "AGREEMENT_CHANGED") {
+        setSourceAgreementAccepted(false);
+        setSourceAgreement(null);
+        setAgreementReload(value => value + 1);
+      }
       setError(
         e instanceof Error ? e.message : "The account request failed. Please try again.",
       );
@@ -217,6 +246,7 @@ export default function App() {
     setPassword("");
     setConfirm("");
     setTermsAccepted(false);
+    setSourceAgreementAccepted(false);
     setMode("login");
     setMfaRequired(false); setMfaCode("");
     setWelcome("You have signed out.");
@@ -317,14 +347,14 @@ export default function App() {
                 className={`button ${mode === "login" ? "primary" : "secondary"} small`}
                 aria-pressed={mode === "login"}
                 disabled={busy}
-                onClick={() => { setMode("login"); setPassword(""); setConfirm(""); setTermsAccepted(false); setError(""); setWelcome(""); }}
+                onClick={() => { setMode("login"); setPassword(""); setConfirm(""); setTermsAccepted(false); setSourceAgreementAccepted(false); setError(""); setWelcome(""); }}
               >Sign in</button>
               <button
                 type="button"
                 className={`button ${mode === "register" ? "primary" : "secondary"} small`}
                 aria-pressed={mode === "register"}
                 disabled={busy}
-                onClick={() => { setMode("register"); setPassword(""); setConfirm(""); setTermsAccepted(false); setError(""); setWelcome(""); }}
+                onClick={() => { setMode("register"); setPassword(""); setConfirm(""); setTermsAccepted(false); setSourceAgreementAccepted(false); setError(""); setWelcome(""); }}
               >Create account</button>
             </div>
           )}
@@ -339,7 +369,7 @@ export default function App() {
             </>}
             {registering && (
               <label>
-                Your name
+                Full legal name
                 <input
                   type="text"
                   autoComplete="name"
@@ -347,7 +377,7 @@ export default function App() {
                   maxLength={100}
                   value={name}
                   disabled={busy}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => { setName(e.target.value); setSourceAgreementAccepted(false); }}
                 />
               </label>
             )}
@@ -400,6 +430,31 @@ export default function App() {
               </>
             )}
             {registering && (
+              <section className="registration-source-agreement" aria-labelledby="source-agreement-heading" aria-busy={agreementLoading}>
+                <h3 id="source-agreement-heading">Source ownership and third-party sharing</h3>
+                <p>Review your rights to the materials you upload and the agreement's third-party sharing and reuse permissions before signing.</p>
+                {agreementLoading && <p role="status"><Loader2 size={15} className="spin" /> Loading the agreement…</p>}
+                {agreementError && <div className="feedback error" role="alert">
+                  <span>{agreementError}</span>
+                  <button type="button" className="text-button" disabled={busy || agreementLoading} onClick={() => setAgreementReload(value => value + 1)}>Reload agreement</button>
+                </div>}
+                {sourceAgreement && <>
+                  <details open>
+                    <summary>{sourceAgreement.title}</summary>
+                    <div className="source-agreement-text" tabIndex={0}>{sourceAgreement.body}</div>
+                  </details>
+                  <p className="field-note"><a href={`/source-agreement.html?version=${encodeURIComponent(sourceAgreement.version)}`} target="_blank" rel="noopener noreferrer">Open this agreement version</a></p>
+                  <p>Your full legal name above is your electronic signature when you accept this agreement and create your account.</p>
+                  <label className="check-label">
+                    <input type="checkbox" checked={sourceAgreementAccepted} required disabled={busy || agreementLoading}
+                      onChange={event => setSourceAgreementAccepted(event.target.checked)} />
+                    <span>{sourceAgreement.consentLabel}</span>
+                  </label>
+                  {name.trim() && <p className="field-note">Electronic signature: {name.trim()}</p>}
+                </>}
+              </section>
+            )}
+            {registering && (
               <label className="check-label">
                 <input
                   type="checkbox"
@@ -424,7 +479,7 @@ export default function App() {
                 {welcome}
               </div>
             )}
-            <button className="button primary" disabled={busy}>
+            <button className="button primary" disabled={busy || (registering && (agreementLoading || !sourceAgreement || !sourceAgreementAccepted || !termsAccepted))}>
               {busy ? (
                 <Loader2 size={17} className="spin" />
               ) : (

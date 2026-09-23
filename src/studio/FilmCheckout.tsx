@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CreditCard, Download, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
-import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference } from "./model";
+import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference, type PreparedProduction } from "./model";
+import {prepareFilmPrice,type FilmPrice} from "./film-pricing";
 import { normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
 import { commitFilmPayment, recoverFilmPayment } from "./checkout-payment";
 import { captchaToken } from "../lib/captcha";
@@ -94,15 +95,18 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
 
 type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
 
-export default function FilmCheckout({ film, reviewed, productionAvailable, persistPaymentReference, onBusyChange }: {
+export default function FilmCheckout({ film, reviewed, productionAvailable, persistPaymentReference, onPrepared, onBusyChange }: {
   film: Film; reviewed: boolean; productionAvailable: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
+  onPrepared: (prepared: PreparedProduction) => void;
   onBusyChange: (message: string) => void;
 }) {
   const prepared = film.productionPreparation;
   const payment = normalizePaymentReference(film.paymentReference);
   const [configuration, setConfiguration] = useState<CheckoutConfiguration | null>(null);
   const [quote, setQuote] = useState<FilmQuote | null>(null);
+  const [price, setPrice] = useState<FilmPrice | null>(null);
+  const [preparationConsent, setPreparationConsent] = useState(false);
   const [order, setOrder] = useState<FilmOrder | null>(null);
   const [production, setProduction] = useState<ProductionStatus | null>(null);
   const [inputHash, setInputHash] = useState("");
@@ -113,10 +117,12 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
   const [now, setNow] = useState(Date.now());
   const lock = useRef(false);
   const quoteRequest = useRef<{ hash: string; key: string } | null>(null);
+  const preparationRequest = useRef<{input:string;key:string;priceKey:string}|null>(null);
   const checkoutKey = useRef(crypto.randomUUID());
   const attemptedPayment = useRef<FilmPaymentReference | null>(null);
   const input = useMemo(() => JSON.stringify(productionPreparationInput(film)), [film]);
   const currentPlan = Boolean(prepared && inputHash && prepared.inputHash === inputHash);
+  const priceCurrent = Boolean(price && prepared && currentPlan && price.preparedId===prepared.id && price.manifestHash===prepared.manifestHash && Date.parse(price.expiresAt)>now);
   const quoteCurrent = Boolean(quote && prepared && quote.preparedId === prepared.id && quote.manifestHash === prepared.manifestHash && currentPlan && quoteMatchesConfiguration(quote, configuration) && Date.parse(quote.expiresAt) > now);
   const paymentReference = payment || attemptedPayment.current;
   const paidPlanCurrent = Boolean(paymentReference && prepared && currentPlan && paymentReference.preparedId === prepared.id && paymentReference.manifestHash === prepared.manifestHash);
@@ -134,10 +140,10 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     return () => { active = false; };
   }, []);
   useEffect(() => {
-    if (!quote) return;
+    if (!quote && !price) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [quote]);
+  }, [quote, price]);
   useEffect(() => {
     if (!payment?.orderId) return;
     // The active checkout owns its result. A parallel mount read could run
@@ -203,6 +209,30 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
         throw new Error("Your film price could not be verified against the saved plan. No payment has been requested.");
       }
       setQuote(result); setConsent(false); setNow(Date.now()); checkoutKey.current = crypto.randomUUID();
+      if(price&&result.amountCents!==price.amountCents)setMessage("The pricing settings changed. Review the updated total below before approving payment.");
+    });
+  }
+  async function requestPrice() {
+    if(!reviewed||paymentReference||(!currentPlan&&!preparationConsent))return;
+    await work("Preparing your pricing…",async()=>{
+      setQuote(null);setPrice(null);setConsent(false);
+      if(preparationRequest.current?.input!==input)preparationRequest.current={input,
+        key:currentPlan&&prepared?prepared.requestId:crypto.randomUUID(),priceKey:crypto.randomUUID()};
+      if(price&&Date.parse(price.expiresAt)<=Date.now())preparationRequest.current.priceKey=crypto.randomUUID();
+      const result=await prepareFilmPrice({request:api,input,filmId:film.id,existing:prepared,
+        preparationKey:preparationRequest.current.key,priceKey:preparationRequest.current.priceKey,
+        reviewed,preparationConsent,persist:onPrepared});
+      setPrice(result.price);setNow(Date.now());
+      setMessage("Your production plan is saved and your film price is ready.");
+    });
+  }
+  async function downloadPlan() {
+    if(!prepared)return;
+    await work("Opening your production plan…",async()=>{
+      const value=await api(`/api/studio?action=manifest&id=${encodeURIComponent(prepared.id)}`);
+      const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:"application/json"}));
+      const link=document.createElement("a");link.href=url;link.download="film-production-plan.json";document.body.append(link);link.click();link.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),30_000);
     });
   }
   async function readOrder(reference: FilmPaymentReference) {
@@ -257,16 +287,26 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
   return <section className="readiness-panel film-checkout" aria-label="Film payment and production">
     <h3>Your film price and payment</h3>
     {!paymentReference && <>
-      {!prepared ? <p>Prepare your reviewed production plan to request a price.</p> : !currentPlan ? <p>Prepare an updated plan before requesting a price for your edited film.</p> : <p>Review the final total before approving a payment. Requesting a price does not charge your card.</p>}
-      {!configuration?.available && <p className="field-note">{configuration ? "Payment is not available yet. Your plan remains saved." : "Checking payment availability…"}</p>}
-      <button className="button secondary small" disabled={Boolean(busy) || !currentPlan || !reviewed} onClick={() => void requestQuote()}><RefreshCw size={15} />{quote ? "Refresh film price" : "Check price availability"}</button>
+      <p>Save your reviewed production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
+      {!currentPlan&&<label className="check-label"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.</span></label>}
+      <button className="button primary small" disabled={Boolean(busy) || !reviewed || !film.scenes.length || (!currentPlan&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (price ? "Refresh my pricing" : "Prepare my pricing")}</button>
       {!reviewed && <p className="field-note">Confirm your review of the materials and screenplay first.</p>}
     </>}
+    {prepared&&<p className="field-note">{currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
+    {price&&!paymentReference&&!quote&&<div className="film-price-review" role="status">
+      <p className="eyebrow">Your film price</p>
+      <p className="film-price-total">{money(price.amountCents)} <span>USD total</span></p>
+      <p>{price.filmTitle} · {prepared?.durationSeconds} seconds target</p>
+      <p className="field-note">{price.note}</p>
+      {!priceCurrent&&<p className="feedback">Refresh your pricing to include the latest plan and rates.</p>}
+      {price.kind==="confirmed"&&priceCurrent&&<button className="button secondary" disabled={Boolean(busy)||!reviewed} onClick={()=>void requestQuote()}>Continue to payment</button>}
+    </div>}
     {quote && !paymentReference && <div className="film-price-review">
       <p className="film-price-total">{money(quote.amountCents)} <span>USD total</span></p>
       <p>{quote.filmTitle} · {prepared?.durationSeconds} seconds target</p>
       <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
-      <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. Animation quality is confirmed for this production quote.</p>
+      <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
+      {!productionAvailable&&<p className="field-note">Rendering is not available yet. A payment does not start production.</p>}
       {!quoteCurrent && <p className="feedback">This price has expired or the plan has changed. Request a new price before paying.</p>}
       <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !reviewed} onChange={event => setConsent(event.target.checked)} />
         <span>{quote.sandbox ? `I confirm a ${money(quote.amountCents)} test payment for this reviewed film plan. No real money will move.` : `I authorize BROCO Technologies LLC to charge exactly ${money(quote.amountCents)} for this reviewed film plan.`}</span>

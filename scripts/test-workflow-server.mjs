@@ -9,6 +9,8 @@
  * URL: http://127.0.0.1:5178
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
+ * Agreement QA: registration loads the real public agreement handler; edit it
+ * in owner Administration to test stale acceptance in a second browser tab.
  * The owner address is the app's reserved identifier, backed here ONLY by a fictional
  * in-memory record. These passwords are public test fixtures, never real credentials.
  * All records disappear on exit. Browser fixture drafts stay on this local origin.
@@ -42,12 +44,14 @@ globalThis.fetch = async () => {
 
 const [{ createAuthHandler }, { createStudioHandler }, { createAdminHandler }, auth,
   { OWNER_EMAIL }, { createFilmProductionService, fictionalOperatorProject, productionJobPath },
-  { createPaymentsService }, { productionReadiness }, securityHelpers, { parseRange }] = await Promise.all([
+  { createPaymentsService }, { productionReadiness }, securityHelpers, { parseRange },
+  { readPricingSettings }, { createFilmPricingService }] = await Promise.all([
   import("../api/auth.mjs"), import("../api/studio.mjs"), import("../api/admin.mjs"),
   import("../api/_lib/auth.mjs"), import("../api/_lib/access.mjs"),
   import("../api/_lib/film-production.mjs"), import("../api/_lib/payments.mjs"),
   import("../api/_lib/production.mjs"), import("../api/_lib/auth-security.mjs"),
   import("../api/_lib/archive.mjs"),
+  import("../api/_lib/admin.mjs"), import("../api/_lib/film-pricing.mjs"),
 ]);
 const records = new Map();
 let revision = 0;
@@ -88,13 +92,14 @@ const limit = async (key, maximum, windowMs) => {
   return false;
 };
 const session = (req, allowSetup) => auth.getSession(req, allowSetup, { readRecordImpl: read, writeRecordImpl: write });
-const pricingSettings = async () => (await read("settings/pricing.json"))?.value || { markupBasisPoints: 0, revision: 0 };
+const pricingSettings = () => readPricingSettings(read);
 const registrationPolicy = async () => (await read("settings/registration.json"))?.value || { approvalRequired: true, revision: 0, updatedAt: null, updatedBy: null };
 const connections = async () => ({ story: false, ...productionReadiness({ env: {}, pricingSettings: await pricingSettings() }),
   connections: { ...productionReadiness({ env: {} }).connections,
     story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } });
 const refuseProvider = async () => { throw new Error("Synthetic test cannot call an external provider."); };
 const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write });
+const filmPricing = createFilmPricingService({ filmProduction, pricingSettings, env: {} });
 let deliveryMedia, deliveryProject;
 let deliveryBlobReads = 0;
 const getDeliveryBlob = async (pathname, options) => {
@@ -110,12 +115,14 @@ const getDeliveryBlob = async (pathname, options) => {
     blob: { pathname, contentType: "video/mp4", size: bytes.length } };
 };
 let syntheticCharges = 0;
+const syntheticChargeAmounts = [];
 const simulatedBinding = { environment: "sandbox", grantId: "c".repeat(64) };
 const fakePaymentsProvider = {
   binding: async () => simulatedBinding,
   charge: async (_binding, { amountCents, paymentToken }) => {
     if (!["fixture_card_captured", "fixture_card_declined", "fixture_card_uncertain"].includes(paymentToken)) throw new Error("Only fabricated fixture tokens are accepted.");
     syntheticCharges++;
+    syntheticChargeAmounts.push(amountCents);
     if (paymentToken === "fixture_card_uncertain") throw new Error("Simulated unknown processor outcome.");
     return { id: `fixture_charge_${syntheticCharges}`, amountCents, currency: "USD", verified: true,
       status: paymentToken === "fixture_card_declined" ? "DECLINED" : "CAPTURED" };
@@ -125,12 +132,7 @@ const fakePaymentsProvider = {
   readRefund: refuseProvider,
 };
 const payments = createPaymentsService({ read, write, pricingSettings,
-  quoteProvider: checkoutFixtures ? async (project, actor, { preparedId }) => {
-    const saved = await filmProduction.status({ email: actor.email, id: preparedId });
-    return { preparedId: saved.id, filmId: project.id, filmTitle: project.title, manifestHash: saved.manifestHash,
-      environment: "sandbox", currency: "USD", providerCostCents: 100, quoteReference: "synthetic_local_quote",
-      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(), apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
-  } : (...args) => filmProduction.quoteForPayment(...args),
+  quoteProvider: (...args) => filmPricing.quoteForPayment(...args),
   readiness: checkoutFixtures ? async () => ({ sandboxEnabled: true, merchantVerified: true, authorization: {
     ...simulatedBinding, evidenceHash: "d".repeat(64), validatedAt: new Date(Date.now() - 1000).toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(), operations: ["quote", "charge", "refund", "read", "card-entry"],
@@ -149,7 +151,7 @@ const recordPage = async (prefix, { cursor, limit: size = 50 } = {}) => {
   return { records: page, ...(offset + size < all.length ? { cursor: String(offset + size) } : {}) };
 };
 const shared = { getSession: session, readRecord: read, writeRecord: write, limitAction: limit,
-  connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, payments, captcha };
+  connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, filmPricing, payments, captcha };
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
@@ -333,6 +335,27 @@ const login = async account => {
   assert.equal(result.status, 200); assert.equal(result.body.user.email, account.email);
   return result.cookies.find(cookie=>cookie.startsWith("lineage_session=")).split(";")[0];
 };
+async function currentAgreementConsent() {
+  const response = await route("/api/auth?action=agreement");
+  assert.equal(response.status, 200);
+  const agreement = response.body.agreement;
+  assert.ok(agreement && typeof agreement.body === "string" && agreement.body.length > 0);
+  return { sourceAgreementAccepted: true, sourceAgreementVersion: agreement.version, sourceAgreementHash: agreement.contentHash };
+}
+// Three five-second shots use three six-second planning clips: 858 credits at
+// $88/80,000 = 94 cents rounded, plus the default 50% markup = 141 cents.
+const expectedFixturePriceCents = 141;
+function assertPlanningPrice(price, prepared) {
+  assert.equal(price.status, 200);
+  assert.equal(price.body.preparedId, prepared.id);
+  assert.equal(price.body.manifestHash, prepared.manifestHash);
+  assert.equal(price.body.currency, "USD");
+  assert.equal(price.body.amountCents, expectedFixturePriceCents);
+  assert.equal(price.body.kind, "confirmed");
+  assert.equal(price.body.pricingBasis, "planning-rate");
+  assert.match(price.body.note, /fixed price/i);
+  assert.doesNotMatch(JSON.stringify(price.body), /providerCostCents|planningCreditsPerClip|markupBasisPoints|apiVerified/);
+}
 async function check() {
   assert.equal((await route("/api/studio?action=capabilities")).status, 401);
   const customer = await login(accounts[0]), owner = await login(accounts[1]), other = await login(accounts[2]);
@@ -340,6 +363,8 @@ async function check() {
   assert.equal((await route("/api/admin?action=overview", { cookie: owner })).status, 200);
   const capabilities = await route("/api/studio?action=capabilities", { cookie: customer });
   assert.equal(capabilities.body.production, false); assert.equal(capabilities.body.billing, false);
+  assert.deepEqual(await pricingSettings(), { markupBasisPoints: 5000, planningCreditsPerClip: 286,
+    planningSecondsPerClip: 6, planningRendersPerClip: 1, revision: 0, updatedAt: null, updatedBy: null });
   const prepare = { action: "prepare", project: fixture, idempotencyKey: "synthetic-workflow-prepare-001", preparationConsent: true };
   assert.equal((await route("/api/studio", { cookie: customer, body: { ...prepare, preparationConsent: false } })).status, 400);
   assert.equal((await route("/api/studio", { cookie: customer, body: prepare, suppliedOrigin: "https://other.example.invalid" })).status, 403);
@@ -352,22 +377,94 @@ async function check() {
   assert.equal((await route(`/api/studio?action=productionStatus&id=${job.id}`, { cookie: customer })).status, 200);
   assert.equal((await route(`/api/studio?action=manifest&id=${job.id}`, { cookie: customer })).status, 200);
   assert.equal((await route(`/api/studio?action=productionStatus&id=${job.id}`, { cookie: other })).status, 404);
+  const priced = await route("/api/studio", { cookie: customer, body: { action: "price", project: fixture,
+    preparedId: job.id, idempotencyKey: "synthetic-workflow-price-001" } });
+  assertPlanningPrice(priced, job);
+  assert.equal((await route("/api/studio?action=checkoutConfiguration", { cookie: customer })).body.available, false);
+  assert.equal(syntheticCharges, 0);
+  assert.equal([...records.keys()].some(path => path.startsWith("payments/")), false, "Pricing cannot create a payment quote or order");
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "quote", project: fixture, idempotencyKey: "synthetic-workflow-quote-001" } })).status, 503);
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "checkout", quoteId: "a".repeat(64), idempotencyKey: "synthetic-workflow-pay-001", paymentToken: "synthetic_token_never_real", consent: true } })).status, 403);
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "generate" } })).status, 503);
   assert.equal((await route("/api/admin", { cookie: customer, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 403);
   assert.equal((await route("/api/admin", { cookie: owner, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 201);
+  await checkSourceAgreement(owner, customer);
   await checkRegistrationAccess(owner);
   assert.equal((await route("/api/auth", { cookie: customer, body: { action: "logout" } })).status, 200);
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).status, 401);
   assert.equal(blockedExternalCalls, 0);
-  console.log("PASS: real-handler synthetic workflow, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+  console.log("PASS: real-handler synthetic workflow, fixed $1.41 planning price with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+}
+async function checkSourceAgreement(owner, customer) {
+  const published = await route("/api/auth?action=agreement");
+  assert.equal(published.status, 200);
+  const initial = published.body.agreement;
+  assert.match(initial.contentHash, /^[a-f0-9]{64}$/);
+  assert.equal(typeof initial.version, "string");
+  assert.ok(initial.title && initial.body && initial.consentLabel);
+  assert.equal((await route("/api/auth?action=acceptedAgreement")).status, 401);
+  assert.equal((await route("/api/auth?action=acceptedAgreement", { cookie: customer })).body.acceptance, null,
+    "Existing accounts must not be treated as having accepted the new agreement");
+  assert.equal((await route("/api/admin?action=agreement", { cookie: customer })).status, 403);
+  assert.deepEqual((await route("/api/admin?action=agreement", { cookie: owner })).body.agreement, initial);
+  const consent = { sourceAgreementAccepted: true, sourceAgreementVersion: initial.version, sourceAgreementHash: initial.contentHash };
+  const registration = email => ({ action: "register", name: "Fictional Agreement Signer", email,
+    password: "Meadow lantern copper hillside", termsAccepted: true, ...consent });
+  const invalidAcceptance = [
+    { sourceAgreementAccepted: false },
+    { sourceAgreementHash: undefined },
+    { sourceAgreementHash: "0".repeat(64) },
+  ];
+  for (const [index, invalid] of invalidAcceptance.entries()) {
+    const email = `agreement-rejected-${index}@example.invalid`;
+    const result = await route("/api/auth", { body: { ...registration(email), ...invalid } });
+    assert.ok([400, 409].includes(result.status), `Invalid agreement acceptance must be denied, got ${result.status}`);
+    assert.equal(await read(auth.userPath(email)), null, "Rejected consent cannot create an account");
+    assert.equal(result.cookies.length, 0, "Rejected consent cannot create a session");
+  }
+  const email = "agreement-accepted@example.invalid";
+  const accepted = await route("/api/auth", { body: registration(email) });
+  assert.equal(accepted.status, 201);
+  assert.equal(Object.hasOwn(accepted.body.user, "sourceAgreementAcceptance"), false);
+  const user = (await read(auth.userPath(email))).value;
+  const acceptance = structuredClone(user.sourceAgreementAcceptance);
+  assert.deepEqual(acceptance.agreement, initial);
+  assert.equal(acceptance.accountEmail, email);
+  assert.equal(acceptance.signedName, "Fictional Agreement Signer");
+  assert.equal(acceptance.signatureMethod, "account-name-checkbox");
+  assert.ok(Number.isFinite(Date.parse(acceptance.acceptedAt)));
+  const acceptedCookie = accepted.cookies.find(cookie => cookie.startsWith("lineage_session=")).split(";")[0];
+  assert.deepEqual((await route("/api/auth?action=acceptedAgreement", { cookie: acceptedCookie })).body.acceptance, acceptance);
+  assert.equal((await route(`/api/auth?action=acceptedAgreement&email=${encodeURIComponent(email)}`, { cookie: customer })).body.acceptance, null,
+    "An account cannot request another person's signature record");
+  const update = { action: "updateAgreement", revision: initial.revision, title: initial.title,
+    body: `${initial.body}\n\nSYNTHETIC LOCAL TEST: this new revision exercises consent refresh.`, consentLabel: initial.consentLabel };
+  assert.equal((await route("/api/admin", { cookie: customer, body: update })).status, 403);
+  assert.equal((await route("/api/admin", { cookie: owner, body: update, suppliedOrigin: "https://other.example.invalid" })).status, 403);
+  assert.deepEqual((await route("/api/auth?action=agreement")).body.agreement, initial);
+  const changed = await route("/api/admin", { cookie: owner, body: update });
+  assert.equal(changed.status, 200);
+  const current = changed.body.agreement;
+  assert.equal(current.revision, initial.revision + 1);
+  assert.notEqual(current.version, initial.version);
+  assert.notEqual(current.contentHash, initial.contentHash);
+  assert.equal(current.body, update.body);
+  assert.deepEqual((await route("/api/auth?action=agreement")).body.agreement, current);
+  assert.equal((await route("/api/admin", { cookie: owner, body: update })).status, 409, "A stale editor cannot overwrite a new agreement");
+  assert.deepEqual((await route(`/api/auth?action=agreement&version=${encodeURIComponent(initial.version)}`)).body.agreement, initial);
+  assert.deepEqual((await read(auth.userPath(email))).value.sourceAgreementAcceptance, acceptance, "Editing an agreement cannot rewrite existing consent");
+  const staleEmail = "agreement-stale@example.invalid";
+  assert.equal((await route("/api/auth", { body: registration(staleEmail) })).status, 409);
+  assert.equal(await read(auth.userPath(staleEmail)), null);
+  const refreshed = await route("/api/auth", { body: { ...registration(staleEmail), ...await currentAgreementConsent() } });
+  assert.equal(refreshed.status, 201);
+  assert.deepEqual((await read(auth.userPath(staleEmail))).value.sourceAgreementAcceptance.agreement, current);
 }
 async function checkRegistrationAccess(owner) {
   const waiting = await login(accounts[3]), administrator = await login(accounts[4]);
   assert.equal((await route("/api/auth", { cookie: waiting })).body.user.accessStatus, "pending");
   assert.equal((await route("/api/auth?action=security", { cookie: waiting })).status, 200);
-  for (const action of ["prepare", "quote", "checkout", "generate"]) {
+  for (const action of ["prepare", "price", "quote", "checkout", "generate"]) {
     assert.equal((await route("/api/studio", { cookie: waiting, body: { action } })).status, 401, `Pending ${action}`);
   }
   assert.equal((await route("/api/admin", { cookie: waiting, body: { action: "approve", email: accounts[3].email } })).status, 401);
@@ -390,7 +487,8 @@ async function checkRegistrationAccess(owner) {
   assert.equal(initial.status, 200);
   assert.equal(initial.body.approvalRequired, true);
   assert.equal((await route("/api/admin", { cookie: waiting, body: { action: "updateRegistrationPolicy", approvalRequired: false, expectedRevision: initial.body.revision } })).status, 403);
-  const register = async email => route("/api/auth", { body: { action: "register", name: "Fictional registration policy check", email, password: "Meadow lantern copper hillside", termsAccepted: true } });
+  const register = async email => route("/api/auth", { body: { action: "register", name: "Fictional registration policy check", email,
+    password: "Meadow lantern copper hillside", termsAccepted: true, ...await currentAgreementConsent() } });
   const pending = await register("new-waiting@example.invalid");
   assert.equal(pending.status, 201);
   assert.equal(pending.body.user.accessStatus, "pending");
@@ -420,11 +518,17 @@ async function checkCheckout() {
   for (const [index, status] of ["captured", "declined", "uncertain"].entries()) {
     const prepared = await route("/api/studio", { cookie: customer, body: { action: "prepare", project: checkoutProjects[index], preparationConsent: true, idempotencyKey: `checkout-fixture-prepare-${index}` } });
     assert.equal(prepared.status, 201);
+    const priced = await route("/api/studio", { cookie: customer, body: { action: "price", project: checkoutProjects[index],
+      preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-price-${index}` } });
+    assertPlanningPrice(priced, prepared.body);
+    const paymentsBeforeQuote = [...records.values()].filter(record => record.value?.filmId === checkoutProjects[index].id
+      && record.value?.merchantBinding);
+    assert.equal(paymentsBeforeQuote.length, 0, "Viewing the film price cannot create a billable quote or order");
     const quoted = await route("/api/studio", { cookie: customer, body: { action: "quote", project: checkoutProjects[index], preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-quote-${index}` } });
     assert.equal(quoted.status, 200);
     assert.equal(quoted.body.preparedId, prepared.body.id);
     assert.equal(quoted.body.manifestHash, prepared.body.manifestHash);
-    assert.equal(quoted.body.amountCents, 100);
+    assert.equal(quoted.body.amountCents, priced.body.amountCents);
     assert.equal(quoted.body.sandbox, true);
     const preflight = await route("/api/studio", { cookie: customer, body: { action: "checkoutCheck", quoteId: quoted.body.id, captchaToken: fixtureCaptchaToken("checkout") } });
     assert.equal(preflight.status, 200);
@@ -434,6 +538,8 @@ async function checkCheckout() {
     assert.equal(paid.body.id, quoted.body.orderId);
     assert.equal(paid.body.status, status);
     assert.equal(paid.body.sandbox, true);
+    assert.equal(paid.body.amountCents, expectedFixturePriceCents);
+    assert.equal(syntheticChargeAmounts[index], expectedFixturePriceCents, "The displayed fixed price must reach the processor unchanged");
     const charges = syntheticCharges;
     assert.equal((await route("/api/studio", { cookie: customer, body })).status, 403);
     assert.equal(syntheticCharges, charges, "Replaying a consumed CAPTCHA proof must not call the processor");
@@ -445,13 +551,16 @@ async function checkCheckout() {
     assert.equal((await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: other })).status, 404);
     const receipt = await route(`/api/studio?action=receipt&id=${paid.body.id}`, { cookie: customer });
     assert.equal(receipt.status, status === "captured" ? 200 : 409);
-    if (status === "captured") { firstOrder = paid.body; assert.equal(receipt.body.sandbox, true); }
+    if (status === "captured") {
+      firstOrder = paid.body; assert.equal(receipt.body.sandbox, true);
+      assert.equal(receipt.body.amountCents, expectedFixturePriceCents);
+    }
   }
   assert.equal(syntheticCharges, 3);
   assert.ok(firstOrder);
   assert.equal(blockedExternalCalls, 0);
   assert.doesNotMatch(JSON.stringify([...records.values()]), /fixture_card_|4111111111111111|4000000000009995|"cvc"/);
-  console.log("PASS: actual-handler synthetic checkout quotes, captured/declined/uncertain outcomes, GET-only recovery, sandbox receipts, ownership, no stored card tokens, and zero outbound calls.");
+  console.log("PASS: actual-handler fixed $1.41 planning price through checkout, processor and receipt; captured/declined/uncertain outcomes, GET-only recovery, sandbox receipts, ownership, no stored card tokens, and zero outbound calls.");
 }
 function mediaRoute(path, { cookie, method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {

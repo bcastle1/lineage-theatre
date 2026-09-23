@@ -3,6 +3,7 @@ import { generateStory, STORY_MODEL } from "./_lib/story.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { readPricingSettings } from "./_lib/admin.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
+import { createFilmPricingService } from "./_lib/film-pricing.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 import { createProductionQueue } from "./_lib/production-queue.mjs";
@@ -68,6 +69,7 @@ function customerStory(result,action) {
 export function createStudioHandler(overrides={}) {
  const humanCheck=overrides.captcha||captcha;
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
+ const filmPricing=overrides.filmPricing||createFilmPricingService({filmProduction:dependencies.filmProduction,pricingSettings:dependencies.readPricingSettings});
  const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
    read:dependencies.readRecord,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
  return async function handler(req,res) {
@@ -99,6 +101,12 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(body?.action==="price") {
+      if(!(await limitAction(`price:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before requesting another film price."});
+      const {action,...input}=body;
+      return json(res,200,await filmPricing.price(session.user,input));
+    }
     if(body?.action==="checkoutCheck") {
       if(Object.keys(body).some(key=>!["action","quoteId","captchaToken"].includes(key)))
         return json(res,400,{message:"The payment security request is invalid."});

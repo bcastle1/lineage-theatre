@@ -20,13 +20,14 @@ import { createAccountSecurityService, clearMfaCookie } from "./_lib/account-sec
 import { verificationMail } from "./_lib/verification-mail.mjs";
 import { readRegistrationPolicy } from "./_lib/registration-policy.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
+import { createSourceAgreementService, SourceAgreementError } from "./_lib/source-agreement.mjs";
 
 const unavailableRegistration = "This email cannot be registered. If you already have an account, sign in or contact the administrator.";
 const dependencies = { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction };
 
 export function validateRegistration(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Enter your name, email, and password to create an account.");
-  if (["role", "roles", "status", "accessStatus", "approvedAt", "approvedBy", "approvalSource", "approvalPolicyRevision", "approvalRequired", "adminGrantedBy", "adminRevokedAt", "emailVerified", "mustChangePassword", "permissions", "mfa", "securityVersion", "passwordHistory", "passwordExpiresAt"].some(key=>Object.hasOwn(body,key))) throw new Error("Account access and verification are assigned by the server.");
+  if (["role", "roles", "status", "accessStatus", "approvedAt", "approvedBy", "approvalSource", "approvalPolicyRevision", "approvalRequired", "adminGrantedBy", "adminRevokedAt", "emailVerified", "mustChangePassword", "permissions", "mfa", "securityVersion", "passwordHistory", "passwordExpiresAt", "sourceAgreementAcceptance", "sourceAgreementAcceptedAt", "sourceAgreementSignedName"].some(key=>Object.hasOwn(body,key))) throw new Error("Account access and verification are assigned by the server.");
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const parts = email.split("@");
   const local = parts[0] || "";
@@ -48,6 +49,7 @@ export function createAuthHandler(overrides = {}) {
   const humanCheck = overrides.captcha || captcha;
   const { json, readBody, sameOrigin, getSession, sessionCookie, publicUser, readRecord, writeRecord, userPath, verifyPassword, hashPassword, limitAction } = { ...dependencies, ...overrides };
   const clock = overrides.now || (() => Date.now());
+  const sourceAgreement = overrides.sourceAgreement || createSourceAgreementService({ readRecord, writeRecord, now: clock });
   const registrationPolicy = overrides.readRegistrationPolicy || (() => readRegistrationPolicy(readRecord));
   const security = createAccountSecurityService({ readRecord, writeRecord, verifyPassword,
     verificationMail: overrides.verificationMail || verificationMail, now: clock, env: overrides.env || process.env });
@@ -56,9 +58,16 @@ export function createAuthHandler(overrides = {}) {
   return async function handler(req, res) {
   try {
     if (req.method === "GET") {
+      const url = new URL(req.url || "/api/auth", "https://lineagetheater.com");
+      if (url.searchParams.get("action") === "agreement")
+        return json(res, 200, { agreement: url.searchParams.has("version") ? await sourceAgreement.version(url.searchParams.get("version")) : await sourceAgreement.current() });
       if (new URL(req.url || "/api/auth", "https://lineagetheater.com").searchParams.get("action") === "captcha")
         return json(res, 200, humanCheck.configuration());
       const session = await getSession(req, true);
+      if (url.searchParams.get("action") === "acceptedAgreement") {
+        if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in and complete password setup to view your accepted agreement." });
+        return json(res, 200, { acceptance: sourceAgreement.accepted(session.user) });
+      }
       if (new URL(req.url || "/api/auth", `https://${req.headers.host || "lineagetheater.com"}`).searchParams.get("action") === "security") {
         if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in and complete password setup to manage account security." });
         return json(res, 200, security.security(session.user));
@@ -119,10 +128,11 @@ export function createAuthHandler(overrides = {}) {
         updatedAt: now,
         termsAcceptedAt: now,
         privacyAcknowledgedAt: now,
-        termsVersion: "public-registration-v1",
+        termsVersion: "source-agreement-registration-2026-09-22",
       };
       // Prepare the cookie before writing so missing session setup cannot strand a new account.
       const cookie = sessionCookie(user, { now: clock() });
+      user.sourceAgreementAcceptance = await sourceAgreement.accept(registration, body);
       try {
         // No etag: private Blob atomically creates this exact path with overwrite disabled.
         await writeRecord(path, user);
@@ -224,6 +234,7 @@ export function createAuthHandler(overrides = {}) {
     setSession(res, record.value);
     return json(res, 200, { user: publicUser(record.value) });
   } catch (error) {
+    if (error instanceof SourceAgreementError) return json(res, error.status, { code: error.code, message: error.message });
     if (error instanceof CaptchaError) return json(res, error.status, { code: error.code, message: error.message });
     if (error instanceof AccountSecurityError) return json(res, error.status, { code: error.code, message: error.message });
     return json(res, 503, {
