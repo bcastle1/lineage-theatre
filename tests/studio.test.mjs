@@ -62,7 +62,7 @@ test("admin connection diagnostics still retain model, provider, merchant, and p
   assert.match(result.connections.story.reason,/GPT-6 Astra/);
   assert.match(result.connections.magiclight.reason,/MagicLight/);
   assert.match(result.connections.billing.reason,/QuickBooks/);
-  assert.match(result.connections.billing.reason,/12.5% BROCOTech markup/);
+  assert.match(result.connections.billing.reason,/planning estimate plus the saved administrator markup/);
   assert.equal(result.pricing.markupBasisPoints,1250);
   assert.equal(result.magiclight,false);assert.equal(result.billing,false);
 });
