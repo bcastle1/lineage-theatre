@@ -68,6 +68,14 @@ Only after the rollout checks above succeed, the supported description is:
 
 Do not paste this as a deployed-control attestation before the real Google key and custom-domain verification are complete. Intuit decides assessment approval.
 
+## Diagnosing a rejected security check
+
+The server emits a `[security:captcha]` warning when verification or checkout-proof consumption is rejected. Each warning contains a fixed stage, reason and expected action. Low-score failures include only the numeric score and configured minimum; Google error codes are restricted to a fixed allowlist. Tokens, keys, account and quote identifiers, returned hostnames, and raw provider responses are excluded. A logging failure never permits checkout or changes the rejection.
+
+For `action: "checkout"`, distinguish `provider_rejected`, `action_mismatch`, `hostname_mismatch`, `invalid_score`, `low_score`, `invalid_timestamp`, `future_timestamp`, and `expired_token` before changing any configuration. Secret configuration errors return temporary unavailability; expiration gives the customer a fresh-check instruction. The existing submit handler requests a new token for each customer attempt. Google verification is never retried with the same token, and a failed check cannot create an invoice.
+
+The September 23 production logs showed two `/api/studio` 403 responses at 23:31:50 and 23:32:11 UTC on commit `58b6dc9`. That version did not record a rejection reason. These observations establish a pre-invoice verification failure, not its specific Google cause. After an approved deployment, inspect the warning from the customer's next attempt and address the identified cause; do not lower the score threshold or remove hostname, action, timestamp, or one-use-proof checks to make the error disappear. Local fixtures cannot establish that live checkout is repaired.
+
 ## Official integration references
 
 - [Google reCAPTCHA v3: actions, score and submit-time execution](https://developers.google.com/recaptcha/docs/v3)
