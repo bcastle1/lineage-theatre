@@ -1,6 +1,6 @@
 import { json, readBody, sameOrigin, getSession, readRecord, writeRecord, userPath, publicUser, digest, limitAction } from "./_lib/auth.mjs";
 import { hasAdminAccess, isOwner, OWNER_EMAIL, accessStatusForUser, hasRecordedApproval } from "./_lib/access.mjs";
-import { recordPage, safeUser, validEmail, audit, newInvitation, validateInvitation, validateUserAction, validateRefund, readPricingSettings, markupFromPercent, PRICING_PATH } from "./_lib/admin.mjs";
+import { recordPage, safeUser, validEmail, audit, newInvitation, validateInvitation, validateUserAction, validateRefund, readPricingSettings, pricingSettingsFromRecord, validatePlanningSettings, markupFromPercent, PRICING_PATH } from "./_lib/admin.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { connections } from "./studio.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
@@ -152,12 +152,14 @@ export function createAdminHandler(overrides={}) {
     if(action==="updatePricing") {
       const markupBasisPoints=markupFromPercent(body.markupPercent);
       const record=await readRecord(PRICING_PATH);
-      const current=record?.value || {markupBasisPoints:0,revision:0};
+      const current=pricingSettingsFromRecord(record);
       if(!Number.isInteger(body.expectedRevision) || body.expectedRevision!==current.revision)
         return resultError(res,409,"Pricing was changed by another administrator. Refresh before saving.");
-      const settings={markupBasisPoints,revision:current.revision+1,updatedAt:new Date().toISOString(),updatedBy:actor.email};
+      const planning=validatePlanningSettings(Object.fromEntries(["planningCreditsPerClip","planningSecondsPerClip","planningRendersPerClip"]
+        .map(field=>[field,Object.hasOwn(body,field)?body[field]:current[field]])));
+      const settings={markupBasisPoints,...planning,revision:current.revision+1,updatedAt:new Date().toISOString(),updatedBy:actor.email};
       await writeRecord(PRICING_PATH,settings,record?.etag);
-      await audit(actor.email,"pricing.updated","customer-markup",{previousBasisPoints:current.markupBasisPoints,markupBasisPoints,revision:settings.revision});
+      await audit(actor.email,"pricing.updated","customer-markup",{previousBasisPoints:current.markupBasisPoints,markupBasisPoints,...planning,revision:settings.revision});
       return json(res,200,{...settings,currency:"USD",referenceRate:productionReadiness({pricingSettings:settings}).pricing.referenceRate});
     }
     if(action==="refund") {

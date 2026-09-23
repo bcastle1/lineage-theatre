@@ -209,6 +209,40 @@ export function createFilmProductionService(dependencies = {}) {
       quoteReference: quote.quoteReference, currency: "USD", providerCostCents: quote.providerCostCents, expiresAt: quote.expiresAt,
       environment: adapter.environment, apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
   }
+  async function quoteForProductionBudget({ email, preparedId, manifestHash, environment, budgetCents }) {
+    checkAdapter(adapter);
+    email = owner(email);
+    if (environment !== adapter.environment || typeof manifestHash !== "string" || !HASH.test(manifestHash)
+      || !Number.isSafeInteger(budgetCents) || budgetCents < 1 || budgetCents > 100_000_000) throw unavailable();
+    const record = await get(email, preparedId), job = record.value;
+    if (job.id !== preparedId || job.manifestHash !== manifestHash || hash(job.manifest) !== manifestHash
+      || job.filmId !== job.manifest.filmId || !Array.isArray(job.manifest.shots) || !job.manifest.shots.length
+      || !Array.isArray(job.shots) || job.shots.length !== job.manifest.shots.length
+      || job.shots.some((shot, index) => shot.id !== job.manifest.shots[index].id)
+      || job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) throw unavailable();
+    const actor = job.mode === "operator-test" ? (await read(userPath(email)))?.value : undefined;
+    await requireProductionContext(job, actor, email);
+    const validation = await adapter.validateManifest(clone(job.manifest));
+    if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents)
+      || validation.maximumCostCents < 0 || validation.maximumCostCents > budgetCents) throw unavailable();
+    // Refresh the actual production quote without changing the paid retail
+    // price or increasing the original server-authorized production budget.
+    const quote = await adapter.quote({ manifest: clone(job.manifest), manifestHash,
+      idempotencyKey: digest(`production-budget:${preparedId}:${manifestHash}:${uuid()}`) });
+    const until = typeof quote?.expiresAt === "string" ? Date.parse(quote.expiresAt) : NaN;
+    if (!quote || quote.manifestHash !== manifestHash || quote.currency !== "USD"
+      || typeof quote.quoteReference !== "string" || !quote.quoteReference.trim() || quote.quoteReference.length > 200
+      || !Number.isSafeInteger(quote.providerCostCents) || quote.providerCostCents < 0
+      || quote.providerCostCents > validation.maximumCostCents || quote.providerCostCents > budgetCents
+      || !Number.isFinite(until) || until <= now()) throw unavailable();
+    const current = await get(email, preparedId);
+    if (typeof record.etag !== "string" || current.etag !== record.etag || current.value.manifestHash !== manifestHash || until <= now()) throw unavailable();
+    checkAdapter(adapter);
+    if (adapter.environment !== environment) throw unavailable();
+    return { preparedId, manifestHash, environment, currency: "USD", providerCostCents: quote.providerCostCents,
+      maximumCostCents: validation.maximumCostCents, quoteReference: quote.quoteReference, expiresAt: quote.expiresAt,
+      apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
+  }
   async function prepareOperatorTest({ actor, idempotencyKey }) {
     await requireOperator(actor, actor?.email);
     return prepare({ email: actor.email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, mode: "operator-test" });
@@ -298,7 +332,7 @@ export function createFilmProductionService(dependencies = {}) {
     return customerJob(job);
   }
   return {
-    prepare, prepareOperatorTest, quoteForPayment, advance, acceptAssembly,
+    prepare, prepareOperatorTest, quoteForPayment, quoteForProductionBudget, advance, acceptAssembly,
     status: async ({ email, id }) => customerJob((await get(email, id)).value),
     manifest: async ({ email, id }) => { const job = (await get(email, id)).value; return { id: job.id, manifestHash: job.manifestHash, manifest: clone(job.manifest) }; },
     getPrepared: async ({ email, id }) => clone((await get(email, id)).value),

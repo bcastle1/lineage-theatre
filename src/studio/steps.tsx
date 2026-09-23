@@ -19,7 +19,6 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
-import ProductionPreparation from "./ProductionPreparation";
 import FilmCheckout from "./FilmCheckout";
 import { getSourceObjectUrl } from "../lib/storage";
 
@@ -1049,7 +1048,6 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <ProductionPreparation key={`preparation:${film.id}`} film={film} disabled={Boolean(busy)} onPrepared={prepared=>update({productionPreparation:prepared})} />
       <label className="check-label consent-final">
         <input
           type="checkbox"
@@ -1060,7 +1058,7 @@ export function CreateStep({
         I have permission to use these materials and have reviewed the facts, cast,
         dialogue, and dramatized details.
       </label>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} reviewed={consent} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

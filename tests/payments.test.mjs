@@ -81,6 +81,27 @@ test("quotes accept prices only from trusted verified manifests and current serv
   h.advance(5*60_000+1);await expectError(h.makeQuote(),"QUOTE_EXPIRED");
 });
 
+test("server planning rates set the real charged amount and later cost or markup changes do not reprice an order",async()=>{
+  const h=fixture({quoteOverrides:{pricingBasis:"planning-rate",apiVerified:false,qualityVerified:false,commercialTermsVerified:false}});
+  const q=await h.makeQuote();assert.equal(q.amountCents,1125);
+  const quoteRecord=[...h.records.values()].find(record=>record.value.id===q.id).value;
+  assert.equal(quoteRecord.pricingBasis,"planning-rate");
+  const result=await h.service.checkout(CUSTOMER,{quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
+  assert.equal(result.amountCents,q.amountCents);assert.equal(h.requests[0].body.amount,"11.25");
+  const savedOrder=[...h.records.values()].find(record=>record.value.id===result.id&&record.value.status).value;
+  assert.equal(savedOrder.pricingBasis,"planning-rate");assert.equal(savedOrder.providerCostEstimateCents,1000);
+  const changed=createPaymentsService({read:h.read,write:h.write,pricingSettings:async()=>({markupBasisPoints:9000,revision:100})});
+  assert.equal((await changed.order(CUSTOMER,result.id)).amountCents,1125);
+  await assert.rejects(h.service.quote(CUSTOMER,{project,idempotencyKey:"another-key-12345",pricingBasis:"planning-rate",providerCostCents:1}));
+});
+
+test("pricing settings cannot change between the planning cost snapshot and checkout markup calculation",async()=>{
+  const changed=fixture({quoteOverrides:{pricingBasis:"planning-rate",pricingRevision:6}});
+  await expectError(changed.makeQuote(),"PRICE_CHANGED");assert.equal(changed.records.size,0);assert.equal(changed.requests.length,0);
+  const matching=fixture({quoteOverrides:{pricingBasis:"planning-rate",pricingRevision:7}});
+  assert.equal((await matching.makeQuote()).amountCents,1125);
+});
+
 test("checkout never accepts card data, client amounts, missing consent, cross-tenant or expired quotes",async()=>{
   const h=fixture(),q=await h.makeQuote();
   const body={quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true};
@@ -263,7 +284,7 @@ test("sandbox token driver uses only the fixed fabricated fixture without creden
 test("quotes bind a saved preparation and expose a stable order reference before any payment",async()=>{
   const h=fixture(),q=await h.service.quote(CUSTOMER,{project,preparedId,idempotencyKey:quoteKey});
   assert.equal(q.orderId,digest(`${CUSTOMER.email}:${REF}`));
-  assert.deepEqual(h.quotes[0].opts,{preparedId,idempotencyKey:quoteKey});
+  assert.deepEqual(h.quotes[0].opts,{preparedId,idempotencyKey:quoteKey,environment:"sandbox"});
   await assert.rejects(h.service.order(CUSTOMER,q.orderId),error=>error.status===404);
   const paid=await h.service.checkout(CUSTOMER,{quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
   assert.equal(paid.id,q.orderId);

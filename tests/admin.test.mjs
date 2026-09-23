@@ -94,13 +94,51 @@ test("pricing accepts precise bounded percentages and requires a current revisio
   assert.equal(markupFromPercent(12.35),1235);assert.equal(markupFromPercent(1000),100000);
   for(const input of [-1,1000.01,0.001,"20",NaN,Infinity,null]) assert.throws(()=>markupFromPercent(input));
   const h=harness(admin);
-  assert.equal((await h.run("pricing")).body.markupBasisPoints,0);
+  assert.equal((await h.run("pricing")).body.markupBasisPoints,5000);
   const saved=await h.run("updatePricing",{markupPercent:25.5,expectedRevision:0});
   assert.equal(saved.status,200);assert.equal(saved.body.markupBasisPoints,2550);assert.equal(saved.body.revision,1);
   assert.equal(h.records.get(PRICING_PATH).updatedBy,admin.email);
   assert.equal((await h.run("updatePricing",{markupPercent:10,expectedRevision:0})).status,409);
   assert.equal(h.records.get(PRICING_PATH).markupBasisPoints,2550);
   assert.equal(h.events[0][1],"pricing.updated");
+});
+test("pricing defaults to 50 percent with labeled planning inputs while preserving explicit saved markup",async()=>{
+  const defaults=await readPricingSettings(async()=>null);
+  assert.deepEqual(defaults,{markupBasisPoints:5000,planningCreditsPerClip:286,planningSecondsPerClip:6,planningRendersPerClip:1,revision:0,updatedAt:null,updatedBy:null});
+  const h=harness(admin);
+  h.records.set(PRICING_PATH,{markupBasisPoints:0,revision:3,updatedAt:"2026-09-20T00:00:00.000Z",updatedBy:owner.email});
+  const current=await h.run("pricing");
+  assert.equal(current.status,200);assert.equal(current.body.markupBasisPoints,0);
+  assert.equal(current.body.planningCreditsPerClip,286);assert.equal(current.body.planningSecondsPerClip,6);assert.equal(current.body.planningRendersPerClip,1);
+  assert.equal(h.writes,0);assert.equal(h.records.get(PRICING_PATH).planningCreditsPerClip,undefined);
+});
+test("planning assumptions save with the markup revision and legacy markup-only updates preserve them",async()=>{
+  const h=harness(admin);
+  const saved=await h.run("updatePricing",{markupPercent:50,planningCreditsPerClip:500,planningSecondsPerClip:8,planningRendersPerClip:2,expectedRevision:0});
+  assert.equal(saved.status,200);assert.equal(saved.body.revision,1);
+  for(const [field,value] of Object.entries({markupBasisPoints:5000,planningCreditsPerClip:500,planningSecondsPerClip:8,planningRendersPerClip:2}))
+    assert.equal(h.records.get(PRICING_PATH)[field],value);
+  const legacy=await h.run("updatePricing",{markupPercent:30,expectedRevision:1});
+  assert.equal(legacy.status,200);assert.equal(legacy.body.markupBasisPoints,3000);assert.equal(legacy.body.revision,2);
+  assert.equal(legacy.body.planningCreditsPerClip,500);assert.equal(legacy.body.planningSecondsPerClip,8);assert.equal(legacy.body.planningRendersPerClip,2);
+  assert.equal((await h.run("updatePricing",{markupPercent:50,planningRendersPerClip:3,expectedRevision:1})).status,409);
+  assert.equal(h.records.get(PRICING_PATH).planningRendersPerClip,2);
+});
+test("planning fields require bounded integers when supplied and reject corrupt saved assumptions",async()=>{
+  const bounds={planningCreditsPerClip:1_000_000,planningSecondsPerClip:60,planningRendersPerClip:20};
+  for(const [field,max] of Object.entries(bounds)){
+    for(const value of [0,-1,max+1,1.5,"6",null,NaN,Infinity]){
+      const h=harness(admin);
+      const result=await h.run("updatePricing",{markupPercent:50,expectedRevision:0,[field]:value});
+      assert.equal(result.status,400,`${field}: ${String(value)}`);assert.equal(h.writes,0);assert.equal(h.events.length,0);
+    }
+    for(const value of [1,max]){
+      const h=harness(admin);
+      const result=await h.run("updatePricing",{markupPercent:50,expectedRevision:0,[field]:value});
+      assert.equal(result.status,200);assert.equal(result.body[field],value);
+    }
+    await assert.rejects(readPricingSettings(async()=>({value:{markupBasisPoints:0,revision:1,[field]:null}})),/whole number/);
+  }
 });
 test("refund validation prevents over-refunds and the pending connection cannot claim success",async()=>{
   const order={id:"synthetic-order-123",provider:"quickbooks",providerChargeId:"synthetic-provider-reference",status:"partially-refunded",currency:"USD",amountCents:1000,refundedCents:200};

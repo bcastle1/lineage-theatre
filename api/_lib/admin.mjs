@@ -4,6 +4,26 @@ import { digest, readRecord, writeRecord } from "./auth.mjs";
 import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "./access.mjs";
 
 export const PRICING_PATH = "settings/pricing.json";
+export const DEFAULT_PRICING_SETTINGS = Object.freeze({markupBasisPoints:5000,planningCreditsPerClip:286,planningSecondsPerClip:6,planningRendersPerClip:1,revision:0,updatedAt:null,updatedBy:null});
+const planningBounds = Object.freeze({planningCreditsPerClip:1_000_000,planningSecondsPerClip:60,planningRendersPerClip:20});
+export function validatePlanningSettings(value={}) {
+  const settings={};
+  for(const [field,maximum] of Object.entries(planningBounds)) {
+    const selected=Object.hasOwn(value,field)?value[field]:DEFAULT_PRICING_SETTINGS[field];
+    if(!Number.isSafeInteger(selected)||selected<1||selected>maximum)
+      throw new Error(`Choose a whole number from 1 to ${maximum.toLocaleString("en-US")} for ${field==="planningCreditsPerClip"?"planning credits per clip":field==="planningSecondsPerClip"?"planning seconds per clip":"planning renders per clip"}.`);
+    settings[field]=selected;
+  }
+  return settings;
+}
+export function pricingSettingsFromRecord(record) {
+  if(!record)return {...DEFAULT_PRICING_SETTINGS};
+  const value=record.value;
+  if (!value || !Number.isInteger(value.markupBasisPoints) || value.markupBasisPoints<0 || value.markupBasisPoints>100_000
+      || !Number.isSafeInteger(value.revision) || value.revision<1)
+    throw new Error("The saved pricing settings need administrator attention.");
+  return {markupBasisPoints:value.markupBasisPoints,...validatePlanningSettings(value),revision:value.revision,updatedAt:value.updatedAt,updatedBy:value.updatedBy};
+}
 export function validEmail(value) {
   const email = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
@@ -35,13 +55,7 @@ export function markupFromPercent(value) {
   return basisPoints;
 }
 export async function readPricingSettings(read=readRecord) {
-  const record=await read(PRICING_PATH);
-  if (!record) return {markupBasisPoints:0,revision:0,updatedAt:null,updatedBy:null};
-  const value=record.value;
-  if (!Number.isInteger(value.markupBasisPoints) || value.markupBasisPoints<0 || value.markupBasisPoints>100_000
-      || !Number.isInteger(value.revision) || value.revision<1)
-    throw new Error("The saved pricing settings need administrator attention.");
-  return {markupBasisPoints:value.markupBasisPoints,revision:value.revision,updatedAt:value.updatedAt,updatedBy:value.updatedBy};
+  return pricingSettingsFromRecord(await read(PRICING_PATH));
 }
 export function validateUserAction(actor, target, action) {
   if (!target) throw new Error("That account was not found.");
