@@ -81,6 +81,33 @@ test("quotes accept prices only from trusted verified manifests and current serv
   h.advance(5*60_000+1);await expectError(h.makeQuote(),"QUOTE_EXPIRED");
 });
 
+test("legacy approved roles reach merchant readiness without bypassing it or contacting a processor",async()=>{
+  for(const actor of [{email:OWNER_EMAIL,role:"owner"},{email:ADMIN.email,role:"admin"}]) {
+    const calls=[];
+    const never=async()=>assert.fail("Unavailable merchant must not access storage, quotes or a provider");
+    const service=createPaymentsService({read:never,write:never,quoteProvider:never,provider:{binding:never,charge:never},
+      readiness:async input=>{calls.push(input);return {};}});
+    await expectError(service.quote(actor,{project,idempotencyKey:quoteKey}),"PRODUCTION_UNAVAILABLE");
+    await expectError(service.checkout(actor,{quoteId:REF,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true}),"PRODUCTION_UNAVAILABLE");
+    assert.deepEqual(await service.checkoutConfiguration(actor),{available:false});
+    assert.deepEqual(calls.map(call=>call.operation),["quote","charge","card-entry"]);
+    assert.ok(calls.every(call=>call.actor===actor));
+    assert.equal(Object.hasOwn(actor,"status"),false);
+  }
+});
+
+test("payment actor validation still denies unapproved customers, suspended roles, password setup and owner email alone",async()=>{
+  const never=async()=>assert.fail("Invalid account must not reach readiness or a provider");
+  const service=createPaymentsService({readiness:never,read:never,write:never,provider:{binding:never}});
+  for(const actor of [null,{email:OWNER_EMAIL},{email:OWNER_EMAIL,status:"active"},
+    {...OWNER,role:"customer"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true},
+    {...ADMIN,status:"suspended"},{...ADMIN,mustChangePassword:true},{...OWNER,email:OTHER.email},
+    {...CUSTOMER,status:"pending"},{...CUSTOMER,status:undefined},{...CUSTOMER,approvedAt:undefined}]) {
+    await assert.rejects(service.quote(actor,{project,idempotencyKey:quoteKey}),error=>error instanceof PaymentError&&error.status===401);
+    await assert.rejects(service.checkoutConfiguration(actor),error=>error instanceof PaymentError&&error.status===401);
+  }
+});
+
 test("server planning rates set the real charged amount and later cost or markup changes do not reprice an order",async()=>{
   const h=fixture({quoteOverrides:{pricingBasis:"planning-rate",apiVerified:false,qualityVerified:false,commercialTermsVerified:false}});
   const q=await h.makeQuote();assert.equal(q.amountCents,1125);

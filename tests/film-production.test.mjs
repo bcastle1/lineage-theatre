@@ -252,6 +252,39 @@ test("owner test uses fixed fictional material and still requires a server budge
   await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: { email: owner.email, role: "customer" } }), e => e.status === 403);
 });
 
+test("a persisted legacy owner can prepare the fixed operator plan while unavailable rendering remains blocked", async () => {
+  const legacy = { email: owner.email, role: "owner" };
+  for (const [actor, current] of [[legacy, legacy], [owner, legacy], [legacy, owner]]) {
+    const data = store();
+    await data.writeRecordImpl(userPath(owner.email), current);
+    const original = structuredClone(data.records.get(userPath(owner.email)));
+    const service = createFilmProductionService({ ...data, now: () => at });
+    const job = await service.prepareOperatorTest({ actor, idempotencyKey });
+    assert.equal(job.status, "prepared");
+    assert.equal(data.records.get(productionJobPath(owner.email, job.id)).value.mode, "operator-test");
+    assert.equal(job.manifestHash, buildFilmManifest(fictionalOperatorProject()).manifestHash);
+    assert.equal((await service.prepareOperatorTest({ actor, idempotencyKey })).id, job.id);
+    await assert.rejects(service.advance({ email: owner.email, id: job.id, actor }), error => error.code === "PRODUCTION_UNAVAILABLE");
+    assert.deepEqual(data.records.get(userPath(owner.email)), original);
+    assert.equal(data.records.size, 2);
+  }
+});
+
+test("operator preparation requires both current and session owner roles without suspension or password setup", async () => {
+  const legacy = { email: owner.email, role: "owner" };
+  for (const invalid of [null, { email: owner.email }, { ...owner, role: "customer" }, { ...owner, role: "admin" },
+    { ...owner, email }, { ...owner, status: "suspended" }, { ...owner, mustChangePassword: true }]) {
+    for (const [actor, current] of [[invalid, legacy], [legacy, invalid]]) {
+      const data = store();
+      await data.writeRecordImpl(userPath(owner.email), current);
+      const before = structuredClone([...data.records]);
+      const service = createFilmProductionService({ ...data, now: () => at });
+      await assert.rejects(service.prepareOperatorTest({ actor, idempotencyKey }), error => error.code === "OWNER_REQUIRED");
+      assert.deepEqual([...data.records], before);
+    }
+  }
+});
+
 test("sandbox refuses normal customer plans even for the owner and ignores a caller's fictional-only claim", async () => {
   const data = store(); let calls = 0;
   await data.writeRecordImpl(userPath(owner.email), owner);

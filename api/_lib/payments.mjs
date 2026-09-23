@@ -40,7 +40,9 @@ function exactFields(value,keys) {
     throw new PaymentError("This payment request contains unsupported information.");
 }
 function actorEmail(actor) {
-  if(!actor||actor.status!=="active"||accessStatusForUser(actor)!=="approved"||actor.mustChangePassword||typeof actor.email!=="string"
+  // Use the same approval check as the studio, including persisted legacy
+  // administrator roles. It still rejects suspended and unapproved accounts.
+  if(!actor||accessStatusForUser(actor)!=="approved"||actor.mustChangePassword||typeof actor.email!=="string"
     ||actor.email!==actor.email.trim().toLowerCase()||!/^\S+@\S+\.\S+$/.test(actor.email))throw new PaymentError("Sign in to continue.",401);
   return actor.email;
 }

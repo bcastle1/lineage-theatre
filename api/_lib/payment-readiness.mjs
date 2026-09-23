@@ -121,7 +121,7 @@ export function createPaymentReadiness({ read = readRecord, env = process.env, n
       // requests use the session account. Neither supplied roles nor an email
       // string can grant access without the current private account record.
       const account = (await read(userPath(email)))?.value;
-      if (account?.email !== email || account.status !== "active" || account.mustChangePassword
+      if (account?.email !== email || account.mustChangePassword
           || accessStatusForUser(account) !== "approved") return {};
       if (environment === "sandbox" && (!isOwner(account) || account.email !== OWNER_EMAIL)) return {};
       return { authorization: authorized };
