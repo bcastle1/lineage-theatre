@@ -6,6 +6,7 @@ import { connections } from "./studio.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
 import { readRegistrationPolicy as readPolicy, REGISTRATION_POLICY_PATH } from "./_lib/registration-policy.mjs";
+import { createSourceAgreementService, SourceAgreementError } from "./_lib/source-agreement.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -18,12 +19,13 @@ function resultError(res,status,message) { return json(res,status,{message}); }
 export function createAdminHandler(overrides={}) {
  const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
+ const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  return async function handler(req,res) {
   const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy}=dependencies;
   try {
     if (req.method==="POST" && !sameOrigin(req)) return resultError(res,403,"Begin this action inside Lineage Theatre.");
     const url=new URL(req.url,`https://${req.headers.host}`);
-    const body=req.method==="POST"?await readBody(req,12_000):null;
+    const body=req.method==="POST"?await readBody(req,32_000):null;
     const action=body?.action || url.searchParams.get("action") || "overview";
     // Pending users can claim their exact owner-issued invitation, but cannot
     // read administrator data or skip a required password change.
@@ -52,6 +54,7 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="agreement") return json(res,200,{agreement:url.searchParams.has("version")?await sourceAgreement.version(url.searchParams.get("version")):await sourceAgreement.current()});
       if(action==="registrationPolicy") return json(res,200,await readRegistrationPolicy());
       if(action==="productionReadiness") return json(res,200,filmProduction.readiness());
       if(action==="paymentDiagnostics") return json(res,200,await payments.adminDiagnostics(actor,url.searchParams.get("id")));
@@ -92,6 +95,12 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="updateAgreement") {
+      const {action,...input}=body;
+      const agreement=await sourceAgreement.update(actor,input);
+      await audit(actor.email,"source.agreement.updated",agreement.version,{revision:agreement.revision,contentHash:agreement.contentHash});
+      return json(res,200,{agreement});
+    }
     if(action==="updateRegistrationPolicy") {
       if(typeof body.approvalRequired!=="boolean") return resultError(res,400,"Choose whether administrator approval is required.");
       const record=await readRecord(REGISTRATION_POLICY_PATH);
@@ -176,6 +185,7 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof SourceAgreementError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof FilmProductionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
     if(error instanceof PaymentError) return json(res,error.status,{code:error.code,message:error.message,charged:error.charged});
     const text=error instanceof Error?error.message:"";

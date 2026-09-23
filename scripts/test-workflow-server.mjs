@@ -9,6 +9,8 @@
  * URL: http://127.0.0.1:5178
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
+ * Agreement QA: registration loads the real public agreement handler; edit it
+ * in owner Administration to test stale acceptance in a second browser tab.
  * The owner address is the app's reserved identifier, backed here ONLY by a fictional
  * in-memory record. These passwords are public test fixtures, never real credentials.
  * All records disappear on exit. Browser fixture drafts stay on this local origin.
@@ -333,6 +335,13 @@ const login = async account => {
   assert.equal(result.status, 200); assert.equal(result.body.user.email, account.email);
   return result.cookies.find(cookie=>cookie.startsWith("lineage_session=")).split(";")[0];
 };
+async function currentAgreementConsent() {
+  const response = await route("/api/auth?action=agreement");
+  assert.equal(response.status, 200);
+  const agreement = response.body.agreement;
+  assert.ok(agreement && typeof agreement.body === "string" && agreement.body.length > 0);
+  return { sourceAgreementAccepted: true, sourceAgreementVersion: agreement.version, sourceAgreementHash: agreement.contentHash };
+}
 // Three five-second shots use three six-second planning clips: 858 credits at
 // $88/80,000 = 94 cents rounded, plus the default 50% markup = 141 cents.
 const expectedFixturePriceCents = 141;
@@ -379,11 +388,77 @@ async function check() {
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "generate" } })).status, 503);
   assert.equal((await route("/api/admin", { cookie: customer, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 403);
   assert.equal((await route("/api/admin", { cookie: owner, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 201);
+  await checkSourceAgreement(owner, customer);
   await checkRegistrationAccess(owner);
   assert.equal((await route("/api/auth", { cookie: customer, body: { action: "logout" } })).status, 200);
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).status, 401);
   assert.equal(blockedExternalCalls, 0);
-  console.log("PASS: real-handler synthetic workflow, fixed $1.41 planning price with 50% markup while billing is disabled, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+  console.log("PASS: real-handler synthetic workflow, fixed $1.41 planning price with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+}
+async function checkSourceAgreement(owner, customer) {
+  const published = await route("/api/auth?action=agreement");
+  assert.equal(published.status, 200);
+  const initial = published.body.agreement;
+  assert.match(initial.contentHash, /^[a-f0-9]{64}$/);
+  assert.equal(typeof initial.version, "string");
+  assert.ok(initial.title && initial.body && initial.consentLabel);
+  assert.equal((await route("/api/auth?action=acceptedAgreement")).status, 401);
+  assert.equal((await route("/api/auth?action=acceptedAgreement", { cookie: customer })).body.acceptance, null,
+    "Existing accounts must not be treated as having accepted the new agreement");
+  assert.equal((await route("/api/admin?action=agreement", { cookie: customer })).status, 403);
+  assert.deepEqual((await route("/api/admin?action=agreement", { cookie: owner })).body.agreement, initial);
+  const consent = { sourceAgreementAccepted: true, sourceAgreementVersion: initial.version, sourceAgreementHash: initial.contentHash };
+  const registration = email => ({ action: "register", name: "Fictional Agreement Signer", email,
+    password: "Meadow lantern copper hillside", termsAccepted: true, ...consent });
+  const invalidAcceptance = [
+    { sourceAgreementAccepted: false },
+    { sourceAgreementHash: undefined },
+    { sourceAgreementHash: "0".repeat(64) },
+  ];
+  for (const [index, invalid] of invalidAcceptance.entries()) {
+    const email = `agreement-rejected-${index}@example.invalid`;
+    const result = await route("/api/auth", { body: { ...registration(email), ...invalid } });
+    assert.ok([400, 409].includes(result.status), `Invalid agreement acceptance must be denied, got ${result.status}`);
+    assert.equal(await read(auth.userPath(email)), null, "Rejected consent cannot create an account");
+    assert.equal(result.cookies.length, 0, "Rejected consent cannot create a session");
+  }
+  const email = "agreement-accepted@example.invalid";
+  const accepted = await route("/api/auth", { body: registration(email) });
+  assert.equal(accepted.status, 201);
+  assert.equal(Object.hasOwn(accepted.body.user, "sourceAgreementAcceptance"), false);
+  const user = (await read(auth.userPath(email))).value;
+  const acceptance = structuredClone(user.sourceAgreementAcceptance);
+  assert.deepEqual(acceptance.agreement, initial);
+  assert.equal(acceptance.accountEmail, email);
+  assert.equal(acceptance.signedName, "Fictional Agreement Signer");
+  assert.equal(acceptance.signatureMethod, "account-name-checkbox");
+  assert.ok(Number.isFinite(Date.parse(acceptance.acceptedAt)));
+  const acceptedCookie = accepted.cookies.find(cookie => cookie.startsWith("lineage_session=")).split(";")[0];
+  assert.deepEqual((await route("/api/auth?action=acceptedAgreement", { cookie: acceptedCookie })).body.acceptance, acceptance);
+  assert.equal((await route(`/api/auth?action=acceptedAgreement&email=${encodeURIComponent(email)}`, { cookie: customer })).body.acceptance, null,
+    "An account cannot request another person's signature record");
+  const update = { action: "updateAgreement", revision: initial.revision, title: initial.title,
+    body: `${initial.body}\n\nSYNTHETIC LOCAL TEST: this new revision exercises consent refresh.`, consentLabel: initial.consentLabel };
+  assert.equal((await route("/api/admin", { cookie: customer, body: update })).status, 403);
+  assert.equal((await route("/api/admin", { cookie: owner, body: update, suppliedOrigin: "https://other.example.invalid" })).status, 403);
+  assert.deepEqual((await route("/api/auth?action=agreement")).body.agreement, initial);
+  const changed = await route("/api/admin", { cookie: owner, body: update });
+  assert.equal(changed.status, 200);
+  const current = changed.body.agreement;
+  assert.equal(current.revision, initial.revision + 1);
+  assert.notEqual(current.version, initial.version);
+  assert.notEqual(current.contentHash, initial.contentHash);
+  assert.equal(current.body, update.body);
+  assert.deepEqual((await route("/api/auth?action=agreement")).body.agreement, current);
+  assert.equal((await route("/api/admin", { cookie: owner, body: update })).status, 409, "A stale editor cannot overwrite a new agreement");
+  assert.deepEqual((await route(`/api/auth?action=agreement&version=${encodeURIComponent(initial.version)}`)).body.agreement, initial);
+  assert.deepEqual((await read(auth.userPath(email))).value.sourceAgreementAcceptance, acceptance, "Editing an agreement cannot rewrite existing consent");
+  const staleEmail = "agreement-stale@example.invalid";
+  assert.equal((await route("/api/auth", { body: registration(staleEmail) })).status, 409);
+  assert.equal(await read(auth.userPath(staleEmail)), null);
+  const refreshed = await route("/api/auth", { body: { ...registration(staleEmail), ...await currentAgreementConsent() } });
+  assert.equal(refreshed.status, 201);
+  assert.deepEqual((await read(auth.userPath(staleEmail))).value.sourceAgreementAcceptance.agreement, current);
 }
 async function checkRegistrationAccess(owner) {
   const waiting = await login(accounts[3]), administrator = await login(accounts[4]);
@@ -412,7 +487,8 @@ async function checkRegistrationAccess(owner) {
   assert.equal(initial.status, 200);
   assert.equal(initial.body.approvalRequired, true);
   assert.equal((await route("/api/admin", { cookie: waiting, body: { action: "updateRegistrationPolicy", approvalRequired: false, expectedRevision: initial.body.revision } })).status, 403);
-  const register = async email => route("/api/auth", { body: { action: "register", name: "Fictional registration policy check", email, password: "Meadow lantern copper hillside", termsAccepted: true } });
+  const register = async email => route("/api/auth", { body: { action: "register", name: "Fictional registration policy check", email,
+    password: "Meadow lantern copper hillside", termsAccepted: true, ...await currentAgreementConsent() } });
   const pending = await register("new-waiting@example.invalid");
   assert.equal(pending.status, 201);
   assert.equal(pending.body.user.accessStatus, "pending");

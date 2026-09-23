@@ -9,6 +9,7 @@ import { getSession, hashPassword, sessionCookie, userPath } from "../api/_lib/a
 import { accessStatusForUser, OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { newInvitation } from "../api/_lib/admin.mjs";
 import { REGISTRATION_POLICY_PATH, readRegistrationPolicy } from "../api/_lib/registration-policy.mjs";
+import { builtInSourceAgreement } from "../api/_lib/source-agreement.mjs";
 
 const previousSecret = process.env.LINEAGE_SESSION_SECRET;
 process.env.LINEAGE_SESSION_SECRET = "isolated-registration-approval-test-signing-key";
@@ -22,7 +23,8 @@ const owner = { email: OWNER_EMAIL, role: "owner", status: "active", passwordHas
 const admin = { email: "administrator@example.invalid", role: "admin", status: "active", passwordHash };
 const pending = { email: "employee@brocotech.ai", name: "Fictional Employee", role: "customer", status: "pending", passwordHash };
 const approved = { ...pending, status: "active", approvedAt: "2026-09-01T00:00:00.000Z", approvedBy: owner.email };
-const signup = email => ({ action: "register", email, name: "Fictional Applicant", password, termsAccepted: true });
+const signup = email => ({ action: "register", email, name: "Fictional Applicant", password, termsAccepted: true,
+  sourceAgreementAccepted: true, sourceAgreementVersion: builtInSourceAgreement().version, sourceAgreementHash: builtInSourceAgreement().contentHash });
 
 function harness(overrides = {}) {
   const records = new Map(), events = [], operations = [];

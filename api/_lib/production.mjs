@@ -10,7 +10,7 @@ export function productionReadiness({ env = process.env, pricingSettings={markup
     quality:{preference:"highest",label:"Highest available animation quality",verified:false},
     connections:{
       magiclight:{available:false,reason:"MagicLight film production is awaiting the account's API connection and verified generation settings. You can prepare and save your screenplay here. No payment is taken."},
-      billing:{available:false,reason:`QuickBooks is selected for payments; its merchant connection is pending. When checkout becomes available, payment processing will be provided by Intuit Payments Inc. Your film price will use the quoted MagicLight cost ${pricingSettings.markupBasisPoints===0?"with no BROCOTech markup":`plus a ${pricingSettings.markupBasisPoints/100}% BROCOTech markup`}. A confirmed total must be shown before you approve a charge.`},
+      billing:{available:false,reason:"QuickBooks is selected for payments; its merchant connection is pending. When checkout becomes available, payment processing will be provided by Intuit Payments Inc. Film prices use a verified provider quote or a planning estimate plus the saved administrator markup. The total you approve at checkout is the fixed payment amount."},
     },
   };
 }

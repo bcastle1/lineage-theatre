@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Source Materials Agreement | Lineage Theater</title>
+  <style>
+    body{max-width:820px;margin:40px auto;padding:0 24px;color:#29332e;background:#f8f7f4;font:16px/1.7 Arial,sans-serif}
+    h1{font:32px/1.2 Georgia,serif}a{color:#183e33}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}
+    .notice{padding:18px;background:#eee9dc;border-left:4px solid #8c6230}button{padding:10px 18px;font:inherit;cursor:pointer}
+    .error{color:#8b231c}#version{font-size:13px;overflow-wrap:anywhere}@media print{nav,button{display:none}body{margin:0;background:white}}
+  </style>
+</head>
+<body>
+  <nav><a href="/">Return to Lineage Theater</a> · <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a></nav>
+  <h1 id="title">Source Materials Ownership and Use Agreement</h1>
+  <p class="notice">This agreement transfers rights in submitted sources and permits commercial reuse and sharing with third-party companies. Read the full version before accepting it. Viewing this page does not record acceptance.</p>
+  <p id="status" role="status">Loading agreement…</p>
+  <p id="version"></p>
+  <pre id="body"></pre>
+  <p id="consent"></p>
+  <button id="print" type="button" hidden>Print or save a copy</button>
+  <noscript>Enable JavaScript to retrieve the current or linked agreement version, or contact admin@brocotech.ai for a copy.</noscript>
+  <script type="module">
+    const status = document.getElementById('status');
+    const parameters = new URLSearchParams(location.search);
+    const requested = parameters.get('version');
+    const ownAcceptance = parameters.get('accepted') === '1';
+    const endpoint = ownAcceptance ? '/api/auth?action=acceptedAgreement' : '/api/auth?action=agreement' + (requested ? '&version=' + encodeURIComponent(requested) : '');
+    try {
+      const response = await fetch(endpoint, {cache:'no-store',credentials:'same-origin'});
+      if (!response.ok) throw new Error(ownAcceptance && response.status === 401 ? 'Sign in to Lineage Theater to view your accepted agreement, then reload this page.' : 'The agreement could not be loaded. Please reload this page or contact admin@brocotech.ai before registering.');
+      const result = await response.json();
+      if (ownAcceptance && !result.acceptance) throw new Error('No source agreement acceptance is recorded for this account. Publication of the new agreement does not mean that you accepted it.');
+      const agreement = ownAcceptance ? result.acceptance.agreement : result.agreement;
+      if (!agreement || !['title','body','consentLabel','version','contentHash'].every(key=>typeof agreement[key]==='string' && agreement[key])) throw new Error('The agreement is unavailable. Please try again before registering.');
+      document.getElementById('title').textContent = agreement.title;
+      document.getElementById('body').textContent = agreement.body;
+      document.getElementById('consent').textContent = 'Acceptance statement: ' + agreement.consentLabel;
+      document.getElementById('version').textContent = 'Version: ' + agreement.version + ' | Content hash: ' + agreement.contentHash;
+      status.textContent = ownAcceptance ? 'Your accepted agreement. Signed by ' + result.acceptance.signedName + ' (' + result.acceptance.accountEmail + ') on ' + result.acceptance.acceptedAt + '.' : requested ? 'Showing the requested agreement version.' : 'Showing the current registration agreement.';
+      const printButton = document.getElementById('print');
+      printButton.hidden = false;
+      printButton.addEventListener('click',()=>window.print());
+    } catch(error) { status.className='error';status.textContent=error.message; }
+  </script>
+</body>
+</html>

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAdminHandler } from "../api/admin.mjs";
 import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "../api/_lib/access.mjs";
 import { userPath } from "../api/_lib/auth.mjs";
+import { builtInSourceAgreement, sourceAgreementVersionPath, SOURCE_AGREEMENT_PATH } from "../api/_lib/source-agreement.mjs";
 import { newInvitation, validateInvitation, validateUserAction, validateRefund, markupFromPercent, readPricingSettings, safeUser, PRICING_PATH } from "../api/_lib/admin.mjs";
 const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
 const admin={email:"admin@example.invalid",role:"admin",status:"active"};
@@ -32,8 +33,8 @@ test("email alone never creates owner/admin access; inactive privileges are not 
 test("unsigned and customer requests cannot read admin data or mutate roles/pricing/refunds",async()=>{
   for(const actor of [null,customer]){
     const h=harness(actor),expected=actor?403:401;
-    for(const action of ["overview","users","payments","audit","pricing","registrationPolicy"]) assert.equal((await h.run(action)).status,expected);
-    for(const action of ["invite","revokeAdmin","suspend","activate","approve","updatePricing","updateRegistrationPolicy","refund"])
+    for(const action of ["overview","users","payments","audit","pricing","registrationPolicy","agreement"]) assert.equal((await h.run(action)).status,expected);
+    for(const action of ["invite","revokeAdmin","suspend","activate","approve","updatePricing","updateRegistrationPolicy","updateAgreement","refund"])
       assert.equal((await h.run(action,{email:admin.email,markupPercent:50,expectedRevision:0})).status,expected);
     assert.equal(h.writes,0);
   }
@@ -101,6 +102,38 @@ test("pricing accepts precise bounded percentages and requires a current revisio
   assert.equal((await h.run("updatePricing",{markupPercent:10,expectedRevision:0})).status,409);
   assert.equal(h.records.get(PRICING_PATH).markupBasisPoints,2550);
   assert.equal(h.events[0][1],"pricing.updated");
+});
+
+test("administrators publish revisioned source statements with immutable history and a minimal audit",async()=>{
+  const h=harness(admin),original=builtInSourceAgreement();
+  assert.deepEqual((await h.run("agreement")).body,{agreement:original});
+  const input={revision:0,title:"Source ownership and permissions",body:"The account holder supplies authorized source material.",consentLabel:"I accept this source agreement."};
+  const saved=await h.run("updateAgreement",input);
+  assert.equal(saved.status,200);assert.equal(saved.body.agreement.revision,1);
+  assert.deepEqual((await h.run("agreement")).body,saved.body);
+  assert.deepEqual(h.records.get(sourceAgreementVersionPath(original.version)).agreement,original);
+  const archive=h.records.get(sourceAgreementVersionPath(saved.body.agreement.version));
+  assert.equal(archive.updatedBy,admin.email);assert.equal(archive.previousVersion,original.version);
+  assert.equal(h.records.get(SOURCE_AGREEMENT_PATH).version,saved.body.agreement.version);
+  assert.deepEqual(h.events,[[admin.email,"source.agreement.updated",saved.body.agreement.version,
+    {revision:1,contentHash:saved.body.agreement.contentHash}]]);
+  const conflict=await h.run("updateAgreement",input);
+  assert.equal(conflict.status,409);assert.equal(conflict.body.code,"AGREEMENT_CONFLICT");assert.equal(h.events.length,1);
+  const historical=await h.run(`agreement&version=${encodeURIComponent(original.version)}`);
+  assert.equal(historical.status,200);assert.deepEqual(historical.body.agreement,original);
+});
+
+test("source statement saves retain same-origin and rate limits and accept bounded Unicode multiline text",async()=>{
+  const input={revision:0,title:"Fictional source agreement",body:("É\n").repeat(4900),consentLabel:"I accept."};
+  const h=harness(admin);
+  assert.equal((await h.run("updateAgreement",input,{origin:"https://other.invalid"})).status,403);
+  assert.equal(h.writes,0);
+  const limited=harness(admin,{limitAction:async()=>false});
+  assert.equal((await limited.run("updateAgreement",input)).status,429);assert.equal(limited.writes,0);
+  const invalid=await h.run("updateAgreement",{...input,updatedBy:"other@example.invalid"});
+  assert.equal(invalid.status,400);assert.equal(h.writes,0);
+  const saved=await h.run("updateAgreement",input);
+  assert.equal(saved.status,200);assert.equal(saved.body.agreement.body,input.body.trim());
 });
 test("pricing defaults to 50 percent with labeled planning inputs while preserving explicit saved markup",async()=>{
   const defaults=await readPricingSettings(async()=>null);

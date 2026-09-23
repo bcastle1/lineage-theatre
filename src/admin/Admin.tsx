@@ -15,6 +15,7 @@ import {
   CreditCard,
   Download,
   Film,
+  FileText,
   LayoutDashboard,
   Loader2,
   Percent,
@@ -30,9 +31,10 @@ import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
+import SourceAgreementEditor from "./SourceAgreementEditor";
 import "./admin.css";
 
-type Tab = "overview" | "people" | "payments" | "pricing" | "films" | "activity";
+type Tab = "overview" | "people" | "payments" | "pricing" | "agreement" | "films" | "activity";
 type Connection = { available: boolean; reason: string };
 type Pricing = {
   markupBasisPoints: number;
@@ -205,6 +207,7 @@ const tabs = [
   { id: "people" as const, name: "People", icon: Users },
   { id: "payments" as const, name: "Payments", icon: CreditCard },
   { id: "pricing" as const, name: "Pricing", icon: Percent },
+  { id: "agreement" as const, name: "Source agreement", icon: FileText },
   { id: "films" as const, name: "Film archive", icon: Film },
   { id: "activity" as const, name: "Activity", icon: Activity },
 ];
@@ -1306,6 +1309,7 @@ export default function Admin({
             Refreshing administration records…
           </div>
         )}
+        {tab === "agreement" && <SourceAgreementEditor disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
         {tab === "overview" && (
           <>
             {overview?.statsPartial && (
