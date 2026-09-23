@@ -233,6 +233,16 @@ test("test orders are labeled and excluded from live totals while captured live 
   assert.doesNotMatch(JSON.stringify(list.body),/manifestHash|merchantBinding|grantId/);
 });
 
+test("hosted accounting payments expose unverified refunds separately from confirmed refund totals",async()=>{
+  const orders=[{id:"hosted",status:"captured",currency:"USD",amountCents:1000,refundedCents:500,checkoutMethod:"quickbooks-hosted-invoice"},
+    {id:"legacy",status:"captured",currency:"USD",amountCents:2000,refundedCents:200}];
+  const h=harness(admin,{recordPage:async prefix=>({records:prefix==="payments/orders/"?orders:[]})});
+  const result=await h.run("overview");
+  assert.equal(result.body.stats.paymentTotalCents,3000);
+  assert.equal(result.body.stats.refundTotalCents,200);
+  assert.equal(result.body.stats.hostedRefundsUnverified,1);
+});
+
 test("fictional production test preparation is owner-only and retains write guards",async()=>{
   const calls=[],filmProduction={prepareOperatorTest:async input=>{calls.push(input);return {id:"fictional-test",manifestHash:"a".repeat(64)};}};
   const input={idempotencyKey:"synthetic-operator-123"};

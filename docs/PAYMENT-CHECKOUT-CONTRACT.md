@@ -1,5 +1,7 @@
 # Shared payment checkout contract
 
+**Current customer routing:** [QuickBooks-hosted checkout](HOSTED-CHECKOUT.md) supersedes the card-entry customer routes below. Customer checkout no longer accepts a payment token or renders the custom card form. The following card-entry contract is retained as documentation of the legacy adapter, its isolated tests, and earlier records; its signed-review controls remain in place. Hosted accounting confirmations cannot authorize this adapter's refunds or rendering.
+
 Originally September 14, 2026; checkout preparation and readable receipt documentation updated September 23, 2026. This describes implemented plumbing and the remaining activation evidence. It does not certify merchant approval or authorize a transaction.
 
 Approved customers, employees and administrators use the same studio quote, checkout, order and receipt actions. Registration approval governs account access. Administrator permissions are required for refunds, reconciliation and diagnostic details, not for purchases.

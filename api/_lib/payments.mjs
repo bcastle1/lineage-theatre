@@ -247,6 +247,7 @@ export function createPaymentsService(overrides={}) {
   async function order(actor,orderId) {return publicOrder((await readOrder(actor,orderId)).value);}
   async function reconcile(actor,{orderId}) {
     requireAdmin(actor);let record=await readOrder(actor,orderId),value=record.value;
+    if(value.checkoutMethod==="quickbooks-hosted-invoice")throw new PaymentError("Check this invoice through hosted checkout.",409,"HOSTED_INVOICE_REQUIRED");
     const binding=await enabled("read",{actor});if(!sameBinding(value.merchantBinding,binding))throw conflict();
     if(value.refundOperation) {
       const operation=value.refundOperation;
@@ -281,6 +282,7 @@ export function createPaymentsService(overrides={}) {
     requireAdmin(actor);exactFields(body,["orderId","amountCents","reason","idempotencyKey"]);key(body.idempotencyKey);
     if(!amountValid(body.amountCents)||typeof body.reason!=="string"||!body.reason.trim()||body.reason.length>500)throw new PaymentError("Enter a valid refund amount and reason.");
     let record=await readOrder(actor,body.orderId),value=record.value;
+    if(value.checkoutMethod==="quickbooks-hosted-invoice")throw new PaymentError("Manage this invoice's refund in QuickBooks.",409,"HOSTED_REFUND_IN_QUICKBOOKS");
     const prior=value.refunds.find(item=>item.keyHash===digest(body.idempotencyKey));
     if(prior) {if(prior.amountCents!==body.amountCents||prior.reason!==body.reason.trim())throw conflict();return publicOrder(value);}
     if(value.refundOperation) {
@@ -318,7 +320,7 @@ export function createPaymentsService(overrides={}) {
   }
   async function authorizeProduction({email,orderId,manifestHash,preparedId}) {
     const record=await read(orderPath(id(orderId))),value=record?.value;
-    const captured=order=>order&&order.customerEmail===email&&order.manifestHash===manifestHash&&order.preparedId===preparedId&&order.status==="captured"
+    const captured=order=>order&&order.checkoutMethod!=="quickbooks-hosted-invoice"&&order.customerEmail===email&&order.manifestHash===manifestHash&&order.preparedId===preparedId&&order.status==="captured"
       &&order.capturedAt&&order.refundedCents===0&&!order.refundOperation&&bindingValid(order.merchantBinding);
     if(!captured(value))throw blocked();
     if(value.pricingBasis==="planning-rate") {

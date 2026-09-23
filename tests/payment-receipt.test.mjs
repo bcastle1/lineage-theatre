@@ -8,7 +8,7 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
 }).outputText;
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
-const { createFilmReceiptHtml } = await import(moduleUrl((await compile("../src/studio/payment-receipt.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
+const { createFilmReceiptData, createFilmReceiptHtml } = await import(moduleUrl((await compile("../src/studio/payment-receipt.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const receipt = (changes = {}) => ({ receiptId: "a".repeat(64), filmTitle: "Fictional family garden", currency: "USD",
   amountCents: 567, refundedCents: 0, capturedAt: "2026-09-23T15:37:14.000Z", status: "captured", sandbox: false,
   transactionId: "synthetic-transaction-123", ...changes });
@@ -44,4 +44,29 @@ test("sandbox, refund and uncertain receipts never mislabel a current unconfirme
   assert.match(refunded, /Fully refunded/);assert.match(refunded, /Confirmed refunds<\/th><td>\$5\.67 USD/);
   for (const change of [{ status: "submitting" }, { status: "declined" }, { capturedAt: "" }, { refundedCents: 568 }])
     assert.throws(() => createFilmReceiptHtml(receipt(change)), /could not be verified/);
+});
+
+test("hosted receipts report accounting evidence without claiming processor capture or a current refund balance", () => {
+  const html = createFilmReceiptHtml(receipt({ confirmationSource: "quickbooks-accounting", checkoutMethod: "quickbooks-hosted-invoice" }));
+  assert.match(html, /<h1>QuickBooks payment record<\/h1>/);
+  assert.match(html, /Payment recorded by QuickBooks/);
+  assert.match(html, /QuickBooks payment reference/);
+  assert.match(html, /does not confirm payment processor capture, bank settlement/);
+  assert.match(html, /latest refund status/);
+  assert.doesNotMatch(html, /Payment confirmed|Payment is processed by|Recorded capture date|Confirmed refunds/);
+  assert.throws(() => createFilmReceiptHtml(receipt({ confirmationSource: "invented-processor" })), /could not be verified/);
+  assert.throws(() => createFilmReceiptHtml(receipt({ checkoutMethod: "quickbooks-hosted-invoice" })), /could not be verified/);
+});
+
+test("downloadable accounting receipt data marks refunds unverified and omits a zero refund claim", () => {
+  const data = createFilmReceiptData(receipt({ confirmationSource: "quickbooks-accounting", checkoutMethod: "quickbooks-hosted-invoice" }));
+  assert.equal(data.confirmationSource, "quickbooks-accounting");
+  assert.equal(data.type, "QuickBooks payment record");
+  assert.equal(data.totalAmount, "$5.67");
+  assert.equal("refunded" in data, false);
+  assert.match(data.refundStatus, /Not verified/);
+  assert.match(data.notice, /does not confirm payment processor capture, bank settlement, film completion, or any later refund/);
+  const legacy = createFilmReceiptData(receipt({ refundedCents: 200, status: "partially-refunded" }));
+  assert.equal(legacy.refunded, "$2.00");
+  assert.equal("refundStatus" in legacy, false);
 });

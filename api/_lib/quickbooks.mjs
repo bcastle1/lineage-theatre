@@ -242,8 +242,8 @@ export function createQuickBooksService(overrides = {}) {
         const expired = !Number.isFinite(Date.parse(token.accessTokenExpiresAt)) || Date.parse(token.accessTokenExpiresAt) <= now();
         output.connected = !expired && output.accessTokenStorage === "memory-only"; output.authorizationStatus = expired ? "expired" : "authorized";
         output.message = expired
-          ? "The previous access token has expired. Renew authorization before checking the company; customer checkout remains unavailable."
-          : "Intuit authorization is saved. Access tokens are held only in server memory and renewed when needed. Customer payments and refunds remain unavailable.";
+          ? "The previous access token has expired. Renew authorization before checking the company. Check hosted checkout settings for payment availability; film production is separate."
+          : "Intuit authorization is saved. Access tokens are held only in server memory and renewed when needed. Check hosted checkout settings for payment availability; film production is separate.";
         if (output.accessTokenStorage === "migration-required") output.message = "Refresh authorization to remove the legacy stored access token and use memory-only access tokens. Payments remain unavailable.";
       } catch { output.authorizationStatus = "needs-attention"; output.message = "The saved authorization cannot be read. Disconnect it locally and check server setup before reconnecting."; }
     }
@@ -267,7 +267,7 @@ export function createQuickBooksService(overrides = {}) {
         && evidence.tokenVersion === digest(JSON.stringify(value.encryptedTokens)) && Number.isFinite(Date.parse(evidence.verifiedAt))) {
       output.companyVerification = { verifiedAt: evidence.verifiedAt, companyName: evidence.companyName,
         legalName: evidence.legalName, country: evidence.country, accountingAccessVerified: true };
-      output.message = "Accounting access to the connected company was verified. Merchant readiness and customer payments or refunds remain unverified and unavailable.";
+      output.message = "Accounting access to the connected company was verified. Check hosted checkout settings for payment availability; film production is separate.";
     }
     return output;
   }
@@ -671,6 +671,147 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
       headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json","Content-Type":"application/json","Request-Id":requestId},
       ...(method==="POST"?{body:JSON.stringify(body)}:{}),
     });
+  }
+  return {binding,request};
+}
+
+// Accounting invoices send the customer to Intuit's hosted payment page. This
+// transport never accepts card data, creates a payment, or calls invoice /send.
+// The caller must also address QBO's automatic-email preference before creation.
+// The caller owns account authorization, approved item/configuration, invoice
+// claims and response projection. Accounting access is not Payments approval.
+// https://developer.intuit.com/app/developer/qbo/docs/api/accounting/most-commonly-used/invoice
+export function createQuickBooksAccountingTransport(overrides={}) {
+  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,connection=quickbooks}=overrides;
+  const unavailable=()=>new QuickBooksError("The Accounting connection needs administrator review.",503,"ACCOUNTING_CONNECTION_UNAVAILABLE");
+  const invalid=()=>new QuickBooksError("This Accounting request is not supported.",400,"ACCOUNTING_REQUEST_INVALID");
+  const plain=value=>Boolean(value&&typeof value==="object"&&!Array.isArray(value)
+    &&[Object.prototype,null].includes(Object.getPrototypeOf(value)));
+  const fields=(value,allowed,required=[])=>plain(value)&&Object.keys(value).every(key=>allowed.includes(key))
+    &&required.every(key=>Object.hasOwn(value,key));
+  const entityId=value=>typeof value==="string"&&/^[0-9]{1,30}$/.test(value);
+  const text=(value,max)=>typeof value==="string"&&value.length>0&&value.length<=max&&value.trim()===value&&!/[\x00-\x1f\x7f]/.test(value);
+  const email=value=>text(value,254)&&/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value);
+  const address=value=>fields(value,["Address"],["Address"])&&email(value.Address);
+  const ref=value=>fields(value,["value"],["value"])&&entityId(value.value);
+  const money=value=>typeof value==="number"&&Number.isFinite(value)&&value>0&&value<=1_000_000
+    &&Math.abs(value*100-Math.round(value*100))<0.0000001;
+  const sameBinding=(a,b)=>a.environment===b.environment&&a.grantId===b.grantId&&a.realmId===b.realmId;
+  const validBinding=value=>fields(value,["environment","grantId","realmId"],["environment","grantId","realmId"])
+    &&Object.hasOwn(INTUIT_ACCOUNTING_ORIGINS,value.environment)&&typeof value.grantId==="string"&&/^[a-f0-9]{64}$/.test(value.grantId)&&entityId(value.realmId);
+  function queryStatement(query) {
+    if(!fields(query,["entity","where","startPosition","maxResults"],["entity"]))throw invalid();
+    const filters={Customer:["Id","DisplayName","Active"],Item:["Id","Active"],Invoice:["Id","DocNumber","CustomerRef"],
+      Payment:["Id","CustomerRef"],Account:["Id","Active"]};
+    if(!Object.hasOwn(filters,query.entity))throw invalid();
+    const start=query.startPosition??1,max=query.maxResults??100;
+    if(!Number.isSafeInteger(start)||start<1||start>1_000_000||!Number.isSafeInteger(max)||max<1||max>1000)throw invalid();
+    let condition="";
+    if(query.where!==undefined) {
+      const filter=query.where;
+      if(!fields(filter,["field","value"],["field","value"])||!filters[query.entity].includes(filter.field))throw invalid();
+      if(filter.field==="Active") {
+        if(typeof filter.value!=="boolean")throw invalid();
+        condition=` WHERE Active = ${filter.value}`;
+      }else {
+        // One conservative literal, never caller-provided SQL, escaping, comments,
+        // multiple statements, comparisons or a writable query operation.
+        if(!text(filter.value,320)||!/^[A-Za-z0-9@._+ -]+$/.test(filter.value)
+          ||(["Id","CustomerRef"].includes(filter.field)&&!entityId(filter.value)))throw invalid();
+        condition=` WHERE ${filter.field} = '${filter.value}'`;
+      }
+    }
+    return `SELECT * FROM ${query.entity}${condition} STARTPOSITION ${start} MAXRESULTS ${max}`;
+  }
+  function createBody(path,body) {
+    if(path==="/customer") {
+      if(!fields(body,["DisplayName","PrimaryEmailAddr"],["DisplayName","PrimaryEmailAddr"])
+        ||!text(body.DisplayName,500)||!address(body.PrimaryEmailAddr))throw invalid();
+    }else {
+      if(!fields(body,["CustomerRef","BillEmail","Line","CurrencyRef","AllowOnlineCreditCardPayment","AllowOnlineACHPayment","EmailStatus","PrivateNote"],
+        ["CustomerRef","BillEmail","Line","CurrencyRef","AllowOnlineCreditCardPayment","AllowOnlineACHPayment","EmailStatus","PrivateNote"])
+        ||!ref(body.CustomerRef)||!address(body.BillEmail)||!fields(body.CurrencyRef,["value"],["value"])||body.CurrencyRef.value!=="USD"
+        ||typeof body.AllowOnlineCreditCardPayment!=="boolean"||typeof body.AllowOnlineACHPayment!=="boolean"
+        ||body.EmailStatus!=="NotSet"||!text(body.PrivateNote,4000)||!Array.isArray(body.Line)||body.Line.length!==1)throw invalid();
+      const line=body.Line[0],details=line?.SalesItemLineDetail;
+      if(!fields(line,["Amount","DetailType","Description","SalesItemLineDetail"],["Amount","DetailType","Description","SalesItemLineDetail"])
+        ||!money(line.Amount)||line.DetailType!=="SalesItemLineDetail"||!text(line.Description,4000)
+        ||!fields(details,["ItemRef","Qty","UnitPrice","TaxCodeRef"],["ItemRef","Qty","UnitPrice","TaxCodeRef"])
+        ||!ref(details.ItemRef)||details.Qty!==1||!money(details.UnitPrice)||Math.round(line.Amount*100)!==Math.round(details.UnitPrice*100)
+        ||!fields(details.TaxCodeRef,["value"],["value"])||details.TaxCodeRef.value!=="NON")throw invalid();
+    }
+    return JSON.stringify(body);
+  }
+  async function inspect(allowRefresh=false,requireAccess=false,expected) {
+    const config=quickbooksConfig(env),record=await read(QUICKBOOKS_CONNECTION_PATH),value=record?.value;
+    if(value?.status!=="authorized"||value.encryptedTokens?.version!==2||value.pending||value.refreshOperation||value.remoteReviewRequired
+      ||value.revocationStatus==="pending"||value.remoteCleanup?.status==="pending"
+      ||value.fingerprint!==config.fingerprint||value.credentialVersion!==config.credentialVersion
+      ||typeof value.authorizationAttemptId!=="string"||!value.authorizationAttemptId||typeof record.etag!=="string"||!record.etag)throw unavailable();
+    const owner=(await read(userPath(value.connectedBy||OWNER_EMAIL)))?.value;
+    if(!isOwner(owner)||owner.mustChangePassword)throw unavailable();
+    const token={...decryptQuickBooksTokens(value.encryptedTokens,config),accessToken:readQuickBooksAccessToken(value.encryptedTokens,config,now())};
+    if(token.accessToken!==null&&(typeof token.accessToken!=="string"||token.accessToken.length<8||token.accessToken.length>16_384||/[\s\x00-\x1f]/.test(token.accessToken)))throw unavailable();
+    if(!entityId(token.realmId)||(token.grantedScopes!=null&&(!Array.isArray(token.grantedScopes)
+      ||!token.grantedScopes.includes("com.intuit.quickbooks.accounting"))))throw unavailable();
+    const bound={environment:config.environment,grantId:digest(`${config.credentialVersion}:${token.realmId}:${value.authorizationAttemptId}`),realmId:token.realmId};
+    // A stale expected grant cannot trigger refresh of a newly connected company.
+    if(expected&&!sameBinding(bound,expected))throw unavailable();
+    const expires=Date.parse(token.accessTokenExpiresAt);
+    if(!Number.isFinite(expires))throw unavailable();
+    if(expires<=now()+60_000||((allowRefresh||requireAccess)&&!token.accessToken)) {
+      if(!allowRefresh)throw unavailable();
+      await connection.refresh(owner,{expectedRevision:value.revision});
+      return inspect(false,true,bound);
+    }
+    return {record,config,owner,token,binding:bound};
+  }
+  async function binding({allowRefresh=false}={}) {
+    try {if(typeof allowRefresh!=="boolean")throw invalid();return (await inspect(allowRefresh)).binding;}
+    catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
+  }
+  async function request(expected,operation) {
+    if(!validBinding(expected)||!fields(operation,["method","path","query","body","requestId"],["method","path"])||typeof operation.path!=="string")throw invalid();
+    const bound={...expected},{method,path,query,body,requestId}=operation,parameters=new URLSearchParams();
+    let serializedBody;
+    if(method==="GET") {
+      if(body!==undefined||requestId!==undefined)throw invalid();
+      if(path==="/query")parameters.set("query",queryStatement(query));
+      else if(path==="/preferences"||/^\/(?:item|customer|invoice|payment)\/[0-9]{1,30}$/.test(path)) {
+        if(path.startsWith("/invoice/")) {
+          if(query!==undefined&&(!fields(query,["include"],["include"])||query.include!=="invoiceLink"))throw invalid();
+          parameters.set("include","invoiceLink");
+        }else if(query!==undefined)throw invalid();
+      }else throw invalid();
+    }else if(method==="POST"&&["/customer","/invoice"].includes(path)) {
+      if(query!==undefined||typeof requestId!=="string"||!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(requestId))throw invalid();
+      serializedBody=createBody(path,body);parameters.set("requestid",requestId);
+    }else throw invalid();
+    let current;
+    try {
+      current=await inspect(true,true,bound);
+      const latest=await read(QUICKBOOKS_CONNECTION_PATH),owner=(await read(userPath(current.owner.email)))?.value;
+      // The account lookup also awaits storage; do not send a grant replaced
+      // while that last owner check was in flight.
+      const finalGrant=await read(QUICKBOOKS_CONNECTION_PATH);
+      if(latest?.etag!==current.record.etag||finalGrant?.etag!==current.record.etag||quickbooksConfig(env).credentialVersion!==current.config.credentialVersion
+        ||!isOwner(owner)||owner.mustChangePassword||digest(owner.passwordHash||"")!==digest(current.owner.passwordHash||"")
+        ||Date.parse(current.token.accessTokenExpiresAt)<=now())throw unavailable();
+      const strings=value=>typeof value==="string"?[value]:value&&typeof value==="object"?Object.values(value).flatMap(strings):[];
+      const contents=[...parameters.values(),...(serializedBody?strings(JSON.parse(serializedBody)):[])];
+      if([current.token.accessToken,current.token.refreshToken,current.config.clientSecret,current.config.key.toString("base64")]
+        .some(secret=>typeof secret==="string"&&secret.length>=8&&contents.some(value=>value.includes(secret))))throw invalid();
+    }catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
+    const suffix=parameters.size?`?${parameters}`:"";
+    try {
+      // No automatic retry, mutation outside the two creation paths, or /send.
+      // Return a server-only Response; the caller must bound/project its body.
+      return await fetchImpl(`${INTUIT_ACCOUNTING_ORIGINS[bound.environment]}/v3/company/${bound.realmId}${path}${suffix}`,{
+        method,redirect:"error",signal:AbortSignal.timeout(20_000),
+        headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json",...(method==="POST"?{"Content-Type":"application/json"}:{})},
+        ...(serializedBody?{body:serializedBody}:{}),
+      });
+    }catch {throw new QuickBooksError("The Accounting request result could not be confirmed. Check its saved status before retrying.",502,"ACCOUNTING_REQUEST_UNCERTAIN");}
   }
   return {binding,request};
 }
