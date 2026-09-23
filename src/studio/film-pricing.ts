@@ -20,15 +20,14 @@ export function normalizeFilmPrice(value:unknown):FilmPrice|null {
 
 // Preparation and pricing never depend on card entry. Persist the saved plan
 // before requesting a price so a pricing failure cannot lose that preparation.
-export async function prepareFilmPrice({request,input,filmId,existing,preparationKey,priceKey,reviewed,preparationConsent,persist,now=Date.now}:{
+export async function prepareFilmPrice({request,input,filmId,existing,preparationKey,priceKey,preparationConsent,persist,now=Date.now}:{
   request:Request;input:string;filmId:string;existing?:PreparedProduction;preparationKey:string;priceKey:string;
-  reviewed:boolean;preparationConsent:boolean;persist:(value:PreparedProduction)=>void;now?:()=>number;
+  preparationConsent:boolean;persist:(value:PreparedProduction)=>void;now?:()=>number;
 }):Promise<{prepared:PreparedProduction;price:FilmPrice}> {
-  if(!reviewed)throw new Error("Confirm your review of the materials and screenplay first.");
   const inputHash=await productionInputHash(input);
   let prepared=existing?.inputHash===inputHash?existing:undefined;
   if(!prepared) {
-    if(!preparationConsent)throw new Error("Allow your reviewed production plan to be saved before preparing pricing.");
+    if(!preparationConsent)throw new Error("Allow your production plan to be saved before preparing pricing.");
     const result=await request("/api/studio",{action:"prepare",project:JSON.parse(input),preparationConsent:true,idempotencyKey:preparationKey});
     prepared=normalizeProductionPreparation({...result as object,inputHash,requestId:preparationKey});
     if(!prepared)throw new Error("The saved production reference could not be verified. Retry this preparation request.");

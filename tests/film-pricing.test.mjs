@@ -121,6 +121,31 @@ test("the unavailable production adapter returns a fixed planning-rate price wit
   assert.ok([...data.records.keys()].every(path => path.startsWith("production/jobs/")));
 });
 
+test("photo-only and older edited films receive fixed prices without screenplay review metadata", async () => {
+  for (const kind of ["photo", "older-two-scenes", "manual-one-scene"]) {
+    const saved = structuredClone(project), data = store();
+    if (kind === "photo") {
+      saved.sources[0] = { id: saved.sources[0].id, name: "fictional-photo.png", type: "image/png", text: "", note: "" };
+    } else {
+      saved.scenes = saved.scenes.slice(0, kind === "manual-one-scene" ? 1 : 2).map(({ title, narration, visual }) => ({ title, narration, visual }));
+      delete saved.characters; delete saved.assumptions; delete saved.selectedThemes; delete saved.logline;
+    }
+    const unchanged = structuredClone(saved);
+    const production = createFilmProductionService({ ...data, now: () => NOW });
+    const plan = await production.prepare({ email: actor.email, project: saved, preparationConsent: true, idempotencyKey: `fictional-${kind}-request` });
+    const beforePrice = structuredClone([...data.records]);
+    const price = await fixture({ filmProduction: production }).service.price(actor, {
+      project: saved, preparedId: plan.id, idempotencyKey: `fictional-${kind}-price`,
+    });
+    assert.equal(price.amountCents, kind === "older-two-scenes" ? 189 : 141);
+    assert.equal(price.manifestHash, plan.manifestHash);
+    assert.equal(price.kind, "confirmed");
+    assert.deepEqual(saved, unchanged);
+    assert.deepEqual([...data.records], beforePrice);
+    assert.equal(data.records.size, 1, "pricing creates no payment or generation records");
+  }
+});
+
 test("planning-rate prices use saved per-scene timing, server rate and editable clip assumptions", async () => {
   const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
   const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });

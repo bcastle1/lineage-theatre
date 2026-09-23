@@ -95,8 +95,8 @@ function PaymentCardForm({ configuration, quote, consent, disabled, onToken, onB
 
 type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
 
-export default function FilmCheckout({ film, reviewed, productionAvailable, persistPaymentReference, onPrepared, onBusyChange }: {
-  film: Film; reviewed: boolean; productionAvailable: boolean;
+export default function FilmCheckout({ film, productionAvailable, persistPaymentReference, onPrepared, onBusyChange }: {
+  film: Film; productionAvailable: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
   onPrepared: (prepared: PreparedProduction) => void;
   onBusyChange: (message: string) => void;
@@ -183,14 +183,14 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     finally { lock.current = false; setBusy(""); onBusyChange(""); }
   }
   async function requestQuote() {
-    if (!prepared || !currentPlan || !reviewed || paymentReference) return;
+    if (!prepared || !currentPlan || paymentReference) return;
     await work("Checking your film price…", async () => {
       setQuote(null); setConsent(false);
       const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio?action=checkoutConfiguration"));
       setConfiguration(latestConfiguration);
       if (!latestConfiguration.available) {
         setQuote(null);
-        throw new Error("Payment and film production are not available yet. Your reviewed plan remains saved. You can check availability again later.");
+        throw new Error("Payment and film production are not available yet. Your plan remains saved. You can check availability again later.");
       }
       if (quote && Date.parse(quote.expiresAt) <= Date.now()) quoteRequest.current = null;
       if (quoteRequest.current?.hash !== prepared.manifestHash) quoteRequest.current = { hash: prepared.manifestHash, key: crypto.randomUUID() };
@@ -213,7 +213,7 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     });
   }
   async function requestPrice() {
-    if(!reviewed||paymentReference||(!currentPlan&&!preparationConsent))return;
+    if(paymentReference||(!currentPlan&&!preparationConsent))return;
     await work("Preparing your pricing…",async()=>{
       setQuote(null);setPrice(null);setConsent(false);
       if(preparationRequest.current?.input!==input)preparationRequest.current={input,
@@ -221,7 +221,7 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
       if(price&&Date.parse(price.expiresAt)<=Date.now())preparationRequest.current.priceKey=crypto.randomUUID();
       const result=await prepareFilmPrice({request:api,input,filmId:film.id,existing:prepared,
         preparationKey:preparationRequest.current.key,priceKey:preparationRequest.current.priceKey,
-        reviewed,preparationConsent,persist:onPrepared});
+        preparationConsent,persist:onPrepared});
       setPrice(result.price);setNow(Date.now());
       setMessage("Your production plan is saved and your film price is ready.");
     });
@@ -241,7 +241,7 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     return result;
   }
   async function submitPayment(paymentToken: string, checkoutProof: string) {
-    if (!quote || !quoteCurrent || !consent || !reviewed || paymentReference || !configuration?.available) return;
+    if (!quote || !quoteCurrent || !consent || paymentReference || !configuration?.available) return;
     await work("Confirming your payment…", async () => {
       if (Date.parse(quote.expiresAt) <= Date.now()) throw new Error("Your price expired before payment. Request a new price.");
       const reference = { preparedId: quote.preparedId, manifestHash: quote.manifestHash, quoteId: quote.id, orderId: quote.orderId, checkoutKey: checkoutKey.current, submittedAt: new Date().toISOString(), sandbox: quote.sandbox };
@@ -272,7 +272,7 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
     });
   }
   async function productionRequest(start: boolean) {
-    if (!paymentReference || (start && (!paidPlanCurrent || !reviewed || order?.status !== "captured" || !productionAvailable))) return;
+    if (!paymentReference || (start && (!paidPlanCurrent || order?.status !== "captured" || !productionAvailable))) return;
     await work(start ? "Starting your film…" : "Checking film production…", async () => {
       const result = await api<ProductionStatus>(start ? "/api/studio" : `/api/studio?action=productionStatus&id=${encodeURIComponent(paymentReference.preparedId)}`,
         start ? { action: "startProduction", preparedId: paymentReference.preparedId, orderId: paymentReference.orderId, productionConsent: true } : undefined);
@@ -287,10 +287,9 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
   return <section className="readiness-panel film-checkout" aria-label="Film payment and production">
     <h3>Your film price and payment</h3>
     {!paymentReference && <>
-      <p>Save your reviewed production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
+      <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
       {!currentPlan&&<label className="check-label"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.</span></label>}
-      <button className="button primary small" disabled={Boolean(busy) || !reviewed || !film.scenes.length || (!currentPlan&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (price ? "Refresh my pricing" : "Prepare my pricing")}</button>
-      {!reviewed && <p className="field-note">Confirm your review of the materials and screenplay first.</p>}
+      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length || (!currentPlan&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (price ? "Refresh my pricing" : "Prepare my pricing")}</button>
     </>}
     {prepared&&<p className="field-note">{currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
     {price&&!paymentReference&&!quote&&<div className="film-price-review" role="status">
@@ -299,7 +298,7 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
       <p>{price.filmTitle} · {prepared?.durationSeconds} seconds target</p>
       <p className="field-note">{price.note}</p>
       {!priceCurrent&&<p className="feedback">Refresh your pricing to include the latest plan and rates.</p>}
-      {price.kind==="confirmed"&&priceCurrent&&<button className="button secondary" disabled={Boolean(busy)||!reviewed} onClick={()=>void requestQuote()}>Continue to payment</button>}
+      {price.kind==="confirmed"&&priceCurrent&&<button className="button secondary" disabled={Boolean(busy)} onClick={()=>void requestQuote()}>Continue to payment</button>}
     </div>}
     {quote && !paymentReference && <div className="film-price-review">
       <p className="film-price-total">{money(quote.amountCents)} <span>USD total</span></p>
@@ -308,10 +307,10 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
       {!productionAvailable&&<p className="field-note">Rendering is not available yet. A payment does not start production.</p>}
       {!quoteCurrent && <p className="feedback">This price has expired or the plan has changed. Request a new price before paying.</p>}
-      <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !reviewed} onChange={event => setConsent(event.target.checked)} />
-        <span>{quote.sandbox ? `I confirm a ${money(quote.amountCents)} test payment for this reviewed film plan. No real money will move.` : `I authorize BROCO Technologies LLC to charge exactly ${money(quote.amountCents)} for this reviewed film plan.`}</span>
+      <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent} onChange={event => setConsent(event.target.checked)} />
+        <span>{quote.sandbox ? `I confirm a ${money(quote.amountCents)} test payment for this saved film plan. No real money will move.` : `I authorize BROCO Technologies LLC to charge exactly ${money(quote.amountCents)} for this saved film plan.`}</span>
       </label>
-      {configuration?.available && quoteCurrent && <PaymentCardForm configuration={configuration} quote={quote} consent={consent && reviewed} disabled={Boolean(busy)} onToken={submitPayment} onBusyChange={label => { setBusy(label); onBusyChange(label); }} />}
+      {configuration?.available && quoteCurrent && <PaymentCardForm configuration={configuration} quote={quote} consent={consent} disabled={Boolean(busy)} onToken={submitPayment} onBusyChange={label => { setBusy(label); onBusyChange(label); }} />}
     </div>}
     {paymentReference && <div className="film-order-status" role="status">
       <h4>{order?.sandbox ? "Test payment status" : "Payment status"}</h4>
@@ -327,11 +326,11 @@ export default function FilmCheckout({ film, reviewed, productionAvailable, pers
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
         <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
-          : "Your payment is confirmed. Starting production uses the reviewed plan associated with this order."}</p>
+          : "Your payment is confirmed. Starting production uses the saved plan associated with this order."}</p>
         {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
         {!productionAvailable && !production?.mediaReady && <p>Film production is currently unavailable. Your order remains recorded; contact the administrator for help or a refund.</p>}
         <div className="action-group">
-          {(!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !productionAvailable || !paidPlanCurrent || !reviewed} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume production" : "Start my film"}</button>}
+          {(!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !productionAvailable || !paidPlanCurrent} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume production" : "Start my film"}</button>}
           <button className="text-button" disabled={Boolean(busy)} onClick={() => void productionRequest(false)}><RefreshCw size={15} />Check production status</button>
         </div>
         {production?.status === "completed" && production.mediaReady && <div className="finished-production">
