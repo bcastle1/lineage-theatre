@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSourceAgreementService, builtInSourceAgreement, sourceAgreementVersionPath, SOURCE_AGREEMENT_PATH } from "../api/_lib/source-agreement.mjs";
 import { createAuthHandler } from "../api/auth.mjs";
+import { createAdminHandler } from "../api/admin.mjs";
+import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { digest } from "../api/_lib/auth.mjs";
 
 const at = Date.parse("2026-09-22T18:00:00.000Z");
@@ -66,6 +68,43 @@ test("admin updates archive the old version and preserve previously signed snaps
   await assert.rejects(h.service.accept(account, consent(original)), code(409, "AGREEMENT_CHANGED"));
   await assert.rejects(h.service.update(admin, { revision: 0, ...text }), code(409, "AGREEMENT_CONFLICT"));
   assert.deepEqual(await h.service.current(), saved);
+});
+
+test("legacy owner and administrator records may save agreements through shared role authorization", async () => {
+  for (const actor of [{ email: OWNER_EMAIL, role: "owner" }, { email: admin.email, role: "admin" }]) {
+    const h = harness(), events = [];
+    const handler = createAdminHandler({ getSession: async () => ({ user: actor }), sourceAgreement: h.service,
+      limitAction: async () => true, audit: async (...args) => events.push(args) });
+    const run = async method => {
+      let status, body;
+      await handler({ method, url: "/api/admin?action=agreement", headers: { host: "lineagetheater.com", origin: "https://lineagetheater.com" },
+        ...(method === "POST" ? { body: { action: "updateAgreement", revision: 0, ...text } } : {}) }, {
+        set statusCode(value) { status = value; }, setHeader() {}, end(value) { body = JSON.parse(value); },
+      });
+      return { status, body };
+    };
+    assert.equal((await run("GET")).status, 200);
+    const saved = await run("POST");
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.agreement.revision, 1);
+    assert.deepEqual((await run("GET")).body.agreement, saved.body.agreement);
+    assert.equal(h.records.get(sourceAgreementVersionPath(saved.body.agreement.version)).value.updatedBy, actor.email);
+    assert.equal(events[0][0], actor.email);
+    assert.equal(events[0][1], "source.agreement.updated");
+    assert.equal(Object.hasOwn(actor, "status"), false);
+  }
+});
+
+test("agreement saves still reject suspended roles, password setup, customers and owner email alone", async () => {
+  const h = harness();
+  for (const actor of [
+    { email: OWNER_EMAIL }, { email: OWNER_EMAIL, status: "active" },
+    { email: OWNER_EMAIL, role: "customer", status: "active" }, { email: account.email, role: "owner", status: "active" },
+    { email: OWNER_EMAIL, role: "owner", status: "suspended" }, { ...admin, status: "suspended" },
+    { email: OWNER_EMAIL, role: "owner", mustChangePassword: true }, { ...admin, mustChangePassword: true },
+    { ...account, role: "customer", status: "pending" },
+  ]) await assert.rejects(h.service.update(actor, { revision: 0, ...text }), code(403, "AGREEMENT_FORBIDDEN"));
+  assert.equal(h.writes.length, 0);
 });
 
 test("historical built-in statements remain retrievable independently of the current bundled default", async () => {

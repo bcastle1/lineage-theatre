@@ -94,7 +94,9 @@ export function createSourceAgreementService({ readRecord: read = readRecord, wr
   }
   async function update(actor, input) {
     return safely(async () => {
-      if (!actor || actor.status !== "active" || actor.mustChangePassword || !hasAdminAccess(actor)
+      // Match the administrator handler, including persisted legacy roles
+      // without a status field. The shared helper rejects suspended accounts.
+      if (!actor || actor.mustChangePassword || !hasAdminAccess(actor)
         || typeof actor.email !== "string" || actor.email !== actor.email.trim().toLowerCase())
         throw new SourceAgreementError("Administrator access is required.", 403, "AGREEMENT_FORBIDDEN");
       if (!input || typeof input !== "object" || Array.isArray(input)

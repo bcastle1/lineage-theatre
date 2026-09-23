@@ -68,7 +68,9 @@ export function createFilmPricingService({ filmProduction: production = filmProd
     };
   }
   async function calculate(actor, body) {
-    if (!actor || actor.status !== "active" || accessStatusForUser(actor) !== "approved" || actor.mustChangePassword
+    // The shared check covers customer approval and persisted legacy admin
+    // roles, while denying suspended accounts regardless of their role.
+    if (!actor || accessStatusForUser(actor) !== "approved" || actor.mustChangePassword
       || typeof actor.email !== "string" || actor.email !== actor.email.trim().toLowerCase() || !/^\S+@\S+\.\S+$/.test(actor.email))
       throw new FilmProductionError("Sign in to continue.", 401);
     if (!body || typeof body !== "object" || Array.isArray(body)
