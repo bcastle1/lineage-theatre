@@ -107,12 +107,19 @@ export function createStudioHandler(overrides={}) {
       const {action,...input}=body;
       return json(res,200,await filmPricing.price(session.user,input));
     }
+    if(body?.action==="prepareCheckout") {
+      if(Object.keys(body).some(key=>key!=="action"))
+        return json(res,400,{message:"The payment preparation request is invalid."});
+      if(!(await limitAction(`checkout-prepare:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before preparing another payment."});
+      return json(res,200,await payments.prepareCheckout(session.user));
+    }
     if(body?.action==="checkoutCheck") {
       if(Object.keys(body).some(key=>!["action","quoteId","captchaToken"].includes(key)))
         return json(res,400,{message:"The payment security request is invalid."});
       if(!(await limitAction(`captcha-checkout:${email}`,20,3600_000)))
         return json(res,429,{message:"Please wait before making another payment security request."});
-      if(!(await payments.checkoutConfiguration(session.user)).available)
+      if(!(await payments.prepareCheckout(session.user)).available)
         return json(res,503,{message:productionUnavailable,charged:false});
       return json(res,200,await humanCheck.prepareCheckout(email,body.quoteId,body.captchaToken));
     }

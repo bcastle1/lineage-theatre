@@ -186,7 +186,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     if (!prepared || !currentPlan || paymentReference) return;
     await work("Checking your film price…", async () => {
       setQuote(null); setConsent(false);
-      const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio?action=checkoutConfiguration"));
+      const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio", { action: "prepareCheckout" }));
       setConfiguration(latestConfiguration);
       if (!latestConfiguration.available) {
         setQuote(null);

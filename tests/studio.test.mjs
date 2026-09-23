@@ -134,6 +134,22 @@ test("checkout configuration is a signed-in read-only route and default unavaila
   assert.equal(calls.length,1);assert.deepEqual(h.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
 });
 
+test("checkout preparation requires an explicit same-origin rate-limited POST and accepts no payment data",async()=>{
+  const calls=[],payments={prepareCheckout:async user=>{calls.push(user);return {available:false};},
+    checkoutConfiguration:async()=>({available:false}),checkout:()=>assert.fail("Preparation must not charge")};
+  const h=harness({payments});
+  assert.equal((await h.run("prepareCheckout")).status,400);
+  assert.equal((await harness({payments},null).run("prepareCheckout",post())).status,401);
+  assert.equal((await h.run("prepareCheckout",{...post(),headers:{origin:"https://other.example.invalid"}})).status,403);
+  for(const body of [{paymentToken:"synthetic-token"},{amountCents:1},{allowRefresh:true}])
+    assert.equal((await h.run("prepareCheckout",post(body))).status,400);
+  assert.equal((await harness({payments,limitAction:async()=>false}).run("prepareCheckout",post())).status,429);
+  assert.deepEqual(calls,[]);
+  assert.deepEqual(await h.run("prepareCheckout",post()),{status:200,body:{available:false}});
+  assert.deepEqual(calls,[actor]);assert.deepEqual(h.calls.limits,[[`checkout-prepare:${actor.email}`,20,3600_000]]);
+  assert.equal((await h.run("checkoutConfiguration")).status,200);assert.equal(calls.length,1);
+});
+
 test("explicit story consent and per-user rate limits remain required before generation",async()=>{
   const h=harness();
   for(const storyConsent of [undefined,false,"true"]) {

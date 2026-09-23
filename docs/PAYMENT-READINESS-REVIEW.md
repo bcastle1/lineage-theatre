@@ -34,6 +34,16 @@ The film service separately requires `operator-test` mode for every sandbox quot
 
 Production operations and card-entry reviews are separate. A card-entry review additionally requires an operations review for the same grant authorizing `charge`. A sandbox reviewer key cannot authorize production unless production is explicitly within its trusted environment scope.
 
+## Optional owner-only production access
+
+Set the server-only `LINEAGE_PAYMENT_ACCESS=owner` to limit production card entry, quotes, charges, processor reconciliation, refunds and render authorization to the current persisted owner account. The owner's email alone or a browser-supplied role does not qualify. Suspended accounts, incomplete password setup, deleted accounts and owner-role removal continue to fail closed. The worker's subject is checked against the same current account restriction before authorizing production spending.
+
+Leave the variable unset, or explicitly set `LINEAGE_PAYMENT_ACCESS=approved`, to retain the existing approved-account behavior. Any other supplied value disables production authorization, including transport authorization, rather than falling back to broader access. Sandbox access remains owner-only regardless of this production setting.
+
+This setting only narrows access. The real production grant, matching signed operations and card-entry reviews, exact deployment revision, allowed operation and evidence expiration are still required. It creates no review record and makes no merchant-readiness assertion. Quote amounts, payment consent, CAPTCHA, immutable order claims and refund limits are unchanged. The owner can reconcile or refund an existing customer order; other administrators cannot initiate those provider operations while owner-only mode is set.
+
+Existing order, receipt, diagnostics and accounting-export reads retain their prior account/administrator authorization and do not contact the processor. Existing customers therefore keep access to recorded outcomes and receipts when this mode is enabled. Non-owner rendering authorization is restricted too; account for already-paid customer fulfillment before enabling owner-only mode on an established merchant. Changing the mode requires server configuration and does not rewrite orders or extend signed approvals.
+
 ## Trusted reviewer keys
 
 The server-only `PAYMENT_REVIEW_TRUSTED_KEYS` variable is a JSON object mapping each reviewer key ID to exactly `{publicKey, reviewer, environments}`. `publicKey` is an Ed25519 public key in PEM form; `reviewer` identifies the authorized reviewer; `environments` contains `sandbox`, `production`, or both. Maximum ten keys. Configure public keys only after establishing the reviewer's authority. The private signing key must stay outside the app deployment, repository, browser and application logs.
