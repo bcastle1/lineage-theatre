@@ -97,7 +97,7 @@ test("CAPTCHA configuration is public without a session or secret disclosure", a
 test("payment route demands a real one-use proof before processor invocation; GET recovery stays available", async () => {
   const h = harness(), processed = [];
   const handler = createStudioHandler({ captcha: h.service, getSession: async () => ({ user: { email } }), limitAction: async () => true,
-    payments: { checkoutConfiguration: async () => ({ available: true }), checkout: async (_, body) => { processed.push(body); return { status: "synthetic-captured" }; }, order: async () => ({ status: "synthetic-order" }) } });
+    payments: { prepareCheckout: async () => ({ available: true }), checkout: async (_, body) => { processed.push(body); return { status: "synthetic-captured" }; }, order: async () => ({ status: "synthetic-order" }) } });
   const body = { action: "checkout", quoteId: quote, paymentToken: "synthetic-payment-token", consent: true };
   assert.equal((await run(handler, request(body))).status, 403); assert.equal(processed.length, 0);
   const preflight = await run(handler, request({ action: "checkoutCheck", quoteId: quote, captchaToken: token }));
@@ -112,7 +112,7 @@ test("payment route demands a real one-use proof before processor invocation; GE
 });
 test("disabled checkout cannot issue a proof or contact reCAPTCHA", async () => {
   const handler = createStudioHandler({ getSession: async () => ({ user: { email } }), limitAction: async () => true,
-    captcha: { prepareCheckout: () => assert.fail("Checkout is disabled") }, payments: { checkoutConfiguration: async () => ({ available: false }) } });
+    captcha: { prepareCheckout: () => assert.fail("Checkout is disabled") }, payments: { prepareCheckout: async () => ({ available: false }) } });
   const result = await run(handler, request({ action: "checkoutCheck", quoteId: quote, captchaToken: token }));
   assert.equal(result.status, 503); assert.equal(result.body.charged, false);
 });

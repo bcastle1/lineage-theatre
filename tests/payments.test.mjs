@@ -234,7 +234,7 @@ function grantFixture(overrides={}) {
   let time=NOW,sequence=0;
   const env={QUICKBOOKS_ENVIRONMENT:overrides.environment||"sandbox",QUICKBOOKS_CLIENT_ID:"synthetic-client",QUICKBOOKS_CLIENT_SECRET:"synthetic-secret",QUICKBOOKS_TOKEN_ENCRYPTION_KEY:randomBytes(32).toString("base64")};
   const config=quickbooksConfig(env),calls=[],records=new Map();
-  const tokens={accessToken:"synthetic-access-token",refreshToken:"synthetic-refresh-token",realmId:"123456789",accessTokenExpiresAt:new Date(NOW+3600_000).toISOString(),grantedScopes:[...QUICKBOOKS_SCOPES]};
+  const tokens={accessToken:"synthetic-access-token",refreshToken:"synthetic-refresh-token",realmId:"123456789",accessTokenExpiresAt:new Date(NOW+3600_000).toISOString(),refreshTokenExpiresAt:new Date(NOW+86400_000).toISOString(),grantedScopes:[...QUICKBOOKS_SCOPES]};
   const put=(path,value)=>records.set(path,{value:structuredClone(value),etag:`g-${++sequence}`});
   put(userPath(OWNER.email),OWNER);
   put(QUICKBOOKS_CONNECTION_PATH,{status:"authorized",revision:3,encryptedTokens:encryptQuickBooksTokens(tokens,config),fingerprint:config.fingerprint,credentialVersion:config.credentialVersion,authorizationAttemptId:"synthetic-authorization-attempt",connectedBy:OWNER.email});
@@ -335,6 +335,57 @@ test("card entry configuration is read-only, minimal and requires a fresh separa
     const f=fixture({overrides:{readiness:async()=>({authorization:authorization(BINDING,change)})}});
     assert.deepEqual(await f.service.checkoutConfiguration(CUSTOMER),{available:false});
   }
+});
+
+test("explicit checkout preparation renews expired production access before quoting without charging",async()=>{
+  const operations=[],freshAuthorization=binding=>authorization(binding,{expiresAt:new Date(NOW+7200_000).toISOString()});
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding,operation})=>{
+    operations.push(operation);return freshAuthorization(binding);
+  },refresh:async({records,put,tokens,config})=>{
+    assert.ok(Date.parse(tokens.refreshTokenExpiresAt)>NOW+3600_001);
+    put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,
+      encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-rotated-access",accessTokenExpiresAt:new Date(NOW+7200_000).toISOString()},config)});
+  }});
+  const binding=await h.transport.binding();
+  const f=fixture({quoteOverrides:{environment:"production",expiresAt:new Date(NOW+7200_000).toISOString()},
+    overrides:{provider:createIntuitPaymentsAdapter({transport:h.transport}),
+      readiness:async({actor})=>actor.email===OWNER.email?{authorization:freshAuthorization(binding)}:{}}});
+  h.advance(3600_001);f.advance(3600_001);
+  const before=structuredClone([...h.records]);
+  assert.deepEqual(await f.service.checkoutConfiguration(OWNER),{available:false});
+  assert.deepEqual([...h.records],before);assert.deepEqual(h.calls,[]);
+  for(const actor of [CUSTOMER,ADMIN])assert.deepEqual(await f.service.prepareCheckout(actor),{available:false});
+  assert.deepEqual([...h.records],before);assert.deepEqual(h.calls,[]);
+  const configuration=await f.service.prepareCheckout(OWNER);
+  assert.equal(configuration.available,true);assert.equal(configuration.environment,"production");
+  assert.equal(configuration.tokenization.url,"https://api.intuit.com/quickbooks/v4/payments/tokens");
+  assert.deepEqual(operations,["refresh"]);assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],"refresh");
+  const quote=await f.makeQuote(OWNER);
+  assert.equal(quote.amountCents,1125);assert.equal(quote.sandbox,false);
+  assert.equal(h.calls.length,1);assert.equal(f.records.size,1);
+  assert.ok([...f.records.keys()].every(path=>path.startsWith("payments/quotes/")));
+  assert.equal((await f.service.checkoutConfiguration(OWNER)).available,true);assert.equal(h.calls.length,1);
+});
+
+test("checkout preparation cannot renew without card-entry authorization or return readiness revoked during renewal",async()=>{
+  const never=async()=>assert.fail("Missing card-entry authorization must block before binding or refresh");
+  for(const ready of [{},{sandboxEnabled:true,merchantVerified:true},{authorization:authorization(BINDING,{operations:["charge"]})},
+    {authorization:authorization(BINDING,{expiresAt:new Date(NOW).toISOString()})}]) {
+    const service=createPaymentsService({provider:{binding:never},readiness:async()=>ready,now:()=>NOW});
+    assert.deepEqual(await service.prepareCheckout(OWNER),{available:false});
+  }
+  let revoked=false;
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding})=>authorization(binding),
+    refresh:async({records,put,tokens,config})=>{
+      put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,
+        encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-rotated-access",accessTokenExpiresAt:new Date(NOW+7200_000).toISOString()},config)});
+      revoked=true;
+    }});
+  const binding=await h.transport.binding();h.advance(3590_000);
+  const service=createPaymentsService({provider:createIntuitPaymentsAdapter({transport:h.transport}),now:()=>NOW+3590_000,
+    readiness:async()=>revoked?{}:{authorization:authorization(binding)}});
+  assert.deepEqual(await service.prepareCheckout(OWNER),{available:false});
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],"refresh");
 });
 
 test("production service plumbing uses current grant-scoped server authorization and truthful receipts",async()=>{

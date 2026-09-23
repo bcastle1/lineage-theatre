@@ -119,6 +119,9 @@ export function createPaymentsService(overrides={}) {
     // Legacy sandbox test injection cannot enable production. Production needs
     // a fresh current-grant authorization from a trusted server evidence verifier.
     if(!(ready?.sandboxEnabled===true&&ready?.merchantVerified===true)&&!ready?.authorization)throw blocked();
+    // Card entry must be authorized before an explicit preparation may renew OAuth.
+    if(operation==="card-entry"&&(!bindingValid(ready?.authorization)
+      ||!paymentAuthorizationMatches(ready.authorization,ready.authorization,"card-entry",now())))throw blocked();
     const binding=await provider.binding({allowRefresh});
     if(!bindingValid(binding))throw blocked();
     if(binding.environment==="production"&&!paymentAuthorizationMatches(ready?.authorization,binding,operation,now()))throw blocked();
@@ -126,10 +129,10 @@ export function createPaymentsService(overrides={}) {
       &&!paymentAuthorizationMatches(ready?.authorization,binding,operation,now()))throw blocked();
     return binding;
   }
-  async function checkoutConfiguration(actor) {
+  async function cardEntryConfiguration(actor,allowRefresh) {
     actorEmail(actor);
     try {
-      const binding=await enabled("card-entry",{allowRefresh:false,actor}),ready=await readiness({actor,operation:"card-entry"});
+      const binding=await enabled("card-entry",{allowRefresh,actor}),ready=await readiness({actor,operation:"card-entry"});
       // Browser-direct entry makes the merchant page part of card-data handling.
       // Require a separately reviewed entry authorization even for sandbox UI.
       if(!paymentAuthorizationMatches(ready?.authorization,binding,"card-entry",now()))return {available:false};
@@ -137,6 +140,9 @@ export function createPaymentsService(overrides={}) {
         tokenization:{method:"intuit-browser-direct",url:`${INTUIT_PAYMENT_ORIGINS[binding.environment]}/quickbooks/v4/payments/tokens`}};
     }catch {return {available:false};}
   }
+  // Status reads never renew authorization. Renewal requires the same-origin POST.
+  const checkoutConfiguration=actor=>cardEntryConfiguration(actor,false);
+  const prepareCheckout=actor=>cardEntryConfiguration(actor,true);
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
     try {
@@ -356,6 +362,6 @@ export function createPaymentsService(overrides={}) {
     return {allowed:true,manifestHash,budgetCents:value.providerCostEstimateCents,quoteReference:value.quoteReference,
       expiresAt:stamp(Math.min(Date.parse(value.quoteExpiresAt),now()+60_000)),environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
   }
-  return {checkoutConfiguration,quote,checkout,order,reconcile,refund,receipt,accountingExport,adminDiagnostics,authorizeProduction};
+  return {checkoutConfiguration,prepareCheckout,quote,checkout,order,reconcile,refund,receipt,accountingExport,adminDiagnostics,authorizeProduction};
 }
 export const payments=createPaymentsService();
