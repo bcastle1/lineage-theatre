@@ -1,12 +1,14 @@
 import type { Source } from "./model";
 import { api } from "./model";
 import { saveSourceFile } from "../lib/storage";
+import { uploadMedia } from "./media-library";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { mediaFeedback, readPdfText, textFeedback } from "./source-policy.mjs";
 
 export async function importSource(
   file: File,
   projectId: string,
+  options: { id?: string; fromLibrary?: boolean; projectTitle?: string } = {},
 ): Promise<Source> {
   if (file.size > 100 * 1024 * 1024)
     throw new Error(`${file.name} exceeds the 100 MB limit.`);
@@ -37,7 +39,7 @@ export async function importSource(
       `${file.name}: use a photo, PDF, Word document, text, GEDCOM, audio, or video file.`,
     );
   const source: Source = {
-    id: crypto.randomUUID(),
+    id: options.id || crypto.randomUUID(),
     name: file.name,
     type:
       (file.type !== "application/octet-stream" && file.type) ||
@@ -118,6 +120,7 @@ export async function importSource(
         ? "PDF saved, but its text could not be read. Unlock protected PDFs or add a transcription for scans."
         : "File saved, but its text could not be read. Convert it to DOCX or plain text, or add the story details manually.";
   }
+  if (!options.fromLibrary) await uploadMedia(file, source.id, { id: projectId, title: options.projectTitle || "Untitled family film" });
   await saveSourceFile(source.id, projectId, file);
   return source;
 }

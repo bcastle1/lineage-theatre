@@ -37,9 +37,10 @@ import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
+import MediaLibrary from "../studio/MediaLibrary";
 import "./admin.css";
 
-type Tab = "overview" | "people" | "payments" | "pricing" | "agreement" | "films" | "activity";
+type Tab = "overview" | "people" | "payments" | "pricing" | "agreement" | "films" | "activity" | "media";
 type Connection = { available: boolean; reason: string; status?: "configured" | Exclude<CheckoutConnectionStatus, "ready"> };
 type Pricing = {
   markupBasisPoints: number;
@@ -218,6 +219,7 @@ const tabs = [
   { id: "pricing" as const, name: "Pricing", icon: Percent },
   { id: "agreement" as const, name: "Source agreement", icon: FileText },
   { id: "films" as const, name: "Film archive", icon: Film },
+  { id: "media" as const, name: "Media library", icon: FileText },
   { id: "activity" as const, name: "Activity", icon: Activity },
 ];
 const money = (cents?: number, currency = "USD") =>
@@ -368,15 +370,17 @@ export default function Admin({
   user,
   notify,
   onPricingChanged,
+  onMediaBusyChange,
 }: {
   user: User;
   notify: (text: string, tone?: Notice["tone"]) => void;
   onPricingChanged: () => Promise<void>;
+  onMediaBusyChange?: (busy: boolean) => void;
 }) {
   const [tab, setTab] = useState<Tab>(() =>
     typeof window !== "undefined" && window.location.hash.startsWith("#admin/payments")
       ? "payments"
-      : "overview",
+      : window.location.hash === "#admin/media" ? "media" : "overview",
   );
   const [overview, setOverview] = useState<Overview | null>(null);
   const [people, setPeople] = useState<PeopleData | null>(null);
@@ -408,6 +412,7 @@ export default function Admin({
   const [updated, setUpdated] = useState("");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const mediaBusyChanged = useCallback((value: boolean) => { setBusy(value); onMediaBusyChange?.(value); }, [onMediaBusyChange]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [invitation, setInvitation] = useState<{
     inviteUrl: string;
@@ -1249,6 +1254,7 @@ export default function Admin({
   }
   function chooseTab(next: Tab) {
     setTab(next);
+    window.history.replaceState(null, "", `#admin/${next}`);
     setQuery("");
     setError("");
     setActionError("");
@@ -1353,6 +1359,7 @@ export default function Admin({
             Refreshing administration records…
           </div>
         )}
+        {tab === "media" && <MediaLibrary admin onBusyChange={mediaBusyChanged} />}
         {tab === "agreement" && <SourceAgreementEditor disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
         {tab === "overview" && (
           <>

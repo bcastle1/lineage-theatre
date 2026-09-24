@@ -63,9 +63,11 @@ export function ArchiveStep({
   notify,
   busy,
   upload,
+  openMediaLibrary,
   next,
 }: StepProps & {
   upload: (files: FileList | File[]) => Promise<void>;
+  openMediaLibrary: () => void;
   next: () => void;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -228,8 +230,9 @@ export function ArchiveStep({
       )}
       <div className="panel-actions">
         <span className="field-note">
-          Sources save in this browser. You choose when AI may read them.
+          New uploads save to your private media library with administrator access, including after you archive or remove them. Film drafts also keep a browser copy. You choose when AI may read your sources.
         </span>
+        <button className="button secondary small" disabled={!!busy} onClick={openMediaLibrary}>Browse media library</button>
         <button className="button primary" disabled={!!busy} onClick={next}>
           Develop my film
           <ArrowRight size={16} />

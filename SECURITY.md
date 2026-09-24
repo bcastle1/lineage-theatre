@@ -14,10 +14,10 @@ Lineage Theatre is a React/Vite application with authenticated Vercel API routes
 
 ## Family data and uploads
 
-- Working projects and original source files remain in localStorage and IndexedDB. Local storage is not an encrypted vault, and clearing it does not erase server account records or an opted-in cloud archive.
+- Working projects and local source copies remain in localStorage and IndexedDB. New originals also save to the private media library with customer/administrator access. Earlier local files require an explicit Copy browser sources action. Customer trash and archive retain server originals; only administrators can purge them from their separate archive. See `docs/MEDIA-LIBRARY.md` for authorization, upload, deletion and retention controls. Local storage is not an encrypted vault, and clearing it does not erase server records or originals.
 - The separate cloud archive requires explicit consent to save limited film metadata and an optional finished MP4/WebM video with administrator access. It does not upload source documents or full working screenplays. Private Blob paths are scoped to the account; media routes authorize the owner or an administrator before streaming.
 - Upload tokens are limited to authorized paths, formats, and sizes. Upload completion is checked before a video is marked available. Format/header checks are not malware scanning or a certification that media content is safe.
-- TXT, PDF, and DOCX extraction is local. Supported legacy DOC extraction uses the authenticated app server without retaining the uploaded document there. Unread scans and untranscribed recordings must not be cited as if their contents were understood.
+- TXT, PDF, and DOCX extraction is local. Supported legacy DOC extraction uses the authenticated app server. Originals are retained separately by the media library. Unread scans and untranscribed recordings must not be cited as if their contents were understood.
 
 ## Providers and money
 

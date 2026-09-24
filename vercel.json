@@ -19,6 +19,7 @@
     }
   ],
   "functions": {
+    "api/media.mjs": { "maxDuration": 300 },
     "api/auth.mjs": {
       "maxDuration": 30
     },

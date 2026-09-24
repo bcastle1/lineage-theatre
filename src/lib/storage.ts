@@ -129,3 +129,17 @@ export async function deleteSourceFile(id: string) {
   });
   db.close();
 }
+
+// Scope legacy recovery to projects already belonging to the signed-in account.
+// This includes sources detached from a film but still retained in IndexedDB.
+export async function listProjectSourceFiles(projectIds: string[]): Promise<StoredSourceFile[]> {
+  const allowed = new Set(projectIds), db = await openDb();
+  try {
+    const records = await new Promise<StoredSourceFile[]>((resolve, reject) => {
+      const request = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return records.filter(record => allowed.has(record.projectId));
+  } finally { db.close(); }
+}

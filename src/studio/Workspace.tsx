@@ -39,6 +39,8 @@ import { importSource } from "./sources";
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
 import FilmLibrary from "./FilmLibrary";
+import MediaLibrary from "./MediaLibrary";
+import { downloadMediaFile, type MediaItem } from "./media-library";
 import LibraryArtwork from "./LibraryArtwork";
 import { initialWorkspaceView, localLibraryPatch, localLibraryState, verifyLibraryDetail, type LibraryAction, type LibraryEntry } from "./film-library";
 import { createDerivedFilmDraft, persistCreatedDraft } from "./derived-film";
@@ -105,12 +107,12 @@ export default function Workspace({
   const [activeId, setActiveId] = useState(
     projects.find((p) => localLibraryState(p) === "active")?.id || projects[0].id,
   );
-  const [view, setView] = useState<"create" | "library" | "admin">(() =>
+  const [view, setView] = useState<"create" | "library" | "admin" | "media">(() =>
     initialWorkspaceView(window.location.hash, user.role),
   );
   useEffect(() => {
     const openPayments = () => {
-      if ((user.role === "owner" || user.role === "admin") && window.location.hash.startsWith("#admin/payments")) setView("admin");
+      if (window.location.hash !== "#studio") setView(initialWorkspaceView(window.location.hash, user.role));
     };
     window.addEventListener("hashchange", openPayments);
     return () => window.removeEventListener("hashchange", openPayments);
@@ -131,7 +133,8 @@ export default function Workspace({
   const [accountBusy, setAccountBusy] = useState(false);
   const [libraryActionBusy, setLibraryActionBusy] = useState(false);
   const [archiveUploadBusy, setArchiveUploadBusy] = useState(false);
-  const libraryBusy = libraryActionBusy || archiveUploadBusy;
+  const [mediaBusy, setMediaBusy] = useState(false);
+  const libraryBusy = libraryActionBusy || archiveUploadBusy || mediaBusy;
 
   const workLock = useRef(false);
   const workspaceMounted = useRef(false);
@@ -383,7 +386,7 @@ export default function Workspace({
       const failures: string[] = [];
       for (const file of Array.from(files)) {
         try {
-          added.push(await importSource(file, id));
+          added.push(await importSource(file, id, { projectTitle: film.title }));
         } catch (e) {
           failures.push(e instanceof Error ? e.message : `Could not add ${file.name}`);
         }
@@ -400,7 +403,7 @@ export default function Workspace({
         ),
       );
       notify(
-        `${added.length} source${added.length === 1 ? "" : "s"} added.${failures.length ? " " + failures.join(" ") : " Readable document text is now available to the story studio."}`,
+        `${added.length} source${added.length === 1 ? "" : "s"} added and saved to your media library.${failures.length ? " " + failures.join(" ") : " Readable document text is now available to the story studio."}`,
         failures.length ? "error" : "success",
       );
     });
@@ -606,8 +609,19 @@ export default function Workspace({
     notify("Project backup downloaded. Original media files are stored separately.");
   }
 
+  async function useLibraryMedia(item: MediaItem) {
+    if (localLibraryState(film) !== "active") throw new Error("Open or create an active film before adding media.");
+    if (!film.sources.some(source => source.id === item.id)) {
+      const source = await importSource(await downloadMediaFile(item), film.id, { id: item.id, fromLibrary: true });
+      update({ sources: [...film.sources, source] });
+    }
+    setView("create"); setStep(0); window.history.replaceState(null, "", "#create");
+    notify(`${item.name} is available in your current film.`);
+  }
+  function openMediaLibrary() { setView("media"); window.history.replaceState(null, "", "#media"); }
   const nav = [
     { id: "library" as const, label: "Film library", icon: Library },
+    { id: "media" as const, label: "Media library", icon: Library },
     { id: "create" as const, label: "Create a film", icon: Video },
     ...(user.role === "owner" || user.role === "admin"
       ? [{ id: "admin" as const, label: "Administration", icon: ShieldCheck }]
@@ -634,6 +648,7 @@ export default function Workspace({
               onClick={() => {
                 if (n.id === "create" && localLibraryState(film) !== "active") { create(); return; }
                 setView(n.id);
+                window.history.replaceState(null, "", n.id === "admin" ? "#admin" : `#${n.id}`);
                 notify(`${n.label} opened.`, "info");
               }}
             >
@@ -657,7 +672,7 @@ export default function Workspace({
       </aside>
       <div className="studio-main">
         <header className="topbar">
-          {view === "library" ? <div className="project-switch"><Library size={17} aria-hidden="true" /><span>Film library</span></div> :
+          {view === "library" || view === "media" ? <div className="project-switch"><Library size={17} aria-hidden="true" /><span>{view === "media" ? "Media library" : "Film library"}</span></div> :
           <div className="project-switch">
             <FilmIcon size={17} />
             <select
@@ -716,6 +731,7 @@ export default function Workspace({
             >
               <Admin
                 user={user}
+                onMediaBusyChange={setMediaBusy}
                 notify={notify}
                 onPricingChanged={async () => {
                   const current = await api<Capabilities>(
@@ -726,6 +742,7 @@ export default function Workspace({
               />
             </Suspense>
           )}
+          {view === "media" && <MediaLibrary projects={projects} onUse={useLibraryMedia} onBusyChange={setMediaBusy} />}
           {view === "create" && (
             <>
               <div className="page-heading">
@@ -765,6 +782,7 @@ export default function Workspace({
                     <ArchiveStep
                       {...props}
                       upload={upload}
+                      openMediaLibrary={openMediaLibrary}
                       next={() => {
                         if (enoughStory()) navigate(1);
                       }}
@@ -844,6 +862,7 @@ export default function Workspace({
             <div className="library-layout">
               <LibraryArtwork side="left" />
               <div className="library-workspace">
+              <div className="library-media-link"><p>Looking for your photos, documents, recordings, and original film sources?</p><button className="button secondary small" disabled={libraryBusy} onClick={openMediaLibrary}>Open media library</button></div>
               <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} onCreate={create} onOpenDraft={openLibraryDraft}
                 onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} onCreateVersion={createLibraryVersion} />
               {localLegacy && (

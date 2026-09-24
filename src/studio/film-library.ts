@@ -133,7 +133,8 @@ export function localLibraryPatch(action: LibraryAction): Partial<Film> {
   return action === "restore" ? { archivedAt: null, trashedAt: null }
     : action === "archive" ? { archivedAt: at, trashedAt: null } : { trashedAt: at };
 }
-export function initialWorkspaceView(hash: string, role: User["role"]): "admin" | "create" | "library" {
-  if ((role === "owner" || role === "admin") && hash.startsWith("#admin/payments")) return "admin";
+export function initialWorkspaceView(hash: string, role: User["role"]): "admin" | "create" | "library" | "media" {
+  if ((role === "owner" || role === "admin") && hash.startsWith("#admin")) return "admin";
+  if (hash === "#media") return "media";
   return hash === "#create" ? "create" : "library";
 }

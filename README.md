@@ -2,6 +2,8 @@
 
 A family-history film studio with public account registration at [lineagetheater.com](https://lineagetheater.com). React/Vite guides a user through family sources, film development, script and cast review, and production.
 
+The [media library](docs/MEDIA-LIBRARY.md) stores new original uploads privately across devices. Customers can add, download, rename, reuse, archive, trash and restore source media. Administration retains all customers' media independently and provides an archive with permanent deletion. Earlier sources can be copied from their original browser; working drafts remain browser-local.
+
 ## Current capabilities
 
 MagicLight is the only video provider offered in the active studio, with no external handoff. **GPT-6 Astra ideas and screenplay generation are connected and verified. MagicLight film generation and QuickBooks charges/refunds remain connection pending.** The MagicLight production pipeline still needs verified API operations, quality and cost settings, any required clip assembly, and commercial entitlement; the QuickBooks merchant flow must also be integrated and verified before paid production. An API key alone cannot activate an unavailable adapter. See [integration status](docs/INTERNAL-FILM-INTEGRATION.md).

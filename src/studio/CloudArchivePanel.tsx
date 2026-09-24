@@ -123,7 +123,7 @@ export default function CloudArchivePanel({ projects, onBusyChange, showFilms = 
         setBusy("Verifying your private cloud film…");
         await verify(id);
         feedback("Finished film saved and verified in your private cloud archive. You and Lineage Theatre administrators can watch it here.");
-      } else feedback("Film details saved to your private cloud archive. Original source files and the script remain in this browser.");
+      } else feedback("Film details saved to your private cloud archive. Find uploaded originals in Media library. Your working draft remains in this browser.");
       setConsent(false); setFile(null); setFileKey((current) => current + 1);
       if (!selected) { setNewId(crypto.randomUUID()); setTitle(""); setAncestor(""); }
     } catch (cause) { feedback(cause instanceof Error ? cause.message : "Cloud save did not finish. Your local project remains available.", true); }
