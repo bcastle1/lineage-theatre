@@ -8,7 +8,7 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
 }).outputText;
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
-const { normalizeHostedInvoiceUrl, normalizeCheckoutConfiguration, normalizeFilmQuote, normalizeFilmOrder, normalizeFilmReceipt, quoteMatchesConfiguration, paymentStatusMessage } = await import(contractUrl);
+const { canStartFilmProduction, normalizeHostedInvoiceUrl, normalizeCheckoutConfiguration, normalizeFilmQuote, normalizeFilmOrder, normalizeFilmReceipt, quoteMatchesConfiguration, paymentStatusMessage } = await import(contractUrl);
 const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { checkFilmPayment, commitFilmPayment, recoverFilmPayment, retryFilmPayment } = await import(moduleUrl((await compile("../src/studio/checkout-payment.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { normalizePaymentReference, normalizeFilm, customerProjectBackup, newFilm } = await import(moduleUrl(await compile("../src/studio/model.ts")));
@@ -24,6 +24,18 @@ const order = status => ({ id: quote().orderId, quoteId: quote().id, preparedId:
   requiresReview: ["submitting", "uncertain"].includes(status), receiptAvailable: status === "captured", createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), sandbox: true, checkoutMethod: method,
   invoiceUrl: "https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture", invoiceNumber: "1234", ...(status === "captured" ? { confirmationSource: "quickbooks-accounting" } : {}) });
 const token = "SYNTHETIC_TOKEN_NOT_A_REAL_CARD";
+
+test("a confirmed hosted payment can start only its unchanged plan with available production", () => {
+  const paid = normalizeFilmOrder(order("captured"));
+  assert.equal(canStartFilmProduction(paid, true, true), true);
+  assert.equal(canStartFilmProduction(paid, false, true), false);
+  assert.equal(canStartFilmProduction(paid, true, false), false);
+  assert.equal(canStartFilmProduction(null, true, true), false);
+  for (const status of ["submitting", "awaiting-payment", "declined", "uncertain", "refund-pending", "partially-refunded", "refunded"])
+    assert.equal(canStartFilmProduction({ ...paid, status }, true, true), false);
+  for (const change of [{ requiresReview: true }, { refundedCents: 1 }, { receiptAvailable: false }, { charged: false }])
+    assert.equal(canStartFilmProduction({ ...paid, ...change }, true, true), false);
+});
 
 test("verified Intuit short invoice links survive order normalization and payment-tab navigation", () => {
   const base = `https://connect.intuit.com/t/scs-v1-${"a".repeat(96)}`;

@@ -4,12 +4,15 @@ import {accessStatusForUser,isOwner,hasAdminAccess} from "./access.mjs";
 import {readPricingSettings} from "./admin.mjs";
 import {createQuickBooksAccountingTransport} from "./quickbooks.mjs";
 import {PaymentError} from "./payments.mjs";
+import {productionJobPath} from "./film-production.mjs";
 
 export class HostedCheckoutError extends PaymentError {}
 export const HOSTED_CHECKOUT_SETTINGS_PATH="settings/quickbooks-hosted.json";
 const METHOD="quickbooks-hosted-invoice",SOURCE="quickbooks-accounting";
 const hex=/^[a-f0-9]{64}$/,numeric=/^[0-9]{1,30}$/,keys=/^[A-Za-z0-9_-]{16,100}$/;
 const unavailable=()=>new HostedCheckoutError("Payment is not available yet. Your saved film and price are unchanged.",503,"HOSTED_CHECKOUT_UNAVAILABLE");
+const productionUnavailable=()=>new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"PRODUCTION_UNAVAILABLE");
+const reversalsUnavailable=()=>new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"HOSTED_REVERSALS_UNVERIFIED");
 const conflict=()=>new HostedCheckoutError("This request changed or is already being processed. Check the saved order before continuing.",409,"PAYMENT_CONFLICT",null);
 const expired=()=>new HostedCheckoutError("This price or its checkout terms changed. Prepare your price again.",409,"QUOTE_EXPIRED");
 const existingOrder=()=>new HostedCheckoutError("A payment page already exists for this saved film. Recover its saved payment or contact the administrator.",409,"ORDER_ALREADY_EXISTS");
@@ -146,7 +149,8 @@ function paymentAllocation(payment,order,paymentId) {
 
 export function createHostedCheckoutService({read=readRecord,write=writeRecord,now=Date.now,env=process.env,transport=createQuickBooksAccountingTransport(),
   receiptDelivery={deliver:async order=>(await import("./receipt-delivery.mjs")).receiptDelivery.deliver(order)},
-  pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args)}={}) {
+  pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
+  productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),verifyReversals}={}) {
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
     try {const result=await write(path,next,previous?.etag);if(result?.etag)return {value:next,etag:result.etag};}catch{}
@@ -372,8 +376,112 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       processorDisclosure:"Payment recorded by QuickBooks. Processor capture and bank settlement have not been verified.",capturedAt:v.capturedAt,description:"Lineage Theatre film production",status:v.status,sandbox:sandbox(v),checkoutMethod:METHOD,confirmationSource:SOURCE,
       notice:sandbox(v)?"Sandbox accounting receipt. No live payment is represented.":"Payment recorded by QuickBooks. Film delivery and any refund are tracked separately; processor capture and settlement are not verified."};
   }
+  async function authorizeProduction({email,orderId:referenceId,manifestHash,preparedId}={}) {
+    // A planning price and a cached paid badge never authorize provider expense.
+    // Each short-lived grant requires the original paid price, its private plan,
+    // a live exact invoice allocation and an actual capped full-film quote.
+    if(typeof email!=="string"||email!==email.trim().toLowerCase()||!hex.test(manifestHash||"")||!hex.test(referenceId||""))throw productionUnavailable();
+    const actorRecord=await read(userPath(email)),actor=actorRecord?.value;
+    if(typeof actorRecord?.etag!=="string"||actor?.email!==email)throw productionUnavailable();
+    await access(actor);
+    const path=orderPath(referenceId),record=await read(path),value=record?.value;
+    if(!hex.test(value?.quoteId||""))throw productionUnavailable();
+    const paidQuotePath=quotePath(email,value.quoteId),paidQuote=await read(paidQuotePath),q=paidQuote?.value;
+    const validTime=value=>typeof value==="string"&&Number.isFinite(Date.parse(value))&&Date.parse(value)<=now();
+    const sameCompany=(a,b)=>bound(a)&&bound(b)&&a.environment===b.environment&&a.realmId===b.realmId;
+    const quoteFields=["customerEmail","preparedId","manifestHash","filmId","filmTitle","currency","amountCents","providerCostCents","markupCents","pricingRevision","pricingBasis","quoteReference","expiresAt"];
+    const captured=order=>Boolean(order&&q&&order.id===referenceId&&orderId(order)===referenceId&&order.checkoutMethod===METHOD
+      &&order.customerEmail===email&&order.preparedId===preparedId&&order.manifestHash===manifestHash&&order.status==="captured"
+      &&validTime(order.capturedAt)&&order.confirmationSource===SOURCE&&order.currency==="USD"&&order.refundedCents===0
+      &&!order.refundOperation&&(!order.refunds||Array.isArray(order.refunds)&&order.refunds.length===0)&&!order.checkOperation
+      &&order.lastCheckStage==="complete"&&order.lastCheckFailureReason===null&&validTime(order.accountingCheckedAt)
+      &&numeric.test(order.invoiceId||"")&&numeric.test(order.customerId||"")&&order.balanceCents===0
+      &&amountValid(order.providerCostCents)&&amountValid(order.amountCents)&&Number.isSafeInteger(order.markupCents)&&order.markupCents>=0
+      &&order.amountCents===order.providerCostCents+order.markupCents&&q.id===order.quoteId&&quoteFields.every(field=>order[field]===q[field])
+      &&sameBinding(order.merchantBinding,q.merchantBinding)&&complete(order.checkoutSettings)
+      &&JSON.stringify(order.checkoutSettings)===JSON.stringify(q.checkoutSettings)
+      &&Array.isArray(order.accountingPayments)&&order.accountingPayments.length>0&&order.accountingPayments.length<=100
+      &&order.accountingPayments.every(payment=>numeric.test(payment?.id||"")&&amountValid(payment.allocatedCents))
+      &&new Set(order.accountingPayments.map(payment=>payment.id)).size===order.accountingPayments.length
+      &&order.accountingPayments.reduce((sum,payment)=>sum+payment.allocatedCents,0)===order.amountCents
+      &&Array.isArray(order.paymentIds)&&order.paymentIds.length===order.accountingPayments.length
+      &&order.paymentIds.every((id,index)=>id===order.accountingPayments[index].id));
+    if(typeof record?.etag!=="string"||typeof paidQuote?.etag!=="string"||!captured(value))throw productionUnavailable();
+    let planPath;
+    try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable();}
+    const plan=await read(planPath),job=plan?.value;
+    if(typeof plan?.etag!=="string"||!job||job.id!==preparedId||job.ownerHash!==digest(email)||job.manifestHash!==manifestHash
+      ||!job.manifest||digest(JSON.stringify(job.manifest))!==manifestHash||job.filmId!==value.filmId||job.manifest.filmId!==value.filmId
+      ||!Array.isArray(job.manifest.shots)||!job.manifest.shots.length||!Array.isArray(job.shots)||job.shots.length!==job.manifest.shots.length
+      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain"].includes(job.status))throw productionUnavailable();
+    const settingsRecord=await readSettings(),s=settingsRecord?.value;
+    const binding=await transport.binding({allowRefresh:true});
+    if(typeof settingsRecord?.etag!=="string"||!complete(s)||binding.environment!==env.QUICKBOOKS_ENVIRONMENT
+      ||!sameCompany(binding,value.merchantBinding)||!sameCompany(binding,s.merchantBinding))throw productionUnavailable();
+    let authorizedRecord=record;
+    async function recheck() {
+      if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw productionUnavailable();
+      const order=await read(path),quote=await read(paidQuotePath),prepared=await read(planPath),settings=await readSettings();
+      if(order?.etag!==authorizedRecord.etag||!captured(order?.value)||quote?.etag!==paidQuote.etag
+        ||prepared?.etag!==plan.etag||settings?.etag!==settingsRecord.etag)throw productionUnavailable();
+      await access(actor);const account=await read(userPath(email));
+      if(account?.etag!==actorRecord.etag)throw productionUnavailable();
+    }
+    async function verifyPaidInvoice() {
+      await recheck();
+      const checkedAt=now(),invoice=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice;
+      const data=invoiceData(invoice,value),payments=[];
+      for(const paymentId of data.paymentIds)payments.push(paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId));
+      if(data.balanceCents!==0||!payments.length||payments.reduce((sum,payment)=>sum+payment.allocatedCents,0)!==value.amountCents)throw productionUnavailable();
+      // A separate RefundReceipt or CreditMemo/Expense can leave this invoice
+      // and its Payment allocation unchanged. The current Accounting reader
+      // cannot prove absence of reversals, so production has no default bypass.
+      // A future supported reconciliation adapter must supply fresh evidence
+      // for this exact sale; neither a paid badge nor an environment flag does.
+      // https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/Payment
+      if(typeof verifyReversals!=="function")throw reversalsUnavailable();
+      const context={orderId:referenceId,environment:binding.environment,grantId:binding.grantId,realmId:binding.realmId,
+        customerId:value.customerId,invoiceId:value.invoiceId,currency:value.currency,amountCents:value.amountCents,paymentIds:data.paymentIds};
+      const proof=await verifyReversals(structuredClone(context)),observed=Date.parse(proof?.checkedAt),expires=Date.parse(proof?.expiresAt);
+      if(!proof||proof.version!==1||proof.outcome!=="clear"||!hex.test(proof.evidenceHash||"")
+        ||Object.keys(context).some(field=>field==="paymentIds"?!Array.isArray(proof.paymentIds)||JSON.stringify(proof.paymentIds)!==JSON.stringify(context.paymentIds):proof[field]!==context[field])
+        ||typeof proof.checkedAt!=="string"||typeof proof.expiresAt!=="string"||!Number.isFinite(observed)||!Number.isFinite(expires)
+        ||observed<checkedAt||observed>now()||expires<=now()||expires>observed+60_000)throw reversalsUnavailable();
+      await recheck();
+      if(checkedAt+60_000<=now()||expires<=now())throw productionUnavailable();
+      return {checkedAt,expiresAt:expires};
+    }
+    let verifiedAt=await verifyPaidInvoice(),fresh=value.fulfillmentQuote;
+    const quoteValid=quote=>quote&&quote.preparedId===preparedId&&quote.manifestHash===manifestHash&&quote.environment===binding.environment&&quote.currency==="USD"
+      &&quote.apiVerified===true&&quote.qualityVerified===true&&quote.commercialTermsVerified===true
+      &&Number.isSafeInteger(quote.providerCostCents)&&quote.providerCostCents>=0&&quote.providerCostCents<=value.providerCostCents
+      &&Number.isSafeInteger(quote.maximumCostCents)&&quote.maximumCostCents>=quote.providerCostCents&&quote.maximumCostCents<=value.providerCostCents
+      &&typeof quote.quoteReference==="string"&&quote.quoteReference.trim()&&quote.quoteReference.length<=200
+      &&typeof quote.expiresAt==="string"&&Number.isFinite(Date.parse(quote.expiresAt));
+    if(fresh&&!quoteValid(fresh))throw productionUnavailable();
+    const started=job.status!=="prepared"||job.shots.some(shot=>shot.status!=="prepared");
+    if(started&&(!fresh||job.authorization?.manifestHash!==manifestHash||job.authorization.environment!==binding.environment
+      ||job.authorization.quoteReference!==fresh.quoteReference||job.authorization.budgetCents!==fresh.maximumCostCents))throw productionUnavailable();
+    if(!fresh||Date.parse(fresh.expiresAt)<=now()) {
+      // An expired full-film quote cannot be replaced after even one submission.
+      if(started)throw productionUnavailable();
+      fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:value.providerCostCents});
+      if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw productionUnavailable();
+      // Payment may have been voided/refunded while the provider quote was read.
+      verifiedAt=await verifyPaidInvoice();
+      if(Date.parse(fresh.expiresAt)<=now())throw productionUnavailable();
+      const fulfillmentQuote=Object.fromEntries(["preparedId","manifestHash","environment","currency","providerCostCents","maximumCostCents",
+        "quoteReference","expiresAt","apiVerified","qualityVerified","commercialTermsVerified"].map(field=>[field,fresh[field]]));
+      authorizedRecord=await save(path,record,{...value,fulfillmentQuote});
+    }
+    await recheck();
+    const until=Math.min(Date.parse(fresh.expiresAt),verifiedAt.checkedAt+60_000,verifiedAt.expiresAt,now()+60_000);
+    if(until<=now())throw productionUnavailable();
+    return {allowed:true,manifestHash,budgetCents:fresh.maximumCostCents,quoteReference:fresh.quoteReference,expiresAt:stamp(until),
+      environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
+  }
   return {settings,catalog,saveSettings,configuration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
     ownsOrder:async id=>hex.test(id||"")&&(await read(orderPath(id)))?.value.checkoutMethod===METHOD,
-    authorizeProduction:async()=>{throw unavailable();}};
+    authorizeProduction};
 }
 export const hostedCheckout=createHostedCheckoutService();

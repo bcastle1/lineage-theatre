@@ -9,7 +9,8 @@ import { digest } from "../api/_lib/auth.mjs";
 import { createFilmProductionService, validateProviderOutput, validateProviderAudio, unavailableMagicLightAdapter } from "../api/_lib/film-production.mjs";
 import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
 import { createProductionQueue } from "../api/_lib/production-queue.mjs";
-import { payments } from "../api/_lib/payments.mjs";
+import { createPaymentsService } from "../api/_lib/payments.mjs";
+import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
 
 const MAX_BYTES = 250 * 1024 * 1024;
@@ -144,13 +145,21 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
   };
 }
 
-export function createProductionWorker({ adapter = unavailableMagicLightAdapter, paymentService = payments, ...dependencies } = {}) {
-  const film = createFilmProductionService({ ...dependencies, adapter,
-    readRecordImpl: dependencies.read || dependencies.readRecordImpl,
-    writeRecordImpl: dependencies.write || dependencies.writeRecordImpl,
-    authorize: ({ email, id, manifestHash, authorizationReference }) => paymentService.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
+export function createProductionWorker({ adapter = unavailableMagicLightAdapter, paymentService, ...dependencies } = {}) {
+  const read = dependencies.read || dependencies.readRecordImpl;
+  const write = dependencies.write || dependencies.writeRecordImpl;
+  // Quotes and generation must use this worker's same configured adapter. A
+  // callback to the web singleton could otherwise quote a different provider.
+  let film;
+  const productionQuote = input => film.quoteForProductionBudget(input);
+  const hosted = dependencies.hostedCheckout || createHostedCheckoutService({ ...dependencies, read, write, productionQuote });
+  const authorizer = paymentService || createPaymentsService({ ...dependencies, read, write, hostedCheckout: hosted, productionQuote });
+  film = createFilmProductionService({ ...dependencies, adapter,
+    readRecordImpl: read,
+    writeRecordImpl: write,
+    authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
     verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
-  const queue = createProductionQueue({ ...dependencies, film, paymentService });
+  const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
   const assemble = createWorkerAssembly({ ...dependencies, adapter });
   return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
 }

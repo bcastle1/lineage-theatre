@@ -10,10 +10,9 @@ const MAX_MANIFEST_BYTES = 1_500_000;
 export const FILM_PREPARATION_CONSENT = "Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.";
 export const MAGICLIGHT_GAPS = Object.freeze([
   "Account API entitlement and documented authentication",
-  "Supported clip submission, upload, status, output and reconciliation contract",
+  "Supported clip submission, upload, status, output and request lookup",
   "Verified account quality tiers, clip limits and exact job costs",
   "Character reference, voice, music and continuity capabilities",
-  "API commercial and in-app resale permission",
   "Durable media assembly worker and private playable output verification",
 ]);
 
@@ -21,6 +20,7 @@ export class FilmProductionError extends Error {
   constructor(message, status = 400, code = "INVALID_PRODUCTION_REQUEST") { super(message); this.status = status; this.code = code; }
 }
 const unavailable = () => new FilmProductionError("Film production is not available yet. You can continue preparing your screenplay.", 503, "PRODUCTION_UNAVAILABLE");
+const authorizationRequired = () => new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
 const invalid = message => { throw new FilmProductionError(message); };
 const clone = value => structuredClone(value);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -301,9 +301,10 @@ export function createFilmProductionService(dependencies = {}) {
       if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash || grant.environment !== adapter.environment
         || !Number.isSafeInteger(grant.budgetCents) || grant.budgetCents < 0 || Date.parse(grant.expiresAt) <= now() || !Number.isFinite(Date.parse(grant.expiresAt))
         || (job.mode === "operator-test" && grant.fictionalOnly !== true)
-        || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
+        || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw authorizationRequired();
       const validation = await adapter.validateManifest(clone(job.manifest));
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
+      if (Date.parse(grant.expiresAt) <= now()) throw authorizationRequired();
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
     }
     // Polling and reconciliation never spend money and continue after a quote/grant expires.
@@ -315,10 +316,30 @@ export function createFilmProductionService(dependencies = {}) {
     job.status = shot.status === "uncertain" || previousStatus === "submitting" ? "uncertain" : "processing";
     try { await save(productionJobPath(email, id), job, record.etag); }
     catch (error) { if (conflict(error)) return customerJob((await get(email, id)).value); throw error; }
+    async function releaseUnsubmittedClaim() {
+      // This invocation has not called submitShot. Restore only its own claim;
+      // a lost/replaced claim must retain the existing reconciliation path.
+      const pending = await get(email, id), restored = clone(pending.value);
+      const current = restored.shots.find(candidate => candidate.id === shot.id);
+      if (restored.lease?.token === token && current?.status === "submitting"
+        && current.requestKey === shot.requestKey && !current.providerJobId) {
+        current.status = "prepared";
+        delete current.submittedAt;
+        delete restored.lease;
+        restored.status = record.value.status;
+        if (record.value.authorization) restored.authorization = clone(record.value.authorization);
+        else delete restored.authorization;
+        try { await save(productionJobPath(email, id), restored, pending.etag); }
+        catch (error) { if (!conflict(error)) throw error; }
+      }
+      throw authorizationRequired();
+    }
+    const request = { manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+      ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
+    // Storage and request preparation can outlast the short-lived grant too.
+    if (previousStatus === "prepared" && Date.parse(grant.expiresAt) <= now()) await releaseUnsubmittedClaim();
     let result;
     try {
-      const request = { manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
-        ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
       if (previousStatus === "prepared") result = await adapter.submitShot(request);
       else if (["submitting", "uncertain"].includes(previousStatus)) result = await adapter.reconcileShot(request);
       else result = await adapter.pollShot(request);

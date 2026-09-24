@@ -4,9 +4,9 @@ The studio now saves an idempotent production request instead of depending on th
 
 ## Current activation boundary
 
-The default MagicLight adapter is still unavailable. On September 20 the user confirmed that the vendor has not replied with API documentation. Neither this worker nor a configured key supplies the missing provider contract. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
+The default MagicLight adapter is still unavailable. September 23 inspection confirmed an active API key and 80,000 credits but did not establish supported generation authentication or request/response instructions. Erik confirmed the affiliate/partner relationship and commercial permission; no new agreement is requested. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
 
-The worker is implemented and tested locally but has not been provisioned on a durable host. Do not enable paid film sales before connecting the verified provider, running a monitored worker against the intended private storage, and establishing actual delivery. Existing capability defaults continue to block customer production and checkout.
+The worker is implemented and tested locally but has not been provisioned on a durable host. Live owner checkout and receipt delivery have been tested separately; the customer-production capability remains unavailable. This branch adds hosted payment authorization but requires supported reversal reconciliation before it can issue a production grant. Launching film delivery still requires the verified provider, a monitored worker against the intended private storage, and actual delivery acceptance.
 
 ## Worker deployment
 
@@ -33,12 +33,12 @@ Captions are generated and retained privately alongside the MP4 when upload succ
 
 ## Still required for real operation
 
-- Official MagicLight authentication, generation/output/reference-asset contracts, account quality/cost limits, idempotency or lookup, and applicable commercial permission.
+- Supported MagicLight authentication, generation/output/reference-asset instructions, account quality/cost limits, and idempotency or lookup.
 - A provider pricing contract that covers the whole production. The current captured-order grant stops fresh shot submissions after the original quote expires (currently capped at 15 minutes). A long job must not silently extend that budget or invent a new price.
-- Approved production merchant credentials and the reviewed payment activation evidence described in `PAYMENT-READINESS-REVIEW.md`. Sandbox review is separate and restricted to the genuine owner's fixed fictional operator test.
+- A supported server-side payment reversal verifier for hosted orders; invoice/payment allocation alone does not establish the absence of a separate refund. See [the current integration checkpoint](MAGICLIGHT-MEDIA-INTEGRATION.md). The separately tested owner payment flow does not establish automatic fulfillment readiness or expand customer checkout access.
 - Provisioned worker host, monitored scheduling, intended private storage, recovery operations, and real authenticated provider/output acceptance.
 
-On September 20, the signed-in Intuit dashboard showed the existing Lineage Theater assessment as **Completed / Approved**. Its read-only questionnaire has the corrected In-App receipt delivery and supported receipt fields; email, fees and card last-four are unselected. No further assessment submission was needed or performed in this task. Actual sandbox transaction lifecycle verification is still marked No, and live grant migration/company verification and merchant activation remain separate checkpoints.
+On September 20, the signed-in Intuit dashboard showed the existing Lineage Theater assessment as **Completed / Approved**. Its read-only questionnaire had the corrected In-App receipt delivery and supported receipt fields; email, fees and card last-four were unselected. That historical review did not verify a transaction. On September 23, the live app showed the owner's $3.30 test payment recorded by QuickBooks, and Erik confirmed successful payment plus customer and merchant receipt delivery. No new transaction or refund was performed during this integration continuation.
 
 ## Implementation verification — September 20, 2026
 

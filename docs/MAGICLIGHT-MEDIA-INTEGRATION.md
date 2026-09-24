@@ -1,6 +1,6 @@
 # Magiclight media integration development
 
-Development checkpoint: September 22, 2026. This change completes additional media-processing support. It does not claim an authenticated Magiclight generation, activate checkout, or provision a production worker.
+Development checkpoint: September 23, 2026. This change adds media-processing support and connects hosted payment authorization to the production queue. It does not claim an authenticated Magiclight generation, change live checkout, or provision a production worker.
 
 ## Native output quality
 
@@ -37,7 +37,25 @@ Temporary files are removed after success or failure. Only verified MP4 and capt
 
 The September 22 public inspection included the [API key page](https://magiclight.ai/openclaw/api-keys/), [API pricing page](https://magiclight.ai/openclaw/pricing/) and their linked first-party scripts. API pack copy describes Hailuo image-to-video models; the inspected scripts expose key, balance, usage and pack-management behavior. No supported generation authentication format, submission/status/result schema or developer SDK was found in those resources. Account-management calls do not establish a generation contract.
 
-Development can continue on the media pipeline while these request details are obtained. Affiliate and partner offerings indicate commercial relationships; the exact applicable API terms remain to be clarified and are not treated here as a prohibition on implementation.
+On September 23, Erik confirmed the existing affiliate/partner relationship and that no separate agreement is necessary. This task proceeds on that confirmation. The outstanding provider input is technical generation documentation, not a request for another agreement.
+
+## September 23 production wiring
+
+The integration branch now includes the current hosted checkout and receipt release. Confirmed hosted payments route through production authorization that rechecks the customer, original order and plan, current QuickBooks invoice/payment allocation, and a bounded provider quote. A planning price alone cannot authorize generation. The worker uses its own configured film service for both quotations and generation, preserving the same full-film quote once any shot has started.
+
+Hosted authorization also requires a server-side `verifyReversals` implementation. A paid invoice and its payment allocation cannot establish that a separate refund did not occur; the [QuickBooks Payment reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/Payment) documents that linked refunds do not change `TotalAmt`. There is no production implementation of this verifier yet, so the default authorizer returns `HOSTED_REVERSALS_UNVERIFIED`. Tests inject synthetic evidence only. Adding the MagicLight adapter alone will not enable hosted production.
+
+The verifier receives the exact order, current grant/company/environment, customer, invoice, currency, amount and payment IDs. Its response must match that identity and include version 1, outcome `clear`, an evidence hash and a current observation with at most 60 seconds of validity. Each authorization rechecks persisted account/order/plan/settings after asynchronous provider reads; a refreshed provider quote requires another payment and reversal check. No environment flag or customer input substitutes for this evidence.
+
+Approved customers and existing owner accounts use the shared account-access rules. Suspension or account changes during payment authorization block queue creation. The customer start action supports paid hosted invoices when the configured production service reports availability; an API key or client flag cannot enable rendering.
+
+The authenticated MagicLight API account was read on September 23: `LineageServer` is Active and the account displays 80,000 API credits. Vercel metadata confirms a protected Production `MAGICLIGHT_API_KEY`. No key value was read or copied, credits purchased, or real generation request submitted during this continuation.
+
+The supplied references at [docs.magicai.ai](https://docs.magicai.ai/docs/) describe Magic AI's chatbot service using `api.magicai.ai`. Its [API reference](https://docs.magicai.ai/docs/category/api-reference/) lists projects, data sources and chat. These pages do not provide MagicLight video submission, status or output instructions and have not been used as a destination for the MagicLight credential.
+
+The supplied [public fork](https://github.com/foctaveluka-eng/magiclight-api) and its raw README returned HTTP 404 on September 23. The [deployed wrapper's read-only API description](https://vercel-animate-api.vercel.app/api) was reachable and reported version 3.0.0: optional `imageUrl`, required animation `prompt`, 5- or 10-second duration, quality and output format, with status/download identified by `pack` and `eventId`. This differs from the pasted story-expansion parameters. Its current public descriptions do not establish MagicLight as the upstream provider or explain authentication with the existing OpenClaw API key. No generation/status/download route was invoked and no credential or customer material was sent to this wrapper.
+
+The default MagicLight adapter remains unavailable. The remaining connection work requires the supported video-generation URL, authentication and request/response examples, status/output retrieval and retry or request-lookup behavior. After implementing those calls, operational verification must cover the account's actual quality/cost limits, a supervised worker on the selected host, and a bounded real render with private playback. Local fixture and media tests do not establish live generation.
 
 ## Verification
 
@@ -45,6 +63,6 @@ Run `pnpm test` with `FFMPEG_PATH` pointing to a trusted full FFmpeg executable.
 
 Tests cover retained 1080p geometry, compatible mixed source profiles, separate audio, short audio rejection, malformed media/profiles, private audio downloads, provider-output normalization, queue behavior and publication checks. All generated test people, media and provider responses are fixtures. No real Magiclight render or customer transaction is represented by those tests.
 
-Local validation on September 22 passed all **314 tests with zero failures or skips**, including actual FFmpeg decoding/encoding. The production TypeScript/Vite build passed with its existing large-bundle advisory. The native-quality sample was independently decoded as 1920 by 1080, 24 fps, with AAC audio, and its stored byte length and SHA-256 were checked.
+Local validation on September 23 passed all **540 tests with zero failures or skips**, including actual FFmpeg decoding/encoding, hosted production authorization, refund-proof rejection, worker restart, authorization expiry before submission and customer readiness cases. The production TypeScript/Vite build passed with its existing large-bundle advisory. The September 22 native-quality sample was independently decoded as 1920 by 1080, 24 fps, with AAC audio, and its stored byte length and SHA-256 were checked.
 
-Remaining operational work includes the documented provider adapter, reference-asset submission, actual account quality/cost verification, a durable worker host and a bounded real render with private playback acceptance. See [production worker operations](PRODUCTION-WORKER.md) for the existing budget and hosting constraints.
+Remaining operational work includes the documented provider adapter, reference-asset submission, actual account quality/cost verification, supported payment reversal reconciliation, a durable worker host and a bounded real render with private playback acceptance. See [production worker operations](PRODUCTION-WORKER.md) for the existing budget and hosting constraints.

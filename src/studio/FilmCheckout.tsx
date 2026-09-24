@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CreditCard, Download, ExternalLink, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference, type PreparedProduction } from "./model";
 import {prepareFilmPrice,type FilmPrice} from "./film-pricing";
-import { normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
+import { canStartFilmProduction, normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
 import { checkFilmPayment, commitFilmPayment, retryFilmPayment } from "./checkout-payment";
 import { createFilmReceiptData, createFilmReceiptHtml } from "./payment-receipt";
 import { captchaToken } from "../lib/captcha";
@@ -46,6 +46,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
   const paymentReference = payment || attemptedPayment.current;
   const hostedOrder = order?.checkoutMethod === "quickbooks-hosted-invoice";
   const paidPlanCurrent = Boolean(paymentReference && prepared && currentPlan && paymentReference.preparedId === prepared.id && paymentReference.manifestHash === prepared.manifestHash);
+  const canStartProduction = canStartFilmProduction(order, productionAvailable, paidPlanCurrent);
 
   useEffect(() => {
     let active = true; setInputHash(""); setConsent(false);
@@ -226,7 +227,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     });
   }
   async function productionRequest(start: boolean) {
-    if (!paymentReference || (start && (!paidPlanCurrent || hostedOrder || order?.status !== "captured" || !productionAvailable))) return;
+    if (!paymentReference || (start && !canStartProduction)) return;
     await work(start ? "Starting your film…" : "Checking film production…", async () => {
       const result = await api<ProductionStatus>(start ? "/api/studio" : `/api/studio?action=productionStatus&id=${encodeURIComponent(paymentReference.preparedId)}`,
         start ? { action: "startProduction", preparedId: paymentReference.preparedId, orderId: paymentReference.orderId, productionConsent: true } : undefined);
@@ -294,11 +295,11 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
         <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
-          : hostedOrder ? "Payment is recorded. Your administrator must confirm production availability." : "Your payment is confirmed. Starting production uses the saved plan associated with this order."}</p>
+          : "Your payment is confirmed. Starting production uses the saved plan associated with this order."}</p>
         {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
-        {(!productionAvailable || hostedOrder) && !production?.mediaReady && <p>Film production is currently unavailable. Your order remains recorded; contact the administrator for help or a refund.</p>}
+        {!productionAvailable && !production?.mediaReady && <p>Film production is currently unavailable. Your order remains recorded; contact the administrator for help or a refund.</p>}
         <div className="action-group">
-          {!hostedOrder && (!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !productionAvailable || !paidPlanCurrent} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume production" : "Start my film"}</button>}
+          {(!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !canStartProduction} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume production" : "Start my film"}</button>}
           <button className="text-button" disabled={Boolean(busy)} onClick={() => void productionRequest(false)}><RefreshCw size={15} />Check production status</button>
         </div>
         {production?.status === "completed" && production.mediaReady && <div className="finished-production">
