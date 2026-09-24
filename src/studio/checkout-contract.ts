@@ -34,13 +34,20 @@ const hostedMethod = "quickbooks-hosted-invoice";
 // No customer card or bank data is collected or submitted by this application.
 export function normalizeHostedInvoiceUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 8192 || !value.startsWith("https://connect.intuit.com/")
-    || /[\s\\\u0000-\u001f\u007f]/.test(value)) return null;
+    || /[\s\\#\u0000-\u001f\u007f]/.test(value)) return null;
   try {
     const url = new URL(value);
     const portal = url.pathname.startsWith("/portal/") && url.pathname.length > "/portal/".length;
-    const shortLink = /^https:\/\/connect\.intuit\.com\/t\/scs-v1-[a-fA-F0-9]{96}(?:\?locale=[a-zA-Z]{2}_[a-zA-Z]{2})?$/.test(value);
+    const shortLink = /^\/t\/scs-v1-[a-fA-F0-9]{96}$/.test(url.pathname);
     if (url.protocol !== "https:" || url.hostname !== "connect.intuit.com" || url.username || url.password || url.port || url.hash
       || (!portal && !shortLink) || url.href !== value) return null;
+    if (shortLink) {
+      const locales = url.searchParams.getAll("locale");
+      if (locales.length > 1 || (locales.length === 1 && !/^[a-zA-Z]{2}_[a-zA-Z]{2}$/.test(locales[0]))) return null;
+      // The invoice token identifies the payment page. Do not forward provider
+      // action/tracking or redirect parameters to the customer's browser.
+      return `${url.origin}${url.pathname}${locales.length ? `?locale=${locales[0]}` : ""}`;
+    }
     return value;
   } catch { return null; }
 }
