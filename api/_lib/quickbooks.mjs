@@ -742,7 +742,7 @@ export function createQuickBooksAccountingTransport(overrides={}) {
     }
     return JSON.stringify(body);
   }
-  async function inspect(allowRefresh=false,requireAccess=false,expected) {
+  async function inspect(allowRefresh=false,requireAccess=false,expected,metadataOnly=false) {
     const config=quickbooksConfig(env),record=await read(QUICKBOOKS_CONNECTION_PATH),value=record?.value;
     if(value?.status!=="authorized"||value.encryptedTokens?.version!==2||value.pending||value.refreshOperation||value.remoteReviewRequired
       ||value.revocationStatus==="pending"||value.remoteCleanup?.status==="pending"
@@ -759,6 +759,17 @@ export function createQuickBooksAccountingTransport(overrides={}) {
     if(expected&&!sameBinding(bound,expected))throw unavailable();
     const expires=Date.parse(token.accessTokenExpiresAt);
     if(!Number.isFinite(expires))throw unavailable();
+    // Admin metadata may describe a saved grant as renewable, but must never
+    // use that observation to authorize an Accounting request or rotate tokens.
+    if(metadataOnly) {
+      const renewalDue=expires<=now()+60_000||!token.accessToken;
+      if(renewalDue) {
+        const refreshExpiry=Date.parse(token.refreshTokenExpiresAt),hardExpiry=token.refreshTokenHardExpiresAt==null?null:Date.parse(token.refreshTokenHardExpiresAt);
+        if(typeof token.refreshToken!=="string"||token.refreshToken.length<8||token.refreshToken.length>16_384||/[\s\x00-\x1f]/.test(token.refreshToken)
+          ||!Number.isFinite(refreshExpiry)||refreshExpiry<=now()||(hardExpiry!==null&&(!Number.isFinite(hardExpiry)||hardExpiry<=now())))throw unavailable();
+      }
+      return {record,config,owner,token,binding:bound,renewalDue};
+    }
     if(expires<=now()+60_000||((allowRefresh||requireAccess)&&!token.accessToken)) {
       if(!allowRefresh)throw unavailable();
       await connection.refresh(owner,{expectedRevision:value.revision});
@@ -769,6 +780,16 @@ export function createQuickBooksAccountingTransport(overrides={}) {
   async function binding({allowRefresh=false}={}) {
     try {if(typeof allowRefresh!=="boolean")throw invalid();return (await inspect(allowRefresh)).binding;}
     catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
+  }
+  async function readiness() {
+    try {
+      const first=await inspect(false,false,undefined,true),current=await inspect(false,false,first.binding,true);
+      const finalGrant=await read(QUICKBOOKS_CONNECTION_PATH);
+      if(first.record.etag!==current.record.etag||finalGrant?.etag!==current.record.etag
+        ||digest(first.owner.passwordHash||"")!==digest(current.owner.passwordHash||"")
+        ||quickbooksConfig(env).credentialVersion!==current.config.credentialVersion)throw unavailable();
+      return {binding:current.binding,status:current.renewalDue?"renewal-due":"ready"};
+    }catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
   }
   async function request(expected,operation) {
     if(!validBinding(expected)||!fields(operation,["method","path","query","body","requestId"],["method","path"])||typeof operation.path!=="string")throw invalid();
@@ -813,5 +834,5 @@ export function createQuickBooksAccountingTransport(overrides={}) {
       });
     }catch {throw new QuickBooksError("The Accounting request result could not be confirmed. Check its saved status before retrying.",502,"ACCOUNTING_REQUEST_UNCERTAIN");}
   }
-  return {binding,request};
+  return {binding,request,readiness};
 }

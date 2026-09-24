@@ -1,18 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, RefreshCw, Save } from "lucide-react";
 import { api } from "../studio/model";
+import { mergeHostedCheckoutSettings, verifyHostedCheckoutSettings, type HostedCheckoutSettingsValue as Settings } from "./quickbooks-panels";
 
-type Settings = {
-  revision: number; enabled: boolean; configured: boolean; reason?: string; environment?: string;
-  serviceItemId: string; serviceItemName?: string; taxCode: string;
-  deliveryTerms: string; refundTerms: string; merchantConfirmed: boolean;
-  pciAcknowledged: boolean; automaticInvoiceEmailDisabled: boolean;
-};
 type Item = { id: string; name: string; active: boolean; type: string; taxable?: boolean };
 const problem = (error: unknown) => error instanceof Error ? error.message : "The checkout settings could not be loaded.";
 
-export default function HostedCheckoutSettings({ isOwner, disabled = false, onSaved }: {
+export default function HostedCheckoutSettings({ isOwner, disabled = false, onSaved, refreshedSettings = null }: {
   isOwner: boolean; disabled?: boolean; onSaved?: () => void;
+  refreshedSettings?: PromiseSettledResult<Settings> | null;
 }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [items, setItems] = useState<Item[] | null>(null);
@@ -20,15 +16,31 @@ export default function HostedCheckoutSettings({ isOwner, disabled = false, onSa
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const lock = useRef(false);
+  const unsavedChanges = useRef(false);
+  const settingsRequest = useRef(0);
+  const previousRefresh = useRef(refreshedSettings);
   useEffect(() => {
     let active = true;
-    void api<Settings>("/api/admin?action=hostedCheckout").then(value => {
-      if (!Number.isSafeInteger(value.revision) || typeof value.enabled !== "boolean") throw new Error("The saved checkout settings could not be verified.");
-      if (active) setSettings(value);
-    }).catch(cause => { if (active) setError(problem(cause)); });
+    const request = ++settingsRequest.current;
+    void api<Settings>("/api/admin?action=hostedCheckout").then(verifyHostedCheckoutSettings).then(value => {
+      if (active && request === settingsRequest.current) setSettings(value);
+    }).catch(cause => { if (active && request === settingsRequest.current) setError(problem(cause)); });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    // A newly mounted panel reads fresh settings instead of replaying a result
+    // retained from a previous tab. Only a new owner-action result updates it.
+    if (previousRefresh.current === refreshedSettings) return;
+    previousRefresh.current = refreshedSettings;
+    if (!refreshedSettings) return;
+    settingsRequest.current += 1;
+    if (refreshedSettings.status === "fulfilled") {
+      setSettings(current => mergeHostedCheckoutSettings(current, refreshedSettings.value, unsavedChanges.current));
+      setError("");
+    } else setError(problem(refreshedSettings.reason));
+  }, [refreshedSettings]);
   function update<K extends keyof Settings>(field: K, value: Settings[K]) {
+    unsavedChanges.current = true;
     setSettings(current => current ? { ...current, [field]: value } : current);
     setMessage("");
   }
@@ -57,6 +69,7 @@ export default function HostedCheckoutSettings({ isOwner, disabled = false, onSa
         automaticInvoiceEmailDisabled: current.automaticInvoiceEmailDisabled });
       if (!Number.isSafeInteger(value.revision) || value.revision <= current.revision || value.enabled !== current.enabled)
         throw new Error("The saved checkout settings could not be confirmed. Reload before saving again.");
+      unsavedChanges.current = false;
       setSettings(value); setMessage(value.enabled ? "Hosted checkout settings saved." : "Hosted checkout is disabled.");
       onSaved?.();
     });

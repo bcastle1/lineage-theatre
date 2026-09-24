@@ -22,10 +22,11 @@ export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KE
   if(checkoutConfiguration) {
     const available=checkoutConfiguration.available===true;
     production.billing=available;
-    production.payment={provider:"quickbooks",label:"QuickBooks",status:available?"configured":"setup-required",available};
-    production.connections.billing={available,reason:available
+    const status=["renewal-due","needs-attention"].includes(checkoutConfiguration.connectionStatus)?checkoutConfiguration.connectionStatus:available?"configured":"setup-required";
+    production.payment={provider:"quickbooks",label:"QuickBooks",status,available};
+    production.connections.billing={available,status,reason:checkoutConfiguration.reason||(available
       ?"QuickBooks-hosted checkout is configured for this account. Payment recording, bank settlement, and film delivery are tracked separately."
-      :"QuickBooks-hosted checkout needs completed owner settings and an active company connection. Existing saved payment records remain available."};
+      :"QuickBooks-hosted checkout needs completed owner settings and an active company connection. Existing saved payment records remain available.")};
   }
   return {story:story.available,storyModel:STORY_MODEL,...production,connections:{story,...production.connections}};
 }
