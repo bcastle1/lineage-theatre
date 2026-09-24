@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { digest, userPath } from "../api/_lib/auth.mjs";
+import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { createFilmProductionService, fictionalOperatorProject } from "../api/_lib/film-production.mjs";
 import { createProductionQueue, productionQueuePath } from "../api/_lib/production-queue.mjs";
 
 const email = "customer@example.invalid", orderId = "a".repeat(64);
 const actor = { email, role: "customer", status: "active", approvedBy: "owner@example.invalid", approvedAt: "2026-09-20T00:00:00Z" };
-function fixture({ unavailable = false, submitFails = false } = {}) {
+function fixture({ unavailable = false, submitFails = false, account = actor } = {}) {
+  const email = account.email;
   let time = Date.parse("2026-09-20T12:00:00Z"), revision = 0;
   const records = new Map(), calls = { submit: 0, reconcile: 0, assembly: 0 };
   const read = async path => structuredClone(records.get(path) || null);
@@ -34,8 +36,66 @@ function fixture({ unavailable = false, submitFails = false } = {}) {
   const assemble = async ({ id, job }) => { calls.assembly++; return { playable: true, manifestHash: job.manifestHash,
     pathname: `production/media/${digest(email)}/${id}/${"b".repeat(64)}.mp4`, sha256: "b".repeat(64), contentType: "video/mp4", sizeBytes: 100, durationSeconds: 15, width: 1920, height: 1080, frameRate: 24 }; };
   return { queue, film, records, calls, read, write, dependencies, assemble, advanceTime: () => { time += 400_000; },
-    async prepare() { await write(userPath(email), actor); return film.prepare({ email, project: fictionalOperatorProject(), preparationConsent: true, idempotencyKey: "queue-test-preparation-001" }); } };
+    async prepare() { await write(userPath(email), account); return film.prepare({ email, project: fictionalOperatorProject(), preparationConsent: true, idempotencyKey: "queue-test-preparation-001" }); } };
 }
+
+test("persisted legacy owner and administrator accounts can queue and process their paid plan", async () => {
+  for (const account of [{ email: OWNER_EMAIL, role: "owner" }, { email: "admin@example.invalid", role: "admin" }]) {
+    const f = fixture({ account }), job = await f.prepare();
+    assert.equal((await f.queue.enqueue({ actor: account, id: job.id, orderId })).status, "queued");
+    assert.deepEqual(await f.queue.runTicket(productionQueuePath(account.email, job.id)), { state: "pending" });
+    assert.equal(f.calls.submit, 1);
+  }
+});
+
+test("stale sessions cannot queue suspended, unapproved, setup-incomplete, missing or mismatched accounts", async () => {
+  const legacyOwner = { email: OWNER_EMAIL, role: "owner" };
+  for (const [session, current] of [
+    [legacyOwner, { ...legacyOwner, status: "suspended" }],
+    [legacyOwner, { ...legacyOwner, mustChangePassword: true }],
+    [legacyOwner, { ...legacyOwner, role: "customer" }],
+    [legacyOwner, null],
+    [legacyOwner, { email: "another@example.invalid", role: "admin" }],
+    [actor, { email, role: "customer", status: "active" }],
+    [actor, { ...actor, status: "pending" }],
+  ]) {
+    const f = fixture({ account: session }), job = await f.prepare(), path = userPath(session.email);
+    const saved = await f.read(path);
+    if (current) await f.write(path, current, saved.etag); else f.records.delete(path);
+    await assert.rejects(f.queue.enqueue({ actor: session, id: job.id, orderId }), error => error.code === "PRODUCTION_ACCESS_REQUIRED");
+    assert.equal(f.records.has(productionQueuePath(session.email, job.id)), false);
+    assert.equal(f.calls.submit, 0);
+  }
+});
+
+test("account suspension during payment authorization blocks both new and resumed queue requests", async () => {
+  const account = { email: OWNER_EMAIL, role: "owner" };
+  for (const resume of [false, true]) {
+    const f = fixture({ account }), job = await f.prepare(), path = productionQueuePath(account.email, job.id);
+    if (resume) {
+      await f.queue.enqueue({ actor: account, id: job.id, orderId });
+      const ticket = await f.read(path);
+      await f.write(path, { ...ticket.value, state: "attention" }, ticket.etag);
+    }
+    const queue = createProductionQueue({ ...f.dependencies, paymentService: { authorizeProduction: async input => {
+      const saved = await f.read(userPath(account.email));
+      await f.write(userPath(account.email), { ...account, status: "suspended" }, saved.etag);
+      return f.dependencies.paymentService.authorizeProduction(input);
+    } } });
+    await assert.rejects(queue.enqueue({ actor: account, id: job.id, orderId }), error => error.code === "PRODUCTION_ACCESS_REQUIRED");
+    assert.equal((await f.read(path))?.value.state, resume ? "attention" : undefined);
+    assert.equal(f.calls.submit, 0);
+  }
+});
+
+test("a legacy owner suspended after enqueue cannot start a provider operation", async () => {
+  const account = { email: OWNER_EMAIL, role: "owner" }, f = fixture({ account }), job = await f.prepare();
+  await f.queue.enqueue({ actor: account, id: job.id, orderId });
+  const saved = await f.read(userPath(account.email));
+  await f.write(userPath(account.email), { ...account, status: "suspended" }, saved.etag);
+  assert.deepEqual(await f.queue.runTicket(productionQueuePath(account.email, job.id)), { state: "attention" });
+  assert.equal(f.calls.submit, 0);
+});
 
 test("queue requires configured rendering and a saved captured-order authorization", async () => {
   const f = fixture({ unavailable: true }), job = await f.prepare();
