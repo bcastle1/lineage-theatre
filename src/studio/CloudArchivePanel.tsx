@@ -22,7 +22,7 @@ export function cloudMediaUrl(film: CloudFilm, download = false) {
 }
 const labelFor = (film: CloudFilm) => film.hasVideo ? "Uploaded finished film" : film.status === "upload-pending" ? "Upload awaiting verification" : "Film details saved";
 
-export default function CloudArchivePanel({ projects }: { projects: Film[] }) {
+export default function CloudArchivePanel({ projects, onBusyChange, showFilms = true }: { projects: Film[]; onBusyChange?: (busy: boolean) => void; showFilms?: boolean }) {
   const [films, setFilms] = useState<CloudFilm[]>([]);
   const [cursor, setCursor] = useState<string>();
   const [selection, setSelection] = useState(projects[0]?.id || "new");
@@ -39,6 +39,8 @@ export default function CloudArchivePanel({ projects }: { projects: Film[] }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
   const [playing, setPlaying] = useState<string>();
+  useEffect(() => { onBusyChange?.(Boolean(busy) && !busy.startsWith("Loading")); }, [busy, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
   const id = selected?.id || newId;
   const alreadyUploaded = films.some((film) => film.id === id && film.hasVideo);
   function feedback(text: string, failed = false) { setMessage(text); setError(failed); }
@@ -159,7 +161,7 @@ export default function CloudArchivePanel({ projects }: { projects: Film[] }) {
       </button><button className="text-button" disabled={!!busy} onClick={() => void load()}><RefreshCw size={15} />Refresh cloud films</button></div>
       {busy && <p className="field-note" role="status">{busy}</p>}
       {message && <p className={`feedback ${error ? "error" : "success"}`} role={error ? "alert" : "status"}>{message}</p>}
-      <div className="library-list">
+      {showFilms && <><div className="library-list">
         {!busy && films.length === 0 && <p>No cloud films saved yet. Your local projects are listed above.</p>}
         {films.map((film) => <article className="panel" key={film.id}>
           <div className="section-title"><div><h3><FilmIcon size={17} /> {film.title}</h3><p>{film.ancestor || "Family film"} · {labelFor(film)} · {new Date(film.updatedAt).toLocaleDateString()}</p></div>
@@ -173,7 +175,7 @@ export default function CloudArchivePanel({ projects }: { projects: Film[] }) {
           {playing === film.id && film.hasVideo && <video controls playsInline preload="metadata" src={cloudMediaUrl(film)} style={{ width: "100%", maxHeight: 540 }} onError={() => feedback("The private video could not be played. Refresh the archive or download the file to try again.", true)} />}
         </article>)}
       </div>
-      {cursor && <button className="button secondary" disabled={!!busy} onClick={() => void load(cursor)}>Load more cloud films</button>}
+      {cursor && <button className="button secondary" disabled={!!busy} onClick={() => void load(cursor)}>Load more cloud films</button>}</>}
     </section>
   );
 }
