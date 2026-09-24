@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Aperture,
   Video,
@@ -39,7 +39,8 @@ import { importSource } from "./sources";
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
 import FilmLibrary from "./FilmLibrary";
-import { initialWorkspaceView, localLibraryPatch, localLibraryState, type LibraryAction } from "./film-library";
+import { initialWorkspaceView, localLibraryPatch, localLibraryState, verifyLibraryDetail, type LibraryAction, type LibraryEntry } from "./film-library";
+import { createDerivedFilmDraft, persistCreatedDraft } from "./derived-film";
 const Admin = lazy(() => import("../admin/Admin"));
 const AccountSecurity = lazy(() => import("../AccountSecurity"));
 
@@ -132,6 +133,19 @@ export default function Workspace({
   const libraryBusy = libraryActionBusy || archiveUploadBusy;
 
   const workLock = useRef(false);
+  const workspaceMounted = useRef(false);
+  const versionRequest = useRef(0);
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accountIdentity = `${storageKey}:${user.role}:${user.accessStatus}:${user.mustChangePassword}`;
+  const draftContext = useRef({ accountIdentity, storageKey, projects });
+  useLayoutEffect(() => {
+    if (draftContext.current.accountIdentity !== accountIdentity) versionRequest.current += 1;
+    draftContext.current = { accountIdentity, storageKey, projects };
+  }, [accountIdentity, storageKey, projects]);
+  useLayoutEffect(() => {
+    workspaceMounted.current = true;
+    return () => { workspaceMounted.current = false; versionRequest.current += 1; };
+  }, []);
 
   const film = projects.find((p) => p.id === activeId) || projects[0];
   const notify = useCallback(
@@ -186,6 +200,7 @@ export default function Workspace({
         );
       }
     }, 350);
+    autosaveTimer.current = timer;
     return () => clearTimeout(timer);
   }, [projects, storageKey, notify]);
   useEffect(() => {
@@ -313,6 +328,39 @@ export default function Workspace({
     if (!draft) return;
     setActiveId(id); setView("create"); setStep(draft.paymentReference || draft.outputId ? 3 : draft.scenes.length ? 2 : 0);
     notify("Browser draft opened. Saved account versions remain unchanged.", "info");
+  }
+  async function createLibraryVersion(entry: LibraryEntry) {
+    if (workLock.current || busy || archiveUploadBusy || accountBusy) throw new Error("Finish the current action before creating a new version.");
+    if (entry.kind !== "plan") throw new Error("Open a saved film plan before creating a new version.");
+    const account = accountIdentity, request = ++versionRequest.current;
+    const requireCurrentAccount = () => {
+      if (!workspaceMounted.current || request !== versionRequest.current || draftContext.current.accountIdentity !== account) {
+        throw new Error("The account changed before this draft could be saved. Open the saved plan again.");
+      }
+    };
+    workLock.current = true;
+    setBusy("Creating a separate draft…");
+    try {
+      const response = await api<unknown>(`/api/library?action=detail&kind=plan&id=${encodeURIComponent(entry.id)}`);
+      requireCurrentAccount();
+      const detail = await verifyLibraryDetail(response, entry);
+      requireCurrentAccount();
+      const draft = await createDerivedFilmDraft(detail);
+      requireCurrentAccount();
+      // Read the latest committed drafts after asynchronous verification. Save
+      // and read back before opening, so no pending edit or draft is replaced.
+      const context = draftContext.current;
+      const next = persistCreatedDraft(localStorage, context.storageKey, context.projects, draft);
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      draftContext.current = { ...context, projects: next };
+      setProjects(next); setSaved("Saved in this browser"); setActiveId(draft.id);
+      setAiConsent(false); setThemePage(0); setThemeOrigin(""); setResultUrl("");
+      setStep(0); setView("create");
+      notify("New version saved in this browser. Review its source and choose its running time. The original plan and payment are unchanged.");
+    } finally {
+      workLock.current = false;
+      if (workspaceMounted.current) setBusy("");
+    }
   }
   function organizeLocalDraft(id: string, action: LibraryAction) {
     const next = projects.map(project => project.id === id ? { ...project, ...localLibraryPatch(action), updatedAt: new Date().toISOString() } : project);
@@ -794,7 +842,7 @@ export default function Workspace({
           {view === "library" && (
             <>
               <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} onCreate={create} onOpenDraft={openLibraryDraft}
-                onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} />
+                onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} onCreateVersion={createLibraryVersion} />
               {localLegacy && (
                 <div className="legacy-box">
                   <p>Your earlier Lineage Theatre projects are still in this browser.</p>

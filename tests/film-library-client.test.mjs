@@ -92,14 +92,18 @@ test("signed-in landing is the library while administration deep links retain ro
   assert.equal(helpers.initialWorkspaceView("#admin/payments", "customer"), "library");
   assert.equal(helpers.initialWorkspaceView("#create", "customer"), "create");
 });
-test("library renders accessible navigation, a primary creation action and honest browser draft scope", async () => {
+async function libraryComponents() {
   let source = compile(await readFile(new URL("../src/studio/FilmLibrary.tsx", import.meta.url), "utf8"));
   source = source.replace(/import "\.\/film-library\.css";\s*/g, "");
   for (const name of ["react", "react/jsx-runtime", "lucide-react"]) source = source.replaceAll(`from "${name}"`, `from "${pathToFileURL(require.resolve(name)).href}"`);
   source = source.replaceAll('from "./model"', `from "${modelUrl}"`).replaceAll('from "./film-library"', `from "${helperUrl}"`);
-  const { default: FilmLibrary } = await import(moduleUrl(source));
+  return import(moduleUrl(source));
+}
+
+test("library renders accessible navigation, a primary creation action and honest browser draft scope", async () => {
+  const { default: FilmLibrary } = await libraryComponents();
   const html = renderToStaticMarkup(React.createElement(FilmLibrary, { projects: [{ ...newFilm(), title: "A browser-only draft" }], disabled: false,
-    onCreate() {}, onOpenDraft() {}, onLocalAction() {}, onBusyChange() {} }));
+    onCreate() {}, onOpenDraft() {}, onLocalAction() {}, onBusyChange() {}, async onCreateVersion() {} }));
   assert.match(html, /<h1>Your film library<\/h1>/);
   assert.match(html, /aria-label="Film library views"/);
   assert.match(html, /aria-current="page"/);
@@ -107,4 +111,40 @@ test("library renders accessible navigation, a primary creation action and hones
   assert.match(html, /A browser-only draft/); assert.match(html, /Saved in this browser/);
   assert.doesNotMatch(html, /MagicLight|QuickBooks|Vercel|api key/i);
   assert.doesNotMatch(html, />Watch film<|>Download film</);
+  assert.doesNotMatch(html, /Create new version/);
+});
+
+test("new-version action is limited to a saved plan with its verified manifest", async () => {
+  const { SavedPlanVersionAction } = await libraryComponents();
+  let calls = 0;
+  const onCreateVersion = async () => { calls++; };
+  for (const detail of [{ entry: entry() }, { entry: entry({ kind: "upload" }), manifest }]) {
+    assert.equal(renderToStaticMarkup(React.createElement(SavedPlanVersionAction, { detail, disabled: false, onCreateVersion })), "");
+  }
+  const detail = { entry: entry(), manifest, sourceNames: ["A family letter.doc", "<img src=x onerror=alert(1)>.jpg"] };
+  const html = renderToStaticMarkup(React.createElement(SavedPlanVersionAction, { detail, disabled: false, onCreateVersion }));
+  assert.match(html, /Create new version<\/button>/);
+  assert.match(html, /saved screenplay as its source/);
+  assert.match(html, /Original uploads are not copied/);
+  assert.match(html, /original payment stays with this saved plan/);
+  assert.match(html, /choose its running time/);
+  assert.match(html, /Original source filenames \(2\)/);
+  assert.match(html, /A family letter.doc/);
+  assert.match(html, /Add the original files separately/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;\.jpg/);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.equal(calls, 0, "Displaying the action must not create a draft or accept any consent.");
+});
+
+test("new-version action respects the shared busy state and dispatches only the selected immutable entry", async () => {
+  const { SavedPlanVersionAction } = await libraryComponents();
+  const detail = { entry: entry(), manifest }, before = structuredClone(detail), calls = [];
+  const onCreateVersion = async value => { calls.push(value); };
+  const disabled = renderToStaticMarkup(React.createElement(SavedPlanVersionAction, { detail, disabled: true, onCreateVersion }));
+  assert.match(disabled, /<button[^>]*type="button"[^>]*disabled=""/);
+  const element = SavedPlanVersionAction({ detail, disabled: false, onCreateVersion });
+  const button = React.Children.toArray(element.props.children).find(child => child.type === "button");
+  button.props.onClick();
+  assert.deepEqual(calls, [detail.entry]);
+  assert.deepEqual(detail, before);
 });
