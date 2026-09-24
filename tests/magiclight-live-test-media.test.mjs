@@ -29,7 +29,7 @@ function completed() {
 function metadata(saved = completed(), body = bytes) {
   const hash = digest(body);
   return { version: 1, testId: saved.id, ownerHash: digest(saved.ownerEmail), fixtureHash: saved.fixtureHash,
-    taskHash: digest(saved.taskId), sourceHash: digest(saved.videoUrl), sha256: hash,
+    taskHash: digest(saved.taskId), sourceHash: digest(saved.videoUrl), downloadSourceHash: digest(saved.videoUrl), sha256: hash,
     pathname: `integrations/magiclight/media/${digest(saved.ownerEmail)}/${saved.id}/${hash}.mp4`,
     sizeBytes: body.length, contentType: "video/mp4", importedAt: TIME };
 }
@@ -44,7 +44,7 @@ class ResponseCapture extends Writable {
 function fixture(options = {}) {
   const records = new Map([[userPath(OWNER_EMAIL), { value: clone(OWNER), etag: "owner-1" }],
     [MAGICLIGHT_LIVE_TEST_PATH, { value: completed(), etag: "test-1" }]]);
-  const blobs = new Map(), reads = [], writes = [], fetches = [], puts = [], gets = [], cancelled = [];
+  const blobs = new Map(), reads = [], writes = [], fetches = [], puts = [], gets = [], cancelled = [], checks = [];
   let h, serial = 0;
   const read = async path => { reads.push(path); await options.beforeRead?.(path, h); return clone(records.get(path) || null); };
   const write = async (path, value, etag) => {
@@ -56,7 +56,11 @@ function fixture(options = {}) {
     await options.afterWrite?.(path, value, h);
   };
   const liveTest = createMagicLightLiveTestService({ read, write, now: () => NOW, env: { MAGICLIGHT_API_KEY: KEY },
-    clientFactory: () => { throw new Error("Media delivery must never create or poll a provider task."); } });
+    clientFactory: config => {
+      assert.equal(config.enableSubmission, false);
+      return { submitTask: () => assert.fail("Media delivery must never create a provider task."),
+        checkTask: async input => { checks.push(input); if (!options.check) assert.fail("Unexpected provider status call"); return options.check(input, h); } };
+    } });
   const fetchImpl = async (url, init) => {
     fetches.push({ url, init });
     if (options.fetch) return options.fetch(url, init, h);
@@ -87,7 +91,7 @@ function fixture(options = {}) {
   };
   const service = createMagicLightTestMediaService({ liveTest, read, write, fetchImpl, getBlob, putBlob, now: () => NOW,
     approvedHosts: options.approvedHosts ?? [HOST], ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) });
-  h = { service, records, blobs, reads, writes, fetches, puts, gets, cancelled, liveTest,
+  h = { service, records, blobs, reads, writes, fetches, puts, gets, cancelled, checks, liveTest,
     saved: () => records.get(MAGICLIGHT_LIVE_TEST_PATH).value,
     revoke: () => { records.get(userPath(OWNER_EMAIL)).value.status = "suspended"; },
     imported: (value = metadata()) => { records.set(MAGICLIGHT_TEST_MEDIA_PATH, { value, etag: "media-1" }); blobs.set(value.pathname, bytes); },
@@ -132,6 +136,52 @@ test("import copies the fixed completed clip privately and verifies bytes before
   assert.deepEqual(h.records.get(MAGICLIGHT_TEST_MEDIA_PATH).value, metadata());
   assert.deepEqual(h.saved(), original); assert.deepEqual(h.writes.map(x => x.path), [MAGICLIGHT_TEST_MEDIA_PATH]);
   await h.import(); assert.equal(h.fetches.length, 1); assert.equal(h.puts.length, 1); assert.equal(h.writes.length, 1);
+});
+
+test("an expired signed source recovers once from the same completed job without changing its permanent binding", async () => {
+  const renewed = `https://${HOST}/renewed-output.mp4?signature=renewed-private-value`;
+  for (const status of [401, 403, 404, 410]) {
+    const h = fixture({ check: async () => ({ providerCode: 10000, taskStatus: 2, taskId: TASK, videoUrl: renewed }),
+      fetch: async (_url, _init, fix) => fix.fetches.length === 1 ? new Response("expired", { status })
+        : new Response(bytes, { headers: { "content-type": "video/mp4" } }) });
+    const original = clone(h.saved());
+    const result = await h.import();
+    assert.equal(result.media.ready, true); safe(result); assert.doesNotMatch(JSON.stringify(result), /renewed-private/);
+    assert.deepEqual(h.checks, [{ taskId: TASK }]);
+    assert.deepEqual(h.fetches.map(call => call.url), [VIDEO, renewed]);
+    assert.equal(h.fetches.every(call => call.init.credentials === "omit" && call.init.redirect === "error" && !call.init.headers.Authorization), true);
+    assert.deepEqual(h.saved(), original);
+    assert.deepEqual(h.records.get(MAGICLIGHT_TEST_MEDIA_PATH).value, { ...metadata(), downloadSourceHash: digest(renewed) });
+    await h.import(); const stream = await h.stream(); assert.deepEqual(stream.body, bytes);
+    assert.equal(h.fetches.length, 2); assert.equal(h.checks.length, 1);
+  }
+});
+
+test("source recovery rejects unapproved hosts, changed owner, nonterminal status and repeated denial", async () => {
+  const result = { providerCode: 10000, taskStatus: 2, taskId: TASK, videoUrl: VIDEO };
+  for (const check of [async () => ({ ...result, videoUrl: "https://unapproved.example.invalid/a.mp4" }),
+    async () => ({ ...result, taskStatus: 1 }), async () => ({ ...result, taskStatus: 3 }),
+    async () => ({ ...result, taskId: "different-job" }), async () => { throw new Error(`${KEY} ${VIDEO}`); },
+    async (_input, h) => { h.revoke(); return result; }]) {
+    const h = fixture({ check, fetch: async () => new Response("denied", { status: 403 }) }), original = clone(h.saved());
+    await assert.rejects(h.import(), error => { safe({ code: error.code, message: error.message }); return true; });
+    assert.equal(h.fetches.length, 1); assert.equal(h.checks.length, 1); assert.deepEqual(h.saved(), original);
+    assert.equal(h.puts.length + h.writes.length, 0);
+  }
+  const denied = fixture({ check: async () => result, fetch: async () => new Response("denied", { status: 403 }) });
+  await assert.rejects(denied.import()); assert.equal(denied.fetches.length, 2); assert.equal(denied.checks.length, 1);
+  assert.equal(denied.puts.length + denied.writes.length, 0);
+});
+
+test("link recovery does not run for transient download errors or after the download deadline", async () => {
+  for (const status of [400, 429, 500, 503]) {
+    const h = fixture({ fetch: async () => new Response("unavailable", { status }) });
+    await assert.rejects(h.import()); assert.equal(h.checks.length, 0); assert.equal(h.fetches.length, 1);
+  }
+  const expired = fixture({ timeoutMs: 5, fetch: async () => new Response("expired", { status: 403 }),
+    check: async () => { await new Promise(resolve => setTimeout(resolve, 20)); return { providerCode: 10000, taskStatus: 2, taskId: TASK, videoUrl: VIDEO }; } });
+  await assert.rejects(expired.import(), error => error.code === "MAGICLIGHT_TEST_MEDIA_TIMEOUT");
+  assert.equal(expired.fetches.length, 1); assert.equal(expired.puts.length + expired.writes.length, 0);
 });
 
 test("owner and saved completion are required before importing or reading media", async () => {
