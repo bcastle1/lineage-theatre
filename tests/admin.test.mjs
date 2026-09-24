@@ -203,6 +203,19 @@ test("payment diagnostics, accounting exports and reconciliation use separate ad
   assert.equal(calls.length,3);
 });
 
+test("hosted diagnostics remain limited to authenticated administrator support exports",async()=>{
+  const id="a".repeat(64),calls=[];
+  const diagnostics={lastCheckAttemptedAt:"2026-09-24T00:00:00.000Z",reason:"invoice_link_invalid"};
+  const hostedCheckout={ownsOrder:async()=>true,order:async()=>({id,status:"uncertain",amountCents:330,currency:"USD",requiresReview:true}),
+    adminDiagnostics:async(...args)=>{calls.push(args);return diagnostics;}};
+  const h=harness(admin,{hostedCheckout});
+  const support=await h.run("paymentDiagnostics",undefined,{},id);
+  assert.equal(support.status,200);assert.deepEqual(support.body.diagnostics,diagnostics);
+  assert.equal(Object.hasOwn((await h.run("accountingExport",undefined,{},id)).body,"diagnostics"),false);
+  for(const actor of [null,customer])assert.equal((await harness(actor,{hostedCheckout}).run("paymentDiagnostics",undefined,{},id)).status,actor?403:401);
+  assert.deepEqual(calls,[[admin,id]]);
+});
+
 test("only durable managed orders enter the refund service and same-origin/admin gates still apply",async()=>{
   const calls=[],id="a".repeat(64),payments={refund:async(...args)=>{calls.push(args);return {id,status:"partially-refunded",refundedCents:100,sandbox:true};}};
   const body={orderId:id,amountCents:100,reason:"Fictional test refund",idempotencyKey:"synthetic-refund-123"};

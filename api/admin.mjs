@@ -71,6 +71,7 @@ export function createAdminHandler(overrides={}) {
             checkoutMethod:order.checkoutMethod,currency:order.currency,amountCents:order.amountCents,
             requiresReview:order.requiresReview,confirmationSource:order.confirmationSource||null,
             settlementVerified:false,postingReady:false,
+            ...(action==="paymentDiagnostics"?{diagnostics:await hosted.adminDiagnostics(actor,id)}:{}),
             note:"Review the existing hosted invoice in QuickBooks. This export does not post to your books or verify settlement or refunds."});
         }
         return json(res,200,await payments[action==="paymentDiagnostics"?"adminDiagnostics":"accountingExport"](actor,id));
