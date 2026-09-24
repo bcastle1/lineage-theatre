@@ -29,7 +29,7 @@
       "maxDuration": 30
     },
     "api/admin.mjs": {
-      "maxDuration": 60
+      "maxDuration": 180
     },
     "api/archive.mjs": {
       "maxDuration": 300

@@ -67,6 +67,21 @@ test("concurrent processes, repeated clicks, reloads and key rotation never subm
   assert.equal(h.checks.length, 0); assert.equal(h.submissions.length, 1);
 });
 
+test("server-only completed media binding requires the persisted owner and keeps working after key rotation", async () => {
+  const h = fixture();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.code === "MAGICLIGHT_TEST_NOT_COMPLETE");
+  await h.submit();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.code === "MAGICLIGHT_TEST_NOT_COMPLETE");
+  await h.check();
+  h.env.MAGICLIGHT_API_KEY = "changed-key";
+  const media = await h.service.completedForMedia(OWNER);
+  assert.equal(media.videoUrl, VIDEO); assert.equal(media.taskId, TASK);
+  assert.equal(h.submissions.length, 1); assert.equal(h.checks.length, 1);
+  await assert.rejects(h.service.completedForMedia({ ...OWNER, role: "admin" }), e => e.status === 403);
+  h.revoke();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.status === 403);
+});
+
 test("explicit consent and fixed input reject browser credentials, prompt, task ID, URLs or new identity", async () => {
   for (const body of [undefined, null, [], {}, { consent: false }, ...["prompt", "imageUrl", "apiKey", "taskId", "idempotencyKey", "environment"].map(key => ({ consent: true, [key]: "untrusted" }))]) {
     const h = fixture(); await assert.rejects(h.service.submit(OWNER, body), e => e.status === 400);

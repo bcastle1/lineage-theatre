@@ -200,7 +200,16 @@ export function createMagicLightLiveTestService({ read = readRecord, write = wri
     await owner(actor);
     return view(previous.value);
   }
-  return Object.freeze({ status, submit, check });
+  // Server-only delivery binding. Never serialize this private record through
+  // an API response; its signed provider URL is solely for the media importer.
+  async function completedForMedia(actor) {
+    await owner(actor);
+    const previous = await saved(actor);
+    if (previous?.value.status !== "completed") throw new MagicLightLiveTestError("MAGICLIGHT_TEST_NOT_COMPLETE", 409, "The saved test clip is not complete yet.");
+    await owner(actor);
+    return { ...previous.value };
+  }
+  return Object.freeze({ status, submit, check, completedForMedia });
 }
 
 export const magiclightLiveTest = createMagicLightLiveTestService();

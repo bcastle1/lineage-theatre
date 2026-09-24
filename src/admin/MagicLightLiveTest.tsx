@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Download, Loader2, RefreshCw } from "lucide-react";
 import { api, ApiError } from "../studio/model";
 
 const fixture = {
@@ -18,7 +18,9 @@ type LiveTestState = {
   configured: boolean; productionReady: false; customerFulfillment: false;
   fixture: typeof fixture & { hash: string; costVerified: false; durationVerified: false };
   test: SavedTest | null;
+  media?: { ready: boolean; sizeBytes?: number; sha256?: string };
 };
+const mediaPath = "/api/admin?action=magicLightLiveTestMedia";
 type SafeError = { code: string; httpStatus?: number };
 const statuses = new Set<TestStatus>(["submitting", "submitted", "uncertain", "processing", "completed", "failed"]);
 const validCode = (value: unknown): value is string => typeof value === "string" && /^MAGICLIGHT_[A-Z_]{1,80}$/.test(value);
@@ -46,7 +48,11 @@ function normalize(value: unknown): LiveTestState {
       || (test.checkedAt !== undefined && !validDate(test.checkedAt))
       || !optionalInteger(test.providerCode) || !optionalInteger(test.taskStatus)
       || (test.httpStatus !== undefined && (!Number.isSafeInteger(test.httpStatus) || test.httpStatus < 100 || test.httpStatus > 599))
-      || (test.code !== undefined && !validCode(test.code)) || !safeOrigin(test.outputOrigin)))) {
+      || (test.code !== undefined && !validCode(test.code)) || !safeOrigin(test.outputOrigin)))
+    || (state.media !== undefined && (!state.media || typeof state.media.ready !== "boolean"
+      || (state.media.ready && test?.status !== "completed")
+      || (state.media.sizeBytes !== undefined && (!Number.isSafeInteger(state.media.sizeBytes) || state.media.sizeBytes < 1))
+      || (state.media.sha256 !== undefined && (typeof state.media.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(state.media.sha256)))))) {
     throw new Error("Invalid saved test");
   }
   return state;
@@ -58,13 +64,14 @@ function safeError(error: unknown): SafeError {
       ? { httpStatus: error.status } : {}),
   };
 }
-function statusText(status: TestStatus): string {
+function statusText(status: TestStatus, mediaReady = false): string {
   switch (status) {
     case "submitting": return "The single submission is saved. Its provider result still needs verification.";
     case "submitted": return "The test job is saved. Check its progress with MagicLight.";
     case "processing": return "MagicLight is processing the saved test job.";
     case "uncertain": return "The submission result is uncertain. Review the saved job; another submission is unavailable.";
-    case "completed": return "MagicLight reports the clip is complete. Secure import and playback still need verification.";
+    case "completed": return mediaReady ? "The completed test clip is saved privately in Lineage. Check playback below."
+      : "MagicLight reports the clip is complete. Import the saved output to check playback in Lineage.";
     case "failed": return "The saved test failed. Review its diagnostic result before taking any further action.";
   }
 }
@@ -72,12 +79,14 @@ function statusText(status: TestStatus): string {
 export default function MagicLightLiveTest({ disabled = false }: { disabled?: boolean }) {
   const [state, setState] = useState<LiveTestState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<"submit" | "check" | "">("");
+  const [busy, setBusy] = useState<"submit" | "check" | "import" | "">("");
   const [error, setError] = useState<SafeError | null>(null);
   const [consent, setConsent] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const [reload, setReload] = useState(0);
+  const [duration, setDuration] = useState<number | null>(null);
+  const [playbackError, setPlaybackError] = useState(false);
   const lock = useRef(false), mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -97,15 +106,18 @@ export default function MagicLightLiveTest({ disabled = false }: { disabled?: bo
   const blocked = disabled || loading || Boolean(busy) || needsRefresh;
   const canSubmit = state?.configured === true && state.test === null && !attempted;
   const canCheck = Boolean(test && !["completed", "failed"].includes(test.status));
-  async function operate(operation: "submit" | "check") {
-    if (blocked || lock.current || (operation === "submit" ? !canSubmit || !consent : !canCheck)) return;
+  const canImport = test?.status === "completed" && state?.media?.ready !== true;
+  useEffect(() => { setDuration(null); setPlaybackError(false); }, [test?.id, state?.media?.sha256, state?.media?.ready]);
+  async function operate(operation: "submit" | "check" | "import") {
+    if (blocked || lock.current || (operation === "submit" ? !canSubmit || !consent : operation === "import" ? !canImport : !canCheck)) return;
     lock.current = true; setBusy(operation); setError(null);
     if (operation === "submit") { setAttempted(true); setConsent(false); }
     try {
       const result = normalize(await api<unknown>("/api/admin", operation === "submit"
         ? { action: "submitMagicLightLiveTest", consent: true }
-        : { action: "checkMagicLightLiveTest" }));
+        : { action: operation === "import" ? "importMagicLightLiveTestMedia" : "checkMagicLightLiveTest" }));
       if (operation === "submit" && !result.test) throw new Error("Submission not confirmed");
+      if (operation === "import" && (result.test?.id !== test?.id || result.media?.ready !== true)) throw new Error("Import not confirmed");
       if (mounted.current) { setState(result); setNeedsRefresh(false); }
     } catch (cause) {
       if (mounted.current) { setError(safeError(cause)); setNeedsRefresh(true); }
@@ -115,7 +127,7 @@ export default function MagicLightLiveTest({ disabled = false }: { disabled?: bo
   return <section className="admin-hosted-checkout" aria-labelledby="magiclight-live-test-title" aria-busy={loading || Boolean(busy)}>
     <div className="admin-section-heading"><div>
       <h2 id="magiclight-live-test-title">MagicLight live clip test</h2>
-      <p>One fictional clip using existing MagicLight credits. The credit cost and output duration are unknown. This test does not create a customer payment or fulfill a paid film.</p>
+      <p>One fictional clip using existing MagicLight credits. The credit cost is not verified here. This test does not create a customer payment or fulfill a paid film.</p>
     </div><button type="button" className="button secondary small" disabled={disabled || loading || Boolean(busy)} onClick={() => setReload(value => value + 1)}>
       <RefreshCw size={15} aria-hidden="true" />Refresh saved test
     </button></div>
@@ -125,11 +137,12 @@ export default function MagicLightLiveTest({ disabled = false }: { disabled?: bo
       <div style={{ flex: "1 1 280px" }}><h3>{fixture.title}</h3><p className="field-note">{fixture.prompt}</p></div>
     </div>
     <div role="status" aria-live="polite">
-      {loading ? <p>Loading the saved live test…</p> : test ? <p><strong>{statusText(test.status)}</strong></p>
+      {loading ? <p>Loading the saved live test…</p> : test ? <p><strong>{statusText(test.status, state?.media?.ready)}</strong></p>
         : state && !state.configured ? <p>This deployment has no saved MagicLight key.</p>
         : attempted ? <p>The submission result needs verification. Refresh the saved test before taking further action.</p>
         : state ? <p>No live test has been saved.</p> : null}
-      {busy && <p><Loader2 size={15} className="spin" aria-hidden="true" /> {busy === "submit" ? "Submitting the single live test…" : "Checking the saved provider job…"}</p>}
+      {busy && <p><Loader2 size={15} className="spin" aria-hidden="true" /> {busy === "submit" ? "Submitting the single live test…"
+        : busy === "import" ? "Importing the completed test clip…" : "Checking the saved provider job…"}</p>}
     </div>
     {test && <div className="admin-feedback info">
       <p className="field-note">One submission · Saved {new Date(test.updatedAt).toLocaleString()}
@@ -153,5 +166,21 @@ export default function MagicLightLiveTest({ disabled = false }: { disabled?: bo
     {test && canCheck && <button type="button" className="button secondary small" disabled={blocked} onClick={() => void operate("check")}>
       <RefreshCw size={15} aria-hidden="true" />Check saved job
     </button>}
+    {canImport && <div>
+      <p className="field-note">Import copies the completed output into private Lineage storage. It uses the existing job and does not submit another generation request.</p>
+      <button type="button" className="button primary small" disabled={blocked} onClick={() => void operate("import")}>Import completed test clip</button>
+    </div>}
+    {test?.status === "completed" && state?.media?.ready && <section aria-labelledby="magiclight-test-player-title" style={{ marginTop: 20 }}>
+      <h3 id="magiclight-test-player-title">Actual test clip</h3>
+      <p className="field-note">This is the single fictional technical test, not the full paid film.</p>
+      <video key={`${test.id}:${state.media.sha256 || "saved"}`} controls playsInline preload="metadata" src={mediaPath}
+        aria-label="Fictional shipyard test clip player" style={{ width: "100%", maxHeight: 540, marginTop: 12 }}
+        onLoadedMetadata={event => { const seconds = event.currentTarget.duration; setDuration(Number.isFinite(seconds) && seconds > 0 ? seconds : null); setPlaybackError(false); }}
+        onError={() => setPlaybackError(true)} />
+      <p className="field-note" role="status">{duration === null ? "Clip duration is unknown until the video metadata loads." : `Clip duration: ${duration.toFixed(1)} seconds (video metadata).`}
+        {state.media.sizeBytes !== undefined ? ` · ${(state.media.sizeBytes / (1024 * 1024)).toFixed(2)} MB` : ""}</p>
+      {playbackError && <p className="admin-inline-error" role="alert">The saved test clip could not be played. Refresh its status or try downloading it.</p>}
+      <a className="button secondary small" href={`${mediaPath}&download=1`} download><Download size={15} aria-hidden="true" />Download test clip</a>
+    </section>}
   </section>;
 }
