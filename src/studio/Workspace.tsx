@@ -39,6 +39,7 @@ import { importSource } from "./sources";
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
 import FilmLibrary from "./FilmLibrary";
+import LibraryArtwork from "./LibraryArtwork";
 import { initialWorkspaceView, localLibraryPatch, localLibraryState, verifyLibraryDetail, type LibraryAction, type LibraryEntry } from "./film-library";
 import { createDerivedFilmDraft, persistCreatedDraft } from "./derived-film";
 const Admin = lazy(() => import("../admin/Admin"));
@@ -701,7 +702,7 @@ export default function Workspace({
             </button>
           </div>
         </header>
-        <main className="workspace">
+        <main className={`workspace${view === "library" && !accountOpen ? " workspace-library" : ""}`}>
           {accountOpen ? <Suspense fallback={<div className="panel" role="status">Opening account settings…</div>}>
             <AccountSecurity user={user} onUserChange={onUserChange} onClose={() => setAccountOpen(false)} onBusyChange={setAccountBusy} />
           </Suspense> : <>
@@ -840,7 +841,9 @@ export default function Workspace({
             </>
           )}
           {view === "library" && (
-            <>
+            <div className="library-layout">
+              <LibraryArtwork side="left" />
+              <div className="library-workspace">
               <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} onCreate={create} onOpenDraft={openLibraryDraft}
                 onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} onCreateVersion={createLibraryVersion} />
               {localLegacy && (
@@ -873,11 +876,13 @@ export default function Workspace({
                   </button>
                 </div>
               )}
-            </>
+                <details className="film-library-upload"><summary>Save or upload a completed film</summary>
+                  <CloudArchivePanel projects={projects.filter(project => localLibraryState(project) === "active")} onBusyChange={setArchiveUploadBusy} showFilms={false} />
+                </details>
+              </div>
+              <LibraryArtwork side="right" />
+            </div>
           )}
-          {view === "library" && <details className="film-library-upload"><summary>Save or upload a completed film</summary>
-            <CloudArchivePanel projects={projects.filter(project => localLibraryState(project) === "active")} onBusyChange={setArchiveUploadBusy} showFilms={false} />
-          </details>}
           </>}
         </main>
         <footer className="workspace-footer">
