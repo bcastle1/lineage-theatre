@@ -33,12 +33,14 @@ const hostedMethod = "quickbooks-hosted-invoice";
 // Only the provider's hosted invoice portal may receive payment navigation.
 // No customer card or bank data is collected or submitted by this application.
 export function normalizeHostedInvoiceUrl(value: unknown): string | null {
-  if (typeof value !== "string" || value.length > 8192 || !value.startsWith("https://connect.intuit.com/portal/")
+  if (typeof value !== "string" || value.length > 8192 || !value.startsWith("https://connect.intuit.com/")
     || /[\s\\\u0000-\u001f\u007f]/.test(value)) return null;
   try {
     const url = new URL(value);
+    const portal = url.pathname.startsWith("/portal/") && url.pathname.length > "/portal/".length;
+    const shortLink = /^https:\/\/connect\.intuit\.com\/t\/scs-v1-[a-fA-F0-9]{96}(?:\?locale=[a-zA-Z]{2}_[a-zA-Z]{2})?$/.test(value);
     if (url.protocol !== "https:" || url.hostname !== "connect.intuit.com" || url.username || url.password || url.port || url.hash
-      || !url.pathname.startsWith("/portal/") || url.pathname.length <= "/portal/".length || url.href !== value) return null;
+      || (!portal && !shortLink) || url.href !== value) return null;
     return value;
   } catch { return null; }
 }
