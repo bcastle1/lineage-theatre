@@ -187,6 +187,81 @@ test("a missing invoice link never masks changed financial details or an unsafe 
   assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
 });
 
+test("private invoice diagnostics identify exact validation failures without changing payment outcomes",async()=>{
+  const cases=[
+    [{Id:"999"},"INVOICE_ID_MISMATCH"],[{CustomerRef:{value:"999"}},"INVOICE_CUSTOMER_MISMATCH"],[{CurrencyRef:{value:"EUR"}},"INVOICE_CURRENCY_MISMATCH"],
+    [{BillEmail:{Address:"private-customer@example.invalid"}},"INVOICE_EMAIL_MISMATCH"],[{TotalAmt:14},"INVOICE_TOTAL_MISMATCH"],[{Balance:16},"INVOICE_BALANCE_INVALID"],
+    [{Line:[]},"INVOICE_SALES_LINE_COUNT"],[{TxnTaxDetail:{TotalTax:1}},"INVOICE_TAX_AMOUNT_MISMATCH"],[{AllowOnlineCreditCardPayment:false},"INVOICE_CARD_DISABLED"],
+    [{AllowOnlineACHPayment:false},"INVOICE_ACH_DISABLED"],[{EmailStatus:"EmailSent"},"INVOICE_EMAIL_STATUS_CHANGED"],[{Voided:true},"INVOICE_VOIDED"],
+    [{LinkedTxn:[{TxnId:"1",TxnType:"CreditMemo"}]},"INVOICE_LINKED_TRANSACTION_UNSUPPORTED"]];
+  for(const [change,reason] of cases) {
+    const h=fixture(),order=await h.checkout();h.editInvoice(change);h.advance(1000);
+    const checked=await h.service.check(OWNER,{orderId:order.id}),diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+    assert.equal(checked.status,"uncertain");assert.equal(checked.invoiceUrl,null);assert.equal(diagnostics.lastCheckFailureReason,reason);
+    assert.equal(diagnostics.lastCheckStage,"invoice-validation");assert.equal(diagnostics.lastCheckAttemptedAt,new Date(NOW+1000).toISOString());
+    for(const field of ["lastCheckFailureReason","lastCheckStage","lastCheckAttemptedAt","lastCheckUrlDiagnostics"])assert.equal(Object.hasOwn(checked,field),false);
+    assert.doesNotMatch(JSON.stringify(diagnostics),/private-customer|EmailSent|CreditMemo/);
+    assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+  }
+});
+
+test("invalid link diagnostics contain bounded shape data only and clear after read-only recovery",async()=>{
+  const secret="SYNTHETIC_PRIVATE_LINK_TOKEN",cases=[
+    ["",{kind:"string",length:0,blank:true,whitespace:false,parsed:false}],
+    ["  ",{kind:"string",length:2,blank:true,whitespace:true,parsed:false}],
+    [{privateToken:secret},{kind:"object",length:0,blank:false,whitespace:false,parsed:false}],
+    [`https://connect.intuit.com/t/scs-v1-${secret}?locale=en_US&redirect=private`,{kind:"string",blank:false,parsed:true,hostKind:"connect.intuit.com",pathKind:"short",shortTokenLength:secret.length,shortTokenHex:false,queryKind:"other",queryCount:2}],
+    [`https://private.example/${secret}`,{kind:"string",parsed:true,hostKind:"other",pathKind:"other"}],
+  ];
+  for(const [link,expected] of cases) {
+    const h=fixture(),order=await h.checkout();h.editInvoice({InvoiceLink:link});
+    const checked=await h.service.check(OWNER,{orderId:order.id}),diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+    assert.equal(checked.status,"uncertain");assert.equal(diagnostics.lastCheckFailureReason,"INVOICE_LINK_INVALID");assert.equal(diagnostics.lastCheckStage,"complete");
+    for(const [key,value] of Object.entries(expected))assert.equal(diagnostics.invoiceLinkDiagnostics[key],value,key);
+    assert.doesNotMatch(JSON.stringify(diagnostics),/SYNTHETIC_PRIVATE_LINK_TOKEN|redirect|private\.example|locale=en_US/);
+    assert.equal(JSON.stringify([...h.records.values()]).includes(secret),false);
+    h.editInvoice({InvoiceLink:"https://connect.intuit.com/portal/app/example"});h.advance(1000);
+    assert.equal((await h.service.check(OWNER,{orderId:order.id})).status,"awaiting-payment");
+    const recovered=await h.service.adminDiagnostics(OWNER,order.id);
+    assert.equal(recovered.lastCheckFailureReason,null);assert.equal(recovered.invoiceLinkDiagnostics,null);
+    assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+  }
+});
+
+test("private check stages distinguish provider reads, payment validation and connection races without raw errors",async()=>{
+  const h=fixture(),order=await h.checkout(),privateError="PRIVATE_PROVIDER_TOKEN_AND_ERROR";
+  h.setDispatch(op=>{if(op.path==="/invoice/30")throw Error(privateError);});
+  await h.service.check(OWNER,{orderId:order.id});let diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckFailureReason,"INVOICE_READ_FAILED");assert.equal(diagnostics.lastCheckStage,"invoice-read");
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  h.setDispatch(op=>{if(op.path==="/payment/40")throw Error(privateError);});
+  await h.service.check(OWNER,{orderId:order.id});diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckFailureReason,"PAYMENT_READ_FAILED");
+  h.setDispatch(op=>op.path==="/payment/40"?json({Payment:{Id:"wrong-private-id"}}):undefined);
+  await h.service.check(OWNER,{orderId:order.id});diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckFailureReason,"PAYMENT_VALIDATION_FAILED");
+  h.editInvoice({Balance:15,LinkedTxn:[]});h.setDispatch(op=>{if(op.path==="/invoice/30")h.setBinding({...BINDING,grantId:"b".repeat(64)});});
+  await h.service.check(OWNER,{orderId:order.id});diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckFailureReason,"BINDING_RECHECK_FAILED");
+  h.setDispatch(undefined);h.setBinding({...BINDING,realmId:"5678"});
+  await error(h.service.check(OWNER,{orderId:order.id}));diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckFailureReason,"CONNECTION_BINDING_FAILED");assert.equal(diagnostics.lastCheckStage,"binding");
+  assert.equal(JSON.stringify([...h.records.values()]).includes(privateError),false);
+  assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+});
+
+test("support diagnostics require a current administrator and project stored fields through fixed allowlists",async()=>{
+  const h=fixture({env:{LINEAGE_PAYMENT_ACCESS:"approved"}}),order=await h.checkout(CUSTOMER);
+  await error(h.service.adminDiagnostics(CUSTOMER,order.id));
+  const path=`payments/orders/${order.id}.json`,saved=h.records.get(path).value;
+  h.seed(path,{...saved,lastCheckAttemptedAt:"private-date",lastCheckFailureReason:"PRIVATE_ERROR",lastCheckStage:"PRIVATE_STAGE",
+    lastCheckUrlDiagnostics:{rawUrl:"PRIVATE_URL",kind:"PRIVATE_KIND",hostKind:"PRIVATE_HOST",shortTokenLength:1e9,queryCount:2,parsed:true}});
+  const diagnostics=await h.service.adminDiagnostics(OWNER,order.id);
+  assert.equal(diagnostics.lastCheckAttemptedAt,null);assert.equal(diagnostics.lastCheckFailureReason,null);assert.equal(diagnostics.lastCheckStage,null);
+  assert.deepEqual(diagnostics.invoiceLinkDiagnostics,{parsed:true,queryCount:2});assert.doesNotMatch(JSON.stringify(diagnostics),/PRIVATE_/);
+  h.seed(userPath(OWNER.email),{...OWNER,status:"suspended"});await error(h.service.adminDiagnostics(OWNER,order.id));
+});
+
 test("ambiguous customer and invoice create results never replay POST or issue a second order",async()=>{
   for(const failingPath of ["/customer","/invoice"]) {
     const h=fixture({dispatch:op=>{if(op.method==="POST"&&op.path===failingPath)throw Error("synthetic timeout containing no real secrets");}}),first=await h.checkout();assert.equal(first.status,"uncertain");assert.equal(first.charged,null);assert.equal(first.invoiceUrl,null);

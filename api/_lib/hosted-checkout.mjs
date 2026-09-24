@@ -43,6 +43,40 @@ function safeLink(value) {
   if(!portal&&!short)return null;
   try {const u=new URL(value);return u.protocol==="https:"&&u.hostname==="connect.intuit.com"&&!u.port&&!u.username&&!u.password&&!u.hash&&(short||(u.pathname.startsWith("/portal/")&&u.pathname.length>8))&&u.href===value?value:null;}catch{return null;}
 }
+const checkStages=["binding","invoice-read","invoice-validation","payment-read","payment-validation","actor-recheck","binding-recheck","complete"];
+const checkReasons=new Set(["CONNECTION_BINDING_FAILED","INVOICE_READ_FAILED","INVOICE_VALIDATION_FAILED","PAYMENT_READ_FAILED","PAYMENT_VALIDATION_FAILED","ACTOR_RECHECK_FAILED","BINDING_RECHECK_FAILED","CHECK_FAILED",
+  "INVOICE_ID_INVALID","INVOICE_ID_MISMATCH","INVOICE_CUSTOMER_MISMATCH","INVOICE_CURRENCY_MISMATCH","INVOICE_EMAIL_MISMATCH","INVOICE_TOTAL_MISMATCH","INVOICE_BALANCE_INVALID",
+  "INVOICE_LINES_INVALID","INVOICE_SALES_LINE_COUNT","INVOICE_LINE_TYPE_UNSUPPORTED","INVOICE_ITEM_MISMATCH","INVOICE_QUANTITY_MISMATCH","INVOICE_UNIT_PRICE_MISMATCH","INVOICE_LINE_AMOUNT_MISMATCH",
+  "INVOICE_TAX_CODE_MISMATCH","INVOICE_TAX_AMOUNT_MISMATCH","INVOICE_CARD_DISABLED","INVOICE_ACH_DISABLED","INVOICE_EMAIL_STATUS_CHANGED","INVOICE_VOIDED",
+  "INVOICE_LINKED_TRANSACTIONS_INVALID","INVOICE_LINKED_TRANSACTION_UNSUPPORTED","INVOICE_LINKED_TRANSACTION_LIMIT","INVOICE_LINKED_TRANSACTION_DUPLICATE","INVOICE_LINK_INVALID","PAYMENT_RECONCILIATION_INCOMPLETE"]);
+function invoiceMismatch(reason) {const error=conflict();error.diagnosticReason=reason;return error;}
+function checkReason(error,stage) {
+  if(checkReasons.has(error?.diagnosticReason))return error.diagnosticReason;
+  return {binding:"CONNECTION_BINDING_FAILED","invoice-read":"INVOICE_READ_FAILED","invoice-validation":"INVOICE_VALIDATION_FAILED","payment-read":"PAYMENT_READ_FAILED",
+    "payment-validation":"PAYMENT_VALIDATION_FAILED","actor-recheck":"ACTOR_RECHECK_FAILED","binding-recheck":"BINDING_RECHECK_FAILED"}[stage]||"CHECK_FAILED";
+}
+function invoiceLinkDiagnostics(value) {
+  const result={kind:typeof value==="string"?"string":Array.isArray(value)?"array":typeof value==="object"?"object":typeof value==="boolean"?"boolean":typeof value==="number"?"number":"other",
+    length:typeof value==="string"?Math.min(value.length,4097):0,blank:typeof value==="string"&&value.trim()==="",whitespace:typeof value==="string"&&/[\s\\\x00-\x1f\x7f]/.test(value),parsed:false};
+  if(typeof value!=="string"||value.length>4096)return result;
+  try {
+    const url=new URL(value),short=url.pathname.startsWith("/t/scs-v1-"),token=short?url.pathname.slice(10):"";
+    const hostKind=["connect.intuit.com","payments.intuit.com","quickbooks.intuit.com","qbo.intuit.com"].includes(url.hostname)?url.hostname:url.hostname.endsWith(".intuit.com")?"other-intuit":"other";
+    return {...result,parsed:true,https:url.protocol==="https:",expectedHost:url.hostname==="connect.intuit.com",hostKind,credentials:Boolean(url.username||url.password),
+      port:Boolean(url.port)||/^https:\/\/connect\.intuit\.com:/.test(value),fragment:value.includes("#"),canonical:url.href===value,
+      pathKind:short?"short":url.pathname.startsWith("/portal/")?"portal":"other",shortTokenLength:token.length,shortTokenHex:short&&/^[a-fA-F0-9]+$/.test(token),
+      queryKind:url.search===""?"none":/^\?locale=[a-zA-Z]{2}_[a-zA-Z]{2}$/.test(url.search)?"locale":"other",queryCount:Math.min([...url.searchParams].length,100)};
+  }catch{return result;}
+}
+function safeLinkDiagnostics(value) {
+  if(!value||typeof value!=="object")return null;
+  const result={};
+  for(const key of ["parsed","blank","https","expectedHost","credentials","port","fragment","whitespace","canonical","shortTokenHex"])if(typeof value[key]==="boolean")result[key]=value[key];
+  for(const key of ["length","shortTokenLength","queryCount"])if(Number.isSafeInteger(value[key])&&value[key]>=0&&value[key]<=4097)result[key]=value[key];
+  for(const [key,allowed] of [["kind",["string","array","object","boolean","number","other"]],["pathKind",["short","portal","other"]],["queryKind",["none","locale","other"]],
+    ["hostKind",["connect.intuit.com","payments.intuit.com","quickbooks.intuit.com","qbo.intuit.com","other-intuit","other"]]])if(allowed.includes(value[key]))result[key]=value[key];
+  return result;
+}
 function publicQuote(q) {return {id:q.id,orderId:orderId(q),preparedId:q.preparedId,manifestHash:q.manifestHash,filmId:q.filmId,filmTitle:q.filmTitle,currency:q.currency,
   amountCents:q.amountCents,expiresAt:q.expiresAt,sandbox:sandbox(q),method:METHOD,deliveryTerms:q.checkoutSettings.deliveryTerms,refundTerms:q.checkoutSettings.refundTerms};}
 function publicOrder(v,at) {
@@ -55,18 +89,33 @@ function publicOrder(v,at) {
 function itemData(item) {return item&&numeric.test(item.Id||"")&&typeof item.Name==="string"&&item.Name.length<=500
   ?{id:item.Id,name:item.Name,active:item.Active===true,type:typeof item.Type==="string"?item.Type:"",taxable:item.Taxable===true}:null;}
 function invoiceData(invoice,order) {
-  const lines=invoice?.Line,sales=Array.isArray(lines)?lines.filter(l=>l.DetailType==="SalesItemLineDetail"):[],line=sales[0],detail=line?.SalesItemLineDetail;
+  const lines=invoice?.Line,sales=Array.isArray(lines)?lines.filter(l=>l?.DetailType==="SalesItemLineDetail"):[],line=sales[0],detail=line?.SalesItemLineDetail;
   const balance=money(invoice?.Balance),invoiceId=invoice?.Id;
-  if(!numeric.test(invoiceId||"")||(order.invoiceId&&invoiceId!==order.invoiceId)||invoice.CustomerRef?.value!==order.customerId||invoice.CurrencyRef?.value!=="USD"
-    ||typeof invoice.BillEmail?.Address!=="string"||invoice.BillEmail.Address.toLowerCase()!==order.customerEmail
-    ||money(invoice.TotalAmt)!==order.amountCents||balance===null||balance>order.amountCents||sales.length!==1
-    ||lines.some(l=>!["SalesItemLineDetail","SubTotalLineDetail"].includes(l.DetailType))||detail?.ItemRef?.value!==order.checkoutSettings.serviceItemId
-    ||detail.Qty!==1||money(detail.UnitPrice)!==order.amountCents||money(line.Amount)!==order.amountCents||detail.TaxCodeRef?.value!=="NON"
-    ||(invoice.TxnTaxDetail?.TotalTax!==undefined&&money(invoice.TxnTaxDetail.TotalTax)!==0)
-    ||invoice.AllowOnlineCreditCardPayment!==true||invoice.AllowOnlineACHPayment!==true||invoice.EmailStatus!=="NotSet"
-    ||invoice.TxnStatus==="Voided"||invoice.status==="Voided"||invoice.Voided===true)throw conflict();
+  if(!numeric.test(invoiceId||""))throw invoiceMismatch("INVOICE_ID_INVALID");
+  if(order.invoiceId&&invoiceId!==order.invoiceId)throw invoiceMismatch("INVOICE_ID_MISMATCH");
+  if(invoice.CustomerRef?.value!==order.customerId)throw invoiceMismatch("INVOICE_CUSTOMER_MISMATCH");
+  if(invoice.CurrencyRef?.value!=="USD")throw invoiceMismatch("INVOICE_CURRENCY_MISMATCH");
+  if(typeof invoice.BillEmail?.Address!=="string"||invoice.BillEmail.Address.toLowerCase()!==order.customerEmail)throw invoiceMismatch("INVOICE_EMAIL_MISMATCH");
+  if(money(invoice.TotalAmt)!==order.amountCents)throw invoiceMismatch("INVOICE_TOTAL_MISMATCH");
+  if(balance===null||balance>order.amountCents)throw invoiceMismatch("INVOICE_BALANCE_INVALID");
+  if(!Array.isArray(lines))throw invoiceMismatch("INVOICE_LINES_INVALID");
+  if(sales.length!==1)throw invoiceMismatch("INVOICE_SALES_LINE_COUNT");
+  if(lines.some(l=>!["SalesItemLineDetail","SubTotalLineDetail"].includes(l?.DetailType)))throw invoiceMismatch("INVOICE_LINE_TYPE_UNSUPPORTED");
+  if(detail?.ItemRef?.value!==order.checkoutSettings.serviceItemId)throw invoiceMismatch("INVOICE_ITEM_MISMATCH");
+  if(detail.Qty!==1)throw invoiceMismatch("INVOICE_QUANTITY_MISMATCH");
+  if(money(detail.UnitPrice)!==order.amountCents)throw invoiceMismatch("INVOICE_UNIT_PRICE_MISMATCH");
+  if(money(line.Amount)!==order.amountCents)throw invoiceMismatch("INVOICE_LINE_AMOUNT_MISMATCH");
+  if(detail.TaxCodeRef?.value!=="NON")throw invoiceMismatch("INVOICE_TAX_CODE_MISMATCH");
+  if(invoice.TxnTaxDetail?.TotalTax!==undefined&&money(invoice.TxnTaxDetail.TotalTax)!==0)throw invoiceMismatch("INVOICE_TAX_AMOUNT_MISMATCH");
+  if(invoice.AllowOnlineCreditCardPayment!==true)throw invoiceMismatch("INVOICE_CARD_DISABLED");
+  if(invoice.AllowOnlineACHPayment!==true)throw invoiceMismatch("INVOICE_ACH_DISABLED");
+  if(invoice.EmailStatus!=="NotSet")throw invoiceMismatch("INVOICE_EMAIL_STATUS_CHANGED");
+  if(invoice.TxnStatus==="Voided"||invoice.status==="Voided"||invoice.Voided===true)throw invoiceMismatch("INVOICE_VOIDED");
   const links=invoice.LinkedTxn??[];
-  if(!Array.isArray(links)||links.some(l=>l.TxnType!=="Payment"||!numeric.test(l.TxnId||""))||links.length>100||new Set(links.map(l=>l.TxnId)).size!==links.length)throw conflict();
+  if(!Array.isArray(links))throw invoiceMismatch("INVOICE_LINKED_TRANSACTIONS_INVALID");
+  if(links.some(l=>l?.TxnType!=="Payment"||!numeric.test(l.TxnId||"")))throw invoiceMismatch("INVOICE_LINKED_TRANSACTION_UNSUPPORTED");
+  if(links.length>100)throw invoiceMismatch("INVOICE_LINKED_TRANSACTION_LIMIT");
+  if(new Set(links.map(l=>l.TxnId)).size!==links.length)throw invoiceMismatch("INVOICE_LINKED_TRANSACTION_DUPLICATE");
   const invoiceUrl=safeLink(invoice.InvoiceLink);
   return {invoiceId,invoiceNumber:typeof invoice.DocNumber==="string"&&invoice.DocNumber.length<=100?invoice.DocNumber:null,
     invoiceUrl,invoiceLinkStatus:invoiceUrl?"ready":invoice.InvoiceLink==null?"pending":"invalid",balanceCents:balance,paymentIds:links.map(l=>l.TxnId)};
@@ -261,23 +310,38 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   }
   async function check(actor,{orderId:referenceId}={}) {
     let record=await readOrder(actor,referenceId);const value=record.value;
+    const attemptedAt=stamp(now());let binding;
     // Pausing new checkout must not prevent prior customers reading their invoice.
-    const binding=await transport.binding({allowRefresh:true});
     // Reconnecting the same company does not change an existing invoice's identity.
     // This exception is for reads only; creation retains its original exact grant.
-    if(!bound(binding)||!bound(value.merchantBinding)||binding.environment!==value.merchantBinding.environment||binding.realmId!==value.merchantBinding.realmId||!numeric.test(value.invoiceId||""))throw conflict();
-    // Claim the read operation too: overlapping responses cannot regress a newer result.
-    record=await save(orderPath(value.id),record,{...value,checkOperation:randomUUID()});
-    let update={status:"uncertain",invoiceUrl:null};
     try {
-      const invoice=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice,data=invoiceData(invoice,value),payments=[];
-      for(const paymentId of data.paymentIds)payments.push(paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId));
+      binding=await transport.binding({allowRefresh:true});
+      if(!bound(binding)||!bound(value.merchantBinding)||binding.environment!==value.merchantBinding.environment||binding.realmId!==value.merchantBinding.realmId)throw conflict();
+      if(!numeric.test(value.invoiceId||""))throw invoiceMismatch("INVOICE_ID_INVALID");
+    }catch(error) {
+      await save(orderPath(value.id),record,{...value,lastCheckAttemptedAt:attemptedAt,lastCheckStage:"binding",lastCheckFailureReason:checkReason(error,"binding"),lastCheckUrlDiagnostics:null});
+      throw error;
+    }
+    // Claim the read operation too: overlapping responses cannot regress a newer result.
+    record=await save(orderPath(value.id),record,{...value,checkOperation:randomUUID(),lastCheckAttemptedAt:attemptedAt,lastCheckStage:"invoice-read",lastCheckFailureReason:null,lastCheckUrlDiagnostics:null});
+    let update={status:"uncertain",invoiceUrl:null},stage="invoice-read",urlDiagnostics=null;
+    try {
+      const invoice=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice;
+      stage="invoice-validation";
+      if(invoice?.InvoiceLink!=null&&!safeLink(invoice.InvoiceLink))urlDiagnostics=invoiceLinkDiagnostics(invoice.InvoiceLink);
+      const data=invoiceData(invoice,value),payments=[];
+      for(const paymentId of data.paymentIds) {
+        stage="payment-read";const payment=(await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment;
+        stage="payment-validation";payments.push(paymentAllocation(payment,value,paymentId));
+      }
       const allocated=payments.reduce((sum,p)=>sum+p.allocatedCents,0),paid=data.balanceCents===0&&allocated===value.amountCents&&payments.length>0;
       const unpaid=data.balanceCents===value.amountCents&&allocated===0&&data.paymentIds.length===0&&data.invoiceLinkStatus!=="invalid";
       update={...data,status:paid?"captured":unpaid?"awaiting-payment":"uncertain",accountingPayments:payments,accountingCheckedAt:stamp(now()),lastCheckedBinding:binding,
-        ...(paid?{capturedAt:value.capturedAt||stamp(now()),confirmationSource:SOURCE}:{}),settlementVerified:false};
-      await currentActor(actor);if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw conflict();
-    }catch {update={status:"uncertain",invoiceUrl:null};}
+        ...(paid?{capturedAt:value.capturedAt||stamp(now()),confirmationSource:SOURCE}:{}),settlementVerified:false,lastCheckStage:"complete",
+        lastCheckFailureReason:paid||unpaid?null:data.invoiceLinkStatus==="invalid"?"INVOICE_LINK_INVALID":"PAYMENT_RECONCILIATION_INCOMPLETE",lastCheckUrlDiagnostics:urlDiagnostics};
+      stage="actor-recheck";await currentActor(actor);
+      stage="binding-recheck";if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw conflict();
+    }catch(error) {update={status:"uncertain",invoiceUrl:null,lastCheckStage:stage,lastCheckFailureReason:checkReason(error,stage),lastCheckUrlDiagnostics:urlDiagnostics};}
     const current=await read(orderPath(value.id));if(current?.etag!==record.etag)throw conflict();
     const saved=(await save(orderPath(value.id),record,{...record.value,...update,checkOperation:null})).value;
     // Receipt delivery is recoverable independently; mail problems must never
@@ -285,13 +349,23 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(saved.status==="captured")try {await receiptDelivery.deliver(saved);}catch{}
     return presentOrder(saved);
   }
+  async function adminDiagnostics(actor,orderReference) {
+    const current=await currentActor(actor);
+    if(!hasAdminAccess(actor)||!hasAdminAccess(current))throw new HostedCheckoutError("Administrator access is required.",403);
+    const value=(await readOrder(current,orderReference)).value,attempted=Date.parse(value.lastCheckAttemptedAt);
+    return {orderId:value.id,lastCheckAttemptedAt:Number.isFinite(attempted)?stamp(attempted):null,
+      lastCheckStage:checkStages.includes(value.lastCheckStage)?value.lastCheckStage:null,
+      lastCheckFailureReason:checkReasons.has(value.lastCheckFailureReason)?value.lastCheckFailureReason:null,
+      invoiceLinkStatus:["ready","pending","invalid"].includes(value.invoiceLinkStatus)?value.invoiceLinkStatus:null,
+      invoiceLinkDiagnostics:safeLinkDiagnostics(value.lastCheckUrlDiagnostics)};
+  }
   async function receipt(actor,orderReference) {
     const v=(await readOrder(actor,orderReference)).value;if(v.status!=="captured"||!v.capturedAt||v.confirmationSource!==SOURCE)throw new HostedCheckoutError("A receipt is available after QuickBooks records payment.",409);
     return {receiptId:v.id,filmTitle:v.filmTitle,currency:v.currency,amountCents:v.amountCents,refundedCents:0,transactionId:v.accountingPayments?.[0]?.id||null,
       processorDisclosure:"Payment recorded by QuickBooks. Processor capture and bank settlement have not been verified.",capturedAt:v.capturedAt,description:"Lineage Theatre film production",status:v.status,sandbox:sandbox(v),checkoutMethod:METHOD,confirmationSource:SOURCE,
       notice:sandbox(v)?"Sandbox accounting receipt. No live payment is represented.":"Payment recorded by QuickBooks. Film delivery and any refund are tracked separately; processor capture and settlement are not verified."};
   }
-  return {settings,catalog,saveSettings,configuration,quote,checkout,check,receipt,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
+  return {settings,catalog,saveSettings,configuration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
     ownsOrder:async id=>hex.test(id||"")&&(await read(orderPath(id)))?.value.checkoutMethod===METHOD,
     authorizeProduction:async()=>{throw unavailable();}};
 }
