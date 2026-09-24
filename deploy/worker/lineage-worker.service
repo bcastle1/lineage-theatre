@@ -1,0 +1,20 @@
+[Unit]
+Description=Lineage Theatre private film worker pass
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Install this configuration only after runtime/provider acceptance. Keep the
+# image pin and secret file on the host; neither belongs in the source bundle.
+EnvironmentFile=/etc/lineage-worker/host.conf
+ExecStartPre=/usr/bin/test -s /etc/lineage-worker/runtime.env
+ExecStart=/usr/bin/docker run --rm --init --name lineage-production-worker --label app=lineage-production-worker --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 3g --memory-swap 3g --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 --env-file /etc/lineage-worker/runtime.env ${LINEAGE_WORKER_IMAGE} --once
+ExecStop=/usr/bin/docker stop --time 120 lineage-production-worker
+TimeoutStartSec=2h
+TimeoutStopSec=150s
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+

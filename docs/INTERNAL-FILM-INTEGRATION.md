@@ -1,5 +1,7 @@
 # Internal film production — implementation status
 
+Historical September 14 checkpoint. For current payment, commercial-permission and worker status, see [MagicLight media integration](MAGICLIGHT-MEDIA-INTEGRATION.md) and [production worker operations](PRODUCTION-WORKER.md). The owner has since verified live payment and receipt delivery and confirmed the partner/commercial arrangement. The older requirements below are not a request to repeat completed approvals.
+
 The production app includes registration, owner/delegated administration, private finished-film archives, configurable markup, owner-managed Intuit authorization, and verified GPT-6 Astra story development. MagicLight film generation, transaction processing, and accounting synchronization remain disabled until the provider contracts and real account flows are verified. Release evidence belongs in the deployment record; a deployed interface alone does not establish a working provider integration.
 
 ## Implemented

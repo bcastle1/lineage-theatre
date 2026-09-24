@@ -702,7 +702,7 @@ export function createQuickBooksAccountingTransport(overrides={}) {
   function queryStatement(query) {
     if(!fields(query,["entity","where","startPosition","maxResults"],["entity"]))throw invalid();
     const filters={Customer:["Id","DisplayName","Active"],Item:["Id","Active"],Invoice:["Id","DocNumber","CustomerRef"],
-      Payment:["Id","CustomerRef"],Account:["Id","Active"]};
+      Payment:["Id","CustomerRef"],Account:["Id","Active"],RefundReceipt:["Id"],CreditMemo:["Id"],Purchase:["Id"],JournalEntry:["Id"],Deposit:["Id"]};
     if(!Object.hasOwn(filters,query.entity))throw invalid();
     const start=query.startPosition??1,max=query.maxResults??100;
     if(!Number.isSafeInteger(start)||start<1||start>1_000_000||!Number.isSafeInteger(max)||max<1||max>1000)throw invalid();

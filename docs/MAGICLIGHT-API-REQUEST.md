@@ -1,5 +1,27 @@
 # MagicLight integration inquiry template
 
+## Current technical follow-up, September 23, 2026
+
+Prepared text only; not sent during this continuation. The owner has confirmed commercial permission and the existing partner relationship. The account has an active API key and purchased credits. Those topics do not require a new agreement or purchase.
+
+To: support@magiclight.ai
+
+Subject: Re: API integration for complete animated films inside Lineage Theater
+
+Hello MagicLight team,
+
+We are ready to connect our existing MagicLight API account to Lineage Theater. Please send one working server-side cURL example for submitting a small image-to-video job using an OpenClaw API key, with a placeholder instead of a real key, and an example of checking that job and retrieving its video.
+
+Please include the supported base URL, authentication header, exact model/options, credit cost, and how to look up a submission after a network timeout without charging twice. The account dashboard currently shows API Keys, Pricing and Usage but no generation documentation. A developer-documentation link covering these operations would also work.
+
+Our existing partner/commercial arrangement is already confirmed. This request is only for the technical connection instructions.
+
+Thank you,
+Erik
+Lineage Theater / BROCOTech
+
+## Original September 14 inquiry
+
 To: support@magiclight.ai
 
 Subject: API integration for complete animated films inside Lineage Theater

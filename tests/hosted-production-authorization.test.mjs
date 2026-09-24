@@ -7,6 +7,7 @@ import { digest, userPath } from "../api/_lib/auth.mjs";
 import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { productionQueuePath } from "../api/_lib/production-queue.mjs";
 import { createProductionWorker } from "../scripts/production-worker.mjs";
+import { HOSTED_REVERSAL_SCOPE } from "../api/_lib/hosted-reversals.mjs";
 
 const NOW = Date.parse("2026-09-23T18:00:00Z"), EMAIL = "customer@example.invalid";
 const BINDING = { environment: "production", grantId: "a".repeat(64), realmId: "1234" };
@@ -48,13 +49,21 @@ async function fixture(options = {}) {
   const plan = await film.prepare({ email, project: fictionalOperatorProject(), preparationConsent: true, idempotencyKey: "fictional-hosted-prepare" });
   const planPath = productionJobPath(email, plan.id);
   const payment = { Id: "40", CustomerRef: { value: "20" }, CurrencyRef: { value: "USD" }, TotalAmt: 4.5,
+    SyncToken: "0", MetaData: { CreateTime: new Date(NOW).toISOString(), LastUpdatedTime: new Date(NOW).toISOString() },
     Line: [{ Amount: 4.5, LinkedTxn: [{ TxnId: "30", TxnType: "Invoice" }] }] };
   const transport = {
     binding: async request => { await bindingEffect?.(request); return structuredClone(binding); },
     request: async (expected, operation) => {
       assert.deepEqual(expected, binding); requests.push(structuredClone(operation));
       const reply = await transportEffect?.(operation); if (reply !== undefined) return reply;
-      if (operation.path === "/query") return json({ QueryResponse: { Customer: customer ? [customer] : [] } });
+      if (operation.path === "/query") {
+        if (["RefundReceipt", "CreditMemo", "Purchase", "JournalEntry", "Deposit", "Payment"].includes(operation.query.entity)) {
+          const entity = operation.query.entity, values = entity === "Payment" ? [payment] : options.accountingRecords?.[entity] || [];
+          const entries = values.slice(operation.query.startPosition - 1, operation.query.startPosition - 1 + operation.query.maxResults);
+          return json({ QueryResponse: entries.length ? { [entity]: entries, startPosition: operation.query.startPosition, maxResults: entries.length } : {} });
+        }
+        return json({ QueryResponse: { Customer: customer ? [customer] : [] } });
+      }
       if (operation.path === "/item/2") return json({ Item: { Id: "2", Name: "Film production", Type: "Service", Active: true } });
       if (operation.path === "/customer") { customer = { Id: "20", Active: true, ...operation.body }; return json({ Customer: customer }); }
       if (operation.path === "/invoice") {
@@ -71,11 +80,11 @@ async function fixture(options = {}) {
   // deliberately has no default implementation of this verifier.
   const verifyReversals = async context => {
     await reversalEffect?.();
-    return { ...context, version: 1, outcome: "clear", evidenceHash: digest("fictional-reversal-evidence"),
+    return { ...context, version: 1, outcome: "clear", scope: HOSTED_REVERSAL_SCOPE, evidenceHash: digest("fictional-reversal-evidence"),
       checkedAt: new Date(time).toISOString(), expiresAt: new Date(time + 60_000).toISOString(), ...options.reversalEvidence };
   };
   const dependencies = { read, write, now: () => time, env, transport, receiptDelivery: { deliver: async () => {} },
-    ...(options.missingReversalVerifier ? {} : { verifyReversals }),
+    ...(options.useRecordedReversalVerifier ? {} : { verifyReversals: options.missingReversalVerifier ? null : verifyReversals }),
     pricingSettings: async () => ({ revision: 1, markupBasisPoints: 5000 }),
     quoteProvider: async () => ({ preparedId: plan.id, manifestHash: plan.manifestHash, filmId: plan.filmId, filmTitle: "Fictional film",
       currency: "USD", providerCostCents: 300, pricingBasis: "planning-rate", pricingRevision: 1, quoteReference: "paid-planning-price",
@@ -117,10 +126,10 @@ test("hosted paid planning orders dispatch through exact live allocation and a c
   assert.deepEqual({ ...saved, fulfillmentQuote: undefined, changeId: undefined, updatedAt: undefined },
     { ...h.initialOrder, fulfillmentQuote: undefined, changeId: undefined, updatedAt: undefined });
   assert.equal(saved.fulfillmentQuote.providerCostCents, 260); assert.equal(saved.amountCents, 450);
-  assert.deepEqual(h.requests.map(r => r.path), ["/invoice/30", "/payment/40", "/invoice/30", "/payment/40"]);
+  assert.deepEqual(h.requests.map(r => r.path), Array.from({ length: 4 }, () => ["/invoice/30", "/payment/40"]).flat());
   assert.ok(h.requests.every(r => r.method === "GET")); assert.equal(h.quoteCalls.length, 1);
   h.advance(20_000); assert.equal((await h.authorize()).quoteReference, grant.quoteReference);
-  assert.equal(h.quoteCalls.length, 1); assert.equal(h.requests.length, 6);
+  assert.equal(h.quoteCalls.length, 1); assert.equal(h.requests.length, 12);
 });
 
 test("hosted production never treats a planning price or partner flag as an actual provider quote", async () => {
@@ -186,7 +195,7 @@ test("fresh accounting reads reject zero-balance credit, void, partial, wrong cu
 test("same-company reconnect grants only after new live validation and retains the original invoice binding", async () => {
   const h = await fixture(); h.reconnect(); const grant = await h.authorize();
   assert.equal(grant.allowed, true); assert.deepEqual(h.records.get(h.orderPath).value.merchantBinding, BINDING);
-  assert.equal(h.requests.filter(r => r.path === "/invoice/30").length, 2);
+  assert.equal(h.requests.filter(r => r.path === "/invoice/30").length, 4);
   for (const change of [{ realmId: "other" }, { realmId: "9999" }, { environment: "sandbox" }]) {
     const bad = await fixture(); bad.reconnect(change); await denied(bad.authorize()); assert.equal(bad.requests.length, 0);
   }
@@ -205,7 +214,7 @@ test("order, account, settings, quote, plan and merchant changes during producti
 test("payment reversal during production quote is re-read before any fulfillment quote is locked", async () => {
   const h = await fixture(); h.setProductionEffect(() => h.editPayment({ Voided: true }));
   await denied(h.authorize()); assert.equal(h.records.get(h.orderPath).value.fulfillmentQuote, undefined);
-  assert.equal(h.requests.filter(r => r.path === "/payment/40").length, 2);
+  assert.equal(h.requests.filter(r => r.path === "/payment/40").length, 3);
 });
 
 test("binding and account changes during live accounting reads cannot escape the final checks", async () => {
@@ -291,7 +300,7 @@ test("worker composes the hosted authorizer with its own adapter and a restarted
   assert.ok(h.requests.every(request => request.method === "GET"));
 });
 
-test("hosted production defaults unavailable without supported reversal evidence even when invoice and allocation stay paid", async () => {
+test("hosted production remains unavailable with a disabled verifier even when invoice and allocation stay paid", async () => {
   const h = await fixture({ missingReversalVerifier: true });
   h.env.HOSTED_REVERSALS_CLEAR = "true";
   const before = structuredClone(h.invoice()), allocation = structuredClone(h.payment());
@@ -331,4 +340,21 @@ test("reversal after the provider quote or account changes during reconciliation
   await denied(revoked.authorize()); assert.equal(revoked.quoteCalls.length, 0);
   const short = await fixture({ reversalEvidence: { expiresAt: new Date(NOW + 5000).toISOString() } });
   assert.equal((await short.authorize()).expiresAt, new Date(NOW + 5000).toISOString());
+});
+
+test("hosted default verifier grants only after stable recorded-reversal scans and rereads the paid invoice afterward", async () => {
+  const h = await fixture({ useRecordedReversalVerifier: true });
+  const grant = await h.authorize(); assert.equal(grant.allowed, true);
+  assert.equal(grant.expiresAt, new Date(NOW + 15_000).toISOString());
+  assert.equal(h.requests.filter(request => request.path === "/query").length, 24);
+  assert.ok(h.requests.every(request => request.method === "GET"));
+  const refund = await fixture({ useRecordedReversalVerifier: true, accountingRecords: { RefundReceipt: [{ Id: "50", SyncToken: "0",
+    CustomerRef: { value: "20" }, TotalAmt: 4.5, Line: [], MetaData: { CreateTime: new Date(NOW).toISOString(), LastUpdatedTime: new Date(NOW).toISOString() } }] } });
+  await assert.rejects(refund.authorize(), error => error.code === "HOSTED_REVERSALS_UNVERIFIED");
+  assert.equal(refund.invoice().Balance, 0); assert.equal(refund.payment().TotalAmt, 4.5); assert.equal(refund.quoteCalls.length, 0);
+  const raced = await fixture({ useRecordedReversalVerifier: true }); let scans = 0;
+  raced.setTransportEffect(operation => {
+    if (operation.path === "/query" && operation.query.entity === "Payment" && ++scans === 2) raced.editInvoice({ Balance: 4.5 });
+  });
+  await denied(raced.authorize()); assert.equal(raced.quoteCalls.length, 0);
 });

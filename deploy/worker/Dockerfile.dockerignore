@@ -1,0 +1,15 @@
+# Positive allowlist, even when a future operator builds from the repo root.
+**
+!package.json
+!pnpm-lock.yaml
+!api/
+!api/_lib/
+!api/_lib/*.mjs
+!scripts/
+!scripts/production-worker.mjs
+!scripts/assemble-film.mjs
+!scripts/check-worker-runtime.mjs
+!deploy/
+!deploy/worker/
+!deploy/worker/Dockerfile
+!deploy/worker/Dockerfile.dockerignore

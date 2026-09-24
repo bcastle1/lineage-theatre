@@ -5,6 +5,7 @@ import {readPricingSettings} from "./admin.mjs";
 import {createQuickBooksAccountingTransport} from "./quickbooks.mjs";
 import {PaymentError} from "./payments.mjs";
 import {productionJobPath} from "./film-production.mjs";
+import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
 
 export class HostedCheckoutError extends PaymentError {}
 export const HOSTED_CHECKOUT_SETTINGS_PATH="settings/quickbooks-hosted.json";
@@ -150,7 +151,8 @@ function paymentAllocation(payment,order,paymentId) {
 export function createHostedCheckoutService({read=readRecord,write=writeRecord,now=Date.now,env=process.env,transport=createQuickBooksAccountingTransport(),
   receiptDelivery={deliver:async order=>(await import("./receipt-delivery.mjs")).receiptDelivery.deliver(order)},
   pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
-  productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),verifyReversals}={}) {
+  productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),
+  verifyReversals=createHostedReversalVerifier({transport,now})}={}) {
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
     try {const result=await write(path,next,previous?.etag);if(result?.etag)return {value:next,etag:result.etag};}catch{}
@@ -434,19 +436,26 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       for(const paymentId of data.paymentIds)payments.push(paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId));
       if(data.balanceCents!==0||!payments.length||payments.reduce((sum,payment)=>sum+payment.allocatedCents,0)!==value.amountCents)throw productionUnavailable();
       // A separate RefundReceipt or CreditMemo/Expense can leave this invoice
-      // and its Payment allocation unchanged. The current Accounting reader
-      // cannot prove absence of reversals, so production has no default bypass.
-      // A future supported reconciliation adapter must supply fresh evidence
-      // for this exact sale; neither a paid badge nor an environment flag does.
+      // and its Payment allocation unchanged. Require a fresh completed scan
+      // for recorded Accounting reversals. This does not prove bank settlement
+      // or absence of unrecorded refunds outside QuickBooks.
       // https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/Payment
       if(typeof verifyReversals!=="function")throw reversalsUnavailable();
       const context={orderId:referenceId,environment:binding.environment,grantId:binding.grantId,realmId:binding.realmId,
-        customerId:value.customerId,invoiceId:value.invoiceId,currency:value.currency,amountCents:value.amountCents,paymentIds:data.paymentIds};
+        customerId:value.customerId,invoiceId:value.invoiceId,currency:value.currency,amountCents:value.amountCents,paymentIds:data.paymentIds,saleCreatedAt:value.createdAt};
       const proof=await verifyReversals(structuredClone(context)),observed=Date.parse(proof?.checkedAt),expires=Date.parse(proof?.expiresAt);
-      if(!proof||proof.version!==1||proof.outcome!=="clear"||!hex.test(proof.evidenceHash||"")
+      if(!proof||proof.version!==1||proof.outcome!=="clear"||proof.scope!==HOSTED_REVERSAL_SCOPE||!hex.test(proof.evidenceHash||"")
         ||Object.keys(context).some(field=>field==="paymentIds"?!Array.isArray(proof.paymentIds)||JSON.stringify(proof.paymentIds)!==JSON.stringify(context.paymentIds):proof[field]!==context[field])
         ||typeof proof.checkedAt!=="string"||typeof proof.expiresAt!=="string"||!Number.isFinite(observed)||!Number.isFinite(expires)
         ||observed<checkedAt||observed>now()||expires<=now()||expires>observed+60_000)throw reversalsUnavailable();
+      // Reconciliation can span several paginated queries. Re-read this sale
+      // after the scan so an unapplied/voided invoice or Payment cannot reuse
+      // the paid snapshot taken before it.
+      const finalInvoice=invoiceData((await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice,value);
+      if(finalInvoice.balanceCents!==0||JSON.stringify(finalInvoice.paymentIds)!==JSON.stringify(data.paymentIds))throw productionUnavailable();
+      let finalAllocation=0;
+      for(const paymentId of finalInvoice.paymentIds)finalAllocation+=paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId).allocatedCents;
+      if(finalAllocation!==value.amountCents)throw productionUnavailable();
       await recheck();
       if(checkedAt+60_000<=now()||expires<=now())throw productionUnavailable();
       return {checkedAt,expiresAt:expires};
