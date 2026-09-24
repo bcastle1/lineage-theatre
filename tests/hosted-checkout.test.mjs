@@ -119,6 +119,39 @@ test("invoice creation without a link reads the same invoice to obtain its secur
   assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
 });
 
+test("canonical Intuit short invoice links are payable and recover an existing rejected invoice without another POST",async()=>{
+  for(const suffix of ["","?locale=en_US","?locale=en_us","?locale=EN_us"]) {
+    const link=`https://connect.intuit.com/t/scs-v1-${"aB09".repeat(24)}${suffix}`;
+    const h=fixture({invoiceOverrides:{InvoiceLink:link}}),order=await h.checkout();
+    assert.equal(order.status,"awaiting-payment");assert.equal(order.invoiceUrl,link);assert.equal(order.charged,false);assert.equal(order.requiresReview,false);
+    const path=`payments/orders/${order.id}.json`,saved=h.records.get(path).value,before=mutationRequests(h).length;
+    h.seed(path,{...saved,status:"uncertain",invoiceUrl:null,invoiceLinkStatus:"invalid"});
+    assert.equal((await h.service.order(OWNER,order.id)).invoiceUrl,null);
+    const recovered=await h.service.check(OWNER,{orderId:order.id});
+    assert.equal(recovered.id,order.id);assert.equal(recovered.status,"awaiting-payment");assert.equal(recovered.invoiceUrl,link);
+    assert.equal(recovered.requiresReview,false);assert.equal(recovered.receiptAvailable,false);assert.equal(h.records.get(path).value.invoiceId,saved.invoiceId);
+    assert.equal((await h.checkout()).invoiceUrl,link);assert.equal(mutationRequests(h).length,before);
+    assert.equal(h.requests.filter(r=>r.method==="GET"&&r.path==="/invoice/30").length,1);
+  }
+});
+
+test("short invoice links reject malformed tokens, alternate origins and unapproved query parameters",async()=>{
+  const token="a".repeat(96),base=`https://connect.intuit.com/t/scs-v1-${token}`;
+  const invalid=[base.slice(0,-1),`${base}a`,base.replace(token,"g".repeat(96)),base.replace("scs-v1-","scs-v2-"),base.replace("/t/","/other/"),
+    `${base}/`,`${base}/next`,`${base}#payment`,`${base}?`,`${base}?locale=en-US`,`${base}?locale=en`,`${base}?locale=en_US&locale=fr_CA`,
+    `${base}?redirect=https://evil.example`,`${base}?locale=en_US&redirect=https://evil.example`,`${base}?Locale=en_US`,`${base}?locale=en%5fUS`,
+    base.replace("https:","http:"),base.replace("connect.intuit.com","connect.intuit.com.evil.example"),base.replace("connect.intuit.com","user@connect.intuit.com"),
+    base.replace("connect.intuit.com","connect.intuit.com:443"),base.replace("/t/","/portal/../t/"),base.replace("/t/","/t/%2E%2E/t/"),
+    base.replace(token,`%61${token.slice(1)}`),`${base}\\other`,` ${base}`,`${base}\n`];
+  for(const link of invalid) {
+    const h=fixture({invoiceOverrides:{InvoiceLink:link}}),order=await h.checkout();
+    assert.equal(order.status,"uncertain",link);assert.equal(order.invoiceUrl,null);assert.equal(order.requiresReview,true);assert.equal(order.receiptAvailable,false);
+    const checked=await h.service.check(OWNER,{orderId:order.id});
+    assert.equal(checked.status,"uncertain",link);assert.equal(checked.invoiceUrl,null);
+    assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+  }
+});
+
 test("an unpaid invoice waiting for its link recovers through status reads without another invoice",async()=>{
   for(const missing of [undefined,null]) {
     const h=fixture({invoiceOverrides:{InvoiceLink:missing}}),order=await h.checkout();

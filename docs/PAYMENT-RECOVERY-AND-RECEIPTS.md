@@ -49,3 +49,9 @@ Before marking live: deploy the approved exact commit, verify its served assets,
 - An independent review identified the retry popup path; both initial preparation and safe retry now use the same validated navigation and fallback feedback.
 
 Sources: [Google token verification](https://developers.google.com/recaptcha/docs/verify), [Intuit Invoice API](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/most-commonly-used/invoice), [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing), [Microsoft Graph sendMail](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0).
+
+## Live follow-up: Intuit short invoice links
+
+After the approved PR 23 release, the owner signed into QuickBooks. Invoice 207 showed enabled credit card and bank transfer methods and a $3.30 customer payment preview with card entry. An independent provider read then returned a share link on `https://connect.intuit.com/t/scs-v1-<96 hexadecimal characters>?locale=en_US`. The first scheduled reconciliation verified the unpaid invoice but rejected that link because both existing validators accepted only `/portal/` paths.
+
+The follow-up supports exactly that canonical Intuit short-link shape, with an optional two-letter/two-letter locale and no other query parameters. Existing `/portal/` support and HTTPS/exact-host/credential/port/fragment/traversal checks remain. Tests prove normalization, popup navigation, and recovery of an already rejected saved order through the same invoice GET without another POST. Malformed token lengths, encoded/extra path segments, lookalike domains, redirect parameters and duplicate locales fail closed. Full suite: 490 tests passed; production build passed. No actual hosted URL/token is recorded in these notes or tests.

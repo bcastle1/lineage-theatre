@@ -9,6 +9,7 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
 const { normalizeHostedInvoiceUrl, normalizeCheckoutConfiguration, normalizeFilmQuote, normalizeFilmOrder, normalizeFilmReceipt, quoteMatchesConfiguration, paymentStatusMessage } = await import(contractUrl);
+const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { checkFilmPayment, commitFilmPayment, recoverFilmPayment, retryFilmPayment } = await import(moduleUrl((await compile("../src/studio/checkout-payment.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { normalizePaymentReference, normalizeFilm, customerProjectBackup, newFilm } = await import(moduleUrl(await compile("../src/studio/model.ts")));
 const now = Date.parse("2026-09-14T12:00:00.000Z");
@@ -23,6 +24,25 @@ const order = status => ({ id: quote().orderId, quoteId: quote().id, preparedId:
   requiresReview: ["submitting", "uncertain"].includes(status), receiptAvailable: status === "captured", createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), sandbox: true, checkoutMethod: method,
   invoiceUrl: "https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture", invoiceNumber: "1234", ...(status === "captured" ? { confirmationSource: "quickbooks-accounting" } : {}) });
 const token = "SYNTHETIC_TOKEN_NOT_A_REAL_CARD";
+
+test("verified Intuit short invoice links survive order normalization and payment-tab navigation", () => {
+  const base = `https://connect.intuit.com/t/scs-v1-${"a".repeat(96)}`;
+  for (const link of [base, `${base}?locale=en_US`, `${base}?locale=EN_us`]) {
+    assert.equal(normalizeHostedInvoiceUrl(link), link);
+    assert.equal(normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: link }).invoiceUrl, link);
+    let navigated;
+    const tab={opener:{},document:{title:"",body:{}},closed:false,location:{replace:url=>navigated=url},close:()=>{}};
+    assert.equal(reservePaymentWindow(()=>tab).open(link), true);
+    assert.equal(navigated, link);
+  }
+  for (const link of [`${base}?redirect=https://evil.invalid`, `${base}?locale=en_US&redirect=https://evil.invalid`,
+    `${base}?locale=en_US&locale=fr_CA`, `${base}?locale=en%5fUS`, `${base}#other`, `${base}/more`,
+    base.slice(0,-1), `${base}0`, base.replace("scs-v1-", "other-"), base.replace("/t/", "/t/../t/"),
+    base.replace("connect.intuit.com/", "connect.intuit.com:443/"), base.replace("connect.intuit.com", "connect.intuit.com.evil.invalid"),
+    base.replace("connect.intuit.com", "user@connect.intuit.com"), base.replace("https:", "http:")]) {
+    assert.equal(normalizeHostedInvoiceUrl(link), null, link);
+  }
+});
 
 test("a saved unpaid invoice without a payment link remains recoverable and locked", () => {
   const pending = normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: null });
@@ -227,7 +247,6 @@ test("an expired original retry quote is surfaced without creating a replacement
   assert.equal(calls, 1);
 });
 
-const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 test("payment navigation reserves a tab immediately and strips its opener before verified navigation", () => {
   const calls=[];
   const tab={opener:{},document:{title:"",body:{textContent:""}},closed:false,location:{replace:url=>calls.push(url)},close:()=>calls.push("close")};

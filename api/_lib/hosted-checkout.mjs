@@ -37,8 +37,11 @@ function complete(s) {return Boolean(s&&s.enabled===true&&Number.isSafeInteger(s
   &&typeof s.deliveryTerms==="string"&&s.deliveryTerms.trim().length>0&&typeof s.refundTerms==="string"&&s.refundTerms.trim().length>0
   &&s.merchantConfirmed===true&&s.pciAcknowledged===true&&s.automaticInvoiceEmailDisabled===true&&bound(s.merchantBinding));}
 function safeLink(value) {
-  if(typeof value!=="string"||value.length>4096||!/^https:\/\/connect\.intuit\.com\/portal\/[^\s\\#]+$/.test(value))return null;
-  try {const u=new URL(value);return u.protocol==="https:"&&u.hostname==="connect.intuit.com"&&!u.port&&!u.username&&!u.password&&!u.hash&&u.pathname.startsWith("/portal/")&&u.pathname.length>8&&u.href===value?value:null;}catch{return null;}
+  if(typeof value!=="string"||value.length>4096)return null;
+  const portal=/^https:\/\/connect\.intuit\.com\/portal\/[^\s\\#]+$/.test(value);
+  const short=/^https:\/\/connect\.intuit\.com\/t\/scs-v1-[a-fA-F0-9]{96}(?:\?locale=[a-zA-Z]{2}_[a-zA-Z]{2})?$/.test(value);
+  if(!portal&&!short)return null;
+  try {const u=new URL(value);return u.protocol==="https:"&&u.hostname==="connect.intuit.com"&&!u.port&&!u.username&&!u.password&&!u.hash&&(short||(u.pathname.startsWith("/portal/")&&u.pathname.length>8))&&u.href===value?value:null;}catch{return null;}
 }
 function publicQuote(q) {return {id:q.id,orderId:orderId(q),preparedId:q.preparedId,manifestHash:q.manifestHash,filmId:q.filmId,filmTitle:q.filmTitle,currency:q.currency,
   amountCents:q.amountCents,expiresAt:q.expiresAt,sandbox:sandbox(q),method:METHOD,deliveryTerms:q.checkoutSettings.deliveryTerms,refundTerms:q.checkoutSettings.refundTerms};}
