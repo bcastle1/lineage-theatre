@@ -5,7 +5,6 @@ import {
   Library,
   Plus,
   LogOut,
-  ArrowRight,
   Check,
   CheckCircle2,
   AlertCircle,
@@ -20,7 +19,6 @@ import {
   customerProjectBackup,
   editorialPlan,
   editorialThemes,
-  formatDuration,
   newFilm,
   normalizeFilm,
   normalizePaymentReference,
@@ -40,6 +38,8 @@ import { importSource } from "./sources";
 
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
+import FilmLibrary from "./FilmLibrary";
+import { initialWorkspaceView, localLibraryPatch, localLibraryState, type LibraryAction } from "./film-library";
 const Admin = lazy(() => import("../admin/Admin"));
 const AccountSecurity = lazy(() => import("../AccountSecurity"));
 
@@ -94,18 +94,17 @@ export default function Workspace({
   const [projects, setProjects] = useState<Film[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(storageKey) || "[]");
-      return Array.isArray(parsed) && parsed.length
-        ? parsed.map(normalizeFilm)
-        : [newFilm()];
+      const stored = Array.isArray(parsed) && parsed.length ? parsed.map(normalizeFilm) : [];
+      return stored.some(project => localLibraryState(project) === "active") ? stored : [newFilm(), ...stored];
     } catch {
       return [newFilm()];
     }
   });
   const [activeId, setActiveId] = useState(
-    projects.find((p) => !p.archivedAt)?.id || projects[0].id,
+    projects.find((p) => localLibraryState(p) === "active")?.id || projects[0].id,
   );
   const [view, setView] = useState<"create" | "library" | "admin">(() =>
-    (user.role === "owner" || user.role === "admin") && window.location.hash.startsWith("#admin/payments") ? "admin" : "create",
+    initialWorkspaceView(window.location.hash, user.role),
   );
   useEffect(() => {
     const openPayments = () => {
@@ -128,6 +127,9 @@ export default function Workspace({
   const [localLegacy, setLocalLegacy] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountBusy, setAccountBusy] = useState(false);
+  const [libraryActionBusy, setLibraryActionBusy] = useState(false);
+  const [archiveUploadBusy, setArchiveUploadBusy] = useState(false);
+  const libraryBusy = libraryActionBusy || archiveUploadBusy;
 
   const workLock = useRef(false);
 
@@ -222,14 +224,14 @@ export default function Workspace({
     };
   }, [film.outputId, notify]);
   useEffect(() => {
-    if (!busy) return;
+    if (!busy && !libraryBusy && saved === "Saved in this browser") return;
     const prevent = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", prevent);
     return () => window.removeEventListener("beforeunload", prevent);
-  }, [busy]);
+  }, [busy, libraryBusy, saved]);
   const jobSignature = projects
     .filter(
       (p) =>
@@ -297,12 +299,33 @@ export default function Workspace({
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   function create() {
+    if (busy || libraryBusy) return;
     const project = newFilm();
     setProjects((p) => [project, ...p]);
     setActiveId(project.id);
     setStep(0);
     setView("create");
     notify("A new family film is ready to develop.");
+  }
+  function openLibraryDraft(id: string) {
+    if (busy || libraryBusy) return;
+    const draft = projects.find(project => project.id === id && localLibraryState(project) === "active");
+    if (!draft) return;
+    setActiveId(id); setView("create"); setStep(draft.paymentReference || draft.outputId ? 3 : draft.scenes.length ? 2 : 0);
+    notify("Browser draft opened. Saved account versions remain unchanged.", "info");
+  }
+  function organizeLocalDraft(id: string, action: LibraryAction) {
+    const next = projects.map(project => project.id === id ? { ...project, ...localLibraryPatch(action), updatedAt: new Date().toISOString() } : project);
+    const serialized = JSON.stringify(next);
+    try {
+      localStorage.setItem(storageKey, serialized);
+      if (localStorage.getItem(storageKey) !== serialized) throw new Error();
+    } catch { throw new Error("This browser could not save the change. Your draft is unchanged. Make space or export a backup before trying again."); }
+    setProjects(next); setSaved("Saved in this browser");
+    if (activeId === id && action !== "restore") {
+      const nextActive = next.find(project => localLibraryState(project) === "active");
+      if (nextActive) setActiveId(nextActive.id);
+    }
   }
   async function upload(files: FileList | File[]) {
     const id = film.id;
@@ -535,8 +558,8 @@ export default function Workspace({
   }
 
   const nav = [
-    { id: "create" as const, label: "Create a film", icon: Video },
     { id: "library" as const, label: "Film library", icon: Library },
+    { id: "create" as const, label: "Create a film", icon: Video },
     ...(user.role === "owner" || user.role === "admin"
       ? [{ id: "admin" as const, label: "Administration", icon: ShieldCheck }]
       : []),
@@ -558,8 +581,9 @@ export default function Workspace({
             <button
               key={n.id}
               className={view === n.id ? "nav-item selected" : "nav-item"}
-              disabled={!!busy}
+              disabled={!!busy || libraryBusy}
               onClick={() => {
+                if (n.id === "create" && localLibraryState(film) !== "active") { create(); return; }
                 setView(n.id);
                 notify(`${n.label} opened.`, "info");
               }}
@@ -584,26 +608,27 @@ export default function Workspace({
       </aside>
       <div className="studio-main">
         <header className="topbar">
+          {view === "library" ? <div className="project-switch"><Library size={17} aria-hidden="true" /><span>Film library</span></div> :
           <div className="project-switch">
             <FilmIcon size={17} />
             <select
               aria-label="Current film"
               value={film.id}
-              disabled={!!busy}
+              disabled={!!busy || libraryBusy}
               onChange={(e) => {
                 setActiveId(e.target.value);
                 notify("Film opened.");
               }}
             >
               {projects
-                .filter((p) => !p.archivedAt)
+                .filter((p) => localLibraryState(p) === "active")
                 .map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.title || "Untitled family film"}
                   </option>
                 ))}
             </select>
-          </div>
+          </div>}
           <span
             className={`save-state ${saved.startsWith("Could") ? "error-text" : ""}`}
             role="status"
@@ -612,16 +637,17 @@ export default function Workspace({
             {saved}
           </span>
           <div className="user-menu">
-            <button className="text-button" aria-label="Account security" disabled={!!busy || accountBusy} onClick={() => setAccountOpen(true)}>{user.name}</button>
+            <button className="text-button" aria-label="Account security" disabled={!!busy || libraryBusy || accountBusy} onClick={() => setAccountOpen(true)}>{user.name}</button>
             <button
               className="icon-button"
               aria-label="Sign out"
-              disabled={!!busy || accountBusy}
-              onClick={() =>
+              disabled={!!busy || libraryBusy || accountBusy}
+              onClick={() => {
+                if (saved !== "Saved in this browser" && !window.confirm("Some draft changes have not been saved in this browser. Sign out anyway?")) return;
                 void onLogout().catch(() =>
                   notify("Sign-out failed. Please try again.", "error"),
-                )
-              }
+                );
+              }}
             >
               <LogOut size={17} />
             </button>
@@ -767,77 +793,8 @@ export default function Workspace({
           )}
           {view === "library" && (
             <>
-              <div className="page-heading">
-                <div>
-                  <h1>Your family film library</h1>
-                  <p>Private projects saved under your account in this browser.</p>
-                </div>
-                <button className="button primary" onClick={create}>
-                  <Plus size={16} />
-                  New film
-                </button>
-              </div>
-              <div className="library-list">
-                {projects.map((p) => (
-                  <article
-                    className={`library-item ${p.archivedAt ? "archived" : ""}`}
-                    key={p.id}
-                  >
-                    <div className="library-art">
-                      <FilmIcon size={28} strokeWidth={1.2} />
-                    </div>
-                    <div>
-                      <h2>{p.title || "Untitled family film"}</h2>
-                      <p>
-                        {p.ancestor || "Add a family story"} · {p.style} ·{" "}
-                        {formatDuration(p.duration)}
-                      </p>
-                      <small>
-                        {p.archivedAt
-                          ? "Archived"
-                          : p.outputId
-                            ? "Film created"
-                            : p.scenes.length
-                              ? "In the cutting room"
-                              : "In development"}{" "}
-                        · {p.sources.length} sources ·{" "}
-                        {new Date(p.updatedAt).toLocaleDateString()}
-                      </small>
-                    </div>
-                    <div className="action-group">
-                      <button
-                        className="button secondary small"
-                        onClick={() => {
-                          if (p.archivedAt) update({ archivedAt: null }, p.id);
-                          setActiveId(p.id);
-                          setView("create");
-                          setStep(p.outputId ? 3 : 0);
-                          notify("Film opened.");
-                        }}
-                      >
-                        {p.archivedAt ? "Restore & open" : "Open film"}
-                        <ArrowRight size={14} />
-                      </button>
-                      {!p.archivedAt && (
-                        <button
-                          className="text-button"
-                          disabled={projects.filter((x) => !x.archivedAt).length <= 1}
-                          onClick={() => {
-                            update({ archivedAt: new Date().toISOString() }, p.id);
-                            if (activeId === p.id)
-                              setActiveId(
-                                projects.find((x) => x.id !== p.id && !x.archivedAt)!.id,
-                              );
-                            notify("Film archived. You can restore it here.");
-                          }}
-                        >
-                          Archive
-                        </button>
-                      )}
-                    </div>
-                  </article>
-                ))}
-              </div>
+              <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} onCreate={create} onOpenDraft={openLibraryDraft}
+                onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} />
               {localLegacy && (
                 <div className="legacy-box">
                   <p>Your earlier Lineage Theatre projects are still in this browser.</p>
@@ -870,7 +827,9 @@ export default function Workspace({
               )}
             </>
           )}
-          {view === "library" && <CloudArchivePanel projects={projects} />}
+          {view === "library" && <details className="film-library-upload"><summary>Save or upload a completed film</summary>
+            <CloudArchivePanel projects={projects.filter(project => localLibraryState(project) === "active")} onBusyChange={setArchiveUploadBusy} showFilms={false} />
+          </details>}
           </>}
         </main>
         <footer className="workspace-footer">

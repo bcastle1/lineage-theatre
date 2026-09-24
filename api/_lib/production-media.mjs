@@ -35,7 +35,7 @@ export function validateStoredProductionMedia(job, email) {
   return Object.fromEntries(["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"].map(key => [key, media[key]]));
 }
 
-async function requireFinishedFilmPayment({ job, email, actor, read, now }) {
+export async function requireFinishedFilmPayment({ job, email, actor, read, now }) {
   if (!HASH.test(job.manifestHash || "") || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash) throw invalidMedia();
   // The owner's fixed fictional sample remains an operator preview. A role or
   // test flag alone never exempts a customer's film from payment.
