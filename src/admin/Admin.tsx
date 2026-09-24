@@ -34,12 +34,13 @@ import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
 import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
 import MagicLightLiveTest from "./MagicLightLiveTest";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
+import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import "./admin.css";
 
 type Tab = "overview" | "people" | "payments" | "pricing" | "agreement" | "films" | "activity";
-type Connection = { available: boolean; reason: string };
+type Connection = { available: boolean; reason: string; status?: "configured" | Exclude<CheckoutConnectionStatus, "ready"> };
 type Pricing = {
   markupBasisPoints: number;
   planningCreditsPerClip: number;
@@ -128,6 +129,8 @@ type RegistrationPolicy = {
 type PaymentsData = {
   orders: Order[];
   connectionReady: boolean;
+  configured?: boolean;
+  connectionStatus?: CheckoutConnectionStatus;
   reason?: string;
   cursor?: string;
 };
@@ -382,6 +385,7 @@ export default function Admin({
   const [payments, setPayments] = useState<PaymentsData | null>(null);
   const [quickBooks, setQuickBooks] = useState<QuickBooksStatus | null>(null);
   const [quickBooksError, setQuickBooksError] = useState("");
+  const [hostedCheckoutRefresh, setHostedCheckoutRefresh] = useState<PromiseSettledResult<HostedCheckoutSettingsValue> | null>(null);
   const [verifyingCompany, setVerifyingCompany] = useState(false);
   const [refreshingAuthorization, setRefreshingAuthorization] = useState(false);
   const [quickBooksReturn, setQuickBooksReturn] = useState(paymentCallbackResult);
@@ -818,6 +822,19 @@ export default function Admin({
     !quickBooks.pending && !quickBooks.remoteReviewRequired &&
     Number.isSafeInteger(quickBooks.revision),
   );
+  async function refreshQuickBooksPanels() {
+    const request = ++requestNumber.current;
+    setLoading(true);
+    const result = await readQuickBooksPanels<Overview, PaymentsData>(api);
+    if (!adminMounted.current || request !== requestNumber.current) return;
+    setOverview(result.overview.status === "fulfilled" ? result.overview.value : null);
+    setOverviewError(result.overview.status === "rejected" ? errorText(result.overview.reason) : "");
+    setPayments(result.payments.status === "fulfilled" ? result.payments.value : null);
+    setError(result.payments.status === "rejected" ? errorText(result.payments.reason) : "");
+    setHostedCheckoutRefresh(result.settings);
+    setUpdated(new Date().toISOString());
+    setLoading(false);
+  }
   async function refreshQuickBooksAuthorization() {
     if (!canRefreshQuickBooks || !quickBooks || actionLock.current) return;
     actionLock.current = true;
@@ -849,8 +866,12 @@ export default function Admin({
         }
       }
     } finally {
-      actionLock.current = false;
-      if (adminMounted.current) { setBusy(false); setRefreshingAuthorization(false); }
+      try {
+        if (adminMounted.current) await refreshQuickBooksPanels();
+      } finally {
+        actionLock.current = false;
+        if (adminMounted.current) { setBusy(false); setRefreshingAuthorization(false); }
+      }
     }
   }
   async function verifyQuickBooksCompany() {
@@ -886,16 +907,25 @@ export default function Admin({
       }
     } catch (e) {
       if (adminMounted.current) {
-        setQuickBooks((previous) =>
-          previous ? { ...previous, companyVerification: null } : previous,
-        );
         setQuickBooksError(errorText(e));
+        // Verification can renew an access token. Reconcile its saved result
+        // once without replaying verification or a token rotation.
+        try {
+          const current = await api<QuickBooksStatus>("/api/quickbooks?action=status");
+          if (adminMounted.current) setQuickBooks(current);
+        } catch {
+          if (adminMounted.current) setQuickBooks(null);
+        }
       }
     } finally {
-      actionLock.current = false;
-      if (adminMounted.current) {
-        setBusy(false);
-        setVerifyingCompany(false);
+      try {
+        if (adminMounted.current) await refreshQuickBooksPanels();
+      } finally {
+        actionLock.current = false;
+        if (adminMounted.current) {
+          setBusy(false);
+          setVerifyingCompany(false);
+        }
       }
     }
   }
@@ -1425,9 +1455,13 @@ export default function Admin({
                       tone={connection ? (connection.available ? "good" : "pending") : "neutral"}
                     >
                       {connection
-                        ? connection.available
-                          ? "Connection verified"
-                          : "Setup pending"
+                        ? connection.status === "renewal-due"
+                          ? "Authorization renewal due"
+                          : connection.status === "needs-attention"
+                            ? "Connection needs attention"
+                            : connection.available
+                              ? "Connection verified"
+                              : "Setup pending"
                         : loading
                           ? "Checking"
                           : "Not verified"}
@@ -1875,7 +1909,9 @@ export default function Admin({
                 </div>
                 <div>
                   <span>Hosted checkout</span>
-                  <strong>{payments?.connectionReady ? "Configured" : "Setup required"}</strong>
+                  <strong>{payments?.connectionStatus === "renewal-due" ? "Authorization renewal due"
+                    : payments?.connectionStatus === "needs-attention" ? "Connection needs attention"
+                    : payments?.connectionReady ? "Configured" : "Setup required"}</strong>
                   <small>
                     Customers pay on QuickBooks. Refunds for hosted invoices are managed there.
                   </small>
@@ -2027,7 +2063,7 @@ export default function Admin({
                 onBusyChange={setBusy}
               />}
             </section>
-            <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />
+            <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} refreshedSettings={hostedCheckoutRefresh} onSaved={() => void refresh()} />
             <ReceiptSettings disabled={busy || loading} />
             <div className="admin-section-heading">
               <div>
@@ -2052,7 +2088,9 @@ export default function Admin({
             <div className="admin-feedback info">
               <AlertCircle size={18} />
               <div>
-                <strong>{payments?.connectionReady ? "QuickBooks-hosted checkout is configured" : "Hosted checkout setup is incomplete"}</strong>
+                <strong>{payments?.connectionStatus === "renewal-due" ? "Checkout setup is complete; authorization renewal is due"
+                  : payments?.connectionStatus === "needs-attention" ? "The checkout connection needs attention"
+                  : payments?.connectionReady ? "QuickBooks-hosted checkout is configured" : "Hosted checkout setup is incomplete"}</strong>
                 <p>
                   {payments?.reason ||
                     overview?.connections.billing.reason ||
@@ -2289,7 +2327,7 @@ export default function Admin({
             </div>
           </section>
         )}
-        {tab === "pricing" && <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />}
+        {tab === "pricing" && <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} refreshedSettings={hostedCheckoutRefresh} onSaved={() => void refresh()} />}
         {tab === "films" && (
           <section className="admin-card">
             <div className="admin-section-heading">

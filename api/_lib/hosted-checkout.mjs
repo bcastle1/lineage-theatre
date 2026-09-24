@@ -191,12 +191,32 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(binding.environment!==env.QUICKBOOKS_ENVIRONMENT||!sameBinding(binding,s.merchantBinding))throw unavailable();
     return {record,settings:s,binding};
   }
+  async function configurationStatus(actor,record) {
+    const s=record?.value;
+    if(!complete(s))return {available:false,configured:false,connectionStatus:"setup-required",
+      reason:"Save the service item, business terms, and merchant confirmations for the current connection before enabling checkout."};
+    try {
+      await access(actor);
+      const state=typeof transport.readiness==="function"?await transport.readiness():{binding:await transport.binding({allowRefresh:false}),status:"ready"};
+      if(!["ready","renewal-due"].includes(state.status)||!bound(state.binding)||state.binding.environment!==env.QUICKBOOKS_ENVIRONMENT)throw unavailable();
+      if(!sameBinding(s.merchantBinding,state.binding))return {available:false,configured:false,connectionStatus:"setup-required",
+        reason:"The QuickBooks connection changed. Review and save the checkout settings for the current connection."};
+      await access(actor);
+      if((await readSettings())?.etag!==record.etag)throw unavailable();
+      return {available:state.status==="ready",configured:true,connectionStatus:state.status,
+        reason:state.status==="renewal-due"?"Checkout setup is complete. Authorization renewal is due; the next checkout action will attempt renewal automatically. No payment was made by viewing this status.":null};
+    }catch{return {available:false,configured:false,connectionStatus:"needs-attention",
+      reason:"Checkout settings remain saved, but the QuickBooks connection could not be verified. Review its authorization status before changing checkout settings."};}
+  }
+  async function adminConfiguration(actor) {
+    if(!hasAdminAccess(await currentActor(actor)))throw new HostedCheckoutError("Administrator access is required.",403);
+    return configurationStatus(actor,await readSettings());
+  }
   async function settings(actor) {
-    await currentActor(actor,true);const s=(await readSettings())?.value||defaults();let configured=false;
-    try {configured=complete(s)&&sameBinding(s.merchantBinding,await transport.binding({allowRefresh:false}))&&s.merchantBinding.environment===env.QUICKBOOKS_ENVIRONMENT;}catch{}
+    await currentActor(actor,true);const record=await readSettings(),s=record?.value||defaults(),status=await configurationStatus(actor,record);
     return {revision:s.revision,enabled:s.enabled,serviceItemId:s.serviceItemId,serviceItemName:s.serviceItemName,taxCode:s.taxCode,deliveryTerms:s.deliveryTerms,refundTerms:s.refundTerms,
       merchantConfirmed:s.merchantConfirmed,pciAcknowledged:s.pciAcknowledged,automaticInvoiceEmailDisabled:s.automaticInvoiceEmailDisabled,
-      environment:s.merchantBinding?.environment||env.QUICKBOOKS_ENVIRONMENT||null,configured,reason:configured?null:"Save the service item, business terms, and merchant confirmations for the current connection before enabling checkout."};
+      environment:s.merchantBinding?.environment||env.QUICKBOOKS_ENVIRONMENT||null,...status};
   }
   async function catalog(actor) {
     await currentActor(actor,true);const binding=await transport.binding({allowRefresh:true});if(!bound(binding)||binding.environment!==env.QUICKBOOKS_ENVIRONMENT)throw unavailable();
@@ -489,7 +509,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     return {allowed:true,manifestHash,budgetCents:fresh.maximumCostCents,quoteReference:fresh.quoteReference,expiresAt:stamp(until),
       environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
   }
-  return {settings,catalog,saveSettings,configuration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
+  return {settings,catalog,saveSettings,configuration,adminConfiguration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
     ownsOrder:async id=>hex.test(id||"")&&(await read(orderPath(id)))?.value.checkoutMethod===METHOD,
     authorizeProduction};
 }
