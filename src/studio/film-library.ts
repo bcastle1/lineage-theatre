@@ -14,7 +14,7 @@ export type LibraryEntry = {
 };
 export type LibraryPage = { entries: LibraryEntry[]; cursor?: string };
 export type LibraryScene = { title: string; narration: string; visual: string; dialogue: string };
-export type LibraryDetail = { entry: LibraryEntry; scenes?: LibraryScene[]; manifest?: Record<string, unknown> };
+export type LibraryDetail = { entry: LibraryEntry; scenes?: LibraryScene[]; sourceNames?: string[]; manifest?: Record<string, unknown> };
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -99,11 +99,21 @@ export async function verifyLibraryDetail(value: unknown, expected: LibraryEntry
     || wrapper.manifest.screenplay.scenes.length > 30) throw invalid();
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(wrapper.manifest))));
   if (Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("") !== entry.manifestHash) throw invalid();
+  // The server bounds the screenplay, not the full manifest (shots repeat it).
+  if (new TextEncoder().encode(JSON.stringify(wrapper.manifest.screenplay)).byteLength > 1_500_000) throw invalid();
   const scenes = wrapper.manifest.screenplay.scenes.map(scene => {
-    if (!object(scene) || ![scene.title, scene.narration, scene.visual, scene.dialogue].every(field => text(field, 100_000))) throw invalid();
+    if (!object(scene) || ![scene.title, scene.narration, scene.visual, scene.dialogue].every(field => text(field, 1_500_000))) throw invalid();
     return { title: scene.title as string, narration: scene.narration as string, visual: scene.visual as string, dialogue: scene.dialogue as string };
   });
-  return { entry, scenes, manifest: wrapper.manifest };
+  let sourceNames: string[] | undefined;
+  if (wrapper.manifest.sources !== undefined) {
+    if (!Array.isArray(wrapper.manifest.sources) || wrapper.manifest.sources.length > 200) throw invalid();
+    sourceNames = wrapper.manifest.sources.map(source => {
+      if (!object(source) || !text(source.name, 100_000)) throw invalid();
+      return source.name;
+    });
+  }
+  return { entry, scenes, ...(sourceNames ? { sourceNames } : {}), manifest: wrapper.manifest };
 }
 export function paymentLabel(payment: LibraryPayment): string {
   if (payment.requiresReview) return "Payment needs review";

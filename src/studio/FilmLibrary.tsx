@@ -15,10 +15,27 @@ function downloadPlan(detail: LibraryDetail) {
   link.href = url; link.download = "saved-film-plan.json"; document.body.append(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
-export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft, onLocalAction, onBusyChange }: {
+export function SavedPlanVersionAction({ detail, disabled, onCreateVersion }: {
+  detail: LibraryDetail; disabled: boolean; onCreateVersion: (entry: LibraryEntry) => Promise<void>;
+}) {
+  if (detail.entry.kind !== "plan" || !detail.manifest) return null;
+  return <div className="film-library-version-action">
+    <p className="field-note">Create a separate browser draft using this saved screenplay as its source. Original uploads are not copied. The original payment stays with this saved plan. Review the new draft and choose its running time before production.</p>
+    {detail.sourceNames && detail.sourceNames.length > 0 && <details>
+      <summary>Original source filenames ({detail.sourceNames.length})</summary>
+      <p className="field-note">These names are references from the saved plan. Add the original files separately if you want them read again.</p>
+      <ul>{detail.sourceNames.map((name, index) => <li key={index}>{name || "Unnamed source"}</li>)}</ul>
+    </details>}
+    <button type="button" className="button primary small" disabled={disabled} onClick={() => void onCreateVersion(detail.entry)}>
+      <Plus size={15} aria-hidden="true" />Create new version
+    </button>
+  </div>;
+}
+export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft, onLocalAction, onBusyChange, onCreateVersion }: {
   projects: Film[]; disabled: boolean; onCreate: () => void; onOpenDraft: (id: string) => void;
   onLocalAction: (id: string, action: LibraryAction) => void;
   onBusyChange: (busy: boolean) => void;
+  onCreateVersion: (entry: LibraryEntry) => Promise<void>;
 }) {
   const [view, setView] = useState<LibraryView>("active");
   const [entries, setEntries] = useState<LibraryEntry[]>([]);
@@ -92,6 +109,14 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
+  async function createVersion(entry: LibraryEntry) {
+    if (lock.current || disabled || !detail?.manifest || detail.entry.kind !== "plan"
+      || libraryKey(detail.entry) !== libraryKey(entry)) return;
+    lock.current = true; setBusy("Creating a separate draft…"); setError(""); setMessage("");
+    try { await onCreateVersion(entry); }
+    catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    finally { lock.current = false; if (mounted.current) setBusy(""); }
+  }
   const blocked = disabled || Boolean(busy);
   const drafts = projects.filter(project => localLibraryState(project) === view);
   const closeConfirmation = () => { if (!busy) { dialog.current?.close(); setConfirmation(null); } };
@@ -150,11 +175,12 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
     {detail && <section ref={detailPanel} tabIndex={-1} className="panel film-library-detail" aria-labelledby="saved-film-detail-heading">
       <div className="section-title"><div><h2 id="saved-film-detail-heading">{savedVersionTitle}: {detail.entry.title || "Untitled family film"}</h2>
         <p>{formatDuration(detail.entry.durationSeconds)} target · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
-        <button type="button" className="icon-button" aria-label="Close saved film details" onClick={() => setDetail(null)}><X size={18} /></button></div>
+        <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={() => setDetail(null)}><X size={18} /></button></div>
       <p className="field-note">This saved version is separate from any edits in your browser draft.</p>
       {detail.scenes?.map((scene, index) => <article className="film-library-scene" key={index}><h3>{index + 1}. {scene.title || "Scene"}</h3>
         {scene.narration && <p><strong>Narration:</strong> {scene.narration}</p>}{scene.visual && <p><strong>Visual:</strong> {scene.visual}</p>}{scene.dialogue && <p><strong>Dialogue:</strong> {scene.dialogue}</p>}</article>)}
       {detail.manifest && <button type="button" className="button secondary small" onClick={() => downloadPlan(detail)}><Download size={15} aria-hidden="true" />Download saved plan</button>}
+      <SavedPlanVersionAction detail={detail} disabled={blocked} onCreateVersion={createVersion} />
     </section>}
     <section aria-labelledby="browser-drafts-heading" className="film-library-drafts"><div className="section-title"><div>
       <h2 id="browser-drafts-heading">Browser drafts</h2><p>These editable drafts and original source files are stored on this browser. They are not a backup of your account's saved versions.</p>
