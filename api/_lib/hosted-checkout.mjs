@@ -37,11 +37,18 @@ function complete(s) {return Boolean(s&&s.enabled===true&&Number.isSafeInteger(s
   &&typeof s.deliveryTerms==="string"&&s.deliveryTerms.trim().length>0&&typeof s.refundTerms==="string"&&s.refundTerms.trim().length>0
   &&s.merchantConfirmed===true&&s.pciAcknowledged===true&&s.automaticInvoiceEmailDisabled===true&&bound(s.merchantBinding));}
 function safeLink(value) {
-  if(typeof value!=="string"||value.length>4096)return null;
-  const portal=/^https:\/\/connect\.intuit\.com\/portal\/[^\s\\#]+$/.test(value);
-  const short=/^https:\/\/connect\.intuit\.com\/t\/scs-v1-[a-fA-F0-9]{96}(?:\?locale=[a-zA-Z]{2}_[a-zA-Z]{2})?$/.test(value);
-  if(!portal&&!short)return null;
-  try {const u=new URL(value);return u.protocol==="https:"&&u.hostname==="connect.intuit.com"&&!u.port&&!u.username&&!u.password&&!u.hash&&(short||(u.pathname.startsWith("/portal/")&&u.pathname.length>8))&&u.href===value?value:null;}catch{return null;}
+  if(typeof value!=="string"||value.length>4096||!value.startsWith("https://connect.intuit.com/")||/[\s\\#\x00-\x1f\x7f]/.test(value))return null;
+  try {
+    const u=new URL(value);
+    if(u.protocol!=="https:"||u.hostname!=="connect.intuit.com"||u.port||u.username||u.password||u.hash||u.href!==value)return null;
+    if(u.pathname.startsWith("/portal/")&&u.pathname.length>8)return value;
+    if(!/^\/t\/scs-v1-[a-fA-F0-9]{96}$/.test(u.pathname))return null;
+    const locales=u.searchParams.getAll("locale");
+    if(locales.length>1||(locales.length===1&&!/^[a-zA-Z]{2}_[a-zA-Z]{2}$/.test(locales[0])))return null;
+    // Query action/tracking values cannot change the payment destination. Keep
+    // only the validated locale on the provider's verified invoice identity.
+    return `https://connect.intuit.com${u.pathname}${locales.length?`?locale=${locales[0]}`:""}`;
+  }catch{return null;}
 }
 const checkStages=["binding","invoice-read","invoice-validation","payment-read","payment-validation","actor-recheck","binding-recheck","complete"];
 const checkReasons=new Set(["CONNECTION_BINDING_FAILED","INVOICE_READ_FAILED","INVOICE_VALIDATION_FAILED","PAYMENT_READ_FAILED","PAYMENT_VALIDATION_FAILED","ACTOR_RECHECK_FAILED","BINDING_RECHECK_FAILED","CHECK_FAILED",

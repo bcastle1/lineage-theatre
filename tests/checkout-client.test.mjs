@@ -27,16 +27,23 @@ const token = "SYNTHETIC_TOKEN_NOT_A_REAL_CARD";
 
 test("verified Intuit short invoice links survive order normalization and payment-tab navigation", () => {
   const base = `https://connect.intuit.com/t/scs-v1-${"a".repeat(96)}`;
-  for (const link of [base, `${base}?locale=en_US`, `${base}?locale=EN_us`]) {
-    assert.equal(normalizeHostedInvoiceUrl(link), link);
-    assert.equal(normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: link }).invoiceUrl, link);
+  const cases=[["",""],["?locale=en_US","?locale=en_US"],["?locale=EN_us","?locale=EN_us"],
+    ["?locale=en_US&cta=PRIVATE_QUERY_VALUE","?locale=en_US"],["?cta=PRIVATE_QUERY_VALUE&locale=en_US","?locale=en_US"],
+    ["?redirect=https%3A%2F%2Fevil.invalid%2FPRIVATE_QUERY_VALUE", ""],["?redirect=https://evil.invalid&locale=en_US","?locale=en_US"],
+    ["?cta=PRIVATE_QUERY_VALUE&cta=PRIVATE_QUERY_VALUE",""],["?cta=PRIVATE_QUERY_VALUE%26locale=en_US",""],
+    ["?locale=en%5fUS","?locale=en_US"],["?%6cocale=en_US","?locale=en_US"],["?Locale=PRIVATE_QUERY_VALUE", ""],["?",""]];
+  for (const [suffix,expectedSuffix] of cases) {
+    const link=`${base}${suffix}`,destination=`${base}${expectedSuffix}`;
+    assert.equal(normalizeHostedInvoiceUrl(link), destination);
+    assert.equal(normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: link }).invoiceUrl, destination);
     let navigated;
     const tab={opener:{},document:{title:"",body:{}},closed:false,location:{replace:url=>navigated=url},close:()=>{}};
     assert.equal(reservePaymentWindow(()=>tab).open(link), true);
-    assert.equal(navigated, link);
+    assert.equal(navigated, destination);
+    assert.equal(navigated.includes("PRIVATE_QUERY_VALUE"),false);
   }
-  for (const link of [`${base}?redirect=https://evil.invalid`, `${base}?locale=en_US&redirect=https://evil.invalid`,
-    `${base}?locale=en_US&locale=fr_CA`, `${base}?locale=en%5fUS`, `${base}#other`, `${base}/more`,
+  for (const link of [`${base}?locale=en-US`,`${base}?locale=en`,`${base}?locale=`,`${base}?locale=en_US&locale=fr_CA`,
+    `${base}?locale=en_US&%6cocale=en_US`,`${base}?locale=en_US%26redirect=https://evil.invalid`,`${base}?locale=%00en_US`,`${base}?locale=%20en_US`,`${base}#other`, `${base}#`, `${base}/more`,
     base.slice(0,-1), `${base}0`, base.replace("scs-v1-", "other-"), base.replace("/t/", "/t/../t/"),
     base.replace("connect.intuit.com/", "connect.intuit.com:443/"), base.replace("connect.intuit.com", "connect.intuit.com.evil.invalid"),
     base.replace("connect.intuit.com", "user@connect.intuit.com"), base.replace("https:", "http:")]) {
