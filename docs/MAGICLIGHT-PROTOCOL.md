@@ -35,6 +35,7 @@ const evidence = await client.checkTask({ taskId });
 
 - `checkTask` returns `{ providerCode, taskStatus?, taskId?, videoUrl? }`. `providerCode` is the exact numeric `biz_code`. Unknown business codes return only that code. No `authenticated`, `paid`, `ready`, or entitlement conclusion is inferred. A status-0 reply for a nonexistent task is not proof of authentication.
 - `submitTask({ text, imageUrl? })` requires explicit server construction with `enableSubmission: true`. This is not an environment variable or a film-readiness override. It returns `{ providerCode, taskId }`; there is no automatic retry. POST failures after dispatch are marked `submissionUncertain` because acceptance may be unknown.
+- Numeric JSON task identifiers are preserved from the original number token instead of rounding 64-bit IDs. String IDs remain unchanged. An unsupported runtime fails closed on unsafe integers rather than polling a rounded identifier.
 - Only the two fixed origins above are accepted. There is no configurable base URL, arbitrary request path, redirect following, or credential forwarding to media URLs.
 - Each response is limited to 128 KiB of decoded bytes while streaming, with cancellation on rejection. The default 15-second deadline covers fetch and body consumption; the configured ceiling is 90 seconds. Declared lengths must match unencoded bodies; native fetch decompresses encoded bodies while retaining their compressed length header, so that header is not compared to decoded size. JSON, UTF-8, task identifiers and response fields are validated. Input text is capped at 100,000 UTF-8 bytes as an application limit, not a claimed provider limit.
 - Errors use fixed redacted messages/codes and optionally an HTTP status or numeric provider code. Provider messages, response bodies, trace IDs and transport error messages are not exposed. Raw responses containing credentials in returned task/media fields are rejected.
@@ -50,3 +51,13 @@ The implemented Administration overview button calls same-origin owner-only `POS
 ## Verification
 
 `node --test tests/magiclight-client.test.mjs` uses synthetic fetch/stream fixtures only. It covers fixed hosts, path validation, disabled submission, exact request shape, uncertainty without retries, bounded/stalled/truncated responses, secret redaction, and unchanged film availability. It makes no live provider requests.
+
+## Single owner live test
+
+Administration contains a separate owner-only live clip test using a fixed fictional shipyard prompt and the application's existing public illustrated still. The owner explicitly authorizes one generation using provider credits; exact cost and output duration remain unverified. This is separate from customer checkout and the saved paid film. It does not set production readiness or mark an order fulfilled.
+
+The service stores one private permanent claim at `integrations/magiclight/operator-test-v1.json` before sending a generation POST. It confirms the exact record, current owner, fixture, connection fingerprint, and claim before dispatch. Every later submit attempt returns that saved claim; reloads, retries, key changes, and restarts cannot create another job. Once the provider returns a task ID, storage-only retries preserve that same ID and claim. A lost or ambiguous provider reply remains uncertain and never triggers automatic resubmission.
+
+Owner routes use same-origin session checks: GET `magicLightLiveTest` reads the record; POST `submitMagicLightLiveTest` requires only explicit `consent:true`; POST `checkMagicLightLiveTest` polls only the privately stored task ID. Browser prompts, origins, keys, image URLs, task IDs, and replacement request IDs are rejected. Keys, provider task IDs, and full returned media URLs stay private. The UI exposes only fixed diagnostic codes and the returned media origin; playback requires separate host and media verification.
+
+Focused service/route tests cover concurrent submissions, lost storage responses, bounded task-ID persistence retries, stale status races, owner revocation, changed credentials, output validation, redaction, and rejection of arbitrary input. A completed provider status is evidence of a provider result, not yet a verified playable film.

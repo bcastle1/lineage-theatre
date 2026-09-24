@@ -80,6 +80,27 @@ test("explicit submission sends the documented body exactly once, without fetchi
   assert.deepEqual(JSON.parse(calls[0][1].body), { text: "Synthetic fictional garden.", image_url: "https://images.example.invalid/fictional.png" });
 });
 
+test("numeric provider task IDs retain their exact digits through submission and polling", async () => {
+  const exactId = "2032443088023777281", calls = [];
+  const { client } = fixture({ enableSubmission: true, fetchImpl: async (url, options) => {
+    calls.push({ url, method: options.method });
+    return new Response(`{"biz_code":10000,"data":{"task_id":${exactId},"task_status":1}}`, {
+      headers: { "content-type": "application/json" },
+    });
+  } });
+  const submitted = await client.submitTask({ text: "Fictional test", imageUrl: "https://images.example.invalid/test.png" });
+  assert.equal(submitted.taskId, exactId);
+  assert.equal((await client.checkTask({ taskId: submitted.taskId })).taskId, exactId);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].url.endsWith(`task_id=${exactId}`));
+  for (const invalidToken of ["1.5", "-1", "2e18"]) {
+    const bad = fixture({ enableSubmission: true, fetchImpl: async () => new Response(`{"biz_code":10000,"data":{"task_id":${invalidToken}}}`, {
+      headers: { "content-type": "application/json" },
+    }) });
+    await assert.rejects(bad.client.submitTask({ text: "Fictional test" }), error => error.code === "MAGICLIGHT_INVALID_RESPONSE" && error.submissionUncertain);
+  }
+});
+
 test("invalid submission inputs never dispatch", async () => {
   const { client, calls } = fixture({ enableSubmission: true });
   for (const text of [undefined, "", " ", "a".repeat(100001), "é".repeat(50001)]) {
