@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
-import { prepareStory, validateStory } from "./story.mjs";
+import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -38,24 +38,44 @@ function select(value, fields) { return Object.fromEntries(fields.map(field => [
 function conflict(error) { return /precondition|already exists|etag|if.?match/i.test(`${error?.name} ${error?.message}`); }
 export const productionJobPath = (email, id) => `production/jobs/${digest(owner(email))}/${reference(id)}.json`;
 
+function savedText(value, label) {
+  return value === undefined ? "" : textField(value, label, MAX_MANIFEST_BYTES);
+}
+function savedList(value, label, maximum, minimum = 0) {
+  const list = value === undefined ? [] : value;
+  if (!Array.isArray(list) || list.length < minimum || list.length > maximum)
+    invalid(`${label} must contain ${minimum} to ${maximum} entries.`);
+  return list;
+}
+function savedRows(value, label, maximum, fields, minimum = 0) {
+  return savedList(value, label, maximum, minimum).map((row, index) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) invalid(`${label} entry ${index + 1} is invalid.`);
+    return Object.fromEntries(fields.map(field => [field, field.endsWith("Ids")
+      ? savedList(row[field], `${label} entry ${index + 1} references`, field === "sourceIds" ? 201 : 200).map(id => textField(id, "A film reference", 2000))
+      : savedText(row[field], `${label} entry ${index + 1} ${field}`)]));
+  });
+}
+
 // App timing targets, not a claim about a provider's supported clip lengths.
 // The immutable manifest keeps evidence hashes, not uploaded family source files.
 export function buildFilmManifest(project) {
-  if (!project || typeof project !== "object" || Array.isArray(project)) invalid("Review a screenplay before preparing your film.");
+  if (!project || typeof project !== "object" || Array.isArray(project)) invalid("Choose a saved film before preparing pricing.");
   reference(project.id);
   const title = textField(project.title, "The film title", 200).trim();
   if (!title) invalid("Add a title before preparing your film.");
   if (!Number.isSafeInteger(project.duration) || project.duration < 15 || project.duration > 600) invalid("Choose a film length between 15 and 600 seconds.");
   const { family } = prepareStory({ project });
+  // Pricing saves the customer's current film, including edited or older drafts.
+  // AI-generation rules (evidence coverage, cast, themes and dramatization) are
+  // not prerequisites for a price. Keep supplied content unchanged and enforce
+  // only storage/shape limits here; the provider validates its production inputs.
   const screenplay = {
-    logline: project.logline,
-    selectedThemes: project.selectedThemes?.map(t => select(t, ["title", "plot", "climax", "reason"])),
-    characters: project.characters?.map(c => select(c, ["id", "name", "role", "description", "basis", "sourceIds"])),
-    assumptions: project.assumptions?.map(a => select(a, ["id", "description", "reason"])),
-    scenes: project.scenes?.map(s => select(s, ["title", "narration", "visual", "sourceIds", "characterIds", "dialogue", "dramatization"])),
+    logline: savedText(project.logline, "The film summary"),
+    selectedThemes: savedRows(project.selectedThemes, "Film themes", 3, ["title", "plot", "climax", "reason"]),
+    characters: savedRows(project.characters, "Film cast", 16, ["id", "name", "role", "description", "basis", "sourceIds"]),
+    assumptions: savedRows(project.assumptions, "Film notes", 40, ["id", "description", "reason"]),
+    scenes: savedRows(project.scenes, "Film scenes", 30, ["title", "narration", "visual", "sourceIds", "characterIds", "dialogue", "dramatization"], 1),
   };
-  try { validateStory(screenplay, "plan", family); }
-  catch { invalid("Review the screenplay, cast, source references, and dramatization notes before preparing your film."); }
   const safeScreenplay = clone(screenplay);
   if (Buffer.byteLength(JSON.stringify(safeScreenplay)) > MAX_MANIFEST_BYTES) invalid("This screenplay is too large for a single production plan.");
   const weights = safeScreenplay.scenes.map(s => Math.max(1, `${s.narration} ${s.dialogue}`.trim().split(/\s+/).filter(Boolean).length));
@@ -155,10 +175,12 @@ export function createFilmProductionService(dependencies = {}) {
     return record;
   }
   async function requireOperator(actor, email) {
-    if (!isOwner(actor) || actor.status !== "active" || actor.mustChangePassword || actor.email !== email)
+    // isOwner includes the shared suspension check and supports legacy owner
+    // records. Revalidate the current private role before every test action.
+    if (!isOwner(actor) || actor.mustChangePassword || actor.email !== email)
       throw new FilmProductionError("Only the owner can run this production test.", 403, "OWNER_REQUIRED");
     const current = (await read(userPath(email)))?.value;
-    if (!isOwner(current) || current.email !== email || current.status !== "active" || current.mustChangePassword)
+    if (!isOwner(current) || current.email !== email || current.mustChangePassword)
       throw new FilmProductionError("Only the current active owner can run this production test.", 403, "OWNER_REQUIRED");
   }
   async function requireProductionContext(job, actor, email) {
@@ -220,6 +242,40 @@ export function createFilmProductionService(dependencies = {}) {
     return { preparedId: prepared.id, filmId: project.id, filmTitle: record.value.manifest.title, manifestHash: prepared.manifestHash,
       quoteReference: quote.quoteReference, currency: "USD", providerCostCents: quote.providerCostCents, expiresAt: quote.expiresAt,
       environment: adapter.environment, apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
+  }
+  async function quoteForProductionBudget({ email, preparedId, manifestHash, environment, budgetCents }) {
+    checkAdapter(adapter);
+    email = owner(email);
+    if (environment !== adapter.environment || typeof manifestHash !== "string" || !HASH.test(manifestHash)
+      || !Number.isSafeInteger(budgetCents) || budgetCents < 1 || budgetCents > 100_000_000) throw unavailable();
+    const record = await get(email, preparedId), job = record.value;
+    if (job.id !== preparedId || job.manifestHash !== manifestHash || hash(job.manifest) !== manifestHash
+      || job.filmId !== job.manifest.filmId || !Array.isArray(job.manifest.shots) || !job.manifest.shots.length
+      || !Array.isArray(job.shots) || job.shots.length !== job.manifest.shots.length
+      || job.shots.some((shot, index) => shot.id !== job.manifest.shots[index].id)
+      || job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) throw unavailable();
+    const actor = job.mode === "operator-test" ? (await read(userPath(email)))?.value : undefined;
+    await requireProductionContext(job, actor, email);
+    const validation = await adapter.validateManifest(clone(job.manifest));
+    if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents)
+      || validation.maximumCostCents < 0 || validation.maximumCostCents > budgetCents) throw unavailable();
+    // Refresh the actual production quote without changing the paid retail
+    // price or increasing the original server-authorized production budget.
+    const quote = await adapter.quote({ manifest: clone(job.manifest), manifestHash,
+      idempotencyKey: digest(`production-budget:${preparedId}:${manifestHash}:${uuid()}`) });
+    const until = typeof quote?.expiresAt === "string" ? Date.parse(quote.expiresAt) : NaN;
+    if (!quote || quote.manifestHash !== manifestHash || quote.currency !== "USD"
+      || typeof quote.quoteReference !== "string" || !quote.quoteReference.trim() || quote.quoteReference.length > 200
+      || !Number.isSafeInteger(quote.providerCostCents) || quote.providerCostCents < 0
+      || quote.providerCostCents > validation.maximumCostCents || quote.providerCostCents > budgetCents
+      || !Number.isFinite(until) || until <= now()) throw unavailable();
+    const current = await get(email, preparedId);
+    if (typeof record.etag !== "string" || current.etag !== record.etag || current.value.manifestHash !== manifestHash || until <= now()) throw unavailable();
+    checkAdapter(adapter);
+    if (adapter.environment !== environment) throw unavailable();
+    return { preparedId, manifestHash, environment, currency: "USD", providerCostCents: quote.providerCostCents,
+      maximumCostCents: validation.maximumCostCents, quoteReference: quote.quoteReference, expiresAt: quote.expiresAt,
+      apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
   }
   async function prepareOperatorTest({ actor, idempotencyKey }) {
     await requireOperator(actor, actor?.email);
@@ -313,7 +369,7 @@ export function createFilmProductionService(dependencies = {}) {
     return customerJob(job);
   }
   return {
-    prepare, prepareOperatorTest, quoteForPayment, advance, acceptAssembly,
+    prepare, prepareOperatorTest, quoteForPayment, quoteForProductionBudget, advance, acceptAssembly,
     status: async ({ email, id }) => customerJob((await get(email, id)).value),
     manifest: async ({ email, id }) => { const job = (await get(email, id)).value; return { id: job.id, manifestHash: job.manifestHash, manifest: clone(job.manifest) }; },
     getPrepared: async ({ email, id }) => clone((await get(email, id)).value),

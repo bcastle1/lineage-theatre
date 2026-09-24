@@ -87,6 +87,73 @@
 .admin-content {
   min-height: 420px;
 }
+.admin-source-agreement-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 22px;
+}
+.admin-source-agreement-heading p {
+  max-width: 730px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+  margin-top: 9px;
+}
+.admin-source-agreement-heading button {
+  flex-shrink: 0;
+}
+.admin-source-agreement-meta {
+  display: grid;
+  gap: 9px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.admin-source-agreement-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 24px;
+}
+.admin-source-agreement-form,
+.admin-source-agreement-preview {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+.admin-source-agreement-preview {
+  background: #fafbf8;
+  font-size: 13px;
+}
+.admin-source-agreement-preview h4 {
+  color: var(--forest);
+  font-size: 17px;
+  line-height: 1.5;
+}
+.admin-source-agreement-preview-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.75;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.admin-source-agreement-preview-consent > span {
+  font-size: 20px;
+  line-height: 1.2;
+}
+@media (max-width: 900px) {
+  .admin-source-agreement-heading {
+    flex-direction: column;
+    gap: 16px;
+  }
+  .admin-source-agreement-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+}
 .admin-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -710,6 +777,7 @@
   margin: 10px 0 20px;
 }
 .admin-pricing-columns {
+  align-items: start;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 40px;
@@ -991,6 +1059,58 @@
 .admin-quickbooks-company .admin-fineprint {
   margin-top: 12px;
 }
+.admin-planning-assumptions {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  margin: 8px 0;
+  padding: 18px;
+  border: 1px solid #e1e5dc;
+  border-radius: 8px;
+}
+.admin-planning-assumptions legend {
+  max-width: 100%;
+  padding: 0 5px;
+  color: var(--forest);
+  font-size: 13px;
+  font-weight: 700;
+}
+.admin-planning-assumptions label {
+  display: grid;
+  gap: 7px;
+}
+.admin-planning-assumptions input {
+  width: 100%;
+  max-width: 200px;
+}
+.admin-planning-assumptions p,
+.admin-planning-assumptions small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.admin-planning-assumptions a {
+  color: var(--forest);
+  text-decoration: underline;
+}
+.admin-payment-test {
+  margin-top: 20px;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+.admin-payment-test-status,
+.admin-payment-test-actions,
+.admin-payment-test .admin-inline-error {
+  margin-top: 14px;
+}
+.admin-payment-test-status p + p {
+  margin-top: 8px;
+}
+.admin-payment-test-status .spin {
+  margin-right: 7px;
+  vertical-align: middle;
+}
 .admin-quickbooks-company dl {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
@@ -1018,6 +1138,14 @@
 .admin-quickbooks-actions .button {
   white-space: normal;
 }
+.admin-hosted-checkout { padding: 24px; margin: 24px 0; border: 1px solid #dce4d9; border-radius: 14px; background: #fbfcf8; }
+.admin-hosted-checkout fieldset { display: grid; gap: 16px; border: 0; padding: 0; min-width: 0; }
+.admin-hosted-checkout legend { margin-bottom: 16px; font-weight: 600; }
+.admin-hosted-checkout label:not(.consent) { display: grid; gap: 8px; }
+.admin-hosted-checkout select, .admin-hosted-checkout textarea { width: 100%; max-width: 100%; padding: 10px; border: 1px solid #cbd6ce; border-radius: 8px; background: #fff; color: #203d32; font: inherit; }
+.admin-hosted-checkout .consent { display: flex; align-items: flex-start; gap: 10px; line-height: 1.5; }
+.admin-hosted-checkout .consent input { flex: 0 0 auto; margin-top: 4px; }
+.admin-hosted-checkout .field-note { margin: 0; font-size: 12px; line-height: 1.6; color: #526759; }
 @media (max-width: 700px) {
   .admin-quickbooks-panel {
     padding: 16px;

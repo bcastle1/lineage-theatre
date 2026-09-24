@@ -90,6 +90,9 @@ export function createPaymentReadiness({ read = readRecord, env = process.env, n
   }
   async function authorization(environment, operation) {
     if (!["sandbox", "production"].includes(environment) || ![...OPERATIONS, "card-entry"].includes(operation)) return null;
+    // This setting can narrow production access, never grant merchant approval.
+    // A misspelled supplied mode must not silently expose customer checkout.
+    if (environment === "production" && ![undefined, "approved", "owner"].includes(env.LINEAGE_PAYMENT_ACCESS)) return null;
     const operations = await reviewed("operations", environment);
     if (!operations || (operation !== "card-entry" && !operations.value.operations.includes(operation))) return null;
     const entry = operation === "card-entry" ? await reviewed("card-entry", environment) : null;
@@ -121,9 +124,10 @@ export function createPaymentReadiness({ read = readRecord, env = process.env, n
       // requests use the session account. Neither supplied roles nor an email
       // string can grant access without the current private account record.
       const account = (await read(userPath(email)))?.value;
-      if (account?.email !== email || account.status !== "active" || account.mustChangePassword
+      if (account?.email !== email || account.mustChangePassword
           || accessStatusForUser(account) !== "approved") return {};
-      if (environment === "sandbox" && (!isOwner(account) || account.email !== OWNER_EMAIL)) return {};
+      if ((environment === "sandbox" || (environment === "production" && env.LINEAGE_PAYMENT_ACCESS === "owner"))
+          && (!isOwner(account) || account.email !== OWNER_EMAIL)) return {};
       return { authorization: authorized };
     } catch { return {}; }
   }

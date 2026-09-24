@@ -61,7 +61,7 @@ export default function Landing({ children }: { children: ReactNode }) {
               <a className="landing-button light" href="#studio">Enter your studio <ArrowRight size={18} aria-hidden="true" /></a>
               <button className="landing-play-link" type="button" onClick={() => void playSample()}><Play size={17} aria-hidden="true" /> Watch the sample</button>
             </div>
-            <p className="hero-footnote">Studio preview: organize and save your family materials now. AI story development, film production and checkout are awaiting connection.</p>
+            <p className="hero-footnote">Organize your materials, develop your story and prepare a film price in the studio. Payment and production availability are shown before checkout.</p>
           </div>
           <figure className="hero-still">
             <img src="/assets/ancestor-shipyard-still.png" width="1672" height="941" decoding="async" alt="Cinematic illustration of an ancestor standing beside a wooden ship in a sunlit historic shipyard" />
@@ -131,7 +131,7 @@ export default function Landing({ children }: { children: ReactNode }) {
       <footer className="landing-footer">
         <a className="landing-brand" href="#home"><Aperture size={24} aria-hidden="true" /><span>Lineage Theatre</span></a>
         <p>Stories across generations.</p>
-        <nav aria-label="Legal"><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/security.html">Security</a></nav>
+        <nav aria-label="Legal"><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a><a href="/source-agreement.html">Source agreement</a><a href="/security.html">Security</a></nav>
         <p className="payment-disclosure">When checkout becomes available, payment processing will be provided by Intuit Payments Inc.</p>
       </footer>
     </div>

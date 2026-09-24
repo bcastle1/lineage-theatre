@@ -54,6 +54,11 @@ export default function AccountSecurity({ user, onUserChange, onClose, onBusyCha
     {message && <p className="feedback success" role="status">{message}</p>}
     {!status && !error && <p role="status"><Loader2 className="spin" size={16} /> Loading account settings…</p>}
     <section className="readiness-panel">
+      <h3>Source agreement</h3>
+      <p>Review the agreement version and electronic signature saved when you registered, if a record is available.</p>
+      <a href="/source-agreement.html?accepted=1" target="_blank" rel="noopener noreferrer">Your accepted source agreement</a>
+    </section>
+    <section className="readiness-panel">
       <h3>Email address</h3>
       <p>{status ? status.emailVerified ? "Your email address is verified." : "Your email address has not been verified." : "Verification status is unavailable."}</p>
       {status && !status.emailVerified && <>

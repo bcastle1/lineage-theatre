@@ -36,6 +36,10 @@
     },
     "api/quickbooks.mjs": {
       "maxDuration": 60
+    },
+    "api/payment-reconcile.mjs": {
+      "maxDuration": 180
     }
-  }
+  },
+  "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" }]
 }

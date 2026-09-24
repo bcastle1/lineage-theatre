@@ -1,7 +1,9 @@
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { get } from "@vercel/blob";
-import { digest } from "./auth.mjs";
+import { digest, readRecord, userPath } from "./auth.mjs";
+import { isOwner } from "./access.mjs";
+import { buildFilmManifest, fictionalOperatorProject } from "./film-production.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -13,6 +15,7 @@ export class ProductionMediaError extends Error {
 const unavailable = () => new ProductionMediaError("The finished film is currently unavailable. Please retry.", 503);
 const notFound = () => new ProductionMediaError("This finished film was not found.", 404);
 const invalidMedia = () => new ProductionMediaError("The finished film needs playback verification.", 409);
+const paymentRequired = () => new ProductionMediaError("Complete payment for this film before watching or downloading it. Check your payment status after paying.", 402);
 function mediaOwner(email) {
   if (typeof email !== "string" || email.length > 254 || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(email)) throw notFound();
   return email.toLowerCase();
@@ -30,6 +33,49 @@ export function validateStoredProductionMedia(job, email) {
     || !Number.isSafeInteger(media.sizeBytes) || media.sizeBytes < 16 || media.sizeBytes > MAX_FILM_BYTES
     || !Number.isFinite(media.durationSeconds) || media.durationSeconds <= 0 || media.durationSeconds > 600) throw invalidMedia();
   return Object.fromEntries(["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"].map(key => [key, media[key]]));
+}
+
+async function requireFinishedFilmPayment({ job, email, actor, read, now }) {
+  if (!HASH.test(job.manifestHash || "") || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash) throw invalidMedia();
+  // The owner's fixed fictional sample remains an operator preview. A role or
+  // test flag alone never exempts a customer's film from payment.
+  if (job.mode === "operator-test") {
+    const current = (await read(userPath(email)))?.value;
+    const fixed = buildFilmManifest(fictionalOperatorProject());
+    if (!isOwner(actor) || actor.email !== email || actor.mustChangePassword || !isOwner(current)
+      || current.email !== email || current.mustChangePassword || job.manifestHash !== fixed.manifestHash
+      || job.filmId !== fixed.manifest.filmId || !Array.isArray(job.shots) || job.shots.length !== fixed.manifest.shots.length
+      || job.shots.some((shot, index) => shot.id !== fixed.manifest.shots[index].id)) throw paymentRequired();
+    return;
+  }
+  if (job.mode !== "customer" || job.authorization?.environment !== "production"
+    || job.authorization.manifestHash !== job.manifestHash) throw paymentRequired();
+  // Match the persisted identity used by both checkout services. Older live
+  // processor orders used the unscoped identity; only a confirmed live record
+  // may qualify there. No browser-supplied order ID or payment flag is read.
+  let orderId = digest(`${email}:production:${job.manifestHash}`);
+  let record = await read(`payments/orders/${orderId}.json`);
+  if (!record) {
+    orderId = digest(`${email}:${job.manifestHash}`);
+    record = await read(`payments/orders/${orderId}.json`);
+  }
+  const order = record?.value;
+  if (!order || order.id !== orderId || order.customerEmail !== email || order.preparedId !== job.id
+    || order.manifestHash !== job.manifestHash || order.filmId !== job.filmId || order.status !== "captured"
+    || typeof order.capturedAt !== "string" || !Number.isFinite(Date.parse(order.capturedAt)) || Date.parse(order.capturedAt) > now()
+    || order.currency !== "USD" || !Number.isSafeInteger(order.amountCents) || order.amountCents <= 0 || order.amountCents > 100_000_000
+    || order.refundedCents !== 0 || order.refundOperation || order.checkOperation || order.provider !== "quickbooks"
+    || order.merchantBinding?.environment !== "production" || !HASH.test(order.merchantBinding.grantId || "")) throw paymentRequired();
+  if (order.checkoutMethod === "quickbooks-hosted-invoice") {
+    const paid = order.accountingPayments;
+    if (order.confirmationSource !== "quickbooks-accounting" || !/^[0-9]{1,30}$/.test(order.invoiceId || "")
+      || !/^[0-9]{1,30}$/.test(order.merchantBinding.realmId || "") || order.balanceCents !== 0
+      || typeof order.accountingCheckedAt !== "string" || !Number.isFinite(Date.parse(order.accountingCheckedAt)) || Date.parse(order.accountingCheckedAt) > now()
+      || !Array.isArray(paid) || paid.length < 1 || paid.length > 100
+      || paid.some(payment => !/^[0-9]{1,30}$/.test(payment?.id || "") || !Number.isSafeInteger(payment.allocatedCents) || payment.allocatedCents <= 0)
+      || new Set(paid.map(payment => payment.id)).size !== paid.length
+      || paid.reduce((sum, payment) => sum + payment.allocatedCents, 0) !== order.amountCents) throw paymentRequired();
+  } else if (order.checkoutMethod !== undefined || !/^[A-Za-z0-9_-]{1,128}$/.test(order.providerChargeId || "")) throw paymentRequired();
 }
 
 function exactLength(expected) {
@@ -56,7 +102,7 @@ function sendError(req, res, error) {
 
 // The caller must obtain email from its authenticated session. No URL or path
 // from the request is passed to Blob; getPrepared scopes the job to that user.
-export async function streamProductionMedia({ req, res, email, id, filmProduction, getBlob = get, download = false }) {
+export async function streamProductionMedia({ req, res, email, id, filmProduction, actor, read = readRecord, now = Date.now, getBlob = get, download = false }) {
   let upstream;
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Vary", "Cookie");
@@ -71,6 +117,7 @@ export async function streamProductionMedia({ req, res, email, id, filmProductio
     const job = await filmProduction.getPrepared({ email: owner, id });
     if (job?.id !== id) throw notFound();
     const media = validateStoredProductionMedia(job, owner);
+    await requireFinishedFilmPayment({ job, email: owner, actor, read, now });
     const etag = `"sha256-${media.sha256}"`;
     let range;
     try {

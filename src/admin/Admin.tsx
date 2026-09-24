@@ -15,6 +15,7 @@ import {
   CreditCard,
   Download,
   Film,
+  FileText,
   LayoutDashboard,
   Loader2,
   Percent,
@@ -29,12 +30,19 @@ import {
 import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
+import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
+import HostedCheckoutSettings from "./HostedCheckoutSettings";
+import ReceiptSettings from "./ReceiptSettings";
+import SourceAgreementEditor from "./SourceAgreementEditor";
 import "./admin.css";
 
-type Tab = "overview" | "people" | "payments" | "pricing" | "films" | "activity";
+type Tab = "overview" | "people" | "payments" | "pricing" | "agreement" | "films" | "activity";
 type Connection = { available: boolean; reason: string };
 type Pricing = {
   markupBasisPoints: number;
+  planningCreditsPerClip: number;
+  planningSecondsPerClip: number;
+  planningRendersPerClip: number;
   revision: number;
   updatedAt?: string;
   updatedBy?: string;
@@ -51,6 +59,7 @@ type Overview = {
     paidOrders: number;
     paymentTotalCents: number;
     refundTotalCents: number;
+    hostedRefundsUnverified?: number;
     testOrders?: number;
     currency: string;
   };
@@ -85,6 +94,7 @@ type Order = {
   provider: string;
   sandbox?: boolean;
   managedPayment?: boolean;
+  checkoutMethod?: string | null;
   requiresReview?: boolean;
 };
 type ArchivedFilm = {
@@ -201,6 +211,7 @@ const tabs = [
   { id: "people" as const, name: "People", icon: Users },
   { id: "payments" as const, name: "Payments", icon: CreditCard },
   { id: "pricing" as const, name: "Pricing", icon: Percent },
+  { id: "agreement" as const, name: "Source agreement", icon: FileText },
   { id: "films" as const, name: "Film archive", icon: Film },
   { id: "activity" as const, name: "Activity", icon: Activity },
 ];
@@ -242,18 +253,20 @@ function exportPayments(orders: Order[]) {
       "Created",
       "Provider",
       "Payment type",
+      "Refund verification",
     ],
     ...orders.map((o) => [
       o.id,
       o.customerEmail,
       o.filmTitle,
-      o.status,
+      o.checkoutMethod === "quickbooks-hosted-invoice" && o.status === "captured" ? "Payment recorded by QuickBooks" : o.status,
       o.currency,
       (o.amountCents / 100).toFixed(2),
-      ((o.refundedCents || 0) / 100).toFixed(2),
+      o.checkoutMethod === "quickbooks-hosted-invoice" ? "" : ((o.refundedCents || 0) / 100).toFixed(2),
       o.createdAt,
       o.provider,
       o.sandbox ? "Test payment" : "Live payment",
+      o.checkoutMethod === "quickbooks-hosted-invoice" ? "Not verified; check QuickBooks" : "Recorded confirmed refunds",
     ]),
   ];
   const url = URL.createObjectURL(
@@ -379,6 +392,9 @@ export default function Admin({
   const [audit, setAudit] = useState<AuditData | null>(null);
   const [pricing, setPricing] = useState<Pricing | null>(null);
   const [markup, setMarkup] = useState("");
+  const [planningCredits, setPlanningCredits] = useState("");
+  const [planningSeconds, setPlanningSeconds] = useState("");
+  const [planningRenders, setPlanningRenders] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -473,6 +489,9 @@ export default function Admin({
         if (request === requestNumber.current) {
           setPricing(result);
           setMarkup((result.markupBasisPoints / 100).toFixed(2));
+          setPlanningCredits(String(result.planningCreditsPerClip));
+          setPlanningSeconds(String(result.planningSecondsPerClip));
+          setPlanningRenders(String(result.planningRendersPerClip));
         }
       }
     };
@@ -527,8 +546,8 @@ export default function Admin({
       authorizationPopup.current = null;
       setAuthorizationMessage(
         quickBooks?.connected
-          ? "QuickBooks authorization is saved. You can close the Intuit window. Customer payments and refunds remain unavailable."
-          : "This authorization link is no longer active. Review the current connection status below; customer payments remain unavailable.",
+          ? "QuickBooks authorization is saved. Check the hosted checkout setup below."
+          : "This authorization link is no longer active. Review the current connection status below.",
       );
     }
   }, [authorizationAttempt, quickBooks, isOwner]);
@@ -855,7 +874,7 @@ export default function Admin({
       setQuickBooks(result);
       if (verifiedQuickBooksCompany(result)) {
         notify(
-          "Company verified for accounting access. Customer payments and refunds remain unavailable.",
+          "Company verified for accounting access. Review the hosted checkout setup below.",
           "info",
         );
       } else {
@@ -1058,7 +1077,7 @@ export default function Admin({
       setDialog(null);
       notify(
         result.message ||
-          "QuickBooks authorization updated. Customer payments remain unavailable.",
+          "QuickBooks authorization updated. Review the current checkout settings.",
         "info",
       );
       await refresh();
@@ -1143,8 +1162,19 @@ export default function Admin({
   const markupPercent = /^\d+(\.\d{0,2})?$/.test(markup) ? Number(markup) : NaN;
   const validMarkup =
     Number.isFinite(markupPercent) && markupPercent >= 0 && markupPercent <= 1000;
+  const planningValues = {
+    planningCreditsPerClip: /^\d+$/.test(planningCredits) ? Number(planningCredits) : NaN,
+    planningSecondsPerClip: /^\d+$/.test(planningSeconds) ? Number(planningSeconds) : NaN,
+    planningRendersPerClip: /^\d+$/.test(planningRenders) ? Number(planningRenders) : NaN,
+  };
+  const validPlanning = Object.entries(planningValues).every(([field, value]) => Number.isSafeInteger(value) && value >= 1
+    && value <= (field === "planningCreditsPerClip" ? 1_000_000 : field === "planningSecondsPerClip" ? 60 : 20));
+  const pricingChanged = pricing && (Math.round(markupPercent * 100) !== pricing.markupBasisPoints
+    || planningValues.planningCreditsPerClip !== pricing.planningCreditsPerClip
+    || planningValues.planningSecondsPerClip !== pricing.planningSecondsPerClip
+    || planningValues.planningRendersPerClip !== pricing.planningRendersPerClip);
   async function savePricing() {
-    if (!pricing || !validMarkup || actionLock.current) return;
+    if (!pricing || !validMarkup || !validPlanning || !pricingChanged || actionLock.current) return;
     actionLock.current = true;
     setBusy(true);
     setActionError("");
@@ -1152,18 +1182,22 @@ export default function Admin({
       const result = await api<Pricing>("/api/admin", {
         action: "updatePricing",
         markupPercent,
+        ...planningValues,
         expectedRevision: pricing.revision,
       });
       setPricing(result);
       setMarkup((result.markupBasisPoints / 100).toFixed(2));
+      setPlanningCredits(String(result.planningCreditsPerClip));
+      setPlanningSeconds(String(result.planningSecondsPerClip));
+      setPlanningRenders(String(result.planningRendersPerClip));
       notify(
-        `Markup saved at ${(result.markupBasisPoints / 100).toFixed(2)}% for new quotes. Existing orders are unchanged.`,
+        `Pricing settings saved with ${(result.markupBasisPoints / 100).toFixed(2)}% markup for new film prices. Existing orders are unchanged.`,
       );
       try {
         await onPricingChanged();
       } catch {
         notify(
-          "Markup saved. The film studio's pricing display could not refresh; reload it before reviewing a new quote.",
+          "Pricing settings saved. The film studio's pricing display could not refresh; reload it before reviewing a new quote.",
           "info",
         );
       }
@@ -1281,6 +1315,7 @@ export default function Admin({
             Refreshing administration records…
           </div>
         )}
+        {tab === "agreement" && <SourceAgreementEditor disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
         {tab === "overview" && (
           <>
             {overview?.statsPartial && (
@@ -1324,7 +1359,9 @@ export default function Admin({
                   value: overview
                     ? money(overview.stats.refundTotalCents, overview.stats.currency)
                     : undefined,
-                  detail: "Confirmed refund records",
+                  detail: overview?.stats.hostedRefundsUnverified
+                    ? `Excludes ${overview.stats.hostedRefundsUnverified} hosted payments; check QuickBooks for their refunds`
+                    : "Confirmed refund records",
                   icon: Activity,
                 },
               ].map((metric) => (
@@ -1412,8 +1449,8 @@ export default function Admin({
                 <span className="admin-eyebrow">Film pricing</span>
                 <h2>Provider cost + your markup</h2>
                 <p>
-                  Set the percentage above MagicLight's production cost. A reference
-                  credit rate is not a final film quote.
+                  Use an actual provider quote when available, or your saved planning
+                  rates plus markup to set a fixed film price.
                 </p>
                 <div className="admin-reference-rate">
                   <strong>
@@ -1421,7 +1458,7 @@ export default function Admin({
                       ? `${(overview.pricing.markupBasisPoints / 100).toFixed(2)}%`
                       : "—"}
                   </strong>
-                  <span>Current markup above provider cost</span>
+                  <span>Current markup above the production cost basis</span>
                 </div>
                 {overview?.pricing?.referenceRate && (
                   <p className="admin-fineprint">
@@ -1436,8 +1473,8 @@ export default function Admin({
                 <div className="admin-price-status">
                   <AlertCircle size={17} />
                   <span>
-                    {overview?.pricing?.estimate?.reason ||
-                      "A verified production quote and payment connection are required before charging for a film."}
+                    Film prices can be prepared from your planning rates. Saved customer
+                    prices stay fixed. Payment and production readiness are verified separately.
                   </span>
                 </div>
                 <button className="text-button" onClick={() => chooseTab("pricing")}>
@@ -1827,11 +1864,10 @@ export default function Admin({
                   </small>
                 </div>
                 <div>
-                  <span>Customer payments & refunds</span>
-                  <strong>Unavailable</strong>
+                  <span>Hosted checkout</span>
+                  <strong>{payments?.connectionReady ? "Configured" : "Setup required"}</strong>
                   <small>
-                    Planned payment services: Intuit Payments Inc. Saving QuickBooks
-                    authorization does not activate charges or refunds.
+                    Customers pay on QuickBooks. Refunds for hosted invoices are managed there.
                   </small>
                 </div>
               </div>
@@ -1974,7 +2010,15 @@ export default function Admin({
                   </p>
                 )}
               </div>
+              {isOwner && <QuickBooksPaymentTest
+                disabled={busy || loading || authorizationTracking}
+                connectionRevision={quickBooks?.revision}
+                actionLock={actionLock}
+                onBusyChange={setBusy}
+              />}
             </section>
+            <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />
+            <ReceiptSettings disabled={busy || loading} />
             <div className="admin-section-heading">
               <div>
                 <h2>Payments & refunds</h2>
@@ -1998,7 +2042,7 @@ export default function Admin({
             <div className="admin-feedback info">
               <AlertCircle size={18} />
               <div>
-                <strong>Live charges and refunds remain unavailable</strong>
+                <strong>{payments?.connectionReady ? "QuickBooks-hosted checkout is configured" : "Hosted checkout setup is incomplete"}</strong>
                 <p>
                   {payments?.reason ||
                     overview?.connections.billing.reason ||
@@ -2066,13 +2110,13 @@ export default function Admin({
                                     : "neutral"
                               }
                             >
-                              {humanize(order.status)}
+                              {order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured" ? "Payment recorded by QuickBooks" : humanize(order.status)}
                             </Badge>
                           </td>
                           <td>
                             <strong>{money(order.amountCents, order.currency)}</strong>
                             <small>
-                              {money(order.refundedCents || 0, order.currency)} refunded
+                              {order.checkoutMethod === "quickbooks-hosted-invoice" ? "Refunds: check QuickBooks" : `${money(order.refundedCents || 0, order.currency)} refunded`}
                             </small>
                           </td>
                           <td>{date(order.createdAt)}</td>
@@ -2087,14 +2131,15 @@ export default function Admin({
                                   "partially_refunded",
                                   "partially-refunded",
                                 ].includes(order.status) ||
-                                order.amountCents <= (order.refundedCents || 0)
+                                order.amountCents <= (order.refundedCents || 0) || order.checkoutMethod === "quickbooks-hosted-invoice"
                               }
                               onClick={() => openRefund(order)}
                             >
                               {order.sandbox ? "Review test refund" : "Review refund"}
                             </button>
+                            {order.checkoutMethod === "quickbooks-hosted-invoice" && <a className="text-button" href="https://qbo.intuit.com/app/invoices" target="_blank" rel="noopener noreferrer">Manage invoice in QuickBooks</a>}
                             {order.managedPayment && <>
-                              {order.requiresReview && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
+                              {(order.requiresReview || order.checkoutMethod === "quickbooks-hosted-invoice") && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "paymentDiagnostics")}>Download support details</button>
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "accountingExport")}>Export accounting review</button>
                             </>}
@@ -2112,9 +2157,9 @@ export default function Admin({
           <section className="admin-card admin-pricing-editor">
             <div className="admin-section-heading">
               <div>
-                <h2>Set your film markup</h2>
+                <h2>Provider cost plus your markup</h2>
                 <p>
-                  Choose the percentage added above MagicLight's verified production cost.
+                  Use an actual provider quote when available. Otherwise, use the planning rates below plus your saved markup to set the customer's fixed film price.
                 </p>
               </div>
               <Percent size={24} />
@@ -2137,24 +2182,47 @@ export default function Admin({
                     value={markup}
                     disabled={busy || loading || !pricing}
                     onChange={(e) => setMarkup(e.target.value)}
-                    placeholder="0.00"
+                    placeholder="50.00"
                     required
                   />
                   <small>
                     0% passes through the provider cost. You can set 0% to 1,000%.
                   </small>
                 </label>
+                {pricing && pricing.markupBasisPoints !== 5000 && <button type="button" className="button secondary small"
+                  disabled={busy || loading} onClick={() => setMarkup("50.00")}>Use 50% markup</button>}
                 <p>
-                  Applies to new quotes only. Recorded orders and their original prices
+                  Applies to new film prices only. Recorded orders and their original prices
                   remain unchanged.
                 </p>
                 {pricing && (
                   <p className="admin-fineprint">
-                    Current saved markup: {(pricing.markupBasisPoints / 100).toFixed(2)}%
+                    {pricing.revision === 0 ? "Default markup" : "Current saved markup"}: {(pricing.markupBasisPoints / 100).toFixed(2)}%
                     {pricing.updatedAt ? ` · Updated ${date(pricing.updatedAt)}` : ""}
                     {pricing.updatedBy ? ` by ${pricing.updatedBy}` : ""}
                   </p>
                 )}
+                <fieldset className="admin-planning-assumptions" disabled={busy || loading || !pricing}>
+                  <legend>Film price calculation</legend>
+                  <p>Use planning rates when exact production costs are unavailable. The calculated total becomes the fixed retail price after adding your saved markup.</p>
+                  <label>Credits per clip
+                    <input type="number" min="1" max="1000000" step="1" inputMode="numeric" value={planningCredits}
+                      onChange={event => setPlanningCredits(event.target.value)} required />
+                    <small>Default 286: 80,000 credits divided by up to 280 videos, rounded up. Actual usage depends on the selected generation settings.</small>
+                  </label>
+                  <label>Seconds per clip
+                    <input type="number" min="1" max="60" step="1" inputMode="numeric" value={planningSeconds}
+                      onChange={event => setPlanningSeconds(event.target.value)} required />
+                    <small>Default 6 seconds is a planning assumption, not a verified provider clip duration.</small>
+                  </label>
+                  <label>Renders per clip
+                    <input type="number" min="1" max="20" step="1" inputMode="numeric" value={planningRenders}
+                      onChange={event => setPlanningRenders(event.target.value)} required />
+                    <small>Default 1 render. Increase this to budget for repeated attempts.</small>
+                  </label>
+                  <p>Published reference checked September 22, 2026: MagicLight Pro API pack, $88 for 80,000 credits and up to 280 Hailuo-series videos. <a href="https://magiclight.ai/openclaw/pricing/" target="_blank" rel="noopener noreferrer">View provider pricing</a>.</p>
+                  <p>Final quality, narration, dialogue, music, assembly and retries may change BROCO's actual cost. The customer pays the saved, approved total; BROCO absorbs any cost difference. These assumptions do not verify provider capabilities or enable the payment connection.</p>
+                </fieldset>
                 {actionError && (
                   <div className="admin-inline-error" role="alert">
                     {actionError}
@@ -2167,7 +2235,8 @@ export default function Admin({
                     loading ||
                     !pricing ||
                     !validMarkup ||
-                    Math.round(markupPercent * 100) === pricing.markupBasisPoints
+                    !validPlanning ||
+                    !pricingChanged
                   }
                 >
                   {busy ? (
@@ -2175,14 +2244,14 @@ export default function Admin({
                   ) : (
                     <CheckCircle2 size={16} />
                   )}
-                  Save {validMarkup ? `${markupPercent.toFixed(2)}%` : ""} markup
+                  Save pricing settings
                 </button>
               </form>
               <div className="admin-price-example">
-                <Badge>Illustrative example</Badge>
-                <h3>A film that costs $10.00 to produce</h3>
+                <Badge>Price calculation example</Badge>
+                <h3>A $10.00 production cost basis</h3>
                 <div>
-                  <span>MagicLight provider cost</span>
+                  <span>Provider quote or planning cost</span>
                   <strong>$10.00</strong>
                 </div>
                 <div>
@@ -2202,14 +2271,14 @@ export default function Admin({
                   </strong>
                 </div>
                 <p>
-                  This is a pricing illustration, not a film quote or payment. Actual
-                  production still requires a verified MagicLight quote and the payment
-                  connection.
+                  An actual provider quote is preferred. When planning rates supply the cost basis,
+                  the customer still approves one fixed total. Later changes to these settings do not reprice an existing order.
                 </p>
               </div>
             </div>
           </section>
         )}
+        {tab === "pricing" && <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />}
         {tab === "films" && (
           <section className="admin-card">
             <div className="admin-section-heading">

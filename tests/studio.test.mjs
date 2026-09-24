@@ -2,7 +2,8 @@ import { captchaStub } from "./fixtures/captcha.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { connections, createStudioHandler } from "../api/studio.mjs";
-import { digest } from "../api/_lib/auth.mjs";
+import { digest, userPath } from "../api/_lib/auth.mjs";
+import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { generateStory, prepareStory } from "../api/_lib/story.mjs";
 import { FilmProductionError } from "../api/_lib/film-production.mjs";
 
@@ -62,7 +63,7 @@ test("admin connection diagnostics still retain model, provider, merchant, and p
   assert.match(result.connections.story.reason,/GPT-6 Astra/);
   assert.match(result.connections.magiclight.reason,/MagicLight/);
   assert.match(result.connections.billing.reason,/QuickBooks/);
-  assert.match(result.connections.billing.reason,/12.5% BROCOTech markup/);
+  assert.match(result.connections.billing.reason,/planning estimate plus the saved administrator markup/);
   assert.equal(result.pricing.markupBasisPoints,1250);
   assert.equal(result.magiclight,false);assert.equal(result.billing,false);
 });
@@ -134,6 +135,22 @@ test("checkout configuration is a signed-in read-only route and default unavaila
   assert.equal(calls.length,1);assert.deepEqual(h.calls,{connections:0,pricing:0,generation:[],limits:[],reads:[]});
 });
 
+test("checkout preparation requires an explicit same-origin rate-limited POST and accepts no payment data",async()=>{
+  const calls=[],payments={prepareCheckout:async user=>{calls.push(user);return {available:false};},
+    checkoutConfiguration:async()=>({available:false}),checkout:()=>assert.fail("Preparation must not charge")};
+  const h=harness({payments});
+  assert.equal((await h.run("prepareCheckout")).status,400);
+  assert.equal((await harness({payments},null).run("prepareCheckout",post())).status,401);
+  assert.equal((await h.run("prepareCheckout",{...post(),headers:{origin:"https://other.example.invalid"}})).status,403);
+  for(const body of [{paymentToken:"synthetic-token"},{amountCents:1},{allowRefresh:true}])
+    assert.equal((await h.run("prepareCheckout",post(body))).status,400);
+  assert.equal((await harness({payments,limitAction:async()=>false}).run("prepareCheckout",post())).status,429);
+  assert.deepEqual(calls,[]);
+  assert.deepEqual(await h.run("prepareCheckout",post()),{status:200,body:{available:false}});
+  assert.deepEqual(calls,[actor]);assert.deepEqual(h.calls.limits,[[`checkout-prepare:${actor.email}`,20,3600_000]]);
+  assert.equal((await h.run("checkoutConfiguration")).status,200);assert.equal(calls.length,1);
+});
+
 test("explicit story consent and per-user rate limits remain required before generation",async()=>{
   const h=harness();
   for(const storyConsent of [undefined,false,"true"]) {
@@ -164,12 +181,15 @@ test("production rejects activation and payment inputs reject client provider na
   assert.deepEqual(h.calls.limits,Array.from({length:6},()=>[`payment:${actor.email}`,20,3600_000]));
 });
 
-test("well-formed quote and checkout requests remain unavailable with default service readiness",async()=>{
-  const h=harness();
+test("well-formed hosted quote and checkout requests remain unavailable until owner settings are enabled",async()=>{
+  const hostedCheckout=createHostedCheckoutService({env:{QUICKBOOKS_ENVIRONMENT:"production"},
+    read:async path=>path===userPath(actor.email)?{value:actor}:null,
+    transport:{binding:async()=>assert.fail("Disabled checkout must not refresh a provider grant")}});
+  const h=harness({hostedCheckout});
   for(const [action,body] of [["quote",{project:{title:"Fictional family garden"},idempotencyKey:"synthetic-quote-1234"}],
-    ["checkout",{quoteId:"a".repeat(64),idempotencyKey:"synthetic-checkout-1234",paymentToken:"synthetic-payment-token",consent:true}]]) {
+    ["checkout",{quoteId:"a".repeat(64),idempotencyKey:"synthetic-checkout-1234",consent:true}]]) {
     const result=await h.run(action,post(body));
-    assert.equal(result.status,503);assert.equal(result.body.code,"PRODUCTION_UNAVAILABLE");assert.equal(result.body.charged,false);
+    assert.equal(result.status,503);assert.equal(result.body.code,"HOSTED_CHECKOUT_UNAVAILABLE");assert.equal(result.body.charged,false);
     assertCustomerSafe(result);
   }
 });

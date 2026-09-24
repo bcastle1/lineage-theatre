@@ -34,6 +34,7 @@ const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, enviro
 const prepare = (service, overrides = {}) => service.prepare({ email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, ...overrides });
 
 test("manifest preserves reviewed screenplay, hashes evidence, sets exact target timing and excludes client provider flags", () => {
+  assert.equal(buildFilmManifest(fictionalOperatorProject()).manifestHash, "18e3e118024fbae9006336b9de74187777bcf8126ac83ee7929d74eee16ee46f", "previously prepared valid films keep their exact manifest hash");
   const project = fictionalOperatorProject(); project.apiVerified = true; project.providerKey = "must-not-save"; project.outputUrl = "https://untrusted.invalid";
   const result = buildFilmManifest(project);
   assert.equal(result.manifest.shots.reduce((sum, shot) => sum + shot.targetDurationMs, 0), 15000);
@@ -45,13 +46,65 @@ test("manifest preserves reviewed screenplay, hashes evidence, sets exact target
   assert.doesNotMatch(JSON.stringify(result), /must-not-save|apiVerified|outputUrl|providerKey|"script"|"text"/);
 });
 
-test("unknown evidence, inconsistent cast, invalid duration and oversized screenplay fail before persistence", async () => {
+test("malformed film fields, invalid source IDs, duration and oversized screenplay fail before persistence", async () => {
   const data = store(), service = createFilmProductionService(data);
-  for (const change of [p => p.scenes[0].sourceIds.push("unknown"), p => p.scenes[0].characterIds.push("unknown"), p => p.duration = 0, p => p.scenes[0].narration = "x".repeat(1_600_000)]) {
+  for (const change of [p => p.scenes[0].sourceIds = "invalid", p => p.scenes[0].characterIds.push({ id: "invalid" }),
+    p => p.characters = {}, p => p.scenes = [], p => p.scenes[0].dialogue = 42, p => p.assumptions = null,
+    p => p.selectedThemes[0].reason = { text: "invalid" }, p => p.scenes.push(...Array(30).fill(p.scenes[0])),
+    p => p.sources.push(p.sources[0]), p => p.sources[0].id = "@family-narrative", p => p.sources[0].id = " ",
+    p => p.duration = 0, p => p.scenes[0].narration = "x".repeat(1_600_000)]) {
     const project = fictionalOperatorProject(); change(project);
     await assert.rejects(prepare(service, { project }));
   }
   assert.equal(data.records.size, 0);
+});
+
+test("photo evidence and edited references do not require a screenplay review to prepare pricing", async () => {
+  const project = fictionalOperatorProject(), before = structuredClone(project);
+  project.sources[0] = { id: "fictional-source", name: "fictional-garden.png", type: "image/png", text: "", note: "" };
+  project.characters[0].basis = "inferred";
+  project.characters[0].sourceIds.push("earlier-source-reference");
+  project.scenes[0].characterIds.push("earlier-cast-reference");
+  project.scenes[0].dramatization = "";
+  const original = structuredClone(project), data = store(), service = createFilmProductionService(data);
+  const prepared = await prepare(service, { project });
+  const { manifest } = await service.manifest({ email, id: prepared.id });
+  assert.equal(prepared.status, "prepared");
+  assert.deepEqual(manifest.screenplay.characters, project.characters);
+  assert.deepEqual(manifest.screenplay.scenes, project.scenes);
+  assert.equal(manifest.sources[0].hasReadableText, false);
+  assert.equal(manifest.sources[0].name, "fictional-garden.png");
+  assert.deepEqual(project, original);
+  assert.equal(manifest.screenplay.scenes[0].narration, before.scenes[0].narration);
+});
+
+test("one or two saved scenes and absent optional story metadata remain priceable without invented content", () => {
+  for (const count of [1, 2]) {
+    const project = fictionalOperatorProject();
+    project.scenes = project.scenes.slice(0, count).map(({ title, narration, visual }) => ({ title, narration, visual }));
+    delete project.characters; delete project.assumptions; delete project.selectedThemes; delete project.logline;
+    const original = structuredClone(project), { manifest } = buildFilmManifest(project);
+    assert.equal(manifest.shots.length, count);
+    assert.equal(manifest.shots.reduce((sum, shot) => sum + shot.targetDurationMs, 0), project.duration * 1000);
+    assert.deepEqual(manifest.screenplay.characters, []);
+    assert.deepEqual(manifest.screenplay.assumptions, []);
+    assert.deepEqual(manifest.screenplay.selectedThemes, []);
+    assert.equal(manifest.screenplay.logline, "");
+    assert.deepEqual(manifest.screenplay.scenes.map(({ title, narration, visual }) => ({ title, narration, visual })), project.scenes);
+    assert.ok(manifest.screenplay.scenes.every(scene => !scene.dramatization && !scene.dialogue && !scene.characterIds.length));
+    assert.deepEqual(project, original);
+  }
+});
+
+test("all 200 uploaded sources plus the family narrative can remain referenced", () => {
+  const project = fictionalOperatorProject();
+  project.sources = Array.from({ length: 200 }, (_, index) => ({ id: `source-${index}`, name: `Source ${index}`, type: "text/plain", text: "Fictional source." }));
+  const ids = ["@family-narrative", ...project.sources.map(source => source.id)];
+  project.characters[0].sourceIds = ids;
+  project.scenes[0].sourceIds = ids;
+  const { manifest } = buildFilmManifest(project);
+  assert.deepEqual(manifest.screenplay.characters[0].sourceIds, ids);
+  assert.deepEqual(manifest.screenplay.scenes[0].sourceIds, ids);
 });
 
 test("a very uneven script never creates zero-length or overlapping scene targets", () => {
@@ -285,6 +338,39 @@ test("owner test uses fixed fictional material and still requires a server budge
   assert.match((await service.manifest({ email: owner.email, id: job.id })).manifest.title, /SAMPLE ONLY - FICTIONAL DATA/);
   await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: owner }), e => e.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
   await assert.rejects(service.advance({ email: owner.email, id: job.id, actor: { email: owner.email, role: "customer" } }), e => e.status === 403);
+});
+
+test("a persisted legacy owner can prepare the fixed operator plan while unavailable rendering remains blocked", async () => {
+  const legacy = { email: owner.email, role: "owner" };
+  for (const [actor, current] of [[legacy, legacy], [owner, legacy], [legacy, owner]]) {
+    const data = store();
+    await data.writeRecordImpl(userPath(owner.email), current);
+    const original = structuredClone(data.records.get(userPath(owner.email)));
+    const service = createFilmProductionService({ ...data, now: () => at });
+    const job = await service.prepareOperatorTest({ actor, idempotencyKey });
+    assert.equal(job.status, "prepared");
+    assert.equal(data.records.get(productionJobPath(owner.email, job.id)).value.mode, "operator-test");
+    assert.equal(job.manifestHash, buildFilmManifest(fictionalOperatorProject()).manifestHash);
+    assert.equal((await service.prepareOperatorTest({ actor, idempotencyKey })).id, job.id);
+    await assert.rejects(service.advance({ email: owner.email, id: job.id, actor }), error => error.code === "PRODUCTION_UNAVAILABLE");
+    assert.deepEqual(data.records.get(userPath(owner.email)), original);
+    assert.equal(data.records.size, 2);
+  }
+});
+
+test("operator preparation requires both current and session owner roles without suspension or password setup", async () => {
+  const legacy = { email: owner.email, role: "owner" };
+  for (const invalid of [null, { email: owner.email }, { ...owner, role: "customer" }, { ...owner, role: "admin" },
+    { ...owner, email }, { ...owner, status: "suspended" }, { ...owner, mustChangePassword: true }]) {
+    for (const [actor, current] of [[invalid, legacy], [legacy, invalid]]) {
+      const data = store();
+      await data.writeRecordImpl(userPath(owner.email), current);
+      const before = structuredClone([...data.records]);
+      const service = createFilmProductionService({ ...data, now: () => at });
+      await assert.rejects(service.prepareOperatorTest({ actor, idempotencyKey }), error => error.code === "OWNER_REQUIRED");
+      assert.deepEqual([...data.records], before);
+    }
+  }
 });
 
 test("sandbox refuses normal customer plans even for the owner and ignores a caller's fictional-only claim", async () => {

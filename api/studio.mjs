@@ -3,12 +3,14 @@ import { generateStory, STORY_MODEL } from "./_lib/story.mjs";
 import { productionReadiness } from "./_lib/production.mjs";
 import { readPricingSettings } from "./_lib/admin.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
+import { createFilmPricingService } from "./_lib/film-pricing.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
+import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 import { createProductionQueue } from "./_lib/production-queue.mjs";
 import { streamProductionMedia } from "./_lib/production-media.mjs";
 
-export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings}={}) {
+export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
   if(key) {
     try {
@@ -17,6 +19,14 @@ export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KE
     } catch {story={available:false,reason:"The Astra connection could not be checked. Your materials remain saved."};}
   }
   const production=productionReadiness({pricingSettings});
+  if(checkoutConfiguration) {
+    const available=checkoutConfiguration.available===true;
+    production.billing=available;
+    production.payment={provider:"quickbooks",label:"QuickBooks",status:available?"configured":"setup-required",available};
+    production.connections.billing={available,reason:available
+      ?"QuickBooks-hosted checkout is configured for this account. Payment recording, bank settlement, and film delivery are tracked separately."
+      :"QuickBooks-hosted checkout needs completed owner settings and an active company connection. Existing saved payment records remain available."};
+  }
   return {story:story.available,storyModel:STORY_MODEL,...production,connections:{story,...production.connections}};
 }
 
@@ -67,7 +77,11 @@ function customerStory(result,action) {
 
 export function createStudioHandler(overrides={}) {
  const humanCheck=overrides.captcha||captcha;
+ // Production customer checkout uses Intuit-hosted invoices. Explicit legacy
+ // service injection is retained for isolated tests, never an HTTP option.
+ const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
+ const filmPricing=overrides.filmPricing||createFilmPricingService({filmProduction:dependencies.filmProduction,pricingSettings:dependencies.readPricingSettings});
  const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
    read:dependencies.readRecord,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
  return async function handler(req,res) {
@@ -79,16 +93,19 @@ export function createStudioHandler(overrides={}) {
     const email=session.user.email;
     const url=new URL(req.url,`https://${req.headers.host}`);
     if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
-      return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,
+      return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,actor:session.user,read:readRecord,
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
-      if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings()})));
-      if(action==="checkoutConfiguration") return json(res,200,await payments.checkoutConfiguration(session.user));
+      if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings(),
+        ...(hosted?{checkoutConfiguration:await hosted.configuration(session.user)}:{})})));
+      if(action==="checkoutConfiguration") return json(res,200,hosted?await hosted.configuration(session.user):await payments.checkoutConfiguration(session.user));
       if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id")}));
       if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
-      if(action==="order") return json(res,200,await payments.order(session.user,url.searchParams.get("id")));
-      if(action==="receipt") return json(res,200,await payments.receipt(session.user,url.searchParams.get("id")));
+      if(["order","receipt"].includes(action)) {
+        const id=url.searchParams.get("id");
+        return json(res,200,await (hosted&&await hosted.ownsOrder(id)?hosted:payments)[action](session.user,id));
+      }
       if(!["status","media"].includes(action)) return json(res,400,{message:"Unknown studio request."});
       const id=url.searchParams.get("id");
       if(!/^[a-z0-9-]{20,80}$/i.test(id??"")) return json(res,400,{message:"Invalid production reference."});
@@ -99,14 +116,36 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(body?.action==="price") {
+      if(!(await limitAction(`price:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before requesting another film price."});
+      const {action,...input}=body;
+      return json(res,200,await filmPricing.price(session.user,input));
+    }
+    if(body?.action==="prepareCheckout") {
+      if(Object.keys(body).some(key=>key!=="action"))
+        return json(res,400,{message:"The payment preparation request is invalid."});
+      if(!(await limitAction(`checkout-prepare:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before preparing another payment."});
+      return json(res,200,hosted?await hosted.configuration(session.user,{allowRefresh:true}):await payments.prepareCheckout(session.user));
+    }
     if(body?.action==="checkoutCheck") {
       if(Object.keys(body).some(key=>!["action","quoteId","captchaToken"].includes(key)))
         return json(res,400,{message:"The payment security request is invalid."});
       if(!(await limitAction(`captcha-checkout:${email}`,20,3600_000)))
         return json(res,429,{message:"Please wait before making another payment security request."});
-      if(!(await payments.checkoutConfiguration(session.user)).available)
+      if(!(hosted?await hosted.configuration(session.user,{allowRefresh:true}):await payments.prepareCheckout(session.user)).available)
         return json(res,503,{message:productionUnavailable,charged:false});
       return json(res,200,await humanCheck.prepareCheckout(email,body.quoteId,body.captchaToken));
+    }
+    if(body?.action==="checkPayment") {
+      if(Object.keys(body).some(key=>!["action","orderId"].includes(key))
+        ||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
+        return json(res,400,{message:"Choose the saved payment before checking its status."});
+      if(!(await limitAction(`payment-status:${email}`,60,3600_000)))
+        return json(res,429,{message:"Please wait before checking payment status again."});
+      return json(res,200,hosted&&await hosted.ownsOrder(body.orderId)
+        ?await hosted.check(session.user,{orderId:body.orderId}):await payments.order(session.user,body.orderId));
     }
     if(body?.action==="prepare") {
       if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});
@@ -129,7 +168,7 @@ export function createStudioHandler(overrides={}) {
       if(!(await limitAction(`payment:${email}`,20,3600_000))) return json(res,429,{message:"Please wait before making another payment request. Check an existing order before trying to pay again.",charged:null});
       const {action,checkoutProof,...input}=body;
       if(action==="checkout") await humanCheck.consumeCheckout(email,input.quoteId,checkoutProof);
-      return json(res,200,await payments[action](session.user,input));
+      return json(res,200,await (hosted||payments)[action](session.user,input));
     }
     if(["themes","plan"].includes(body.action)) {
       storyRequest=true;

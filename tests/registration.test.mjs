@@ -3,6 +3,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { createAuthHandler, validateRegistration } from "../api/auth.mjs";
 import { getSession, hashPassword, publicUser, sessionCookie, userPath, verifyPassword, writeRecord } from "../api/_lib/auth.mjs";
+import { builtInSourceAgreement } from "../api/_lib/source-agreement.mjs";
 
 const previousSecret = process.env.LINEAGE_SESSION_SECRET;
 process.env.LINEAGE_SESSION_SECRET = "isolated-registration-test-secret-never-used-in-production";
@@ -10,7 +11,8 @@ after(() => {
   if (previousSecret === undefined) delete process.env.LINEAGE_SESSION_SECRET;
   else process.env.LINEAGE_SESSION_SECRET = previousSecret;
 });
-const registration = () => ({ action: "register", name: "Fictional Ada Example", email: "ada@example.invalid", password: "Synthetic registration passphrase", termsAccepted: true });
+const registration = () => ({ action: "register", name: "Fictional Ada Example", email: "ada@example.invalid", password: "Synthetic registration passphrase", termsAccepted: true,
+  sourceAgreementAccepted: true, sourceAgreementVersion: builtInSourceAgreement().version, sourceAgreementHash: builtInSourceAgreement().contentHash });
 const request = (body, headers = {}) => ({ method: "POST", url: "/api/auth", body, headers: { host: "lineagetheater.com", origin: "https://lineagetheater.com", "x-forwarded-for": "198.51.100.7", ...headers } });
 async function run(handler, req) {
   const result = { statusCode: 0, headers: {}, body: null };
@@ -59,6 +61,12 @@ test("public signup creates a pending unverified customer with a restricted auth
   assert.equal(verifyPassword(body.password, stored.passwordHash), true);
   assert.equal(stored.termsAcceptedAt, stored.privacyAcknowledgedAt);
   assert.ok(Number.isFinite(Date.parse(stored.termsAcceptedAt)));
+  assert.deepEqual(stored.sourceAgreementAcceptance.agreement, builtInSourceAgreement());
+  assert.equal(stored.sourceAgreementAcceptance.signedName, "Fictional Ada Example");
+  assert.equal(stored.sourceAgreementAcceptance.accountEmail, "ada@example.invalid");
+  assert.equal(stored.sourceAgreementAcceptance.signatureMethod, "account-name-checkbox");
+  assert.equal(stored.termsVersion, "source-agreement-registration-2026-09-22");
+  assert.equal(result.body.user.sourceAgreementAcceptance, undefined);
   assert.equal(h.writes[0].etag, undefined);
   const cookie = result.headers["Set-Cookie"];
   assert.match(cookie, /HttpOnly; Secure; SameSite=Strict/);
@@ -78,7 +86,8 @@ test("registration rejects all supplied privilege or verification fields", async
   for (const [key, value] of Object.entries({ role: "owner", roles: ["admin"], status: "active", accessStatus: "approved",
     approvedAt: new Date().toISOString(), approvedBy: "erik@brocotech.ai", approvalSource: "administrator",
     approvalPolicyRevision: 1, approvalRequired: false, adminGrantedBy: "erik@brocotech.ai", adminRevokedAt: null,
-    emailVerified: true, permissions: ["all"], mustChangePassword: false })) {
+    emailVerified: true, permissions: ["all"], mustChangePassword: false,
+    sourceAgreementAcceptance: {}, sourceAgreementAcceptedAt: "2000-01-01T00:00:00.000Z", sourceAgreementSignedName: "Forged name" })) {
     const result = await run(h.handler, request({ ...registration(), [key]: value }));
     assert.equal(result.statusCode, 400, key);
     assert.match(result.body.message, /assigned by the server/);
@@ -109,7 +118,7 @@ test("duplicate normalized email keeps the original account and password", async
   const duplicate = await run(h.handler, request({ ...registration(), email: "ADA@EXAMPLE.INVALID", password: "Different synthetic passphrase" }));
   assert.equal(duplicate.statusCode, 409);
   assert.equal(h.records.get(userPath(registration().email)), original);
-  assert.equal(h.writes.length, 1);
+  assert.equal(h.writes.filter(write => write.path.startsWith("auth/users/")).length, 1);
   assert.equal(duplicate.headers["Set-Cookie"], undefined);
 });
 
@@ -124,7 +133,7 @@ test("concurrent signup requests atomically create one user and never overwrite 
       return records.has(path) ? { value: records.get(path), etag: "winner" } : null;
     },
     writeRecord: async (path, value, etag) => {
-      writes.push(etag);
+      writes.push({ path, etag });
       if (records.has(path)) throw new Error("Atomic create conflict");
       records.set(path, value);
     },
@@ -132,11 +141,31 @@ test("concurrent signup requests atomically create one user and never overwrite 
   const inputs = [registration(), { ...registration(), name: "Another fictional name", password: "Copper orchard lanterns remain" }];
   const results = await Promise.all(inputs.map(body => run(handler, request(body))));
   assert.deepEqual(results.map(r=>r.statusCode).sort(), [201, 409]);
-  assert.deepEqual(writes, [undefined, undefined]);
-  assert.equal(records.size, 1);
+  assert.deepEqual(writes.filter(write => write.path.startsWith("auth/users/")).map(write => write.etag), [undefined, undefined]);
+  assert.equal([...records.keys()].filter(path => path.startsWith("auth/users/")).length, 1);
   const winner = results.findIndex(r=>r.statusCode === 201);
   assert.equal(verifyPassword(inputs[winner].password, records.get(userPath(registration().email)).passwordHash), true);
   assert.equal(results[1 - winner].headers["Set-Cookie"], undefined);
+});
+
+test("registration requires current source acceptance and never uses browser statement text or timestamps", async () => {
+  for (const fields of [{ sourceAgreementAccepted: false }, { sourceAgreementAccepted: "true" }, { sourceAgreementAccepted: undefined },
+    { sourceAgreementVersion: "old-version" }, { sourceAgreementHash: "a".repeat(64) }]) {
+    const h = harness(), result = await run(h.handler, request({ ...registration(), ...fields }));
+    assert.equal(result.statusCode, fields.sourceAgreementAccepted !== undefined || Object.hasOwn(fields, "sourceAgreementAccepted") ? 400 : 409);
+    assert.equal(h.records.has(userPath(registration().email)), false); assert.equal(result.headers["Set-Cookie"], undefined);
+  }
+  const h = harness(), result = await run(h.handler, request({ ...registration(), agreementText: "Forged text", acceptedAt: "2000-01-01T00:00:00.000Z" }));
+  assert.equal(result.statusCode, 201);
+  const saved = h.records.get(userPath(registration().email)).sourceAgreementAcceptance;
+  assert.deepEqual(saved.agreement, builtInSourceAgreement()); assert.notEqual(saved.acceptedAt, "2000-01-01T00:00:00.000Z");
+});
+
+test("agreement storage outages fail registration closed without stranding existing sessions", async () => {
+  const h = harness({ sourceAgreement: { accept: async () => { throw new Error("Private agreement storage failure"); } } });
+  const result = await run(h.handler, request(registration()));
+  assert.equal(result.statusCode, 503); assert.equal(h.records.has(userPath(registration().email)), false);
+  assert.equal(result.headers["Set-Cookie"], undefined); assert.doesNotMatch(JSON.stringify(result.body), /Private agreement/);
 });
 
 test("private Blob create explicitly disables overwrite and supplies no update condition", async () => {

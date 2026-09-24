@@ -1,6 +1,22 @@
 # QuickBooks setup and activation
 
+## Current hosted-checkout path — September 23, 2026
+
+The owner selected QuickBooks-hosted checkout. Production OAuth and a separate company-information read verified the intended BROCO Tech company. The dedicated `Lineage Theater Film Production` Service item was saved with the existing Services income account and no fixed rate; its QuickBooks item reference is `2`. No customer, invoice, email, payment, or refund was created by that setup. Complete the versioned owner settings described in [Hosted checkout](HOSTED-CHECKOUT.md). Deployment alone does not enable checkout, prove a payment, or activate MagicLight.
+
+The earlier direct-card activation checkpoints below are historical and remain relevant only to that separate legacy adapter. Hosted checkout uses the accounting invoice API and does not silently activate direct-card operations.
+
 The user selected Intuit Payments for BROCO Technologies LLC and authorized implementation and deployment. The existing Intuit Developer workspace is BROCOTech; its Lineage Theater application is the one to continue. Do not create duplicate apps or confuse an Intuit Developer workspace ID with a QuickBooks company/realm ID.
+
+## Production migration checkpoint — September 23, 2026
+
+The owner selected real payments. The signed-in existing BROCOTech / Lineage Theater app again displayed **Submission Completed / Results Approved**, and production client credentials were available. Its production redirect list initially contained only the Intuit OAuth playground. The canonical `https://lineagetheater.com/api/quickbooks?action=callback` was added and read back after saving.
+
+Before replacing the sandbox configuration, the owner connection was disconnected through the app. The app returned to **Awaiting Authorization** with **Connect QuickBooks** enabled and no remote-review block. Matching production client ID and secret and `QUICKBOOKS_ENVIRONMENT=production` were saved as production-only Vercel secrets. No key value was recorded in source or this document. `LINEAGE_PAYMENT_ACCESS=owner` narrows initial production payment operations to the current owner; it does not supply merchant approval or signed readiness evidence. These environment changes require a new deployment and a new production OAuth grant before use.
+
+Earlier that day, the existing sandbox grant completed an actual fixed $1 charge, charge readback, full refund and refund readback. Both processor results were verified. This supersedes the historical unverified sandbox lifecycle statements below for that exercised path only; it does not establish decline/uncertainty cases, a real merchant, production card-entry approval, or live customer checkout.
+
+Production merchant authorization, merchant activation and payment/card-entry review remain separate activation steps. The signed-review format described in [payment readiness](PAYMENT-READINESS-REVIEW.md) is this application's internal control, not an artifact format required by Intuit. Do not present configured credentials or an approved developer assessment as a completed payment integration.
 
 ## Current assessment evidence — September 20, 2026
 

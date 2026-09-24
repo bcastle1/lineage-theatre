@@ -81,6 +81,54 @@ test("quotes accept prices only from trusted verified manifests and current serv
   h.advance(5*60_000+1);await expectError(h.makeQuote(),"QUOTE_EXPIRED");
 });
 
+test("legacy approved roles reach merchant readiness without bypassing it or contacting a processor",async()=>{
+  for(const actor of [{email:OWNER_EMAIL,role:"owner"},{email:ADMIN.email,role:"admin"}]) {
+    const calls=[];
+    const never=async()=>assert.fail("Unavailable merchant must not access storage, quotes or a provider");
+    const service=createPaymentsService({read:never,write:never,quoteProvider:never,provider:{binding:never,charge:never},
+      readiness:async input=>{calls.push(input);return {};}});
+    await expectError(service.quote(actor,{project,idempotencyKey:quoteKey}),"PRODUCTION_UNAVAILABLE");
+    await expectError(service.checkout(actor,{quoteId:REF,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true}),"PRODUCTION_UNAVAILABLE");
+    assert.deepEqual(await service.checkoutConfiguration(actor),{available:false});
+    assert.deepEqual(calls.map(call=>call.operation),["quote","charge","card-entry"]);
+    assert.ok(calls.every(call=>call.actor===actor));
+    assert.equal(Object.hasOwn(actor,"status"),false);
+  }
+});
+
+test("payment actor validation still denies unapproved customers, suspended roles, password setup and owner email alone",async()=>{
+  const never=async()=>assert.fail("Invalid account must not reach readiness or a provider");
+  const service=createPaymentsService({readiness:never,read:never,write:never,provider:{binding:never}});
+  for(const actor of [null,{email:OWNER_EMAIL},{email:OWNER_EMAIL,status:"active"},
+    {...OWNER,role:"customer"},{...OWNER,status:"suspended"},{...OWNER,mustChangePassword:true},
+    {...ADMIN,status:"suspended"},{...ADMIN,mustChangePassword:true},{...OWNER,email:OTHER.email},
+    {...CUSTOMER,status:"pending"},{...CUSTOMER,status:undefined},{...CUSTOMER,approvedAt:undefined}]) {
+    await assert.rejects(service.quote(actor,{project,idempotencyKey:quoteKey}),error=>error instanceof PaymentError&&error.status===401);
+    await assert.rejects(service.checkoutConfiguration(actor),error=>error instanceof PaymentError&&error.status===401);
+  }
+});
+
+test("server planning rates set the real charged amount and later cost or markup changes do not reprice an order",async()=>{
+  const h=fixture({quoteOverrides:{pricingBasis:"planning-rate",apiVerified:false,qualityVerified:false,commercialTermsVerified:false}});
+  const q=await h.makeQuote();assert.equal(q.amountCents,1125);
+  const quoteRecord=[...h.records.values()].find(record=>record.value.id===q.id).value;
+  assert.equal(quoteRecord.pricingBasis,"planning-rate");
+  const result=await h.service.checkout(CUSTOMER,{quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
+  assert.equal(result.amountCents,q.amountCents);assert.equal(h.requests[0].body.amount,"11.25");
+  const savedOrder=[...h.records.values()].find(record=>record.value.id===result.id&&record.value.status).value;
+  assert.equal(savedOrder.pricingBasis,"planning-rate");assert.equal(savedOrder.providerCostEstimateCents,1000);
+  const changed=createPaymentsService({read:h.read,write:h.write,pricingSettings:async()=>({markupBasisPoints:9000,revision:100})});
+  assert.equal((await changed.order(CUSTOMER,result.id)).amountCents,1125);
+  await assert.rejects(h.service.quote(CUSTOMER,{project,idempotencyKey:"another-key-12345",pricingBasis:"planning-rate",providerCostCents:1}));
+});
+
+test("pricing settings cannot change between the planning cost snapshot and checkout markup calculation",async()=>{
+  const changed=fixture({quoteOverrides:{pricingBasis:"planning-rate",pricingRevision:6}});
+  await expectError(changed.makeQuote(),"PRICE_CHANGED");assert.equal(changed.records.size,0);assert.equal(changed.requests.length,0);
+  const matching=fixture({quoteOverrides:{pricingBasis:"planning-rate",pricingRevision:7}});
+  assert.equal((await matching.makeQuote()).amountCents,1125);
+});
+
 test("checkout never accepts card data, client amounts, missing consent, cross-tenant or expired quotes",async()=>{
   const h=fixture(),q=await h.makeQuote();
   const body={quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true};
@@ -186,7 +234,7 @@ function grantFixture(overrides={}) {
   let time=NOW,sequence=0;
   const env={QUICKBOOKS_ENVIRONMENT:overrides.environment||"sandbox",QUICKBOOKS_CLIENT_ID:"synthetic-client",QUICKBOOKS_CLIENT_SECRET:"synthetic-secret",QUICKBOOKS_TOKEN_ENCRYPTION_KEY:randomBytes(32).toString("base64")};
   const config=quickbooksConfig(env),calls=[],records=new Map();
-  const tokens={accessToken:"synthetic-access-token",refreshToken:"synthetic-refresh-token",realmId:"123456789",accessTokenExpiresAt:new Date(NOW+3600_000).toISOString(),grantedScopes:[...QUICKBOOKS_SCOPES]};
+  const tokens={accessToken:"synthetic-access-token",refreshToken:"synthetic-refresh-token",realmId:"123456789",accessTokenExpiresAt:new Date(NOW+3600_000).toISOString(),refreshTokenExpiresAt:new Date(NOW+86400_000).toISOString(),grantedScopes:[...QUICKBOOKS_SCOPES]};
   const put=(path,value)=>records.set(path,{value:structuredClone(value),etag:`g-${++sequence}`});
   put(userPath(OWNER.email),OWNER);
   put(QUICKBOOKS_CONNECTION_PATH,{status:"authorized",revision:3,encryptedTokens:encryptQuickBooksTokens(tokens,config),fingerprint:config.fingerprint,credentialVersion:config.credentialVersion,authorizationAttemptId:"synthetic-authorization-attempt",connectedBy:OWNER.email});
@@ -263,7 +311,7 @@ test("sandbox token driver uses only the fixed fabricated fixture without creden
 test("quotes bind a saved preparation and expose a stable order reference before any payment",async()=>{
   const h=fixture(),q=await h.service.quote(CUSTOMER,{project,preparedId,idempotencyKey:quoteKey});
   assert.equal(q.orderId,digest(`${CUSTOMER.email}:${REF}`));
-  assert.deepEqual(h.quotes[0].opts,{preparedId,idempotencyKey:quoteKey});
+  assert.deepEqual(h.quotes[0].opts,{preparedId,idempotencyKey:quoteKey,environment:"sandbox"});
   await assert.rejects(h.service.order(CUSTOMER,q.orderId),error=>error.status===404);
   const paid=await h.service.checkout(CUSTOMER,{quoteId:q.id,idempotencyKey:checkoutKey,paymentToken:TOKEN,consent:true});
   assert.equal(paid.id,q.orderId);
@@ -287,6 +335,57 @@ test("card entry configuration is read-only, minimal and requires a fresh separa
     const f=fixture({overrides:{readiness:async()=>({authorization:authorization(BINDING,change)})}});
     assert.deepEqual(await f.service.checkoutConfiguration(CUSTOMER),{available:false});
   }
+});
+
+test("explicit checkout preparation renews expired production access before quoting without charging",async()=>{
+  const operations=[],freshAuthorization=binding=>authorization(binding,{expiresAt:new Date(NOW+7200_000).toISOString()});
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding,operation})=>{
+    operations.push(operation);return freshAuthorization(binding);
+  },refresh:async({records,put,tokens,config})=>{
+    assert.ok(Date.parse(tokens.refreshTokenExpiresAt)>NOW+3600_001);
+    put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,
+      encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-rotated-access",accessTokenExpiresAt:new Date(NOW+7200_000).toISOString()},config)});
+  }});
+  const binding=await h.transport.binding();
+  const f=fixture({quoteOverrides:{environment:"production",expiresAt:new Date(NOW+7200_000).toISOString()},
+    overrides:{provider:createIntuitPaymentsAdapter({transport:h.transport}),
+      readiness:async({actor})=>actor.email===OWNER.email?{authorization:freshAuthorization(binding)}:{}}});
+  h.advance(3600_001);f.advance(3600_001);
+  const before=structuredClone([...h.records]);
+  assert.deepEqual(await f.service.checkoutConfiguration(OWNER),{available:false});
+  assert.deepEqual([...h.records],before);assert.deepEqual(h.calls,[]);
+  for(const actor of [CUSTOMER,ADMIN])assert.deepEqual(await f.service.prepareCheckout(actor),{available:false});
+  assert.deepEqual([...h.records],before);assert.deepEqual(h.calls,[]);
+  const configuration=await f.service.prepareCheckout(OWNER);
+  assert.equal(configuration.available,true);assert.equal(configuration.environment,"production");
+  assert.equal(configuration.tokenization.url,"https://api.intuit.com/quickbooks/v4/payments/tokens");
+  assert.deepEqual(operations,["refresh"]);assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],"refresh");
+  const quote=await f.makeQuote(OWNER);
+  assert.equal(quote.amountCents,1125);assert.equal(quote.sandbox,false);
+  assert.equal(h.calls.length,1);assert.equal(f.records.size,1);
+  assert.ok([...f.records.keys()].every(path=>path.startsWith("payments/quotes/")));
+  assert.equal((await f.service.checkoutConfiguration(OWNER)).available,true);assert.equal(h.calls.length,1);
+});
+
+test("checkout preparation cannot renew without card-entry authorization or return readiness revoked during renewal",async()=>{
+  const never=async()=>assert.fail("Missing card-entry authorization must block before binding or refresh");
+  for(const ready of [{},{sandboxEnabled:true,merchantVerified:true},{authorization:authorization(BINDING,{operations:["charge"]})},
+    {authorization:authorization(BINDING,{expiresAt:new Date(NOW).toISOString()})}]) {
+    const service=createPaymentsService({provider:{binding:never},readiness:async()=>ready,now:()=>NOW});
+    assert.deepEqual(await service.prepareCheckout(OWNER),{available:false});
+  }
+  let revoked=false;
+  const h=grantFixture({environment:"production",authorizeProduction:async({binding})=>authorization(binding),
+    refresh:async({records,put,tokens,config})=>{
+      put(QUICKBOOKS_CONNECTION_PATH,{...records.get(QUICKBOOKS_CONNECTION_PATH).value,revision:5,
+        encryptedTokens:encryptQuickBooksTokens({...tokens,accessToken:"synthetic-rotated-access",accessTokenExpiresAt:new Date(NOW+7200_000).toISOString()},config)});
+      revoked=true;
+    }});
+  const binding=await h.transport.binding();h.advance(3590_000);
+  const service=createPaymentsService({provider:createIntuitPaymentsAdapter({transport:h.transport}),now:()=>NOW+3590_000,
+    readiness:async()=>revoked?{}:{authorization:authorization(binding)}});
+  assert.deepEqual(await service.prepareCheckout(OWNER),{available:false});
+  assert.equal(h.calls.length,1);assert.equal(h.calls[0][0],"refresh");
 });
 
 test("production service plumbing uses current grant-scoped server authorization and truthful receipts",async()=>{
