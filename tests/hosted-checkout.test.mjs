@@ -33,13 +33,13 @@ function fixture(options={}) {
     if(operation.path==="/customer") {customer={Id:"20",Active:true,...operation.body};return json({Customer:customer});}
     if(operation.path==="/customer/20")return json({Customer:customer});
     if(operation.path==="/invoice") {
-      invoice={...structuredClone(operation.body),Id:String(30+invoiceCount++),DocNumber:"1001",TotalAmt:15,Balance:15,InvoiceLink:"https://connect.intuit.com/portal/app/example",LinkedTxn:[]};return json({Invoice:invoice});
+      invoice={...structuredClone(operation.body),Id:String(30+invoiceCount++),DocNumber:"1001",TotalAmt:15,Balance:15,InvoiceLink:"https://connect.intuit.com/portal/app/example",LinkedTxn:[],...options.invoiceOverrides};return json({Invoice:invoice});
     }
     if(operation.path==="/invoice/30")return json({Invoice:invoice});
     if(operation.path==="/payment/40")return json({Payment:{Id:"40",CustomerRef:{value:"20"},CurrencyRef:{value:"USD"},TotalAmt:15,TxnDate:"2026-09-23",Line:[{Amount:15,LinkedTxn:[{TxnId:"30",TxnType:"Invoice"}]}]}});
     assert.fail(`Unexpected operation ${operation.method} ${operation.path}`);
   }};
-  const dependencies={read,write,transport,now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
+  const dependencies={read,write,transport,receiptDelivery:options.receiptDelivery||{deliver:async()=>{}},now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
     pricingSettings:async()=>({revision:0,markupBasisPoints:5000}),quoteProvider:async(project,actor,request)=>{
       quotes.push({project,actor,request});return {preparedId:PREPARED,manifestHash:manifest,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",providerCostCents:1000,
         pricingBasis:"planning-rate",pricingRevision:0,quoteReference:"fictional-reference",environment:binding.environment,expiresAt:new Date(time+300_000).toISOString(),...options.quoteOverrides};}};
@@ -108,6 +108,50 @@ test("concurrent hosted checkouts across service instances produce one invoice a
   const h=fixture(),q=await h.makeQuote(),body={quoteId:q.id,idempotencyKey:CHECKOUT,consent:true};
   const outcomes=await Promise.allSettled([h.service.checkout(OWNER,body),h.peer().checkout(OWNER,body),h.service.checkout(OWNER,{...body,idempotencyKey:"another-checkout-key-123"})]);
   assert.ok(outcomes.some(r=>r.status==="fulfilled"&&r.value.status==="awaiting-payment"));assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);assert.equal(mutationRequests(h).filter(r=>r.path==="/customer").length,1);
+});
+
+test("invoice creation without a link reads the same invoice to obtain its secure payment page",async()=>{
+  const link="https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture";
+  let h;h=fixture({invoiceOverrides:{InvoiceLink:undefined},dispatch:op=>op.path==="/invoice/30"?json({Invoice:{...h.invoice(),InvoiceLink:link}}):undefined});
+  const order=await h.checkout();
+  assert.equal(order.status,"awaiting-payment");assert.equal(order.requiresReview,false);assert.equal(order.charged,false);assert.equal(order.invoiceUrl,link);
+  assert.equal(h.requests.filter(r=>r.method==="GET"&&r.path==="/invoice/30").length,1);
+  assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+});
+
+test("an unpaid invoice waiting for its link recovers through status reads without another invoice",async()=>{
+  for(const missing of [undefined,null]) {
+    const h=fixture({invoiceOverrides:{InvoiceLink:missing}}),order=await h.checkout();
+    assert.equal(order.status,"awaiting-payment");assert.equal(order.requiresReview,false);assert.equal(order.charged,false);assert.equal(order.receiptAvailable,false);
+    assert.equal(order.invoiceUrl,null);assert.equal(order.retryAllowed,false);
+    const saved=h.records.get(`payments/orders/${order.id}.json`).value;
+    assert.equal(saved.invoiceId,"30");assert.equal(saved.invoiceLinkStatus,"pending");
+    assert.equal(Object.hasOwn(order,"invoiceLinkStatus"),false);
+    await error(h.service.receipt(OWNER,order.id));
+    // Recover an order saved by the previous release as well as newly created orders.
+    if(missing===undefined)h.seed(`payments/orders/${order.id}.json`,{...saved,status:"uncertain",invoiceLinkStatus:undefined});
+    const before=mutationRequests(h).length;
+    const pending=await h.service.check(OWNER,{orderId:order.id});
+    assert.equal(pending.status,"awaiting-payment");assert.equal(pending.invoiceUrl,null);assert.equal(pending.charged,false);
+    const link="https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-delayed";h.editInvoice({InvoiceLink:link});
+    const ready=await h.service.check(OWNER,{orderId:order.id});
+    assert.equal(ready.id,order.id);assert.equal(ready.status,"awaiting-payment");assert.equal(ready.invoiceUrl,link);assert.equal(ready.requiresReview,false);
+    assert.equal(h.records.get(`payments/orders/${order.id}.json`).value.invoiceId,"30");
+    assert.equal((await h.checkout()).id,order.id);assert.equal(mutationRequests(h).length,before);
+    assert.equal(h.requests.filter(r=>r.method==="GET"&&r.path==="/invoice/30").length,3);
+  }
+});
+
+test("a missing invoice link never masks changed financial details or an unsafe returned URL",async()=>{
+  const h=fixture({invoiceOverrides:{InvoiceLink:undefined}}),order=await h.checkout();
+  for(const change of [{TotalAmt:14},{Balance:14},{CustomerRef:{value:"99"}},{CurrencyRef:{value:"EUR"}},{BillEmail:{Address:OTHER.email}},{AllowOnlineCreditCardPayment:false},
+    {InvoiceLink:""},{InvoiceLink:"https://evil.example/portal/pay"},{InvoiceLink:"https://connect.intuit.com/portal/pay#unexpected"}]) {
+    const original=structuredClone(h.invoice());h.editInvoice(change);
+    const checked=await h.service.check(OWNER,{orderId:order.id});
+    assert.equal(checked.status,"uncertain",JSON.stringify(change));assert.equal(checked.requiresReview,true);assert.equal(checked.invoiceUrl,null);assert.equal(checked.receiptAvailable,false);
+    h.editInvoice(original);
+  }
+  assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
 });
 
 test("ambiguous customer and invoice create results never replay POST or issue a second order",async()=>{
@@ -230,4 +274,22 @@ test("merchant terms reject unsupported markup characters and normalize line end
   const body={expectedRevision:0,enabled:true,serviceItemId:"2",taxCode:"NON",...TERMS,merchantConfirmed:true,pciAcknowledged:true,automaticInvoiceEmailDisabled:true};
   await error(fixture({configured:false}).service.saveSettings(OWNER,{...body,deliveryTerms:"Delivery < 24 hours"}));
   const saved=await fixture({configured:false}).service.saveSettings(OWNER,{...body,deliveryTerms:"Delivery\r\nwithin 24 hours"});assert.equal(saved.deliveryTerms,"Delivery\nwithin 24 hours");
+});
+
+test("confirmed payment persists before receipt delivery and mail failure preserves payment",async()=>{
+  let h,attempts=0;
+  h=fixture({receiptDelivery:{deliver:async order=>{
+    attempts++;
+    assert.equal((await h.read(`payments/orders/${order.id}.json`)).value.status,"captured");
+    assert.equal(order.accountingPayments[0].allocatedCents,order.amountCents);
+    throw new Error("Synthetic mail unavailable");
+  }}});
+  const order=await h.checkout();
+  await h.service.check(OWNER,{orderId:order.id});
+  assert.equal(attempts,0);
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  const paid=await h.service.check(OWNER,{orderId:order.id});
+  assert.equal(paid.status,"captured");
+  assert.equal(paid.receiptAvailable,true);
+  assert.equal(attempts,1);
 });

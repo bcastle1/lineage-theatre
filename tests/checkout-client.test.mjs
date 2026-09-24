@@ -24,6 +24,16 @@ const order = status => ({ id: quote().orderId, quoteId: quote().id, preparedId:
   invoiceUrl: "https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture", invoiceNumber: "1234", ...(status === "captured" ? { confirmationSource: "quickbooks-accounting" } : {}) });
 const token = "SYNTHETIC_TOKEN_NOT_A_REAL_CARD";
 
+test("a saved unpaid invoice without a payment link remains recoverable and locked", () => {
+  const pending = normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: null });
+  assert.ok(pending);
+  assert.equal(pending.requiresReview, false);
+  assert.equal(pending.receiptAvailable, false);
+  assert.match(paymentStatusMessage(pending), /remains unpaid/);
+  assert.match(paymentStatusMessage(pending), /Check payment status/);
+  assert.match(paymentStatusMessage(pending), /stays locked/);
+});
+
 test("hosted configuration requires a known method, environment and complete policy", () => {
   const valid = { available: true, environment: "sandbox", method, ...policy };
   assert.deepEqual(normalizeCheckoutConfiguration(valid), valid);
@@ -132,7 +142,7 @@ test("unpaid invoice recovery and explicit status checks cannot create or retry 
   assert.equal(unpaid.charged, false);
   assert.equal(unpaid.receiptAvailable, false);
   assert.match(paymentStatusMessage(unpaid), /Complete payment on QuickBooks/);
-  assert.match(paymentStatusMessage({ ...unpaid, invoiceUrl: null }), /invoice is saved.*Check payment status again/);
+  assert.match(paymentStatusMessage({ ...unpaid, invoiceUrl: null }), /invoice is saved.*Check payment status/);
   await recoverFilmPayment(request, reference());
   await checkFilmPayment(request, reference(), unpaid);
   assert.equal(calls.filter(call => call.body?.action === "checkout").length, 1);
@@ -215,4 +225,35 @@ test("an expired original retry quote is surfaced without creating a replacement
   await assert.rejects(retryFilmPayment({ order: { ...order("uncertain"), invoiceUrl: null, retryAllowed: true }, reference: reference(), checkoutProof: "d".repeat(64),
     request: async () => { calls++; throw Object.assign(new Error("Expired"), { code: "QUOTE_EXPIRED" }); } }), /saved price or checkout terms changed/);
   assert.equal(calls, 1);
+});
+
+const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
+test("payment navigation reserves a tab immediately and strips its opener before verified navigation", () => {
+  const calls=[];
+  const tab={opener:{},document:{title:"",body:{textContent:""}},closed:false,location:{replace:url=>calls.push(url)},close:()=>calls.push("close")};
+  const handle=reservePaymentWindow(()=>{calls.push("reserve");return tab;});
+  assert.deepEqual(calls,["reserve"]);
+  assert.equal(tab.opener,null);
+  assert.match(tab.document.body.textContent,/Preparing/);
+  assert.equal(handle.open(order("awaiting-payment").invoiceUrl),true);
+  handle.close();
+  assert.deepEqual(calls,["reserve",order("awaiting-payment").invoiceUrl]);
+});
+test("blocked or manually closed payment tabs fall back without losing saved checkout", () => {
+  assert.equal(reservePaymentWindow(()=>null).open(order("awaiting-payment").invoiceUrl),false);
+  assert.equal(reservePaymentWindow(()=>{throw Error("popup blocked");}).open(order("awaiting-payment").invoiceUrl),false);
+  let closed=0;
+  const tab={opener:null,document:{title:"",body:{}},closed:true,close:()=>closed++,location:{replace:()=>assert.fail("closed tab must not navigate")}};
+  assert.equal(reservePaymentWindow(()=>tab).open(order("awaiting-payment").invoiceUrl),false);
+  assert.equal(closed,1);
+});
+test("payment tabs close on failure and never navigate to untrusted destinations", () => {
+  let closed=0;
+  const tab={opener:null,document:{title:"",body:{}},closed:false,close:()=>closed++,location:{replace:()=>assert.fail("unsafe navigation")}};
+  const handle=reservePaymentWindow(()=>tab);
+  assert.equal(handle.open("https://evil.invalid/payment"),false);
+  handle.close();
+  assert.equal(closed,1);
+  reservePaymentWindow(()=>tab).close();
+  assert.equal(closed,2);
 });

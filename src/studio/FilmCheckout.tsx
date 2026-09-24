@@ -6,6 +6,7 @@ import { normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote,
 import { checkFilmPayment, commitFilmPayment, retryFilmPayment } from "./checkout-payment";
 import { createFilmReceiptData, createFilmReceiptHtml } from "./payment-receipt";
 import { captchaToken } from "../lib/captcha";
+import { reservePaymentWindow } from "./payment-window";
 import CaptchaNotice from "../CaptchaNotice";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -161,9 +162,21 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     setOrder(result);
     return result;
   }
+  function presentPaymentPage(result: FilmOrder, paymentWindow: ReturnType<typeof reservePaymentWindow>) {
+    setOrder(result);
+    if (result.status === "awaiting-payment" && result.invoiceUrl && !result.requiresReview) {
+      setMessage(paymentWindow.open(result.invoiceUrl)
+        ? "Your secure payment page opened in another tab. Complete payment there, then return here to check its status."
+        : "Your secure payment page is ready. Select Open secure payment page below to enter your payment details.");
+    } else setMessage(paymentStatusMessage(result));
+  }
   async function submitPayment() {
     if (!quote || !quoteCurrent || !consent || paymentReference || !configuration?.available) return;
     await work("Preparing your secure payment page…", async () => {
+      // Reserve the tab during the click so browser popup protection does not
+      // block navigation after the asynchronous security and invoice requests.
+      const paymentWindow = reservePaymentWindow();
+      try {
       if (Date.parse(quote.expiresAt) <= Date.now()) throw new Error("Your price expired before payment. Request a new price.");
       const proof = await api<{ checkoutProof: string }>("/api/studio", {
         action: "checkoutCheck", quoteId: quote.id, captchaToken: await captchaToken("checkout"),
@@ -176,10 +189,8 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
         persistPaymentReference(saved);
         attemptedPayment.current = saved;
       } });
-      setOrder(result);
-      if (result.status === "awaiting-payment" && result.invoiceUrl && !result.requiresReview) {
-        setMessage("Your secure payment page is ready. Open it below, then return here to check payment status.");
-      }
+      presentPaymentPage(result, paymentWindow);
+      } finally { paymentWindow.close(); }
     });
   }
   async function downloadReceipt(format: "html" | "json" = "html") {
@@ -201,6 +212,8 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     if (!paymentReference || !order || order.retryAllowed !== true) return;
     const savedReference = paymentReference, savedOrder = order;
     await work("Retrying your saved payment page…", async () => {
+      const paymentWindow = reservePaymentWindow();
+      try {
       const proof = await api<{ checkoutProof: string }>("/api/studio", {
         action: "checkoutCheck", quoteId: savedReference.quoteId, captchaToken: await captchaToken("checkout"),
       });
@@ -208,7 +221,8 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       // Hide the retry immediately. Only the next verified server record may
       // authorize another attempt if this response is lost or unreadable.
       setOrder({ ...savedOrder, retryAllowed: false });
-      setOrder(await retryFilmPayment({ request: api, order: savedOrder, reference: savedReference, checkoutProof: proof.checkoutProof }));
+      presentPaymentPage(await retryFilmPayment({ request: api, order: savedOrder, reference: savedReference, checkoutProof: proof.checkoutProof }), paymentWindow);
+      } finally { paymentWindow.close(); }
     });
   }
   async function productionRequest(start: boolean) {
@@ -253,7 +267,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
         <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks.`}</span>
       </label>
       {configuration?.available && quoteCurrent && <>
-        <p className="field-note">Enter your payment details on QuickBooks. After payment, return here and select Check payment status.</p>
+        <p className="field-note">Your secure payment page opens in another tab. Enter your payment details there, then return here to check payment status. Your finished film unlocks only after payment is confirmed.</p>
         <CaptchaNotice />
         <button className="button primary" disabled={Boolean(busy) || !consent} onClick={() => void submitPayment()}>
           <CreditCard size={16} />{quote.sandbox ? "Prepare test payment page" : "Prepare secure payment page"}
@@ -272,7 +286,7 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       <div className="action-group">
         {order?.retryAllowed === true && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void retryPaymentPage()}><RefreshCw size={15} />Retry preparing this payment page</button>}
         {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <a className="button primary small" href={order.invoiceUrl} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} />Open secure payment page</a>}
-        <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { await readOrder(paymentReference); })}><RefreshCw size={15} />Check payment status</button>
+        <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { const latest = await readOrder(paymentReference); setMessage(`Status checked. ${paymentStatusMessage(latest)}`); })}><RefreshCw size={15} />Check payment status</button>
         {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt()}><Download size={15} />Download receipt</button>}
         {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt("json")}>Receipt data (JSON)</button>}
         <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Contact the administrator</a>

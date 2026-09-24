@@ -115,7 +115,7 @@ export function paymentStatusMessage(order: FilmOrder): string {
   switch (order.status) {
     case "awaiting-payment": return order.invoiceUrl
       ? "Your payment is not yet confirmed. Complete payment on QuickBooks, then return here to check its status."
-      : "Your invoice is saved, but its payment page is not available yet. Check payment status again or contact the administrator.";
+      : "Your invoice is saved and remains unpaid. The secure payment page is not available yet. Check payment status to try loading the page again, or contact the administrator. Your finished film stays locked until payment is confirmed.";
     case "captured": return order.confirmationSource === "quickbooks-accounting"
       ? order.sandbox ? "Test payment recorded by QuickBooks. No real money was charged." : "Payment recorded by QuickBooks."
       : order.sandbox ? "Your test payment is confirmed. No real money was charged." : "Your payment is confirmed.";

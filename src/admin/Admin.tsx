@@ -32,6 +32,7 @@ import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
+import ReceiptSettings from "./ReceiptSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import "./admin.css";
 
@@ -2017,6 +2018,7 @@ export default function Admin({
               />}
             </section>
             <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} onSaved={() => void refresh()} />
+            <ReceiptSettings disabled={busy || loading} />
             <div className="admin-section-heading">
               <div>
                 <h2>Payments & refunds</h2>

@@ -64,8 +64,9 @@ function invoiceData(invoice,order) {
     ||invoice.TxnStatus==="Voided"||invoice.status==="Voided"||invoice.Voided===true)throw conflict();
   const links=invoice.LinkedTxn??[];
   if(!Array.isArray(links)||links.some(l=>l.TxnType!=="Payment"||!numeric.test(l.TxnId||""))||links.length>100||new Set(links.map(l=>l.TxnId)).size!==links.length)throw conflict();
+  const invoiceUrl=safeLink(invoice.InvoiceLink);
   return {invoiceId,invoiceNumber:typeof invoice.DocNumber==="string"&&invoice.DocNumber.length<=100?invoice.DocNumber:null,
-    invoiceUrl:safeLink(invoice.InvoiceLink),balanceCents:balance,paymentIds:links.map(l=>l.TxnId)};
+    invoiceUrl,invoiceLinkStatus:invoiceUrl?"ready":invoice.InvoiceLink==null?"pending":"invalid",balanceCents:balance,paymentIds:links.map(l=>l.TxnId)};
 }
 function paymentAllocation(payment,order,paymentId) {
   if(payment?.Id!==paymentId||payment.CustomerRef?.value!==order.customerId||payment.CurrencyRef?.value!=="USD"||payment.TxnStatus==="Voided"||payment.Voided===true
@@ -85,6 +86,7 @@ function paymentAllocation(payment,order,paymentId) {
 }
 
 export function createHostedCheckoutService({read=readRecord,write=writeRecord,now=Date.now,env=process.env,transport=createQuickBooksAccountingTransport(),
+  receiptDelivery={deliver:async order=>(await import("./receipt-delivery.mjs")).receiptDelivery.deliver(order)},
   pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args)}={}) {
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
@@ -246,8 +248,10 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
         Line:[{Amount:amount,DetailType:"SalesItemLineDetail",Description:"Film production",SalesItemLineDetail:{ItemRef:{value:s.serviceItemId},Qty:1,UnitPrice:amount,TaxCodeRef:{value:"NON"}}}]};
       let invoice=(await response(binding,{method:"POST",path:"/invoice",requestId:record.value.invoiceRequestId,body})).Invoice;
       let data=invoiceData(invoice,record.value);record=await save(path,record,{...record.value,...data});
-      if(!data.invoiceUrl) {invoice=(await response(binding,{method:"GET",path:`/invoice/${data.invoiceId}`})).Invoice;data=invoiceData(invoice,record.value);}
-      const unpaid=data.balanceCents===q.amountCents&&data.paymentIds.length===0&&Boolean(data.invoiceUrl);
+      if(data.invoiceLinkStatus==="pending") {invoice=(await response(binding,{method:"GET",path:`/invoice/${data.invoiceId}`})).Invoice;data=invoiceData(invoice,record.value);}
+      // A missing payment link does not make a fully verified unpaid invoice ambiguous.
+      // Keep its identity so a later status check can recover the link without another POST.
+      const unpaid=data.balanceCents===q.amountCents&&data.paymentIds.length===0&&data.invoiceLinkStatus!=="invalid";
       record=await save(path,record,{...record.value,...data,status:unpaid?"awaiting-payment":"uncertain"});
     }catch {record=await save(path,record,{...record.value,status:"uncertain",invoiceUrl:null});}
     return presentOrder(record.value);
@@ -266,13 +270,17 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       const invoice=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice,data=invoiceData(invoice,value),payments=[];
       for(const paymentId of data.paymentIds)payments.push(paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId));
       const allocated=payments.reduce((sum,p)=>sum+p.allocatedCents,0),paid=data.balanceCents===0&&allocated===value.amountCents&&payments.length>0;
-      const unpaid=data.balanceCents===value.amountCents&&allocated===0&&data.paymentIds.length===0&&Boolean(data.invoiceUrl);
+      const unpaid=data.balanceCents===value.amountCents&&allocated===0&&data.paymentIds.length===0&&data.invoiceLinkStatus!=="invalid";
       update={...data,status:paid?"captured":unpaid?"awaiting-payment":"uncertain",accountingPayments:payments,accountingCheckedAt:stamp(now()),lastCheckedBinding:binding,
         ...(paid?{capturedAt:value.capturedAt||stamp(now()),confirmationSource:SOURCE}:{}),settlementVerified:false};
       await currentActor(actor);if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw conflict();
     }catch {update={status:"uncertain",invoiceUrl:null};}
     const current=await read(orderPath(value.id));if(current?.etag!==record.etag)throw conflict();
-    return presentOrder((await save(orderPath(value.id),record,{...record.value,...update,checkOperation:null})).value);
+    const saved=(await save(orderPath(value.id),record,{...record.value,...update,checkOperation:null})).value;
+    // Receipt delivery is recoverable independently; mail problems must never
+    // turn a verified payment into an uncertain financial result.
+    if(saved.status==="captured")try {await receiptDelivery.deliver(saved);}catch{}
+    return presentOrder(saved);
   }
   async function receipt(actor,orderReference) {
     const v=(await readOrder(actor,orderReference)).value;if(v.status!=="captured"||!v.capturedAt||v.confirmationSource!==SOURCE)throw new HostedCheckoutError("A receipt is available after QuickBooks records payment.",409);

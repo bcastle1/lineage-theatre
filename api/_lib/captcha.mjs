@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { digest, readRecord, writeRecord } from "./auth.mjs";
 
 const VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
-const MAX_AGE_MS = 120_000;
+const CHECKOUT_PROOF_TTL_MS = 120_000;
 const ACTIONS = new Set(["login", "register", "mfa", "checkout"]);
 const PROVIDER_ERRORS = new Set(["missing-input-secret", "invalid-input-secret", "missing-input-response", "invalid-input-response", "bad-request", "timeout-or-duplicate"]);
 const expiredMessage = "The security check expired. Please try again to run a fresh check.";
@@ -72,10 +72,12 @@ export function createCaptchaService({ env = process.env, fetchImpl = fetch, now
     }
     if (result.score < config.score) reject("verification", "low_score", action,
       { score: result.score, minimumScore: config.score }, "The security check could not verify this attempt. Please try again. If this continues, contact the administrator.");
+    // challenge_ts is the challenge load time, not token issuance. Google
+    // enforces token expiry and single use via siteverify/timeout-or-duplicate.
+    // https://developers.google.com/recaptcha/docs/verify
     const age = now() - Date.parse(result?.challenge_ts);
     if (!Number.isFinite(age)) reject("verification", "invalid_timestamp", action);
     if (age < -10_000) reject("verification", "future_timestamp", action);
-    if (age > MAX_AGE_MS) reject("verification", "expired_token", action, {}, expiredMessage);
     // Google consumes each token once. Never retry verification after an ambiguous response.
   }
   async function prepareCheckout(email, quoteId, token) {
@@ -83,7 +85,7 @@ export function createCaptchaService({ env = process.env, fetchImpl = fetch, now
     await verify(token, "checkout");
     const proof = randomBytes(32).toString("hex");
     await write(`security/checkout-checks/${digest(proof)}.json`, {
-      email, quoteId, expiresAt: now() + MAX_AGE_MS, used: false,
+      email, quoteId, expiresAt: now() + CHECKOUT_PROOF_TTL_MS, used: false,
     });
     return { checkoutProof: proof };
   }

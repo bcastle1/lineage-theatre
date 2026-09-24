@@ -8,6 +8,7 @@ import { payments, PaymentError } from "./_lib/payments.mjs";
 import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { readRegistrationPolicy as readPolicy, REGISTRATION_POLICY_PATH } from "./_lib/registration-policy.mjs";
 import { createSourceAgreementService, SourceAgreementError } from "./_lib/source-agreement.mjs";
+import { createReceiptDeliveryService, ReceiptDeliveryError } from "./_lib/receipt-delivery.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -22,6 +23,7 @@ export function createAdminHandler(overrides={}) {
  const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
+ const receipts=overrides.receiptDelivery||createReceiptDeliveryService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  return async function handler(req,res) {
   const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy}=dependencies;
   try {
@@ -56,6 +58,7 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="receiptSettings") return json(res,200,await receipts.settings(actor));
       if(action==="hostedCheckout") return json(res,200,await hosted.settings(actor));
       if(action==="agreement") return json(res,200,{agreement:url.searchParams.has("version")?await sourceAgreement.version(url.searchParams.get("version")):await sourceAgreement.current()});
       if(action==="registrationPolicy") return json(res,200,await readRegistrationPolicy());
@@ -110,6 +113,12 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="saveReceiptSettings") {
+      const {action,...input}=body;
+      const settings=await receipts.saveSettings(actor,input);
+      await audit(actor.email,"payment.receipts.updated","merchant-receipt-email",{revision:settings.revision,merchantReceiptEmail:settings.merchantReceiptEmail});
+      return json(res,200,settings);
+    }
     if(action==="hostedCheckoutCatalog") {
       if(!isOwner(actor))return resultError(res,403,"Only the owner can manage hosted checkout.");
       if(Object.keys(body).some(key=>key!=="action"))return resultError(res,400,"The catalog request is invalid.");
@@ -214,6 +223,7 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof ReceiptDeliveryError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof SourceAgreementError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof FilmProductionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
     if(error instanceof PaymentError) return json(res,error.status,{code:error.code,message:error.message,charged:error.charged});

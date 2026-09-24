@@ -93,7 +93,7 @@ export function createStudioHandler(overrides={}) {
     const email=session.user.email;
     const url=new URL(req.url,`https://${req.headers.host}`);
     if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
-      return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,
+      return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,actor:session.user,read:readRecord,
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
