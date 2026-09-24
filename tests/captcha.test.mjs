@@ -48,9 +48,23 @@ test("verification sends only token and secret to the fixed Google endpoint", as
   assert.deepEqual([...h.calls[0].init.body], [["secret", env.RECAPTCHA_SECRET_KEY], ["response", token]]);
   assert.equal(h.calls[0].init.redirect, "error");
 });
+test("a fresh Google-approved token from a long-open page gets a new short-lived checkout proof", async () => {
+  for (const challengeAge of [120_001, 3_600_000]) {
+    const h = harness();
+    h.advance(challengeAge);
+    const { checkoutProof } = await h.service.prepareCheckout(email, quote, token);
+    assert.equal(h.calls.length, 1, "Google still verifies the token before a proof is issued");
+    assert.deepEqual(h.reports, []);
+    const record = [...h.records.values()][0].value;
+    assert.equal(record.expiresAt, time + challengeAge + 120_000, "Proof expiry starts at verification, not challenge load");
+    h.advance(119_999);
+    await h.service.consumeCheckout(email, quote, checkoutProof);
+    await assert.rejects(h.service.consumeCheckout(email, quote, checkoutProof), CaptchaError);
+  }
+});
 test("wrong action, domain, score, expired token, replay and malformed responses fail closed", async () => {
   for (const patch of [{ success: false }, { action: "login" }, { hostname: "evil.invalid" }, { hostname: "lineagetheater.com.evil.invalid" },
-    { score: 0.49 }, { score: "0.9" }, { score: 1.1 }, { challenge_ts: new Date(time - 120_001).toISOString() },
+    { score: 0.49 }, { score: "0.9" }, { score: 1.1 },
     { challenge_ts: new Date(time + 10_001).toISOString() }, { challenge_ts: "invalid" }, { "error-codes": ["timeout-or-duplicate"] }]) {
     const h = harness({ fetchImpl: async () => new Response(JSON.stringify({ ...good(), ...patch })) });
     await assert.rejects(h.service.verify(token, "checkout"), CaptchaError);
@@ -73,7 +87,7 @@ test("verification rejection diagnostics identify the cause without relaxing any
     [{ score: 0.49 }, "low_score"],
     [{ challenge_ts: "invalid" }, "invalid_timestamp"],
     [{ challenge_ts: new Date(time + 10_001).toISOString() }, "future_timestamp"],
-    [{ challenge_ts: new Date(time - 120_001).toISOString() }, "expired_token"],
+    [{ success: false, "error-codes": ["timeout-or-duplicate"] }, "expired_token"],
   ];
   for (const [patch, reason] of failures) {
     const h = harness({ fetchImpl: async () => new Response(JSON.stringify({ ...good(), ...patch })) });
@@ -90,13 +104,18 @@ test("verification rejection diagnostics identify the cause without relaxing any
   assert.deepEqual(accepted.reports, [], "Accepted checks do not produce failure diagnostics");
 });
 test("expired checks are recoverable while invalid provider secrets are temporarily unavailable", async () => {
-  for (const patch of [
-    { success: false, "error-codes": ["timeout-or-duplicate"] },
-    { challenge_ts: new Date(time - 120_001).toISOString() },
-  ]) {
-    const h = harness({ fetchImpl: async () => new Response(JSON.stringify({ ...good(), ...patch })) });
-    await assert.rejects(h.service.verify(token, "checkout"), error =>
+  for (const challengeAge of [0, 120_001, 3_600_000]) {
+    let attempts = 0;
+    const h = harness({ fetchImpl: async () => {
+      attempts++;
+      return new Response(JSON.stringify({ ...good(), success: false, "error-codes": ["timeout-or-duplicate"],
+        challenge_ts: new Date(time - challengeAge).toISOString() }));
+    } });
+    await assert.rejects(h.service.prepareCheckout(email, quote, token), error =>
       error instanceof CaptchaError && error.status === 403 && error.code === "CAPTCHA_REQUIRED" && /expired/i.test(error.message));
+    assert.equal(attempts, 1, "Expired or replayed tokens are never automatically retried");
+    assert.equal(h.records.size, 0, "Google-rejected tokens cannot issue a checkout proof at any challenge age");
+    assert.deepEqual(h.reports, [{ stage: "verification", reason: "expired_token", action: "checkout", providerErrors: ["timeout-or-duplicate"] }]);
   }
   for (const providerError of ["missing-input-secret", "invalid-input-secret"]) {
     const h = harness({ fetchImpl: async () => new Response(JSON.stringify({ success: false, "error-codes": [providerError] })) });

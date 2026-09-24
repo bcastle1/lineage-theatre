@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Writable } from "node:stream";
-import { digest } from "../api/_lib/auth.mjs";
-import { createFilmProductionService } from "../api/_lib/film-production.mjs";
+import { digest, userPath } from "../api/_lib/auth.mjs";
+import { createFilmProductionService, buildFilmManifest, fictionalOperatorProject } from "../api/_lib/film-production.mjs";
+import { createStudioHandler } from "../api/studio.mjs";
 import { parseRange, MAX_FILM_BYTES } from "../api/_lib/archive.mjs";
 import { ProductionMediaError, streamProductionMedia, validateStoredProductionMedia } from "../api/_lib/production-media.mjs";
 
@@ -12,7 +13,16 @@ const secondId = "22222222-2222-4222-8222-222222222222";
 const bytes = Buffer.from(Array.from({ length: 128 }, (_, index) => index));
 const sha256 = digest(bytes);
 const pathname = `production/media/${digest(owner)}/${id}/${sha256}.mp4`;
-const completeJob = () => ({ id, ownerHash: digest(owner), status: "completed", media: {
+const manifest = { filmId: secondId, title: "A fictional paid film" }, manifestHash = digest(JSON.stringify(manifest));
+const orderId = digest(`${owner}:production:${manifestHash}`), legacyOrderId = digest(`${owner}:${manifestHash}`);
+const paidOrder = () => ({ id: orderId, customerEmail: owner, preparedId: id, filmId: secondId, manifestHash, status: "captured",
+  capturedAt: "2026-09-01T00:00:00.000Z", currency: "USD", amountCents: 330, refundedCents: 0, provider: "quickbooks",
+  merchantBinding: { environment: "production", grantId: "a".repeat(64) }, providerChargeId: "synthetic-charge-123" });
+const hostedPaidOrder = () => ({ ...paidOrder(), checkoutMethod: "quickbooks-hosted-invoice", providerChargeId: null,
+  merchantBinding: { ...paidOrder().merchantBinding, realmId: "123456789" }, confirmationSource: "quickbooks-accounting",
+  invoiceId: "100", balanceCents: 0, accountingCheckedAt: "2026-09-01T00:00:00.000Z", accountingPayments: [{ id: "101", allocatedCents: 330 }] });
+const completeJob = () => ({ id, ownerHash: digest(owner), status: "completed", mode: "customer", filmId: secondId, manifest, manifestHash,
+  authorization: { environment: "production", manifestHash }, media: {
   pathname, sha256, contentType: "video/mp4", sizeBytes: bytes.length, durationSeconds: 15,
 } });
 
@@ -25,12 +35,18 @@ class ResponseCapture extends Writable {
   get data() { return JSON.parse(this.body.toString()); }
 }
 
-function fixture({ job = completeJob(), changeResult, streamChunks } = {}) {
+function fixture({ job = completeJob(), order = paidOrder(), legacyOrder, account, ownerEmail = owner, changeResult, streamChunks } = {}) {
   const blobReads = [], recordReads = [], cancellations = [];
-  const filmProduction = createFilmProductionService({ readRecordImpl: async path => {
+  const records = new Map();
+  if (job) records.set(`production/jobs/${digest(ownerEmail)}/${id}.json`, { value: structuredClone(job), etag: "job-etag" });
+  if (order) records.set(`payments/orders/${orderId}.json`, { value: structuredClone(order), etag: "order-etag" });
+  if (legacyOrder) records.set(`payments/orders/${legacyOrderId}.json`, { value: structuredClone(legacyOrder), etag: "legacy-etag" });
+  if (account) records.set(userPath(ownerEmail), { value: account, etag: "account-etag" });
+  const read = async path => {
     recordReads.push(path);
-    return path === `production/jobs/${digest(owner)}/${id}.json` && job ? { value: structuredClone(job), etag: "job-etag" } : null;
-  } });
+    return structuredClone(records.get(path) || null);
+  };
+  const filmProduction = createFilmProductionService({ readRecordImpl: read });
   const getBlob = async (path, options) => {
     blobReads.push({ path, options });
     const range = parseRange(options.headers.Range, bytes.length);
@@ -45,12 +61,12 @@ function fixture({ job = completeJob(), changeResult, streamChunks } = {}) {
     };
     return changeResult ? changeResult(result) : result;
   };
-  return { filmProduction, getBlob, blobReads, recordReads, cancellations };
+  return { filmProduction, getBlob, blobReads, recordReads, cancellations, read, records };
 }
 async function request(fix, { method = "GET", email = owner, productionId = id, headers = {}, download = false, ...dependencies } = {}) {
   const res = new ResponseCapture();
   const req = { method, url: `/api/studio?action=productionMedia&id=${id}&url=https://untrusted.invalid/file`, headers };
-  await streamProductionMedia({ req, res, email, id: productionId, filmProduction: fix.filmProduction, getBlob: fix.getBlob, download, ...dependencies });
+  await streamProductionMedia({ req, res, email, id: productionId, filmProduction: fix.filmProduction, getBlob: fix.getBlob, read: fix.read, download, ...dependencies });
   return res;
 }
 
@@ -79,7 +95,7 @@ test("stored production media permits only the owner's completed hash-addressed 
 test("GET authorizes the persisted job then streams private media without exposing its storage URL", async () => {
   const fix = fixture(), res = await request(fix, { email: owner.toUpperCase() });
   assert.equal(res.statusCode, 200); assert.deepEqual(res.body, bytes);
-  assert.deepEqual(fix.recordReads, [`production/jobs/${digest(owner)}/${id}.json`]);
+  assert.deepEqual(fix.recordReads, [`production/jobs/${digest(owner)}/${id}.json`, `payments/orders/${orderId}.json`]);
   assert.deepEqual(fix.blobReads, [{ path: pathname, options: { access: "private", useCache: false, headers: { "accept-encoding": "identity" } } }]);
   assert.equal(res.headers["cache-control"], "private, no-store"); assert.equal(res.headers.vary, "Cookie");
   assert.equal(res.headers["x-content-type-options"], "nosniff"); assert.equal(res.headers["content-type"], "video/mp4");
@@ -92,6 +108,108 @@ test("GET authorizes the persisted job then streams private media without exposi
 test("download uses only a fixed safe filename derived from the production id", async () => {
   const res = await request(fixture(), { download: true });
   assert.equal(res.headers["content-disposition"], `attachment; filename="${id}.mp4"`);
+});
+
+test("unpaid, uncertain, foreign and mismatched orders never unlock the finished film", async () => {
+  const orders = [null, ...[
+    { status: "awaiting-payment", capturedAt: null }, { status: "uncertain" }, { status: "submitting" },
+    { status: "declined" }, { status: "refunded" }, { capturedAt: null }, { capturedAt: "invalid" },
+    { capturedAt: "2999-01-01T00:00:00.000Z" }, { customerEmail: other }, { preparedId: secondId },
+    { manifestHash: "b".repeat(64) }, { filmId: id }, { id: "c".repeat(64) }, { amountCents: 0 },
+    { currency: "EUR" }, { refundedCents: 1 }, { refundOperation: { status: "pending" } },
+    { merchantBinding: { ...paidOrder().merchantBinding, environment: "sandbox" } },
+    { merchantBinding: { ...paidOrder().merchantBinding, environment: undefined } },
+    { providerChargeId: null }, { provider: "unknown" }, { checkoutMethod: "unrecognized" },
+  ].map(patch => ({ ...paidOrder(), ...patch }))];
+  for (const order of orders) {
+    const fix = fixture({ order }), res = await request(fix);
+    assert.equal(res.statusCode, 402); assert.match(res.data.message, /Complete payment/);
+    assert.equal(fix.blobReads.length, 0);
+    assert.equal(res.headers["content-disposition"], undefined);
+  }
+  const job = { ...completeJob(), authorization: { ...completeJob().authorization, environment: "sandbox" } };
+  const fix = fixture({ job });
+  assert.equal((await request(fix)).statusCode, 402, "Sandbox production cannot be unlocked by a live order");
+  assert.equal(fix.blobReads.length, 0);
+});
+
+test("hosted accounting confirmation unlocks only the fully allocated matching live invoice", async () => {
+  const accepted = await request(fixture({ order: hostedPaidOrder() }));
+  assert.equal(accepted.statusCode, 200); assert.deepEqual(accepted.body, bytes);
+  for (const patch of [
+    { confirmationSource: undefined }, { confirmationSource: "processor" }, { invoiceId: null },
+    { balanceCents: 1 }, { accountingPayments: [] }, { accountingPayments: [{ id: "101", allocatedCents: 329 }] },
+    { accountingPayments: [{ id: "101", allocatedCents: 165 }, { id: "101", allocatedCents: 165 }] },
+    { accountingPayments: [{ id: "101", allocatedCents: 330.1 }] }, { accountingCheckedAt: null },
+    { accountingCheckedAt: "2999-01-01T00:00:00.000Z" }, { checkOperation: "pending" },
+    { merchantBinding: { ...hostedPaidOrder().merchantBinding, realmId: undefined } },
+  ]) {
+    const fix = fixture({ order: { ...hostedPaidOrder(), ...patch } });
+    assert.equal((await request(fix)).statusCode, 402); assert.equal(fix.blobReads.length, 0);
+  }
+});
+
+test("legacy processor identity remains usable only for a positively confirmed live payment", async () => {
+  const legacy = { ...paidOrder(), id: legacyOrderId };
+  const allowed = await request(fixture({ order: null, legacyOrder: legacy }));
+  assert.equal(allowed.statusCode, 200);
+  for (const legacyOrder of [
+    { ...legacy, merchantBinding: { ...legacy.merchantBinding, environment: "sandbox" } },
+    { ...legacy, merchantBinding: { ...legacy.merchantBinding, environment: undefined } },
+    { ...legacy, preparedId: secondId },
+  ]) {
+    const fix = fixture({ order: null, legacyOrder });
+    assert.equal((await request(fix)).statusCode, 402); assert.equal(fix.blobReads.length, 0);
+  }
+  const conflict = fixture({ order: { ...paidOrder(), status: "uncertain" }, legacyOrder: legacy });
+  assert.equal((await request(conflict)).statusCode, 402, "A conflicting current order cannot fall back to an older payment");
+  assert.equal(conflict.blobReads.length, 0);
+});
+
+test("the studio route gates playback, downloads, HEAD and ranges despite forged client payment flags", async () => {
+  for (const options of [{ method: "GET" }, { method: "HEAD" }, { method: "GET", download: true }, { method: "GET", range: "bytes=0-3" }]) {
+    const fix = fixture({ order: null }), res = new ResponseCapture();
+    const handler = createStudioHandler({ getSession: async () => ({ user: { email: owner, role: "admin" } }),
+      readRecord: fix.read, filmProduction: fix.filmProduction, getBlob: fix.getBlob });
+    await handler({ method: options.method,
+      url: `/api/studio?action=productionMedia&id=${id}&orderId=${orderId}&paid=true&status=captured&owner=${other}${options.download ? "&download=1" : ""}`,
+      headers: { host: "lineagetheater.com", ...(options.range ? { range: options.range } : {}) } }, res);
+    assert.equal(res.statusCode, 402); assert.equal(fix.blobReads.length, 0);
+    assert.equal(res.headers["cache-control"], "private, no-store");
+    if (options.method === "HEAD") assert.equal(res.body.length, 0);
+  }
+  const fix = fixture(), handler = createStudioHandler({ getSession: async () => ({ user: { email: owner, role: "customer" } }),
+    readRecord: fix.read, filmProduction: fix.filmProduction, getBlob: fix.getBlob });
+  const req = { method: "GET", url: `/api/studio?action=productionMedia&id=${id}`, headers: { host: "lineagetheater.com" } };
+  const paid = new ResponseCapture(); await handler(req, paid);
+  assert.equal(paid.statusCode, 200); assert.deepEqual(paid.body, bytes);
+  fix.records.get(`payments/orders/${orderId}.json`).value.status = "uncertain";
+  const revoked = new ResponseCapture(); await handler(req, revoked);
+  assert.equal(revoked.statusCode, 402); assert.equal(fix.blobReads.length, 1, "Each request rereads the saved payment before any media fetch");
+});
+
+test("only the current owner can preview the unchanged fixed fictional operator sample without payment", async () => {
+  const operator = { email: "erik@brocotech.ai", role: "owner", status: "active" };
+  const fixed = buildFilmManifest(fictionalOperatorProject());
+  const job = { ...completeJob(), ownerHash: digest(operator.email), mode: "operator-test", filmId: fixed.manifest.filmId,
+    manifest: fixed.manifest, manifestHash: fixed.manifestHash, shots: fixed.manifest.shots.map(shot => ({ id: shot.id, status: "completed" })),
+    authorization: { environment: "sandbox", manifestHash: fixed.manifestHash },
+    media: { ...completeJob().media, pathname: `production/media/${digest(operator.email)}/${id}/${sha256}.mp4` } };
+  const fix = fixture({ job, order: null, ownerEmail: operator.email, account: operator });
+  assert.equal((await request(fix, { email: operator.email, actor: operator })).statusCode, 200);
+  for (const account of [{ ...operator, role: "admin" }, { ...operator, status: "suspended" }, { ...operator, mustChangePassword: true }]) {
+    const denied = fixture({ job, order: null, ownerEmail: operator.email, account });
+    assert.equal((await request(denied, { email: operator.email, actor: operator })).statusCode, 402);
+    assert.equal(denied.blobReads.length, 0);
+  }
+  const changed = { ...job, manifest: { ...job.manifest, title: "A different family film" } };
+  changed.manifestHash = digest(JSON.stringify(changed.manifest));
+  const altered = fixture({ job: changed, order: null, ownerEmail: operator.email, account: operator });
+  assert.equal((await request(altered, { email: operator.email, actor: operator })).statusCode, 402);
+  const customerMode = fixture({ job: { ...job, mode: "customer", authorization: { environment: "production", manifestHash: job.manifestHash } },
+    order: null, ownerEmail: operator.email, account: operator });
+  assert.equal((await request(customerMode, { email: operator.email, actor: operator })).statusCode, 402);
+  assert.equal(customerMode.blobReads.length, 0, "Owner access does not exempt customer films");
 });
 
 test("cross-account, missing, unfinished and corrupted jobs never fetch a Blob", async () => {

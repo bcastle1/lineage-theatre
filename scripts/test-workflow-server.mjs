@@ -7,6 +7,7 @@
  * Finished-film playback fixture: node scripts/test-workflow-server.mjs --delivery-fixture
  * Private media route proof: node scripts/test-workflow-server.mjs --delivery-fixture --check
  * URL: http://127.0.0.1:5178
+ * Route checks use an ephemeral loopback port so browser QA can remain open.
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
  * Agreement QA: registration loads the real public agreement handler; edit it
@@ -21,7 +22,8 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 
-const HOST = "127.0.0.1", PORT = 5178, origin = `http://${HOST}:${PORT}`;
+const HOST = "127.0.0.1";
+let PORT = 5178, origin = `http://${HOST}:${PORT}`;
 const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
 const checkoutFixtures = process.argv.includes("--checkout-fixtures");
@@ -196,23 +198,28 @@ if (deliveryFixture) {
   const requestId = randomUUID();
   const prepared = await filmProduction.prepare({ email: accounts[0].email, project: deliveryProject, idempotencyKey: requestId, preparationConsent: true });
   const path = productionJobPath(accounts[0].email, prepared.id), record = await read(path);
+  const timestamp = new Date().toISOString();
   deliveryMedia = { bytes, pathname: `production/media/${auth.digest(accounts[0].email)}/${prepared.id}/${sha256}.mp4`, sha256 };
-  await write(path, { ...record.value, status: "completed", updatedAt: new Date().toISOString(),
+  // These production-shaped records exist only in this local memory map to
+  // exercise the real delivery gate. No provider ran and no real payment exists.
+  await write(path, { ...record.value, status: "completed", updatedAt: timestamp,
+    authorization: { manifestHash: prepared.manifestHash, environment: "production", budgetCents: 100,
+      quoteReference: "synthetic-delivery-only-no-provider", authorizedAt: timestamp },
     shots: record.value.shots.map(shot => ({ ...shot, status: "completed" })),
     media: { pathname: deliveryMedia.pathname, sha256, contentType: "video/mp4", sizeBytes: bytes.length, durationSeconds: 78.506 },
     syntheticFixture: { purpose: "existing-sample-playback-only", providerGenerated: false },
   }, record.etag);
-  const quoteId = auth.digest("synthetic-delivery-fixture-quote"), orderId = auth.digest(`${accounts[0].email}:${prepared.manifestHash}`);
-  const timestamp = new Date().toISOString();
+  const quoteId = auth.digest("synthetic-delivery-fixture-quote"), orderId = auth.digest(`${accounts[0].email}:production:${prepared.manifestHash}`);
   await write(`payments/orders/${orderId}.json`, { id: orderId, quoteId, preparedId: prepared.id, manifestHash: prepared.manifestHash,
     customerEmail: accounts[0].email, filmId: deliveryProject.id, filmTitle: deliveryProject.title, status: "captured",
     currency: "USD", amountCents: 100, refundedCents: 0, createdAt: timestamp, updatedAt: timestamp, capturedAt: timestamp,
-    merchantBinding: simulatedBinding, providerChargeId: "synthetic_delivery_only_no_charge", syntheticFixture: true,
+    provider: "quickbooks", merchantBinding: { ...simulatedBinding, environment: "production" },
+    providerChargeId: "synthetic_delivery_only_no_charge", syntheticFixture: { memoryOnly: true, realPayment: false },
   });
   deliveryProject.productionPreparation = { ...prepared, inputHash: await productionInputHash(JSON.stringify(productionPreparationInput(deliveryProject))),
     requestId, status: "completed", issues: [] };
   deliveryProject.paymentReference = { preparedId: prepared.id, manifestHash: prepared.manifestHash, quoteId, orderId,
-    checkoutKey: "synthetic-delivery-checkout", submittedAt: timestamp, sandbox: true };
+    checkoutKey: "synthetic-delivery-checkout", submittedAt: timestamp, sandbox: false };
   assert.deepEqual(normalizeFilm(deliveryProject).paymentReference, deliveryProject.paymentReference);
   assert.equal(normalizeFilm(deliveryProject).productionPreparation.inputHash, deliveryProject.productionPreparation.inputHash);
 }
@@ -280,7 +287,7 @@ const server = createServer(async (req, res) => {
         visible.push(`<tr><td>${account.email}</td><td>${account.password}</td><td>${code}</td></tr>`);
       }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and captured sandbox order exist only in memory.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
+      if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and fabricated confirmed payment use the live record format solely to test payment-gated delivery. Every record exists only in memory; there is no real transaction, production credential, or external provider call.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
       return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? '<h2>Fake checkout fixtures — no real card data</h2><p>Use separate preloaded films for each payment. Card 4111111111111111 captures; 4000000000000002 declines; 4000000000009995 stays uncertain. Expiry 12/2030, CVC 123, Sample Person, 1 Fictional Street, Test City, UT 84003. The browser intercepts fabricated tokenization locally. No card data or payment request leaves this computer.</p>' : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
     if (checkOnly) { res.statusCode = 404; return res.end("Synthetic route-check mode."); }
@@ -308,7 +315,9 @@ if (!checkOnly) {
     server: { middlewareMode: true, host: HOST, hmr: { server }, fs: { strict: true, allow: [root] } },
   });
 }
-await new Promise((resolve, reject) => { server.once("error", reject); server.listen(PORT, HOST, resolve); });
+await new Promise((resolve, reject) => { server.once("error", reject); server.listen(checkOnly ? 0 : PORT, HOST, resolve); });
+PORT = server.address().port;
+origin = `http://${HOST}:${PORT}`;
 async function close() {
   await vite?.close();
   await new Promise(resolve => server.close(resolve));
@@ -587,13 +596,21 @@ async function checkDelivery() {
   const order = await route(`/api/studio?action=order&id=${payment.orderId}`, { cookie: customer });
   assert.equal(order.status, 200); assert.equal(order.body.status, "captured");
   assert.equal(order.body.preparedId, preparation.id); assert.equal(order.body.quoteId, payment.quoteId);
-  assert.equal(order.body.receiptAvailable, true); assert.equal(order.body.sandbox, true);
-  assert.equal((await route(`/api/studio?action=receipt&id=${payment.orderId}`, { cookie: customer })).body.sandbox, true);
+  assert.equal(order.body.receiptAvailable, true); assert.equal(order.body.sandbox, false);
+  assert.equal((await route(`/api/studio?action=receipt&id=${payment.orderId}`, { cookie: customer })).body.sandbox, false);
   assert.equal((await route(statusUrl, { cookie: other })).status, 404);
   const reads = deliveryBlobReads;
   assert.equal((await mediaRoute(mediaUrl)).status, 401);
   assert.equal((await mediaRoute(mediaUrl, { cookie: other })).status, 404);
   assert.equal(deliveryBlobReads, reads, "Unauthorized requests must never reach private media storage");
+  const paymentPath = `payments/orders/${payment.orderId}.json`, confirmed = (await read(paymentPath)).value;
+  assert.equal(confirmed.syntheticFixture.realPayment, false, "The live-shaped record is fabricated test data, not a real payment");
+  for (const patch of [{ status: "awaiting-payment", capturedAt: null }, { status: "uncertain" }, { merchantBinding: simulatedBinding }]) {
+    await write(paymentPath, { ...confirmed, ...patch }, (await read(paymentPath)).etag);
+    const denied = await mediaRoute(`${mediaUrl}&download=1&paid=true&orderId=${payment.orderId}`, { cookie: customer });
+    assert.equal(denied.status, 402); assert.equal(deliveryBlobReads, reads, "Unpaid, uncertain and sandbox payments cannot read generated media");
+  }
+  await write(paymentPath, confirmed, (await read(paymentPath)).etag);
   const partial = await mediaRoute(mediaUrl, { cookie: customer, headers: { Range: "bytes=0-63" } });
   assert.equal(partial.status, 206); assert.deepEqual(partial.bytes, deliveryMedia.bytes.subarray(0, 64));
   assert.equal(partial.headers["content-range"], `bytes 0-63/${deliveryMedia.bytes.length}`);
@@ -608,7 +625,7 @@ async function checkDelivery() {
   assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), deliveryMedia.sha256);
   assert.equal(download.headers["content-disposition"], `attachment; filename="${preparation.id}.mp4"`);
   assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
-  console.log("PASS: actual-handler completed status, persisted sandbox order, private MP4 playback/ranges, HEAD, verified download bytes, ownership denial, and zero outbound calls or charges. Media is an existing illustrative sample, not new provider output.");
+  console.log("PASS: actual-handler completed status, synthetic confirmed live-format payment, unpaid/uncertain/sandbox denial, private MP4 playback/ranges, HEAD, verified download bytes, ownership denial, and zero outbound calls or charges. Media and payment are local fixtures, not new provider output or a real transaction.");
 }
 if (checkOnly) {
   try { if (deliveryFixture) await checkDelivery(); else if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
