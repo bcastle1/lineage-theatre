@@ -107,6 +107,7 @@ export interface Film {
   generatedBy?: string;
   updatedAt: string;
   archivedAt?: string | null;
+  trashedAt?: string | null;
   outputId?: string;
   outputType?: string;
   outputAt?: string;
