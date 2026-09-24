@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { prepareStory } from "./story.mjs";
+import { verifiedMediaProfile } from "./media-profile.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -9,10 +10,9 @@ const MAX_MANIFEST_BYTES = 1_500_000;
 export const FILM_PREPARATION_CONSENT = "Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.";
 export const MAGICLIGHT_GAPS = Object.freeze([
   "Account API entitlement and documented authentication",
-  "Supported clip submission, upload, status, output and reconciliation contract",
+  "Supported clip submission, upload, status, output and request lookup",
   "Verified account quality tiers, clip limits and exact job costs",
   "Character reference, voice, music and continuity capabilities",
-  "API commercial and in-app resale permission",
   "Durable media assembly worker and private playable output verification",
 ]);
 
@@ -20,6 +20,7 @@ export class FilmProductionError extends Error {
   constructor(message, status = 400, code = "INVALID_PRODUCTION_REQUEST") { super(message); this.status = status; this.code = code; }
 }
 const unavailable = () => new FilmProductionError("Film production is not available yet. You can continue preparing your screenplay.", 503, "PRODUCTION_UNAVAILABLE");
+const authorizationRequired = () => new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
 const invalid = message => { throw new FilmProductionError(message); };
 const clone = value => structuredClone(value);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -116,17 +117,28 @@ function checkAdapter(adapter) {
 }
 
 // Exact hostnames must come from a verified server adapter, never request data.
-export function validateProviderOutput(output, allowedHosts = []) {
+function validateProviderMedia(output, allowedHosts, contentTypes) {
   let url;
   try { url = new URL(output?.url); } catch { throw new FilmProductionError("Film output needs verification.", 502, "OUTPUT_UNVERIFIED"); }
   if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") || url.hash
     || !allowedHosts.includes(url.hostname) || !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(url.hostname)
-    || typeof output.url !== "string" || output.url.length > 8192 || !["video/mp4", "video/webm"].includes(output.contentType)
+    || typeof output.url !== "string" || output.url.length > 8192 || !contentTypes.includes(output.contentType)
     || !Number.isSafeInteger(output.sizeBytes) || output.sizeBytes < 16 || output.sizeBytes > 250 * 1024 * 1024
     || !Number.isFinite(output.durationSeconds) || output.durationSeconds <= 0 || output.durationSeconds > 600) {
     throw new FilmProductionError("Film output needs verification.", 502, "OUTPUT_UNVERIFIED");
   }
   return { url: output.url, contentType: output.contentType, sizeBytes: output.sizeBytes, durationSeconds: output.durationSeconds };
+}
+
+// A server adapter may return a separate, reviewed narration/dialogue mix.
+// It stays private and must pass the same host/byte checks as the video, then
+// actual full decoding and timeline checks in the media worker.
+export function validateProviderAudio(output, allowedHosts = []) {
+  return validateProviderMedia(output, allowedHosts, ["audio/mp4", "audio/mpeg", "audio/wav", "audio/webm"]);
+}
+export function validateProviderOutput(output, allowedHosts = []) {
+  const video = validateProviderMedia(output, allowedHosts, ["video/mp4", "video/webm"]);
+  return { ...video, ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}) };
 }
 
 function customerJob(job) {
@@ -289,9 +301,10 @@ export function createFilmProductionService(dependencies = {}) {
       if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash || grant.environment !== adapter.environment
         || !Number.isSafeInteger(grant.budgetCents) || grant.budgetCents < 0 || Date.parse(grant.expiresAt) <= now() || !Number.isFinite(Date.parse(grant.expiresAt))
         || (job.mode === "operator-test" && grant.fictionalOnly !== true)
-        || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
+        || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw authorizationRequired();
       const validation = await adapter.validateManifest(clone(job.manifest));
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
+      if (Date.parse(grant.expiresAt) <= now()) throw authorizationRequired();
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
     }
     // Polling and reconciliation never spend money and continue after a quote/grant expires.
@@ -303,10 +316,30 @@ export function createFilmProductionService(dependencies = {}) {
     job.status = shot.status === "uncertain" || previousStatus === "submitting" ? "uncertain" : "processing";
     try { await save(productionJobPath(email, id), job, record.etag); }
     catch (error) { if (conflict(error)) return customerJob((await get(email, id)).value); throw error; }
+    async function releaseUnsubmittedClaim() {
+      // This invocation has not called submitShot. Restore only its own claim;
+      // a lost/replaced claim must retain the existing reconciliation path.
+      const pending = await get(email, id), restored = clone(pending.value);
+      const current = restored.shots.find(candidate => candidate.id === shot.id);
+      if (restored.lease?.token === token && current?.status === "submitting"
+        && current.requestKey === shot.requestKey && !current.providerJobId) {
+        current.status = "prepared";
+        delete current.submittedAt;
+        delete restored.lease;
+        restored.status = record.value.status;
+        if (record.value.authorization) restored.authorization = clone(record.value.authorization);
+        else delete restored.authorization;
+        try { await save(productionJobPath(email, id), restored, pending.etag); }
+        catch (error) { if (!conflict(error)) throw error; }
+      }
+      throw authorizationRequired();
+    }
+    const request = { manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+      ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
+    // Storage and request preparation can outlast the short-lived grant too.
+    if (previousStatus === "prepared" && Date.parse(grant.expiresAt) <= now()) await releaseUnsubmittedClaim();
     let result;
     try {
-      const request = { manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
-        ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
       if (previousStatus === "prepared") result = await adapter.submitShot(request);
       else if (["submitting", "uncertain"].includes(previousStatus)) result = await adapter.reconcileShot(request);
       else result = await adapter.pollShot(request);
@@ -348,7 +381,10 @@ export function createFilmProductionService(dependencies = {}) {
       || verified.pathname.includes("..") || !HASH.test(verified.sha256 || "") || !["video/mp4", "video/webm"].includes(verified.contentType)
       || !Number.isSafeInteger(verified.sizeBytes) || verified.sizeBytes < 16 || verified.sizeBytes > 250 * 1024 * 1024 || !Number.isFinite(verified.durationSeconds)
       || Math.abs(verified.durationSeconds - job.manifest.targetDurationSeconds) > 1) throw new FilmProductionError("The finished film needs playback verification.", 502, "OUTPUT_UNVERIFIED");
-    job.media = select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]);
+    let profile;
+    try { profile = verifiedMediaProfile(verified); }
+    catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
+    job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     job.status = "completed";
     await save(productionJobPath(email, id), job, record.etag);
     return customerJob(job);

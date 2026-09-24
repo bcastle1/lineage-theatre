@@ -320,6 +320,14 @@ export function createPaymentsService(overrides={}) {
   }
   async function authorizeProduction({email,orderId,manifestHash,preparedId}) {
     const record=await read(orderPath(id(orderId))),value=record?.value;
+    if(value?.checkoutMethod==="quickbooks-hosted-invoice") {
+      // The queue and worker share this dispatcher. Hosted invoices need their
+      // own exact Accounting allocation checks, never direct-card readiness.
+      const hosted=overrides.hostedCheckout||(await import("./hosted-checkout.mjs")).createHostedCheckoutService({read,write,now,
+        ...(overrides.productionQuote?{productionQuote:overrides.productionQuote}:{}),
+        ...(overrides.verifyReversals?{verifyReversals:overrides.verifyReversals}:{})});
+      return hosted.authorizeProduction({email,orderId,manifestHash,preparedId});
+    }
     const captured=order=>order&&order.checkoutMethod!=="quickbooks-hosted-invoice"&&order.customerEmail===email&&order.manifestHash===manifestHash&&order.preparedId===preparedId&&order.status==="captured"
       &&order.capturedAt&&order.refundedCents===0&&!order.refundOperation&&bindingValid(order.merchantBinding);
     if(!captured(value))throw blocked();

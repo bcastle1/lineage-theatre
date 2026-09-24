@@ -10,7 +10,7 @@ import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 import { createProductionQueue } from "./_lib/production-queue.mjs";
 import { streamProductionMedia } from "./_lib/production-media.mjs";
 
-export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration}={}) {
+export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
   if(key) {
     try {
@@ -18,7 +18,7 @@ export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KE
       story={available:response.ok,reason:response.ok?"GPT-6 Astra is connected. Generation remains subject to the project's quota.":"The connected OpenAI project cannot access GPT-6 Astra. Check model access and the server credential."};
     } catch {story={available:false,reason:"The Astra connection could not be checked. Your materials remain saved."};}
   }
-  const production=productionReadiness({pricingSettings});
+  const production=productionReadiness({pricingSettings,filmService});
   if(checkoutConfiguration) {
     const available=checkoutConfiguration.available===true;
     production.billing=available;
@@ -97,7 +97,7 @@ export function createStudioHandler(overrides={}) {
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
-      if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings(),
+      if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings(),filmService:filmProduction,
         ...(hosted?{checkoutConfiguration:await hosted.configuration(session.user)}:{})})));
       if(action==="checkoutConfiguration") return json(res,200,hosted?await hosted.configuration(session.user):await payments.checkoutConfiguration(session.user));
       if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id")}));

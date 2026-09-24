@@ -142,6 +142,18 @@ test("allowlists reject arbitrary origins, paths, writes, email delivery and inj
   assert.equal(h.calls.length,0);assert.equal(h.refreshes.length,0);
 });
 
+test("recorded reversal entities allow only bounded selects with verified Id filters and no new mutation paths",async()=>{
+  const h=fixture();
+  for(const entity of ["RefundReceipt","CreditMemo","Purchase","JournalEntry","Deposit"]) {
+    await h.transport.request(h.binding,{method:"GET",path:"/query",query:{entity,startPosition:101,maxResults:100}});
+    assert.equal(new URL(h.calls.at(-1)[0]).searchParams.get("query"),`SELECT * FROM ${entity} STARTPOSITION 101 MAXRESULTS 100`);
+    await assert.rejects(h.transport.request(h.binding,{method:"GET",path:"/query",query:{entity,where:{field:"CustomerRef",value:"12"}}}),invalid);
+    await assert.rejects(h.transport.request(h.binding,{method:"POST",path:`/${entity.toLowerCase()}`,body:{},requestId:REQUEST}),invalid);
+    await assert.rejects(h.transport.request(h.binding,{method:"GET",path:`/${entity.toLowerCase()}/12`}),invalid);
+  }
+  assert.equal(h.calls.length,5);
+});
+
 test("minimal customer/invoice creation uses the provided UUID requestid and never invents a new mutation identity",async()=>{
   const h=fixture();
   for(const [path,body] of [["/customer",customer()],["/invoice",invoice()]]) {

@@ -19,6 +19,13 @@ export type FilmOrder = {
   retryAllowed?: boolean;
 };
 export type FilmReceipt = { receiptId: string; filmTitle: string; currency: "USD"; amountCents: number; refundedCents: number; capturedAt: string; status: FilmOrder["status"]; sandbox: boolean; transactionId: string | null; processorDisclosure: string; confirmationSource?: "quickbooks-accounting" };
+
+// This controls the customer action only. The server rechecks the actual order,
+// account, saved film and provider budget before authorizing any generation.
+export function canStartFilmProduction(order: FilmOrder | null, productionAvailable: boolean, paidPlanCurrent: boolean): boolean {
+  return productionAvailable && paidPlanCurrent && order?.status === "captured"
+    && order.charged === true && order.receiptAvailable && !order.requiresReview && order.refundedCents === 0;
+}
 const processorDisclosure = "Payment is processed by: Intuit Payments Inc., 2700 Coast Avenue, Mountain View, CA 94043, Phone number 1-888-536-4801, NMLS #1098819";
 const accountingDisclosure = "Payment recorded by QuickBooks. This record reflects a payment applied to your invoice; it does not confirm payment processor capture, bank settlement, or any later refund.";
 const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);

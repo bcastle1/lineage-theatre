@@ -13,10 +13,11 @@ export function productionQueuePath(email, id) {
   return `${prefix}${digest(email)}/${id}.json`;
 }
 const blocked = () => new FilmProductionError("Film production is not available yet. Your saved plan is unchanged.", 503, "PRODUCTION_UNAVAILABLE");
-function approved(actor) {
-  if (!actor || actor.status !== "active" || actor.mustChangePassword || accessStatusForUser(actor) !== "approved"
-    || typeof actor.email !== "string" || actor.email !== actor.email.toLowerCase().trim())
+function approved(actor, email = actor?.email) {
+  if (!actor || actor.mustChangePassword || accessStatusForUser(actor) !== "approved"
+    || typeof actor.email !== "string" || actor.email !== actor.email.toLowerCase().trim() || actor.email !== email)
     throw new FilmProductionError("Sign in with an approved account to produce this film.", 403, "PRODUCTION_ACCESS_REQUIRED");
+  return actor;
 }
 
 // Queue entries contain references only; screenplay and media remain in the
@@ -24,10 +25,14 @@ function approved(actor) {
 export function createProductionQueue({ read = readRecord, write = writeRecord, listBlobs = list,
   film = filmProduction, paymentService = payments, now = Date.now, uuid = randomUUID,
   setIntervalImpl = setInterval, clearIntervalImpl = clearInterval } = {}) {
+  async function currentAccount(email) {
+    return approved((await read(userPath(email)))?.value, email);
+  }
   async function enqueue({ actor, id, orderId }) {
     approved(actor);
     if (!/^[a-f0-9]{64}$/.test(orderId || "")) throw blocked();
     const path = productionQueuePath(actor.email, id);
+    await currentAccount(actor.email);
     const job = await film.getPrepared({ email: actor.email, id });
     const old = await read(path);
     if (old) {
@@ -37,6 +42,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
         if (film.readiness().available !== true) throw blocked();
         const grant = await paymentService.authorizeProduction({ email: actor.email, orderId, manifestHash: job.manifestHash, preparedId: id });
         if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash) throw blocked();
+        await currentAccount(actor.email);
         const { lease, ...value } = old.value;
         try { await write(path, { ...value, state: "pending", attempts: 0, nextAttemptAt: now(), lastResult: "RESUMED" }, old.etag); }
         catch (error) { if (!conflict(error)) throw error; }
@@ -46,6 +52,8 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     if (film.readiness().available !== true) throw blocked();
     const grant = await paymentService.authorizeProduction({ email: actor.email, orderId, manifestHash: job.manifestHash, preparedId: id });
     if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash) throw blocked();
+    // Account access may change while payment and provider budgets are checked.
+    await currentAccount(actor.email);
     const value = { version: 1, email: actor.email, id, orderId, manifestHash: job.manifestHash,
       state: "pending", attempts: 0, nextAttemptAt: now(), createdAt: new Date(now()).toISOString() };
     try { await write(path, value); }
@@ -109,8 +117,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     timer?.unref?.();
     const finishTicket = async (state, code) => { clearIntervalImpl(timer); await renewal; return finish(ticket, state, code); };
     try {
-      const actor = (await read(userPath(ticket.value.email)))?.value;
-      approved(actor);
+      const actor = await currentAccount(ticket.value.email);
       const input = { email: ticket.value.email, id: ticket.value.id };
       const job = await film.getPrepared(input);
       if (job.manifestHash !== ticket.value.manifestHash) throw blocked();

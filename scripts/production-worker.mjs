@@ -6,9 +6,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { get, put } from "@vercel/blob";
 import { digest } from "../api/_lib/auth.mjs";
-import { createFilmProductionService, validateProviderOutput, unavailableMagicLightAdapter } from "../api/_lib/film-production.mjs";
+import { createFilmProductionService, validateProviderOutput, validateProviderAudio, unavailableMagicLightAdapter } from "../api/_lib/film-production.mjs";
+import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
 import { createProductionQueue } from "../api/_lib/production-queue.mjs";
-import { payments } from "../api/_lib/payments.mjs";
+import { createPaymentsService } from "../api/_lib/payments.mjs";
+import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
 
 const MAX_BYTES = 250 * 1024 * 1024;
@@ -50,8 +52,7 @@ async function boundedBytes(stream, expected) {
   } finally { await reader.cancel().catch(() => {}); }
 }
 
-export async function downloadProductionClip(output, allowedHosts, { fetchImpl = fetch } = {}) {
-  const verified = validateProviderOutput(output, allowedHosts);
+async function downloadProductionMedia(verified, fetchImpl) {
   const response = await fetchImpl(verified.url, { redirect: "error", credentials: "omit", cache: "no-store",
     headers: { Accept: verified.contentType }, signal: AbortSignal.timeout(120_000) });
   const contentType = response.headers.get("content-type")?.split(";")[0];
@@ -61,8 +62,15 @@ export async function downloadProductionClip(output, allowedHosts, { fetchImpl =
   }
   return boundedBytes(response.body, verified.sizeBytes);
 }
+export async function downloadProductionClip(output, allowedHosts, { fetchImpl = fetch } = {}) {
+  return downloadProductionMedia(validateProviderOutput(output, allowedHosts), fetchImpl);
+}
+export async function downloadProductionAudio(output, allowedHosts, { fetchImpl = fetch } = {}) {
+  return downloadProductionMedia(validateProviderAudio(output, allowedHosts), fetchImpl);
+}
 
 export async function verifyPublishedFilm({ email, id, manifestHash, artifact, manifest }, { getBlob = get } = {}) {
+  verifiedMediaProfile(artifact);
   if (!artifact || artifact.technicalSample !== false || artifact.playable !== true || artifact.hasAudio !== true
     || artifact.manifestHash !== manifestHash || !/^[a-f0-9]{64}$/.test(artifact.sha256 || "")
     || artifact.pathname !== `production/media/${digest(email)}/${id}/${artifact.sha256}.mp4`
@@ -94,12 +102,24 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         const bytes = await downloadProductionClip(shot.output, adapter.outputHosts, { fetchImpl });
         const path = join(work, `clip-${index}.${shot.output.contentType === "video/mp4" ? "mp4" : "webm"}`);
         await writeFile(path, bytes, { flag: "wx" });
-        clips.push({ shotId: shot.id, path });
+        const clip = { shotId: shot.id, path };
+        if (shot.output.audio !== undefined) {
+          if (!await stillOwned()) throw new Error("The worker claim expired.");
+          const audio = validateProviderAudio(shot.output.audio, adapter.outputHosts);
+          const extension = { "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav", "audio/webm": "webm" }[audio.contentType];
+          const audioBytes = await downloadProductionAudio(audio, adapter.outputHosts, { fetchImpl });
+          clip.audioPath = join(work, `audio-${index}.${extension}`);
+          await writeFile(clip.audioPath, audioBytes, { flag: "wx" });
+        }
+        clips.push(clip);
       }
       const outputPath = join(work, "film.mp4");
       const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
+      verifiedMediaProfile(report);
       const bytes = await readFile(outputPath);
       if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
+        || report.manifestHash !== job.manifestHash || !Number.isFinite(report.durationSeconds)
+        || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
         || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw new Error("Assembly verification failed.");
       if (!await stillOwned()) throw new Error("The worker claim expired.");
       const pathname = `production/media/${digest(email)}/${id}/${report.sha256}.mp4`;
@@ -125,13 +145,21 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
   };
 }
 
-export function createProductionWorker({ adapter = unavailableMagicLightAdapter, paymentService = payments, ...dependencies } = {}) {
-  const film = createFilmProductionService({ ...dependencies, adapter,
-    readRecordImpl: dependencies.read || dependencies.readRecordImpl,
-    writeRecordImpl: dependencies.write || dependencies.writeRecordImpl,
-    authorize: ({ email, id, manifestHash, authorizationReference }) => paymentService.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
+export function createProductionWorker({ adapter = unavailableMagicLightAdapter, paymentService, ...dependencies } = {}) {
+  const read = dependencies.read || dependencies.readRecordImpl;
+  const write = dependencies.write || dependencies.writeRecordImpl;
+  // Quotes and generation must use this worker's same configured adapter. A
+  // callback to the web singleton could otherwise quote a different provider.
+  let film;
+  const productionQuote = input => film.quoteForProductionBudget(input);
+  const hosted = dependencies.hostedCheckout || createHostedCheckoutService({ ...dependencies, read, write, productionQuote });
+  const authorizer = paymentService || createPaymentsService({ ...dependencies, read, write, hostedCheckout: hosted, productionQuote });
+  film = createFilmProductionService({ ...dependencies, adapter,
+    readRecordImpl: read,
+    writeRecordImpl: write,
+    authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
     verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
-  const queue = createProductionQueue({ ...dependencies, film, paymentService });
+  const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
   const assemble = createWorkerAssembly({ ...dependencies, adapter });
   return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
 }

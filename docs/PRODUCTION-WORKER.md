@@ -4,13 +4,13 @@ The studio now saves an idempotent production request instead of depending on th
 
 ## Current activation boundary
 
-The default MagicLight adapter is still unavailable. On September 20 the user confirmed that the vendor has not replied with API documentation. Neither this worker nor a configured key supplies the missing provider contract. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
+The default full-film MagicLight adapter is still unavailable. The saved account key and 80,000 credits were confirmed; further research found concrete published Bearer-token submission/status examples at MagicLight's production and test origins. The isolated [protocol client and private runtime checks](MAGICLIGHT-PROTOCOL.md) implement that connection without claiming verified account cost, quality or retry behavior. Erik confirmed the affiliate/partner relationship and commercial permission; no new agreement or key is requested. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
 
-The worker is implemented and tested locally but has not been provisioned on a durable host. Do not enable paid film sales before connecting the verified provider, running a monitored worker against the intended private storage, and establishing actual delivery. Existing capability defaults continue to block customer production and checkout.
+The worker is implemented and tested locally, and the existing IONOS server has been verified as a suitable host. See [worker host packaging and acceptance](WORKER-HOST.md) for the exact staged/runtime state. Live owner checkout and receipt delivery have been tested separately; the customer-production capability remains unavailable. This branch adds hosted payment authorization with recorded Accounting reversal reconciliation, pending live company acceptance. Launching film delivery still requires the verified provider, a configured monitored worker against the intended private storage, and actual delivery acceptance.
 
 ## Worker deployment
 
-Use a dedicated durable Node 22+ host with FFmpeg on its executable path and access to the existing private Blob store. Keep provider, Blob and payment configuration in that host's secret manager. Do not export Vercel secrets into the repository. No provider key is consumed until the documented adapter is implemented and selected in the server and worker composition.
+Use a dedicated durable Node 22+ host with FFmpeg on its executable path and access to the existing private Blob store. Keep provider, Blob and payment configuration in that host's secret manager. Do not export Vercel secrets into the repository. The deployed owner-only status diagnostic can use the existing provider key without enabling generation; the worker still requires a verified adapter selected in both server and worker composition.
 
 ```text
 node scripts/production-worker.mjs --check
@@ -25,18 +25,20 @@ Temporary clips live only in a dedicated `lineage-production-worker` system-temp
 
 ## Private output
 
+The [September 22 media development change](MAGICLIGHT-MEDIA-INTEGRATION.md) adds native-profile assembly and optional separate reviewed audio tracks. Those checks operate on real decoded media and retain verified dimensions/frame rate; they do not establish a working Magiclight API connection.
+
 Outputs use `production/media/<owner hash>/<job id>/<SHA-256>.mp4` with private Blob access and overwrite disabled. Actual byte length/hash, manifest binding, audio and decoded duration must pass verification before completion. Provider output URLs are allowlisted HTTPS, redirects are rejected, and downloads are bounded. The browser receives only its same-origin authenticated playback URL. Working sources and cloud archive consent remain separate.
 
 Captions are generated and retained privately alongside the MP4 when upload succeeds. A customer caption-download UI and retention/deletion operations are not added by this change. Media streaming enforces session ownership, exact storage path, content type, byte count and requested range; no provider/storage URL is exposed.
 
 ## Still required for real operation
 
-- Official MagicLight authentication, generation/output/reference-asset contracts, account quality/cost limits, idempotency or lookup, and applicable commercial permission.
+- Supported MagicLight authentication, generation/output/reference-asset instructions, account quality/cost limits, and idempotency or lookup.
 - A provider pricing contract that covers the whole production. The current captured-order grant stops fresh shot submissions after the original quote expires (currently capped at 15 minutes). A long job must not silently extend that budget or invent a new price.
-- Approved production merchant credentials and the reviewed payment activation evidence described in `PAYMENT-READINESS-REVIEW.md`. Sandbox review is separate and restricted to the genuine owner's fixed fictional operator test.
+- Live acceptance of the implemented recorded Accounting reversal verifier for hosted orders; invoice/payment allocation alone does not establish the absence of a separate refund. The verifier cannot detect refunds not recorded in QuickBooks. See [the current integration checkpoint](MAGICLIGHT-MEDIA-INTEGRATION.md). The separately tested owner payment flow does not establish automatic fulfillment readiness or expand customer checkout access.
 - Provisioned worker host, monitored scheduling, intended private storage, recovery operations, and real authenticated provider/output acceptance.
 
-On September 20, the signed-in Intuit dashboard showed the existing Lineage Theater assessment as **Completed / Approved**. Its read-only questionnaire has the corrected In-App receipt delivery and supported receipt fields; email, fees and card last-four are unselected. No further assessment submission was needed or performed in this task. Actual sandbox transaction lifecycle verification is still marked No, and live grant migration/company verification and merchant activation remain separate checkpoints.
+On September 20, the signed-in Intuit dashboard showed the existing Lineage Theater assessment as **Completed / Approved**. Its read-only questionnaire had the corrected In-App receipt delivery and supported receipt fields; email, fees and card last-four were unselected. That historical review did not verify a transaction. On September 23, the live app showed the owner's $3.30 test payment recorded by QuickBooks, and Erik confirmed successful payment plus customer and merchant receipt delivery. No new transaction or refund was performed during this integration continuation.
 
 ## Implementation verification — September 20, 2026
 

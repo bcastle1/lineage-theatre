@@ -31,6 +31,7 @@ import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
+import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import ReceiptSettings from "./ReceiptSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
@@ -1140,11 +1141,17 @@ export default function Admin({
     setActionError("");
     setDialog({ kind: "refund", order, idempotencyKey: crypto.randomUUID() });
   }
-  async function paymentRecordAction(order: Order, action: "paymentDiagnostics" | "accountingExport" | "reconcilePayment") {
+  async function paymentRecordAction(order: Order, action: "paymentDiagnostics" | "accountingExport" | "reconcilePayment" | "checkHostedReversals") {
     if (actionLock.current) return;
     actionLock.current = true; setBusy(true);
     try {
-      if (action === "reconcilePayment") {
+      if (action === "checkHostedReversals") {
+        const result = await api<{ recordedReversalsVerified: boolean; scope: string; code: string; productionReady: false }>("/api/admin", { action, orderId: order.id });
+        if (typeof result.recordedReversalsVerified !== "boolean" || result.scope !== "quickbooks-accounting-recorded-reversals"
+          || result.productionReady !== false || !/^[A-Z_]+$/.test(result.code)) throw new Error("The recorded-reversal check returned an unexpected result.");
+        notify(result.recordedReversalsVerified ? "The supported QuickBooks records passed the reversal check. Bank settlement and film production are verified separately."
+          : `Recorded reversals could not be verified (${result.code}). Review the order in QuickBooks.`, "info");
+      } else if (action === "reconcilePayment") {
         const result = await api<{ requiresReview: boolean }>("/api/admin", { action, orderId: order.id });
         notify(result.requiresReview ? "This order still needs review. No payment or refund was repeated." : "Saved payment status checked.", "info");
         await refresh();
@@ -1377,6 +1384,7 @@ export default function Admin({
             </div>
             {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
             {isOwner && <ProductionPreparation operator />}
+            {isOwner && <MagicLightConnectionCheck disabled={busy || loading} />}
             <div className="admin-overview-grid">
               <section className="admin-card">
                 <div className="admin-section-heading">
@@ -2140,6 +2148,7 @@ export default function Admin({
                             {order.checkoutMethod === "quickbooks-hosted-invoice" && <a className="text-button" href="https://qbo.intuit.com/app/invoices" target="_blank" rel="noopener noreferrer">Manage invoice in QuickBooks</a>}
                             {order.managedPayment && <>
                               {(order.requiresReview || order.checkoutMethod === "quickbooks-hosted-invoice") && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
+                              {isOwner && order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured" && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "checkHostedReversals")}>Check recorded reversals</button>}
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "paymentDiagnostics")}>Download support details</button>
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "accountingExport")}>Export accounting review</button>
                             </>}

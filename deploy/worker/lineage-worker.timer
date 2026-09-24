@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule the Lineage Theatre private film worker
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=lineage-worker.service
+
+[Install]
+WantedBy=timers.target

@@ -8,6 +8,30 @@ import { newInvitation, validateInvitation, validateUserAction, validateRefund, 
 const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
 const admin={email:"admin@example.invalid",role:"admin",status:"active"};
 const customer={email:"customer@example.invalid",role:"customer",status:"active"};
+
+test("recorded reversal diagnostic is owner-only, same-origin and restricted to a saved order ID",async()=>{
+  const id="a".repeat(64),calls=[];
+  const service=async(input)=>{calls.push(input);return {recordedReversalsVerified:true,productionReady:false,scope:"quickbooks-accounting-recorded-reversals",code:"RECORDED_REVERSALS_VERIFIED",totals:{accountingReads:12}};};
+  for(const actor of [null,customer,admin,{...owner,status:"suspended"},{...owner,mustChangePassword:true}]){
+    const h=harness(actor,{checkHostedReversals:service});assert.ok([401,403].includes((await h.run("checkHostedReversals",{orderId:id})).status));
+  }
+  const h=harness(owner,{checkHostedReversals:service});
+  assert.equal((await h.run("checkHostedReversals",{orderId:id},{origin:"https://other.invalid"})).status,403);
+  assert.equal((await h.run("checkHostedReversals")).status,400);
+  for(const body of [{orderId:"../private"},{orderId:id,realmId:"different-company"},{orderId:id,operation:"refund"},{orderId:id,force:true},{}])
+    assert.equal((await h.run("checkHostedReversals",body)).status,400);
+  assert.equal(calls.length,0);
+  const response=await h.run("checkHostedReversals",{orderId:id});
+  assert.equal(response.status,200);assert.equal(response.body.productionReady,false);assert.deepEqual(calls,[{orderId:id}]);
+  assert.deepEqual(h.events,[[OWNER_EMAIL,"payment.reversals.checked",id,{code:"RECORDED_REVERSALS_VERIFIED",recordedReversalsVerified:true}]]);
+  assert.equal(h.writes,0);
+});
+test("recorded reversal scans are rate limited before reading private records or Accounting",async()=>{
+  let calls=0;
+  const h=harness(owner,{limitAction:async(key,max,window)=>key.startsWith("hosted-reversal-check:")?(assert.equal(max,1),assert.equal(window,60_000),false):true,
+    checkHostedReversals:async()=>{calls++;}});
+  assert.equal((await h.run("checkHostedReversals",{orderId:"a".repeat(64)})).status,429);assert.equal(calls,0);
+});
 function harness(actor=owner,overrides={}) {
   const records=new Map(),events=[];
   let writes=0;
