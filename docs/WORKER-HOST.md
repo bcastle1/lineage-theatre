@@ -15,7 +15,7 @@ References: [Vercel function duration announcement](https://vercel.com/changelog
 ## Package and offline acceptance
 
 - `deploy/worker/Dockerfile` installs Node 22, FFmpeg, CA certificates, and frozen production dependencies. It runs as the unprivileged `node` user.
-- `deploy/worker/Dockerfile.dockerignore` allows only package/lock files, server libraries and the three worker scripts. No repository metadata, environment files, local dependencies, customer documents or generated media enter the image.
+- `deploy/worker/Dockerfile.dockerignore` allows only package/lock files, server libraries and the four worker/diagnostic scripts. No repository metadata, environment files, local dependencies, customer documents or generated media enter the image.
 - `scripts/check-worker-runtime.mjs` encodes and fully decodes a one-second synthetic 640×360, 24 fps H.264/AAC sample, verifies output, and removes its temporary files. It does not contact a provider, storage, or any customer queue.
 - The systemd unit and timer are templates only. Staging them does not install or enable them.
 
@@ -69,4 +69,29 @@ Both runtime commands used `--network none`, no runtime environment file, and no
 
 The systemd templates passed `systemd-analyze verify`. Their copied file modes were normalized to 0644 before that final verification. No unit or timer was installed or enabled, and no customer queue was read. The two pre-existing application containers remained healthy. The staging directory retains only the allowlisted source bundle, image-build logs and sanitized acceptance reports; it contains no credentials or customer media.
 
-The later MagicLight protocol and recorded-reversal diagnostic changes are not present in the image above. The current Dockerfile and positive allowlist now include `scripts/check-hosted-reversals.mjs` for the next reviewed build. Rebuild from the reviewed revision and verify the new source manifest before activating a worker; the historical image evidence must not be represented as verification of later source.
+The historical image above predates the MagicLight protocol and recorded-reversal diagnostics. The separate staging record below verifies the later committed source; neither image is an activated production worker.
+
+## Refreshed staging evidence — September 24, 2026, 03:57 UTC
+
+The original file-by-file staging procedure was repeated from the clean committed checkout. Only the explicit package/lock, `api/_lib/*.mjs`, four worker/diagnostic scripts, Dockerfile/ignore and disabled unit templates were copied. All 43 source hashes matched before transfer, after extraction on the host, against the local source after transfer, and after offline acceptance.
+
+| Evidence | Result |
+| --- | --- |
+| Committed source revision | `dbb3742d6fb0100dab7d4a9993ddb1f901707cf2` |
+| Source bundle | 43 explicitly allowlisted files |
+| Source manifest SHA-256 | `2bbfd594f7b8cfbb0bf9f2172a6ed152011c93fb34fbcad69c8602fcb4f7be92` |
+| Transfer archive SHA-256 | `8c25d57b39aaaf9c34b5d150614b3a78297a36475bd9e6befda13557a459b798` |
+| Staging directory | `/opt/lineage-worker/staging/2bbfd594f7b8` |
+| Image tag | `lineage-worker:2bbfd594f7b8-staging` |
+| Immutable image ID | `sha256:63faf7ee9a8afe793c509590b4c3c765dcf46f562e8954ed40111b19cb88db79` |
+| Image size / configured user | 335,148,573 bytes / `node` |
+| Actual container runtime | Node 22.23.2; FFmpeg 5.1.9-0+deb12u1 |
+| Offline synthetic media check | `runtimeReady:true`; 100,570 bytes; 24 fully decoded frames over 1.002667 seconds; temporary media removed |
+| Sample SHA-256 | `269794c63ee6246f4c537b272e40c27aeaf22f13367c310122f9e14361259ba4` |
+| Offline worker check | `available:false`, `provider:magiclight`, `storageConfigured:false` |
+| Recorded-reversal CLI help | Exit 0; documented the five required runtime variables |
+| Recorded-reversal CLI without runtime secrets | Exit 1; `RUNTIME_CONFIGURATION_REQUIRED`, `recordedReversalsVerified:false`, `productionReady:false` |
+
+Every acceptance command targeted the immutable image ID with `--network none`, a read-only filesystem, unprivileged UID/GID, no runtime environment file, and no credentials. The media report confirmed `providerContacted:false` and `customerWorkProcessed:false`. The recorded-reversal negative check used a synthetic all-zero order ID and stopped at missing configuration before reading storage.
+
+The unit templates passed verification and remain uninstalled. Final host checks confirmed no runtime configuration, service or timer was installed; the two existing application containers remained healthy at about 159 MiB combined. No customer queue was read, no provider authentication or render was attempted, and no live Accounting acceptance is claimed by these offline results.
