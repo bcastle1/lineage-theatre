@@ -23,6 +23,12 @@ function resultError(res,status,message) { return json(res,status,{message}); }
 
 export function createAdminHandler(overrides={}) {
  const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
+ const checkoutStatus=async actor=>{
+   if(!hosted)return {available:false};
+   try{return await (hosted.adminConfiguration||hosted.configuration)(actor);}
+   catch{return {available:false,configured:false,connectionStatus:"needs-attention",
+     reason:"The QuickBooks connection status could not be read. Existing payment records remain available; check authorization status before changing checkout settings."};}
+ };
  const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,checkMagicLightConnection,checkHostedReversals,
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
@@ -92,9 +98,10 @@ export function createAdminHandler(overrides={}) {
       }
       if(action==="payments") {
         const page=await recordPage("payments/orders/",{cursor});
-        const ready=hosted?await hosted.configuration(actor):{available:false};
+        const ready=await checkoutStatus(actor);
         return json(res,200,{orders:page.records.map(order=>({...safeOrder(order),checkoutMethod:order.checkoutMethod||null})),cursor:page.cursor,connectionReady:ready.available===true,
-          reason:ready.available?"Hosted checkout is configured. Customers complete payment on QuickBooks; refunds for hosted invoices are managed in QuickBooks. Film production is verified separately.":"Complete the hosted checkout setup below. Existing payment records remain available; no new invoice or payment is created by viewing this page."});
+          configured:ready.configured===true,connectionStatus:ready.connectionStatus,
+          reason:ready.reason||(ready.available?"Hosted checkout is configured. Customers complete payment on QuickBooks; refunds for hosted invoices are managed in QuickBooks. Film production is verified separately.":"Complete the hosted checkout setup below. Existing payment records remain available; no new invoice or payment is created by viewing this page.")});
       }
       if(action==="audit") {
         const page=await recordPage("admin/audit/",{cursor});
@@ -107,7 +114,7 @@ export function createAdminHandler(overrides={}) {
       }
       if(action==="overview") {
         const [users,orders,films,settings]=await Promise.all([recordPage("auth/users/",{limit:100}),recordPage("payments/orders/",{limit:100}),recordPage("archive/metadata/",{limit:100}),readPricingSettings()]);
-        const ready=await connections({pricingSettings:settings,...(hosted?{checkoutConfiguration:await hosted.configuration(actor)}:{})});
+        const ready=await connections({pricingSettings:settings,...(hosted?{checkoutConfiguration:await checkoutStatus(actor)}:{})});
         const paid=orders.records.filter(order=>!isTestOrder(order)&&["paid","captured","partially-refunded","refunded"].includes(order.status)&&order.currency==="USD");
         return json(res,200,{stats:{users:users.records.length,administrators:users.records.filter(hasAdminAccess).length,
           pending:users.records.filter(u=>accessStatusForUser(u)==="pending").length,
