@@ -1,8 +1,25 @@
-# MagicLight integration inquiry template
+# MagicLight integration inquiry record and template
 
-## Current technical follow-up, September 23, 2026
+## Current status: technical follow-up sent September 24, 2026
 
-Prepared text only; not sent during this continuation. The owner has confirmed commercial permission and the existing partner relationship. The account has an active API key and purchased credits. Those topics do not require a new agreement or purchase.
+The technical follow-up was sent, and its presence in Sent Items was verified during this continuation:
+
+- Sent at: `2026-09-24T03:44:12Z`
+- From: `Erik@puricloud.com`
+- To: `support@magiclight.ai`
+- Subject: `Re: API integration for complete animated films inside Lineage Theater`
+
+The owner has confirmed commercial permission and the existing partner relationship. The account has an active API key and purchased credits. Those topics do not require a new agreement or purchase. A technical response is still needed to confirm the missing production controls; delivery verification does not establish provider acceptance or API readiness.
+
+### Research added September 24
+
+- The published [magic-text2video skill](https://clawhub.ai/zhangyuangao/magic-text2video) has a [version 1.0.2 Python client](https://clawhub.ai/api/v1/skills/magic-text2video/file?path=scripts%2Fmedia_gen_client.py&version=1.0.2) using the **test origin** `https://open-test.magiclight.ai`, Bearer API-key authentication, task submission and status polling. Its test origin is not evidence that the production account should send credentials there.
+- The [magic-image-to-video skill published by leizhang-magiclight](https://clawhub.ai/leizhang-magiclight/magic-image-to-video) has a [version 1.0.1 Python client](https://clawhub.ai/api/v1/skills/magic-image-to-video/file?path=scripts%2Fmedia_gen_client.py&version=1.0.1) using the **production origin** `https://open.magiclight.ai`, `Authorization: Bearer <API key>`, `POST /api/misc/openclaw_add_task` with text and an image URL, the `X-DashScope-Async: enable` header, and `GET /api/misc/openclaw_check_task?task_id=...`. This is a concrete published client reference; it does not establish a bounded quote, duplicate-safe submission recovery, exact model/quality controls, or a complete film workflow with dialogue, audio and assembly. No client script was run or generation submitted during this research.
+- YouTube research examined search results and public video descriptions, including the [official Kids Story tutorial](https://www.youtube.com/watch?v=QOqTc3HXjZY) and a [creator's one-click workflow chapter at 07:38](https://www.youtube.com/watch?v=Ze3TBB4lgks&t=458s). These described visual-editor workflows and supplied no technical request examples. Transcripts were not obtained; the available caption requests returned empty responses.
+
+## Prepared technical follow-up, September 23, 2026 (historical)
+
+The following prepared text is retained as the earlier inquiry template. The verified September 24 send is recorded above.
 
 To: support@magiclight.ai
 
@@ -46,6 +63,6 @@ BROCOTech / Lineage Theater
 
 ---
 
-An email based on this template was sent to support@magiclight.ai on September 14, 2026 (UTC), after user authorization and with the user's requested signature. Its recipient, signature and presence in Sent Items were verified. A provider response is still required before implementing the undocumented generation contract.
+An email based on this template was sent to support@magiclight.ai on September 14, 2026 (UTC), after user authorization and with the user's requested signature. Its recipient, signature and presence in Sent Items were verified. This historical inquiry predates the published client references above; the remaining production controls still require technical confirmation.
 
-This template contains no account identifiers, credentials, private uploads, billing details or purchase commitment.
+This record contains no API keys, credentials, private uploads, billing details or purchase commitment.

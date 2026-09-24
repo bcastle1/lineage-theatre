@@ -9,7 +9,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 COPY api/_lib/ ./api/_lib/
-COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/check-worker-runtime.mjs ./scripts/
+COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/check-worker-runtime.mjs scripts/check-hosted-reversals.mjs ./scripts/
 
 ENV NODE_ENV=production FFMPEG_PATH=/usr/bin/ffmpeg
 USER node

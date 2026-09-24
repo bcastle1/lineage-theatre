@@ -9,6 +9,8 @@ import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { readRegistrationPolicy as readPolicy, REGISTRATION_POLICY_PATH } from "./_lib/registration-policy.mjs";
 import { createSourceAgreementService, SourceAgreementError } from "./_lib/source-agreement.mjs";
 import { createReceiptDeliveryService, ReceiptDeliveryError } from "./_lib/receipt-delivery.mjs";
+import { checkMagicLightConnection } from "./_lib/magiclight-diagnostics.mjs";
+import { checkHostedReversals } from "./_lib/hosted-reversal-diagnostics.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -20,12 +22,12 @@ function resultError(res,status,message) { return json(res,status,{message}); }
 
 export function createAdminHandler(overrides={}) {
  const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
- const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,
+ const dependencies={getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,checkMagicLightConnection,checkHostedReversals,
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const receipts=overrides.receiptDelivery||createReceiptDeliveryService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  return async function handler(req,res) {
-  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy}=dependencies;
+  const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy,checkMagicLightConnection,checkHostedReversals}=dependencies;
   try {
     if (req.method==="POST" && !sameOrigin(req)) return resultError(res,403,"Begin this action inside Lineage Theatre.");
     const url=new URL(req.url,`https://${req.headers.host}`);
@@ -114,6 +116,23 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="checkMagicLightConnection") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can check the production connection.");
+      if(Object.keys(body).some(key=>key!=="action")) return resultError(res,400,"The connection check accepts no credentials or job input.");
+      if(!(await limitAction(`magiclight-check:${actor.email}`,3,60_000))) return resultError(res,429,"Please wait before checking the production connection again.");
+      const result=await checkMagicLightConnection();
+      await audit(actor.email,"production.connection.checked","magiclight",{code:result.code,authentication:result.authentication});
+      return json(res,200,result);
+    }
+    if(action==="checkHostedReversals") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can check recorded reversals.");
+      if(Object.keys(body).some(key=>!["action","orderId"].includes(key))||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
+        return resultError(res,400,"Select one saved payment order to check.");
+      if(!(await limitAction(`hosted-reversal-check:${actor.email}`,1,60_000))) return resultError(res,429,"Please wait before checking recorded reversals again.");
+      const result=await checkHostedReversals({orderId:body.orderId});
+      await audit(actor.email,"payment.reversals.checked",body.orderId,{code:result.code,recordedReversalsVerified:result.recordedReversalsVerified});
+      return json(res,200,result);
+    }
     if(action==="saveReceiptSettings") {
       const {action,...input}=body;
       const settings=await receipts.saveSettings(actor,input);

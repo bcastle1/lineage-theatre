@@ -39,6 +39,20 @@ A missing or unsuccessful reconciliation returns `HOSTED_REVERSALS_UNVERIFIED`. 
 
 Local verification uses fabricated in-memory Accounting responses. Acceptance against the connected production company's real record shapes and transaction volume remains a separate read-only verification step. Historical or unrecorded refunds cannot be resolved by inventing transaction mappings.
 
+### Private acceptance diagnostic
+
+`api/_lib/hosted-reversal-diagnostics.mjs` reads one persisted captured hosted order and runs the actual verifier with its saved company/customer/invoice/payment context. It accepts only the verifier's GET/query operations, checks unchanged company binding and order afterward, and imposes a 50-second overall deadline. A normal OAuth token refresh may update the existing encrypted authorization state and its audit trail. It does not call checkout, issue a refund, obtain a provider quote, authorize production or repeat payment.
+
+After deployment, an active owner can select **Check recorded reversals** on a captured hosted order in Administration's Payments view. The handler requires a same-origin POST containing only `action: "checkHostedReversals"` and the saved `orderId`; it permits one check per minute. Returned evidence contains fixed result codes and aggregate counts only, with `productionReady:false`. It does not establish settlement or the complete payment/film authorization.
+
+The same operation is available to an operator in an already protected runtime:
+
+```text
+node scripts/check-hosted-reversals.mjs --order-id <saved-order-id>
+```
+
+It requires `BLOB_READ_WRITE_TOKEN`, `QUICKBOOKS_ENVIRONMENT`, `QUICKBOOKS_CLIENT_ID`, `QUICKBOOKS_CLIENT_SECRET`, and `QUICKBOOKS_TOKEN_ENCRYPTION_KEY`. Supply them through the existing runtime secret store, never command arguments, a checked-in file or chat. No MagicLight key is needed for this Accounting diagnostic. Exit 0 means the scoped recorded-reversal check passed; all other outcomes exit 1. The existing staged image predates this CLI; the current Docker allowlist includes it for the next reviewed build.
+
 ## Primary references
 
 - [Intuit PHP SDK: queries, pagination, maximum result count, and filter restrictions](https://github.com/intuit/QuickBooks-V3-PHP-SDK/blob/master/docs/_sources/quickstart.rst.txt)

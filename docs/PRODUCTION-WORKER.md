@@ -4,13 +4,13 @@ The studio now saves an idempotent production request instead of depending on th
 
 ## Current activation boundary
 
-The default MagicLight adapter is still unavailable. September 23 inspection confirmed an active API key and 80,000 credits but did not establish supported generation authentication or request/response instructions. Erik confirmed the affiliate/partner relationship and commercial permission; no new agreement is requested. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
+The default full-film MagicLight adapter is still unavailable. The saved account key and 80,000 credits were confirmed; further research found concrete published Bearer-token submission/status examples at MagicLight's production and test origins. The isolated [protocol client and private runtime checks](MAGICLIGHT-PROTOCOL.md) implement that connection without claiming verified account cost, quality or retry behavior. Erik confirmed the affiliate/partner relationship and commercial permission; no new agreement or key is requested. Real in-app rendering remains unavailable for both customers and internal tests; sample-clip assembly and simulated provider flows are available for testing. Do not represent those as MagicLight render success.
 
 The worker is implemented and tested locally, and the existing IONOS server has been verified as a suitable host. See [worker host packaging and acceptance](WORKER-HOST.md) for the exact staged/runtime state. Live owner checkout and receipt delivery have been tested separately; the customer-production capability remains unavailable. This branch adds hosted payment authorization with recorded Accounting reversal reconciliation, pending live company acceptance. Launching film delivery still requires the verified provider, a configured monitored worker against the intended private storage, and actual delivery acceptance.
 
 ## Worker deployment
 
-Use a dedicated durable Node 22+ host with FFmpeg on its executable path and access to the existing private Blob store. Keep provider, Blob and payment configuration in that host's secret manager. Do not export Vercel secrets into the repository. No provider key is consumed until the documented adapter is implemented and selected in the server and worker composition.
+Use a dedicated durable Node 22+ host with FFmpeg on its executable path and access to the existing private Blob store. Keep provider, Blob and payment configuration in that host's secret manager. Do not export Vercel secrets into the repository. The deployed owner-only status diagnostic can use the existing provider key without enabling generation; the worker still requires a verified adapter selected in both server and worker composition.
 
 ```text
 node scripts/production-worker.mjs --check

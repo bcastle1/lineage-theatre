@@ -9,6 +9,7 @@
 !scripts/production-worker.mjs
 !scripts/assemble-film.mjs
 !scripts/check-worker-runtime.mjs
+!scripts/check-hosted-reversals.mjs
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile
