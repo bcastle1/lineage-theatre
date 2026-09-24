@@ -11,6 +11,7 @@ import { createSourceAgreementService, SourceAgreementError } from "./_lib/sourc
 import { createReceiptDeliveryService, ReceiptDeliveryError } from "./_lib/receipt-delivery.mjs";
 import { checkMagicLightConnection } from "./_lib/magiclight-diagnostics.mjs";
 import { checkHostedReversals } from "./_lib/hosted-reversal-diagnostics.mjs";
+import { createMagicLightLiveTestService, MagicLightLiveTestError } from "./_lib/magiclight-live-test.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -26,6 +27,7 @@ export function createAdminHandler(overrides={}) {
    readRegistrationPolicy:()=>readPolicy(overrides.readRecord || readRecord),...overrides};
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const receipts=overrides.receiptDelivery||createReceiptDeliveryService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
+ const liveTest=overrides.magiclightLiveTest||createMagicLightLiveTestService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  return async function handler(req,res) {
   const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy,checkMagicLightConnection,checkHostedReversals}=dependencies;
   try {
@@ -60,6 +62,10 @@ export function createAdminHandler(overrides={}) {
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
     if (req.method==="GET") {
+      if(action==="magicLightLiveTest") {
+        if(!isOwner(actor)) return resultError(res,403,"Only the owner can view the live generation test.");
+        return json(res,200,await liveTest.status(actor));
+      }
       if(action==="receiptSettings") return json(res,200,await receipts.settings(actor));
       if(action==="hostedCheckout") return json(res,200,await hosted.settings(actor));
       if(action==="agreement") return json(res,200,{agreement:url.searchParams.has("version")?await sourceAgreement.version(url.searchParams.get("version")):await sourceAgreement.current()});
@@ -116,6 +122,19 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(["submitMagicLightLiveTest","checkMagicLightLiveTest"].includes(action)) {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can run the live generation test.");
+      const submitting=action==="submitMagicLightLiveTest";
+      const allowed=submitting?["action","consent"]:["action"];
+      if(Object.keys(body).some(key=>!allowed.includes(key))||(submitting&&body.consent!==true))
+        return resultError(res,400,"Confirm the fixed live test before submitting. The test accepts no other input.");
+      if(!(await limitAction(`magiclight-live-test:${actor.email}`,6,60_000))) return resultError(res,429,"Please wait before checking the live test again.");
+      const result=submitting?await liveTest.submit(actor,{consent:true}):await liveTest.check(actor);
+      await audit(actor.email,submitting?"production.live_test.requested":"production.live_test.checked","magiclight",{
+        status:result.test?.status||"not-submitted",submissionCount:result.test?.submissionCount||0,
+      });
+      return json(res,200,result);
+    }
     if(action==="checkMagicLightConnection") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can check the production connection.");
       if(Object.keys(body).some(key=>key!=="action")) return resultError(res,400,"The connection check accepts no credentials or job input.");
@@ -243,6 +262,7 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof MagicLightLiveTestError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof ReceiptDeliveryError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof SourceAgreementError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof FilmProductionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});

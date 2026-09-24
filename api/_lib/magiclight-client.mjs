@@ -85,7 +85,17 @@ export function createMagicLightClient({ apiKey, environment = "production", ena
       if ((!encoding || encoding === "identity") && declared !== null && declared !== undefined
         && Number(declared) !== length) fail("MAGICLIGHT_INVALID_RESPONSE");
       let result;
-      try { result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))); }
+      try {
+        result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)), (name, value, context) => {
+          // Task identifiers are opaque. Preserve a provider's numeric JSON ID
+          // from its original token instead of rounding a 64-bit identifier.
+          if (name !== "task_id" || typeof value !== "number") return value;
+          const source = context?.source;
+          if (typeof source === "string" && /^\d{1,128}$/.test(source)) return source;
+          if (source === undefined && Number.isSafeInteger(value) && value >= 0) return String(value);
+          fail("MAGICLIGHT_INVALID_RESPONSE");
+        });
+      }
       catch { fail("MAGICLIGHT_INVALID_RESPONSE"); }
       if (!plain(result) || !Number.isSafeInteger(result.biz_code)) fail("MAGICLIGHT_INVALID_RESPONSE");
       // Unknown provider codes stay numeric evidence. No guessed authentication,

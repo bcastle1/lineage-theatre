@@ -32,6 +32,7 @@ import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
 import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
+import MagicLightLiveTest from "./MagicLightLiveTest";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import ReceiptSettings from "./ReceiptSettings";
 import SourceAgreementEditor from "./SourceAgreementEditor";
@@ -1385,6 +1386,7 @@ export default function Admin({
             {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
             {isOwner && <ProductionPreparation operator />}
             {isOwner && <MagicLightConnectionCheck disabled={busy || loading} />}
+            {isOwner && <MagicLightLiveTest disabled={busy || loading} />}
             <div className="admin-overview-grid">
               <section className="admin-card">
                 <div className="admin-section-heading">
