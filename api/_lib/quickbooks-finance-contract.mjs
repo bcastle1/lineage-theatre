@@ -8,7 +8,7 @@ const REPORT_NAMES = ['ProfitAndLoss', 'BalanceSheet', 'CashFlow', 'TrialBalance
   'GeneralLedger', 'CustomerBalance', 'VendorBalance', 'AgedReceivables', 'AgedPayables'];
 const object = (properties = {}, required = []) => ({ type: 'object', additionalProperties: false, properties, required });
 export const QUICKBOOKS_TOOLS = Object.freeze([
-  { name: 'quickbooks_connection_status', description: 'Check whether Patrick can read the BROCO Tech QuickBooks company. Returns connection health and verification times; never credentials.', inputSchema: object() },
+  { name: 'quickbooks_connection_status', description: 'Check whether Patrick can read the BROCO Tech QuickBooks company. Returns connection health and verification times.', inputSchema: object() },
   { name: 'quickbooks_company_info', description: 'Read the connected BROCO Tech QuickBooks company identity and accounting settings.', inputSchema: object() },
   { name: 'quickbooks_query', description: 'Read a page of live BROCO Tech accounting records. Use an allowed entity and optional QuickBooks WHERE expression. Always report pagination and source time; never treat a partial page as a complete total.', inputSchema: object({
     entity: { type: 'string', enum: ENTITY_NAMES },
