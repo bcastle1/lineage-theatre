@@ -10,7 +10,7 @@ export type LibraryEntry = {
   kind: "plan" | "upload"; id: string; filmId: string; title: string; durationSeconds: number;
   createdAt: string; updatedAt: string; libraryState: LibraryView; revision: number;
   production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean };
-  payments: LibraryPayment[]; manifestHash?: string; mediaUrl?: string; downloadUrl?: string;
+  payments: LibraryPayment[]; manifestHash?: string; mediaUrl?: string; downloadUrl?: string; origin?: "magiclight-delivery";
 };
 export type LibraryPage = { entries: LibraryEntry[]; cursor?: string };
 export type LibraryScene = { title: string; narration: string; visual: string; dialogue: string };
@@ -53,7 +53,7 @@ export function normalizeLibraryEntry(value: unknown): LibraryEntry {
     libraryState: value.libraryState as LibraryView, revision: value.revision,
     production: { status: String(value.production.status), completedShots: value.production.completedShots,
       shotCount: value.production.shotCount, mediaReady: value.production.mediaReady, needsAttention: value.production.needsAttention }, payments,
-    ...(value.kind === "plan" ? { manifestHash: value.manifestHash as string } : {}) };
+    ...(value.kind === "plan" ? { manifestHash: value.manifestHash as string } : value.origin === "magiclight-delivery" ? { origin: "magiclight-delivery" as const } : {}) };
   if (value.mediaUrl !== undefined || value.downloadUrl !== undefined || entry.production.mediaReady) {
     if (!entry.production.mediaReady || !["completed", "uploaded"].includes(entry.production.status)
       || value.mediaUrl !== libraryMediaUrl(entry) || value.downloadUrl !== libraryMediaUrl(entry, true)) throw invalid();

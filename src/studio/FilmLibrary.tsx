@@ -57,11 +57,26 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
   useEffect(() => {
     const request = ++sequence.current;
     setLoading(true); setEntries([]); setCursor(undefined); setError(""); setDetail(null); setPlaying(""); pageCursors.current.clear();
-    void api<unknown>(`/api/library?view=${view}`)
+    void (async () => {
+      let page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}`), view);
+      // An empty plan page may precede delivered films. Continue to the first
+      // visible page so a newly delivered film never hides behind "Load more".
+      for (let count = 0; !page.entries.length && page.cursor && count < 20; count++) {
+        if (pageCursors.current.has(page.cursor)) throw new Error("The library page repeated. Refresh to continue.");
+        pageCursors.current.add(page.cursor);
+        page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}&cursor=${encodeURIComponent(page.cursor)}`), view);
+      }
+      return page;
+    })()
       .then(value => { const page = normalizeLibraryPage(value, view); if (request === sequence.current) { setEntries(page.entries); setCursor(page.cursor); } })
       .catch(cause => { if (request === sequence.current) setError(errorText(cause)); })
       .finally(() => { if (request === sequence.current) setLoading(false); });
   }, [view, reload]);
+  useEffect(() => {
+    if (disabled || busy || loading || playing || detail || confirmation) return;
+    const timer = setInterval(() => { if (document.visibilityState === "visible") setReload(value => value + 1); }, 60_000);
+    return () => clearInterval(timer);
+  }, [disabled, busy, loading, playing, detail, confirmation]);
   useEffect(() => {
     if (confirmation && dialog.current && !dialog.current.open) dialog.current.showModal();
   }, [confirmation]);
@@ -146,10 +161,10 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
         return <article className="library-item film-library-item" key={key} aria-labelledby={`film-${entry.kind}-${entry.id}`}>
           <div className="library-art"><FilmIcon size={27} strokeWidth={1.2} aria-hidden="true" /></div>
           <div className="film-library-content"><h3 id={`film-${entry.kind}-${entry.id}`}>{entry.title || "Untitled family film"}</h3>
-            <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · Saved {new Date(entry.createdAt).toLocaleString()}</p>
+            <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · {entry.origin === "magiclight-delivery" ? "Delivered from MagicLight" : "Saved"} {new Date(entry.createdAt).toLocaleString()}</p>
             <div className="film-library-statuses"><div><span>Payment</span>{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
               {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
-            </strong>) : <strong>{entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
+            </strong>) : <strong>{entry.origin === "magiclight-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
               <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : productionLabel(entry)}</strong></div></div>
             {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
             {entry.production.status === "prepared" && entry.kind === "plan" && <p>Your plan is saved. Rendering has not started.</p>}

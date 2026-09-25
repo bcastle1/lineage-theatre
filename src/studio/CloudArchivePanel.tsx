@@ -16,7 +16,7 @@ export interface CloudFilm {
 }
 interface ArchivePage { films: CloudFilm[]; cursor?: string }
 interface ArchiveSave { film: CloudFilm; upload?: { pathname: string; clientPayload: string } }
-const MAX_BYTES = 250 * 1024 * 1024;
+const MAX_BYTES = 500 * 1024 * 1024;
 export function cloudMediaUrl(film: CloudFilm, download = false) {
   return `/api/archive?${new URLSearchParams({ action: "media", id: film.id, owner: film.ownerEmail, ...(download ? { download: "1" } : {}) })}`;
 }
@@ -100,7 +100,7 @@ export default function CloudArchivePanel({ projects, onBusyChange, showFilms = 
         if (!type) throw new Error("Choose an MP4 or WebM finished film.");
         video = new Blob([video], { type });
       }
-      if (video && (video.size < 16 || video.size > MAX_BYTES)) throw new Error("Choose a finished video up to 250 MB.");
+      if (video && (video.size < 16 || video.size > MAX_BYTES)) throw new Error("Choose a finished video up to 500 MB.");
       const result = await api<ArchiveSave>("/api/archive", {
         action: "save", id, title: title.trim(), ancestor: ancestor.trim(), duration,
         archiveConsent: true, ...(video ? { video: { type: video.type, size: video.size } } : {}),
@@ -149,7 +149,7 @@ export default function CloudArchivePanel({ projects, onBusyChange, showFilms = 
           {selected?.outputId && <option value="saved">Upload this film's saved video</option>}
           <option value="file">Choose a completed MP4 or WebM file</option>
         </select></label>}
-        {!alreadyUploaded && source === "file" && <label>Completed film file<input key={fileKey} type="file" accept="video/mp4,video/webm,.mp4,.webm" disabled={!!busy} onChange={(event) => { setFile(event.target.files?.[0] || null); setConsent(false); }} /><small>Up to 250 MB per film. 100 films and 5 GB of uploads per account.</small></label>}
+        {!alreadyUploaded && source === "file" && <label>Completed film file<input key={fileKey} type="file" accept="video/mp4,video/webm,.mp4,.webm" disabled={!!busy} onChange={(event) => { setFile(event.target.files?.[0] || null); setConsent(false); }} /><small>Up to 500 MB per film. 100 films and 5 GB of uploads per account.</small></label>}
       </div>
       {alreadyUploaded && <p className="field-note">This film already has a verified cloud video. Saving updates its details. Choose “Upload another completed film” for another version.</p>}
       <label className="check-label">

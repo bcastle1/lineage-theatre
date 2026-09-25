@@ -139,7 +139,7 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
     return { kind, id, filmId: kind === "plan" ? value.filmId : id, title: kind === "plan" ? value.manifest.title : value.title,
       durationSeconds: kind === "plan" ? value.manifest.targetDurationSeconds : value.duration,
       createdAt: value.createdAt, updatedAt: value.updatedAt, libraryState: metadata.libraryState, revision: metadata.revision, production, payments,
-      ...(kind === "plan" ? { manifestHash: value.manifestHash } : {}),
+      ...(kind === "plan" ? { manifestHash: value.manifestHash } : value.delivery?.provider === "magiclight" ? { origin: "magiclight-delivery" } : {}),
       ...(mediaReady ? { mediaUrl, downloadUrl: `${mediaUrl}&download=1` } : {}) };
   }
   async function list(actor, { view = "active", cursor } = {}) {

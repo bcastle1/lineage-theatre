@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { get, head, list } from "@vercel/blob";
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
-import { accessStatusForUser } from "./access.mjs";
+import { accessStatusForUser, hasAdminAccess } from "./access.mjs";
 
-export const MAX_FILM_BYTES = 250 * 1024 * 1024;
+export const MAX_FILM_BYTES = 500 * 1024 * 1024;
 export const MAX_ACCOUNT_BYTES = 5 * 1024 * 1024 * 1024;
 export const MAX_ACCOUNT_FILMS = 100;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -51,7 +51,7 @@ export function validateArchiveInput(input) {
   if (input.video !== undefined) {
     if (!input.video || !Object.hasOwn(TYPES, input.video.type)) throw new ArchiveError("Choose an MP4 or WebM finished film.");
     if (!Number.isSafeInteger(input.video.size) || input.video.size < 16 || input.video.size > MAX_FILM_BYTES)
-      throw new ArchiveError("Each finished film must be between 16 bytes and 250 MB.");
+      throw new ArchiveError("Each finished film must be between 16 bytes and 500 MB.");
     video = { type: input.video.type, size: input.video.size };
   }
   // Deliberately whitelist metadata. Scripts, source documents and client URLs are never stored.
@@ -136,9 +136,21 @@ export function createArchiveService(dependencies = {}) {
       throw new ArchiveError("This cloud film was not found.", 404);
     return record;
   }
-  async function save(ownerValue, input) {
+  async function requireDeliveryAdministrator(email) {
+    const current = (await read(userPath(email)))?.value;
+    if (!current || current.email !== email || current.mustChangePassword || !hasAdminAccess(current))
+      throw new ArchiveError("The administrator who assigned this delivery no longer has access.", 403);
+  }
+  async function save(ownerValue, input, delivery) {
     const owner = archiveOwner(ownerValue), data = validateArchiveInput(input);
+    if (delivery) {
+      await requireApprovedOwner(owner);
+      await requireDeliveryAdministrator(delivery.assignedBy);
+      if (delivery.provider !== "magiclight" || !/^\d{10,25}$/.test(delivery.projectId || "") || !/^[a-f0-9]{64}$/.test(delivery.sourceHash || ""))
+        throw new ArchiveError("The delivery reference is invalid.");
+    }
     const current = await read(metadataPath(owner, data.id));
+    if (current?.value.delivery && !delivery) throw new ArchiveError("This film was delivered by your administrator. Create a new film to upload another version.", 409);
     if (current?.value.video && data.video) throw new ArchiveError("This cloud film already has a video. Save a new film to upload another version.", 409);
     if (current?.value.pending && data.video && (current.value.pending.size !== data.video.size || current.value.pending.contentType !== data.video.type))
       throw new ArchiveError("Resume this film's original upload, or create a new film for a different video.", 409);
@@ -152,7 +164,8 @@ export function createArchiveService(dependencies = {}) {
       return {
         version: 1, id: data.id, ownerEmail: owner, title: data.title, ancestor: data.ancestor,
         duration: data.duration, createdAt: old?.createdAt || timestamp, updatedAt: timestamp,
-        consent: { administratorAccess: true, savedAt: timestamp },
+        ...(delivery ? { delivery: { ...delivery, assignedAt: old?.delivery?.assignedAt || timestamp } }
+          : { consent: { administratorAccess: true, savedAt: timestamp } }),
         ...(old?.video ? { video: old.video } : {}),
         ...(old?.pending ? { pending: old.pending } : data.video ? { pending: {
           nonce: uuid(), pathname: mediaPath(owner, data.id, data.video.type),
@@ -167,6 +180,7 @@ export function createArchiveService(dependencies = {}) {
     try { input = JSON.parse(payload); } catch { throw new ArchiveError("The upload request is invalid."); }
     const owner = archiveOwner(ownerValue);
     const record = (await readFilm(owner, input?.id)).value;
+    if (record.delivery) throw new ArchiveError("Administrator deliveries cannot be replaced with a browser upload.", 403);
     if (!record.pending || record.video || pathname !== record.pending.pathname || pathname !== mediaPath(owner, record.id, record.pending.contentType))
       throw new ArchiveError("The video upload does not match this film.", 403);
     return {
@@ -191,6 +205,7 @@ export function createArchiveService(dependencies = {}) {
     // A signed upload ticket can outlive account approval. Its callback has no
     // browser session, so the current account must authorize a new finalization.
     await requireApprovedOwner(owner);
+    if (original.delivery) await requireDeliveryAdministrator(original.delivery.assignedBy);
     let info;
     try { info = await headBlob(pending.pathname); }
     catch (error) { if (/not.?found/i.test(`${error?.name} ${error?.message}`)) throw new ArchiveError("The video upload has not arrived yet. Retry verification after the upload finishes.", 409); throw error; }
@@ -206,11 +221,12 @@ export function createArchiveService(dependencies = {}) {
       // Media verification may take time. Recheck immediately before committing,
       // including retries after a concurrent metadata update.
       await requireApprovedOwner(owner);
+      if (old.delivery) await requireDeliveryAdministrator(old.delivery.assignedBy);
       const { pending: removed, ...rest } = old;
       return { ...rest, updatedAt: new Date(now()).toISOString(), video: {
         pathname: pending.pathname, contentType: info.contentType, size: info.size,
         etag: info.etag, nonce: pending.nonce, uploadedAt: new Date(now()).toISOString(),
-        origin: "user-upload",
+        origin: old.delivery ? "magiclight-delivery" : "user-upload",
       } };
     });
     return publicFilm(saved);
