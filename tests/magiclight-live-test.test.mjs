@@ -67,6 +67,57 @@ test("concurrent processes, repeated clicks, reloads and key rotation never subm
   assert.equal(h.checks.length, 0); assert.equal(h.submissions.length, 1);
 });
 
+test("server-only completed media binding requires the persisted owner and keeps working after key rotation", async () => {
+  const h = fixture();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.code === "MAGICLIGHT_TEST_NOT_COMPLETE");
+  await h.submit();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.code === "MAGICLIGHT_TEST_NOT_COMPLETE");
+  await h.check();
+  h.env.MAGICLIGHT_API_KEY = "changed-key";
+  const media = await h.service.completedForMedia(OWNER);
+  assert.equal(media.videoUrl, VIDEO); assert.equal(media.taskId, TASK);
+  assert.equal(h.submissions.length, 1); assert.equal(h.checks.length, 1);
+  await assert.rejects(h.service.completedForMedia({ ...OWNER, role: "admin" }), e => e.status === 403);
+  h.revoke();
+  await assert.rejects(h.service.completedForMedia(OWNER), e => e.status === 403);
+});
+
+test("download-source refresh polls the exact completed task without rewriting the terminal claim", async () => {
+  let video = VIDEO;
+  const h = fixture({ check: async () => ({ providerCode: 10000, taskStatus: 2, taskId: TASK, videoUrl: video }) });
+  await h.submit();
+  await assert.rejects(h.service.refreshMediaSource(OWNER), e => e.code === "MAGICLIGHT_TEST_NOT_COMPLETE");
+  assert.equal(h.checks.length, 0);
+  await h.check(); const original = h.stored();
+  video = "https://cdn.example.com/renewed.mp4?signature=new-private-signature";
+  assert.equal(await h.service.refreshMediaSource(OWNER), video);
+  assert.deepEqual(h.stored(), original); assert.equal(h.submissions.length, 1);
+  assert.deepEqual(h.checks, [{ taskId: TASK }, { taskId: TASK }]);
+  assert.equal(h.configurations.at(-1).enableSubmission, false);
+  assert.doesNotMatch(JSON.stringify(await h.status()), /new-private-signature|renewed\.mp4/);
+  h.env.MAGICLIGHT_API_KEY = "changed-key";
+  await assert.rejects(h.service.refreshMediaSource(OWNER), e => e.code === "MAGICLIGHT_TEST_BINDING_CHANGED");
+  assert.equal(h.checks.length, 2); assert.deepEqual(h.stored(), original);
+  assert.equal((await h.service.completedForMedia(OWNER)).videoUrl, VIDEO);
+});
+
+test("failed completed-source refresh preserves original evidence and redacts provider errors", async () => {
+  let response = { providerCode: 10000, taskStatus: 2, taskId: TASK, videoUrl: VIDEO };
+  const h = fixture({ check: async () => { if (response instanceof Error) throw response; return response; } });
+  await h.submit(); await h.check(); const original = h.stored();
+  for (const result of [{ providerCode: 10000, taskStatus: 1 }, { providerCode: 10000, taskStatus: 3 },
+    { providerCode: 401 }, { providerCode: 10000, taskStatus: 2, taskId: "other", videoUrl: VIDEO },
+    { providerCode: 10000, taskStatus: 2, videoUrl: `https://cdn.example.com/${KEY}` }, new Error(`${KEY} ${VIDEO}`)]) {
+    response = result;
+    await assert.rejects(h.service.refreshMediaSource(OWNER), error => {
+      assert.equal(error.code, "MAGICLIGHT_TEST_SOURCE_UNCONFIRMED");
+      assert.doesNotMatch(error.message, /fictional-key|private-output-signature/); return true;
+    });
+    assert.deepEqual(h.stored(), original);
+  }
+  assert.equal(h.submissions.length, 1);
+});
+
 test("explicit consent and fixed input reject browser credentials, prompt, task ID, URLs or new identity", async () => {
   for (const body of [undefined, null, [], {}, { consent: false }, ...["prompt", "imageUrl", "apiKey", "taskId", "idempotencyKey", "environment"].map(key => ({ consent: true, [key]: "untrusted" }))]) {
     const h = fixture(); await assert.rejects(h.service.submit(OWNER, body), e => e.status === 400);
