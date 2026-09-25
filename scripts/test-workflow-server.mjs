@@ -161,6 +161,34 @@ const handlers = {
   "/api/admin": createAdminHandler({ ...shared, audit, recordPage }),
 };
 
+// Website-export delivery uses the real services with only local transport and
+// storage injected. No provider or production credential can reach this fixture.
+const [{ createFilmDeliveryService }, { createFilmDeliveryHandler }, { createArchiveService },
+  { createArchiveHandler }, { createFilmLibraryService }, { createLibraryHandler }] = await Promise.all([
+  import("../api/_lib/film-delivery.mjs"), import("../api/film-delivery.mjs"), import("../api/_lib/archive.mjs"),
+  import("../api/archive.mjs"), import("../api/_lib/film-library.mjs"), import("../api/library.mjs"),
+]);
+const websiteCopies = new Map();
+const websiteBytes = await readFile(new URL("../public/assets/the-journey-of-thomas-wilson.mp4", import.meta.url));
+const websiteList = async ({ prefix, cursor, limit: size = 30 }) => {
+  const paths = [...records.keys()].filter(key => key.startsWith(prefix)).sort(), offset = Number(cursor || 0);
+  return { blobs: paths.slice(offset, offset + size).map(pathname => ({ pathname })), hasMore: offset + size < paths.length, cursor: String(offset + size) };
+};
+const websiteGet = async (pathname, options) => {
+  const bytes = websiteCopies.get(pathname); if (!bytes) return null;
+  const range = parseRange(options?.headers?.Range, bytes.length), part = range ? bytes.subarray(range.start, range.end + 1) : bytes;
+  return { stream: new Response(part).body, blob: { pathname, contentType: "video/mp4", size: part.length },
+    headers: new Headers(range ? { "content-range": range.contentRange } : {}) };
+};
+const websiteArchive = createArchiveService({ readRecord: read, writeRecord: write, listBlobs: websiteList, getBlob: websiteGet,
+  headBlob: async pathname => ({ pathname, contentType: "video/mp4", size: websiteCopies.get(pathname)?.length, etag: "fixture-video" }) });
+const websiteDelivery = createFilmDeliveryService({ read, write, listBlobs: websiteList, deleteBlob: async key => records.delete(key), archiveService: websiteArchive,
+  fetchImpl: async () => new Response(null, { headers: { "content-type": "video/mp4", "content-length": String(websiteBytes.length) } }),
+  copy: async (_job, pathname) => { websiteCopies.set(pathname, websiteBytes); return { sizeBytes: websiteBytes.length, sha256: auth.digest(websiteBytes) }; } });
+handlers["/api/film-delivery"] = createFilmDeliveryHandler({ service: websiteDelivery, sessionFor: session, limiter: limit, env: {} });
+handlers["/api/archive"] = createArchiveHandler({ archive: websiteArchive, getSession: session, limitAction: limit, getBlob: websiteGet });
+handlers["/api/library"] = createLibraryHandler({ service: createFilmLibraryService({ read, write, listBlobs: websiteList }), sessionFor: session, limiter: limit });
+
 const accounts = [
   { email: "customer@example.invalid", name: "SAMPLE ONLY - FICTIONAL CUSTOMER", role: "customer", password: "Cedar lantern rivers wander" },
   { email: OWNER_EMAIL, name: "SAMPLE ONLY - FICTIONAL OWNER", role: "owner", password: "Copper forest windmills travel" },

@@ -33,6 +33,7 @@ import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
 import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
 import MagicLightLiveTest from "./MagicLightLiveTest";
+import FilmDelivery from "./FilmDelivery";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
@@ -1421,6 +1422,7 @@ export default function Admin({
               ))}
             </div>
             {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
+            <FilmDelivery />
             {isOwner && <ProductionPreparation operator />}
             {isOwner && <MagicLightConnectionCheck disabled={busy || loading} />}
             {isOwner && <MagicLightLiveTest disabled={busy || loading} />}

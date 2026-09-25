@@ -19,6 +19,7 @@
     }
   ],
   "functions": {
+    "api/film-delivery.mjs": { "maxDuration": 300 },
     "api/media.mjs": { "maxDuration": 300 },
     "api/auth.mjs": {
       "maxDuration": 30
@@ -42,5 +43,6 @@
       "maxDuration": 180
     }
   },
-  "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" }]
+  "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" },
+    { "path": "/api/film-delivery", "schedule": "*/5 * * * *" }]
 }

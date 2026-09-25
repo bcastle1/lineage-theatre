@@ -1,0 +1,13 @@
+.film-delivery { margin: 20px 0; }
+.film-delivery .admin-section-heading { align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.film-delivery-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+.film-delivery-fields label { display: grid; gap: 7px; min-width: 0; }
+.film-delivery-fields input { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px 12px; border: 1px solid #cbd5d9; border-radius: 8px; font: inherit; }
+.film-delivery-wide { grid-column: 1 / -1; }
+.film-delivery label.film-delivery-confirm { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; }
+.film-delivery label.film-delivery-confirm input { flex: 0 0 auto; width: auto; margin-top: 4px; }
+.film-delivery h2, .film-delivery h3 { font-weight: 400; }
+.film-delivery-jobs article { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-top: 1px solid #dde2e3; padding: 18px 0; margin-top: 14px; overflow-wrap: anywhere; }
+.film-delivery-jobs h3, .film-delivery-jobs p { margin: 0 0 7px; }
+.film-delivery small { color: #596b73; }
+@media(max-width: 620px) { .film-delivery-fields { grid-template-columns: minmax(0, 1fr); } .film-delivery-jobs article { flex-direction: column; } }
