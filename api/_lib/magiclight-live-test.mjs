@@ -200,7 +200,36 @@ export function createMagicLightLiveTestService({ read = readRecord, write = wri
     await owner(actor);
     return view(previous.value);
   }
-  return Object.freeze({ status, submit, check });
+  // Server-only delivery binding. Never serialize this private record through
+  // an API response; its signed provider URL is solely for the media importer.
+  async function completedForMedia(actor) {
+    await owner(actor);
+    const previous = await saved(actor);
+    if (previous?.value.status !== "completed") throw new MagicLightLiveTestError("MAGICLIGHT_TEST_NOT_COMPLETE", 409, "The saved test clip is not complete yet.");
+    await owner(actor);
+    return { ...previous.value };
+  }
+  // Refresh only a completed task's transient download URL. The permanent
+  // completion record and any imported private media keep their original
+  // binding; a renewed signed URL must not invalidate an already saved clip.
+  async function refreshMediaSource(actor) {
+    await owner(actor);
+    const previous = await saved(actor);
+    if (previous?.value.status !== "completed") throw new MagicLightLiveTestError("MAGICLIGHT_TEST_NOT_COMPLETE", 409, "The saved test clip is not complete yet.");
+    const config = bound(previous.value, configuration());
+    const client = clientFactory({ apiKey: config.apiKey, environment: "production", enableSubmission: false, requestTimeoutMs: 15_000 });
+    await active(actor, previous, config);
+    let result;
+    try {
+      result = await client.checkTask({ taskId: previous.value.taskId });
+      if (!plain(result) || result.providerCode !== 10000 || result.taskStatus !== 2
+        || (result.taskId !== undefined && result.taskId !== previous.value.taskId)) throw badResponse();
+      result = outputUrl(result.videoUrl, config.apiKey).href;
+    } catch { throw new MagicLightLiveTestError("MAGICLIGHT_TEST_SOURCE_UNCONFIRMED", 502, "The completed job's download could not be refreshed. Its saved result is preserved; no new generation was submitted."); }
+    await active(actor, previous, config);
+    return result;
+  }
+  return Object.freeze({ status, submit, check, completedForMedia, refreshMediaSource });
 }
 
 export const magiclightLiveTest = createMagicLightLiveTestService();

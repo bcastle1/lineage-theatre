@@ -12,6 +12,7 @@ import { createReceiptDeliveryService, ReceiptDeliveryError } from "./_lib/recei
 import { checkMagicLightConnection } from "./_lib/magiclight-diagnostics.mjs";
 import { checkHostedReversals } from "./_lib/hosted-reversal-diagnostics.mjs";
 import { createMagicLightLiveTestService, MagicLightLiveTestError } from "./_lib/magiclight-live-test.mjs";
+import { createMagicLightTestMediaService } from "./_lib/magiclight-live-test-media.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -34,6 +35,7 @@ export function createAdminHandler(overrides={}) {
  const sourceAgreement=overrides.sourceAgreement||createSourceAgreementService({readRecord:dependencies.readRecord,writeRecord:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const receipts=overrides.receiptDelivery||createReceiptDeliveryService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const liveTest=overrides.magiclightLiveTest||createMagicLightLiveTestService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
+ const testMedia=overrides.magiclightTestMedia||createMagicLightTestMediaService({liveTest,read:dependencies.readRecord,write:dependencies.writeRecord});
  return async function handler(req,res) {
   const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy,checkMagicLightConnection,checkHostedReversals}=dependencies;
   try {
@@ -67,10 +69,15 @@ export function createAdminHandler(overrides={}) {
       return json(res,200,{user:publicUser(current.value),message:"Administrator access is active."});
     }
     if (!hasAdminAccess(actor)) return resultError(res,403,"Administrator access is required.");
+    if(["GET","HEAD"].includes(req.method)&&action==="magicLightLiveTestMedia") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can view the live generation test.");
+      if([...url.searchParams.keys()].some(key=>!["action","download"].includes(key))) return resultError(res,400,"The saved test clip accepts no media reference.");
+      return testMedia.stream({actor,req,res,download:url.searchParams.get("download")==="1"});
+    }
     if (req.method==="GET") {
       if(action==="magicLightLiveTest") {
         if(!isOwner(actor)) return resultError(res,403,"Only the owner can view the live generation test.");
-        return json(res,200,await liveTest.status(actor));
+        return json(res,200,await testMedia.state(actor));
       }
       if(action==="receiptSettings") return json(res,200,await receipts.settings(actor));
       if(action==="hostedCheckout") return json(res,200,await hosted.settings(actor));
@@ -129,6 +136,14 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="importMagicLightLiveTestMedia") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can import the live test clip.");
+      if(Object.keys(body).some(key=>key!=="action")) return resultError(res,400,"Import uses only the saved test clip.");
+      if(!(await limitAction(`magiclight-test-media:${actor.email}`,3,60_000))) return resultError(res,429,"Please wait before importing the saved clip again.");
+      const result=await testMedia.importClip(actor);
+      await audit(actor.email,"production.live_test.imported","magiclight",{ready:result.media.ready});
+      return json(res,200,result);
+    }
     if(["submitMagicLightLiveTest","checkMagicLightLiveTest"].includes(action)) {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can run the live generation test.");
       const submitting=action==="submitMagicLightLiveTest";
