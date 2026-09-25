@@ -19,6 +19,7 @@
     }
   ],
   "functions": {
+    "api/patrick-quickbooks.mjs": { "maxDuration": 60 },
     "api/film-delivery.mjs": { "maxDuration": 300 },
     "api/media.mjs": { "maxDuration": 300 },
     "api/auth.mjs": {
@@ -44,5 +45,6 @@
     }
   },
   "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" },
-    { "path": "/api/film-delivery", "schedule": "*/5 * * * *" }]
+    { "path": "/api/film-delivery", "schedule": "*/5 * * * *" },
+    { "path": "/api/patrick-quickbooks", "schedule": "17 8 * * *" }]
 }

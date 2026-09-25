@@ -28,7 +28,7 @@ function fixture(options={}) {
     credentialVersion:config.credentialVersion,fingerprint:config.fingerprint,encryptedTokens:encryptQuickBooksTokens(tokens,config)});
   const read=async path=>{await readHook?.(path);return structuredClone(records.get(path)||null);};
   const binding={environment:config.environment,grantId:digest(`${config.credentialVersion}:${REALM}:synthetic-attempt`),realmId:REALM};
-  const transport=createQuickBooksAccountingTransport({read,env,now:()=>clock,
+  const transport=createQuickBooksAccountingTransport({read,env,now:()=>clock,financeReadOnly:options.financeReadOnly===true,
     connection:{refresh:async(actor,body)=>{
       refreshes.push({actor:structuredClone(actor),body});
       const saved=records.get(QUICKBOOKS_CONNECTION_PATH).value;
@@ -193,4 +193,17 @@ test("known server secrets cannot be serialized into Accounting fields and netwo
     assert.equal(error.code,"ACCOUNTING_REQUEST_UNCERTAIN");assert.doesNotMatch(error.message,/Private|credential response/);return true;
   });
   assert.equal(broken.calls.length,1);assert.equal(broken.refreshes.length,0);
+});
+
+test('finance transport adds report and entity reads while forbidding every accounting write',async()=>{
+  const h=fixture({financeReadOnly:true});
+  await h.transport.request(h.binding,{method:'GET',path:`/companyinfo/${REALM}`});
+  await h.transport.request(h.binding,{method:'GET',path:'/query',query:{entity:'Vendor',where:'Balance > 0',page_size:20}});
+  await h.transport.request(h.binding,{method:'GET',path:'/reports/ProfitAndLoss',query:{report:'ProfitAndLoss',start_date:'2026-01-01',end_date:'2026-09-25',accounting_method:'Cash'}});
+  assert.equal(h.calls.length,3);assert.equal(h.calls.every(([,init])=>init.method==='GET'),true);
+  assert.equal(new URL(h.calls[1][0]).searchParams.get('query'),'SELECT * FROM Vendor WHERE Balance > 0 STARTPOSITION 1 MAXRESULTS 20');
+  for(const operation of [{method:'POST',path:'/customer',body:customer(),requestId:REQUEST},{method:'POST',path:'/invoice',body:invoice(),requestId:REQUEST},
+    {method:'GET',path:'/companyinfo/999'},{method:'GET',path:'/reports/BalanceSheet',query:{report:'ProfitAndLoss',start_date:'2026-01-01',end_date:'2026-09-25',accounting_method:'Cash'}}])
+    await assert.rejects(h.transport.request(h.binding,operation),invalid);
+  assert.equal(h.calls.length,3);
 });
