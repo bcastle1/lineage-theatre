@@ -682,7 +682,7 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
 // claims and response projection. Accounting access is not Payments approval.
 // https://developer.intuit.com/app/developer/qbo/docs/api/accounting/most-commonly-used/invoice
 export function createQuickBooksAccountingTransport(overrides={}) {
-  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,connection=quickbooks}=overrides;
+  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,connection=quickbooks,financeReadOnly=false}=overrides;
   const unavailable=()=>new QuickBooksError("The Accounting connection needs administrator review.",503,"ACCOUNTING_CONNECTION_UNAVAILABLE");
   const invalid=()=>new QuickBooksError("This Accounting request is not supported.",400,"ACCOUNTING_REQUEST_INVALID");
   const plain=value=>Boolean(value&&typeof value==="object"&&!Array.isArray(value)
@@ -795,9 +795,21 @@ export function createQuickBooksAccountingTransport(overrides={}) {
     if(!validBinding(expected)||!fields(operation,["method","path","query","body","requestId"],["method","path"])||typeof operation.path!=="string")throw invalid();
     const bound={...expected},{method,path,query,body,requestId}=operation,parameters=new URLSearchParams();
     let serializedBody;
+    if(financeReadOnly && method!=="GET")throw invalid();
     if(method==="GET") {
       if(body!==undefined||requestId!==undefined)throw invalid();
-      if(path==="/query")parameters.set("query",queryStatement(query));
+      if(financeReadOnly && path==="/query") {
+        const {validateQuickbooksArguments}=await import("./quickbooks-finance-contract.mjs");
+        const args=validateQuickbooksArguments("quickbooks_query",query);
+        parameters.set("query",`SELECT * FROM ${args.entity}${args.where?` WHERE ${args.where}`:""} STARTPOSITION ${args.start_position??1} MAXRESULTS ${args.page_size??50}`);
+      }else if(financeReadOnly && path===`/companyinfo/${bound.realmId}`) {
+        if(query!==undefined)throw invalid();
+      }else if(financeReadOnly && path.startsWith("/reports/")) {
+        const {validateQuickbooksArguments}=await import("./quickbooks-finance-contract.mjs");
+        const args=validateQuickbooksArguments("quickbooks_report",query);
+        if(path!==`/reports/${args.report}`)throw invalid();
+        for(const key of ["start_date","end_date","accounting_method"])parameters.set(key,args[key]);
+      }else if(path==="/query")parameters.set("query",queryStatement(query));
       else if(path==="/preferences"||/^\/(?:item|customer|invoice|payment)\/[0-9]{1,30}$/.test(path)) {
         if(path.startsWith("/invoice/")) {
           if(query!==undefined&&(!fields(query,["include"],["include"])||query.include!=="invoiceLink"))throw invalid();
