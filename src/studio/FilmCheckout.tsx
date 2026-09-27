@@ -15,9 +15,10 @@ const problem = (error: unknown) => error instanceof Error ? error.message : "Th
 
 type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
 
-export default function FilmCheckout({ film, productionAvailable, persistPaymentReference, onPrepared, onBusyChange }: {
+export default function FilmCheckout({ film, productionAvailable, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
   film: Film; productionAvailable: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
+  onNewFilmCheckout: () => void;
   onPrepared: (prepared: PreparedProduction) => void;
   onBusyChange: (message: string) => void;
 }) {
@@ -270,6 +271,12 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
   }
 
   return <section className="readiness-panel film-checkout" aria-label="Film payment and production">
+    {order?.status === "captured" && <div className="film-price-review" aria-label="Separate film checkout">
+      <h3>Buying a new film?</h3>
+      <p>The payment below covers the saved version of {order.filmTitle}. To buy “{film.title || "your current draft"}” as a separate film, keep its current story and prepare a new price.</p>
+      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length} onClick={onNewFilmCheckout}>Price this draft as a new film</button>
+      <p className="field-note">Your earlier film and payment stay saved. This does not charge you or start production. To continue the film you already paid for, use its controls below.</p>
+    </div>}
     <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Your film price and payment"}</h3>
     {!paymentReference && <>
       <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>

@@ -993,6 +993,7 @@ type CreateProps = StepProps & {
   checkFilm: () => Promise<void>;
   resultUrl: string;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
+  onNewFilmCheckout: () => void;
   onCheckoutBusy: (message: string) => void;
   brief: () => void;
   backup: () => void;
@@ -1006,6 +1007,7 @@ export function CreateStep({
   checkFilm,
   resultUrl,
   persistPaymentReference,
+  onNewFilmCheckout,
   onCheckoutBusy,
   brief,
   backup,
@@ -1047,7 +1049,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

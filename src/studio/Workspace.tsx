@@ -17,6 +17,7 @@ import {
 import {
   api,
   customerProjectBackup,
+  createCheckoutDraft,
   editorialPlan,
   editorialThemes,
   newFilm,
@@ -319,12 +320,31 @@ export default function Workspace({
   }
   function create() {
     if (busy || libraryBusy) return;
-    const project = newFilm();
-    setProjects((p) => [project, ...p]);
-    setActiveId(project.id);
-    setStep(0);
-    setView("create");
-    notify("A new family film is ready to develop.");
+    try {
+      openNewDraft(newFilm(), 0);
+      notify("A new family film is ready to develop.");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "The new film could not be saved.", "error");
+    }
+  }
+  function openNewDraft(draft: Film, nextStep: number) {
+    const context = draftContext.current;
+    const next = persistCreatedDraft(localStorage, context.storageKey, context.projects, draft);
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    draftContext.current = { ...context, projects: next };
+    setProjects(next); setSaved("Saved in this browser"); setActiveId(draft.id);
+    setAiConsent(false); setThemePage(0); setThemeOrigin(""); setResultUrl("");
+    setStep(nextStep); setView("create");
+    window.history.replaceState(null, "", "#create");
+  }
+  function priceCurrentDraftAsNewFilm() {
+    if (busy || libraryBusy || workLock.current) return;
+    try {
+      openNewDraft(createCheckoutDraft(film), 3);
+      notify("Your current story is saved as a separate film. Prepare its pricing below. The earlier film and payment remain in your library.");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "The separate film could not be saved.", "error");
+    }
   }
   function openLibraryDraft(id: string) {
     if (busy || libraryBusy) return;
@@ -646,7 +666,7 @@ export default function Workspace({
               className={view === n.id ? "nav-item selected" : "nav-item"}
               disabled={!!busy || libraryBusy}
               onClick={() => {
-                if (n.id === "create" && localLibraryState(film) !== "active") { create(); return; }
+                if (n.id === "create") { create(); return; }
                 setView(n.id);
                 window.history.replaceState(null, "", n.id === "admin" ? "#admin" : `#${n.id}`);
                 notify(`${n.label} opened.`, "info");
@@ -831,6 +851,7 @@ export default function Workspace({
                       checkFilm={checkFilm}
                       resultUrl={resultUrl}
                       persistPaymentReference={persistPaymentReference}
+                      onNewFilmCheckout={priceCurrentDraftAsNewFilm}
                       onCheckoutBusy={setBusy}
                       brief={brief}
                       backup={backup}
