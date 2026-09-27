@@ -7,7 +7,8 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
+const contractUrl = moduleUrl((await compile("../src/studio/checkout-contract.ts")).replaceAll('"./hosted-invoice-url.mjs"',
+  JSON.stringify(new URL("../src/studio/hosted-invoice-url.mjs", import.meta.url).href)));
 const { createFilmReceiptData, createFilmReceiptHtml } = await import(moduleUrl((await compile("../src/studio/payment-receipt.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const receipt = (changes = {}) => ({ receiptId: "a".repeat(64), filmTitle: "Fictional family garden", currency: "USD",
   amountCents: 567, refundedCents: 0, capturedAt: "2026-09-23T15:37:14.000Z", status: "captured", sandbox: false,

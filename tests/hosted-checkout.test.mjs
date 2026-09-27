@@ -143,11 +143,13 @@ test("canonical Intuit short invoice links are payable and recover an existing r
 
 test("short invoice links reject malformed identity, alternate origins and invalid or duplicated locale",async()=>{
   const token="a".repeat(96),base=`https://connect.intuit.com/t/scs-v1-${token}`;
-  const invalid=[base.slice(0,-1),`${base}a`,base.replace(token,"g".repeat(96)),base.replace("scs-v1-","scs-v2-"),base.replace("/t/","/other/"),
+  const invalid=[base.replace(token,""),base.replace(token,"g".repeat(2049)),base.replace("scs-v1-","scs-v2-"),base.replace("/t/","/other/"),
     `${base}/`,`${base}/next`,`${base}#payment`,`${base}#`,`${base}?locale=en-US`,`${base}?locale=en`,`${base}?locale=`,`${base}?locale=en_US&locale=fr_CA`,
     `${base}?locale=en_US&%6cocale=en_US`,`${base}?locale=en_US%26redirect=https://evil.example`,`${base}?locale=%00en_US`,`${base}?locale=%20en_US`,
     base.replace("https:","http:"),base.replace("connect.intuit.com","connect.intuit.com.evil.example"),base.replace("connect.intuit.com","user@connect.intuit.com"),
     base.replace("connect.intuit.com","connect.intuit.com:443"),base.replace("/t/","/portal/../t/"),base.replace("/t/","/t/%2E%2E/t/"),
+    `${base}%2Fnext`,`${base}%2fnext`,`${base}%5Cnext`,`${base}%5cnext`,`${base}%252Fnext`,`${base}/../other`,
+    `${base}%`,`${base}+`,`${base}=`,`${base};`,
     base.replace(token,`%61${token.slice(1)}`),`${base}\\other`,` ${base}`,`${base}\n`];
   for(const link of invalid) {
     const h=fixture({invoiceOverrides:{InvoiceLink:link}}),order=await h.checkout();
@@ -155,6 +157,28 @@ test("short invoice links reject malformed identity, alternate origins and inval
     const checked=await h.service.check(OWNER,{orderId:order.id});
     assert.equal(checked.status,"uncertain",link);assert.equal(checked.invoiceUrl,null);
     assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+  }
+});
+
+test("opaque provider tokens produce payable invoices and recover previously rejected links without another invoice",async()=>{
+  const tokens=["aB09".repeat(24)+"-1","Base64url_Invoice-Token_09","a","x".repeat(95),"x".repeat(97),"x".repeat(2048),"opaque.token~with_unreserved-09"];
+  for(const token of tokens) {
+    const destination=`https://connect.intuit.com/t/scs-v1-${token}?locale=en_US`,link=`${destination}&cta=PRIVATE_QUERY_VALUE`;
+    const h=fixture({invoiceOverrides:{InvoiceLink:link}}),created=await h.checkout();
+    assert.equal(created.status,"awaiting-payment");assert.equal(created.requiresReview,false);assert.equal(created.charged,false);
+    assert.equal(created.invoiceUrl,destination);assert.equal(created.receiptAvailable,false);
+    const path=`payments/orders/${created.id}.json`,saved=h.records.get(path).value,posted=mutationRequests(h).length;
+    h.seed(path,{...saved,status:"uncertain",invoiceUrl:null,invoiceLinkStatus:"invalid",lastCheckStage:"complete",lastCheckFailureReason:"INVOICE_LINK_INVALID"});
+    assert.equal((await h.service.order(OWNER,created.id)).invoiceUrl,null);
+    const recovered=await h.service.check(OWNER,{orderId:created.id});
+    assert.equal(recovered.id,created.id);assert.equal(recovered.status,"awaiting-payment");assert.equal(recovered.invoiceUrl,destination);
+    assert.equal(recovered.requiresReview,false);assert.equal(recovered.charged,false);assert.equal(recovered.receiptAvailable,false);
+    assert.equal(h.records.get(path).value.invoiceId,saved.invoiceId);
+    assert.equal((await h.service.adminDiagnostics(OWNER,created.id)).lastCheckFailureReason,null);
+    assert.equal((await h.checkout()).invoiceUrl,destination);
+    assert.equal(mutationRequests(h).length,posted);assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);
+    assert.equal(h.requests.filter(r=>r.method==="GET"&&r.path==="/invoice/30").length,1);
+    assert.equal(JSON.stringify([...h.records.values()]).includes("PRIVATE_QUERY_VALUE"),false);
   }
 });
 
@@ -216,7 +240,7 @@ test("invalid link diagnostics contain bounded shape data only and clear after r
     ["",{kind:"string",length:0,blank:true,whitespace:false,parsed:false}],
     ["  ",{kind:"string",length:2,blank:true,whitespace:true,parsed:false}],
     [{privateToken:secret},{kind:"object",length:0,blank:false,whitespace:false,parsed:false}],
-    [`https://connect.intuit.com/t/scs-v1-${secret}?locale=en_US&redirect=private`,{kind:"string",blank:false,parsed:true,hostKind:"connect.intuit.com",pathKind:"short",shortTokenLength:secret.length,shortTokenHex:false,queryKind:"other",queryCount:2}],
+    [`https://connect.intuit.com/t/scs-v1-${secret}%2F?locale=en_US&redirect=private`,{kind:"string",blank:false,parsed:true,hostKind:"connect.intuit.com",pathKind:"short",shortTokenLength:secret.length+3,shortTokenHex:false,queryKind:"other",queryCount:2}],
     [`https://private.example/${secret}`,{kind:"string",parsed:true,hostKind:"other",pathKind:"other"}],
   ];
   for(const [link,expected] of cases) {

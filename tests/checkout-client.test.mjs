@@ -7,7 +7,8 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
+const hostedInvoiceUrl = new URL("../src/studio/hosted-invoice-url.mjs", import.meta.url).href;
+const contractUrl = moduleUrl((await compile("../src/studio/checkout-contract.ts")).replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(hostedInvoiceUrl)));
 const { canStartFilmProduction, normalizeHostedInvoiceUrl, normalizeCheckoutConfiguration, normalizeFilmQuote, normalizeFilmOrder, normalizeFilmReceipt, quoteMatchesConfiguration, paymentStatusMessage } = await import(contractUrl);
 const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { checkFilmPayment, commitFilmPayment, recoverFilmPayment, retryFilmPayment } = await import(moduleUrl((await compile("../src/studio/checkout-payment.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
@@ -56,10 +57,31 @@ test("verified Intuit short invoice links survive order normalization and paymen
   }
   for (const link of [`${base}?locale=en-US`,`${base}?locale=en`,`${base}?locale=`,`${base}?locale=en_US&locale=fr_CA`,
     `${base}?locale=en_US&%6cocale=en_US`,`${base}?locale=en_US%26redirect=https://evil.invalid`,`${base}?locale=%00en_US`,`${base}?locale=%20en_US`,`${base}#other`, `${base}#`, `${base}/more`,
-    base.slice(0,-1), `${base}0`, base.replace("scs-v1-", "other-"), base.replace("/t/", "/t/../t/"),
+    base.replace("scs-v1-", "other-"), base.replace("/t/", "/t/../t/"),
+    "https://connect.intuit.com/t/scs-v1-", `https://connect.intuit.com/t/scs-v1-${"a".repeat(2049)}`,
+    `${base}%2Fnext`, `${base}%2fnext`, `${base}%5Cnext`, `${base}%5cnext`, `${base}%252Fnext`,
+    `${base}/../other`, base.replace("/t/", "/t/%2E%2E/t/"), `${base}\\next`,
+    base.replace("scs-v1-", "scs-v1-%61"), `${base}%`, `${base}+`, `${base}=`, `${base};`,
     base.replace("connect.intuit.com/", "connect.intuit.com:443/"), base.replace("connect.intuit.com", "connect.intuit.com.evil.invalid"),
     base.replace("connect.intuit.com", "user@connect.intuit.com"), base.replace("https:", "http:")]) {
     assert.equal(normalizeHostedInvoiceUrl(link), null, link);
+  }
+});
+
+test("opaque Intuit invoice tokens keep their exact identity across normalized orders and payment navigation", () => {
+  const tokens = ["aB09".repeat(24) + "-1", "Base64url_Invoice-Token_09", "a", "x".repeat(95), "x".repeat(97), "x".repeat(2048), "opaque.token~with_unreserved-09"];
+  for (const invoiceToken of tokens) {
+    const destination = `https://connect.intuit.com/t/scs-v1-${invoiceToken}?locale=en_US`;
+    const link = `${destination}&cta=PRIVATE_QUERY_VALUE`;
+    const normalized = normalizeFilmOrder({ ...order("awaiting-payment"), invoiceUrl: link });
+    assert.equal(normalizeHostedInvoiceUrl(link), destination);
+    assert.equal(normalized?.invoiceUrl, destination);
+    assert.equal(normalized?.requiresReview, false);
+    assert.equal(normalized?.charged, false);
+    let navigated;
+    const tab = { opener: {}, document: { title: "", body: {} }, closed: false, location: { replace: url => navigated = url }, close: () => {} };
+    assert.equal(reservePaymentWindow(() => tab).open(normalized.invoiceUrl), true);
+    assert.equal(navigated, destination);
   }
 });
 

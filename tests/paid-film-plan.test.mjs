@@ -9,7 +9,8 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
 }).outputText;
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const modelUrl = moduleUrl(await compile("../src/studio/model.ts"));
-const contractUrl = moduleUrl(await compile("../src/studio/checkout-contract.ts"));
+const contractUrl = moduleUrl((await compile("../src/studio/checkout-contract.ts")).replaceAll('"./hosted-invoice-url.mjs"',
+  JSON.stringify(new URL("../src/studio/hosted-invoice-url.mjs", import.meta.url).href)));
 const { loadPaidFilmPlan, paidPlanMatches, paidOrderMatches, paidFilmStartRequest } = await import(moduleUrl(
   (await compile("../src/studio/paid-film-plan.ts")).replace('"./model"', JSON.stringify(modelUrl)).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 

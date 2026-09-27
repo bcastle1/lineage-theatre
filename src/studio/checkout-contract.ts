@@ -1,3 +1,6 @@
+import { normalizeHostedInvoiceUrl } from "./hosted-invoice-url.mjs";
+export { normalizeHostedInvoiceUrl } from "./hosted-invoice-url.mjs";
+
 export type CheckoutConfiguration = { available: false } | {
   available: true;
   method: "quickbooks-hosted-invoice";
@@ -36,28 +39,6 @@ const text = (value: unknown, max: number): value is string => typeof value === 
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 const terms = (value: unknown): value is string => text(value, 10_000) && Boolean(value.trim()) && !/[<>\u0000-\u0008\u000b-\u001f\u007f]/.test(value);
 const hostedMethod = "quickbooks-hosted-invoice";
-
-// Only the provider's hosted invoice portal may receive payment navigation.
-// No customer card or bank data is collected or submitted by this application.
-export function normalizeHostedInvoiceUrl(value: unknown): string | null {
-  if (typeof value !== "string" || value.length > 8192 || !value.startsWith("https://connect.intuit.com/")
-    || /[\s\\#\u0000-\u001f\u007f]/.test(value)) return null;
-  try {
-    const url = new URL(value);
-    const portal = url.pathname.startsWith("/portal/") && url.pathname.length > "/portal/".length;
-    const shortLink = /^\/t\/scs-v1-[a-fA-F0-9]{96}$/.test(url.pathname);
-    if (url.protocol !== "https:" || url.hostname !== "connect.intuit.com" || url.username || url.password || url.port || url.hash
-      || (!portal && !shortLink) || url.href !== value) return null;
-    if (shortLink) {
-      const locales = url.searchParams.getAll("locale");
-      if (locales.length > 1 || (locales.length === 1 && !/^[a-zA-Z]{2}_[a-zA-Z]{2}$/.test(locales[0]))) return null;
-      // The invoice token identifies the payment page. Do not forward provider
-      // action/tracking or redirect parameters to the customer's browser.
-      return `${url.origin}${url.pathname}${locales.length ? `?locale=${locales[0]}` : ""}`;
-    }
-    return value;
-  } catch { return null; }
-}
 
 export function normalizeCheckoutConfiguration(value: unknown): CheckoutConfiguration {
   if (!object(value) || value.available !== true || !["sandbox", "production"].includes(String(value.environment))
