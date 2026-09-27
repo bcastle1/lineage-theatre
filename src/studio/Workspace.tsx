@@ -52,6 +52,7 @@ export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
   story: boolean;
   production: boolean;
+  generationAttempt?: boolean;
   billing: boolean;
   pricing?: {
     currency: "USD";
@@ -884,7 +885,7 @@ export default function Workspace({
               <LibraryArtwork side="left" />
               <div className="library-workspace">
               <div className="library-media-link"><p>Looking for your photos, documents, recordings, and original film sources?</p><button className="button secondary small" disabled={libraryBusy} onClick={openMediaLibrary}>Open media library</button></div>
-              <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} onCreate={create} onOpenDraft={openLibraryDraft}
+              <FilmLibrary projects={projects} disabled={!!busy || archiveUploadBusy} productionAvailable={caps?.production} generationAttemptAllowed={caps?.generationAttempt === true} onCreate={create} onOpenDraft={openLibraryDraft}
                 onLocalAction={organizeLocalDraft} onBusyChange={setLibraryActionBusy} onCreateVersion={createLibraryVersion} />
               {localLegacy && (
                 <div className="legacy-box">

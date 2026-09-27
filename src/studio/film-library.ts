@@ -26,8 +26,26 @@ const productionStates = ["prepared", "queued", "submitting", "processing", "unc
 const paymentStates = ["submitting", "awaiting-payment", "captured", "declined", "uncertain", "refund-pending", "partially-refunded", "refunded"];
 const invalid = () => new Error("Your saved film information could not be verified. Refresh the library before continuing.");
 export const libraryKey = (entry: Pick<LibraryEntry, "kind" | "id">) => `${entry.kind}:${entry.id}`;
+export function libraryFilmLink(preparedId: string): string {
+  if (!uuid(preparedId)) throw invalid();
+  return `#library?film=${preparedId}`;
+}
+export function parseLibraryFilmLink(hash: string): { kind: "plan"; id: string } | null {
+  const match = /^#library\?film=([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/.exec(hash);
+  return match ? { kind: "plan", id: match[1] } : null;
+}
 export function libraryMediaUrl(entry: Pick<LibraryEntry, "kind" | "id">, download = false): string {
   return `/api/${entry.kind === "plan" ? "studio?action=productionMedia" : "archive?action=media"}&id=${encodeURIComponent(entry.id)}${download ? "&download=1" : ""}`;
+}
+export function libraryCanWatch(entry: LibraryEntry): boolean {
+  return entry.production.mediaReady && ["completed", "uploaded"].includes(entry.production.status)
+    && entry.mediaUrl === libraryMediaUrl(entry) && entry.downloadUrl === libraryMediaUrl(entry, true);
+}
+export function libraryGenerationOrder(entry: LibraryEntry): LibraryPayment | null {
+  if (entry.kind !== "plan" || !entry.manifestHash || libraryCanWatch(entry)) return null;
+  const paid = entry.payments.filter(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
+    && payment.refundedCents === 0 && payment.receiptAvailable);
+  return paid.length === 1 ? paid[0] : null;
 }
 export function normalizeLibraryEntry(value: unknown): LibraryEntry {
   if (!object(value) || !["plan", "upload"].includes(String(value.kind)) || !uuid(value.id)
@@ -115,6 +133,19 @@ export async function verifyLibraryDetail(value: unknown, expected: LibraryEntry
   }
   return { entry, scenes, ...(sourceNames ? { sourceNames } : {}), manifest: wrapper.manifest };
 }
+// A link identifies the immutable saved plan, never a browser draft or the first
+// result in a page. The authenticated detail endpoint remains the access check.
+export async function verifyLibraryLinkedDetail(value: unknown, preparedId: string): Promise<LibraryDetail> {
+  if (!uuid(preparedId) || !object(value)) throw invalid();
+  const entry = normalizeLibraryEntry(value.entry);
+  if (entry.kind !== "plan" || entry.id !== preparedId) throw invalid();
+  return verifyLibraryDetail(value, entry);
+}
+export async function loadLibraryLinkedFilm(hash: string, request: (path: string) => Promise<unknown>): Promise<LibraryDetail> {
+  const target = parseLibraryFilmLink(hash);
+  if (!target) throw invalid();
+  return verifyLibraryLinkedDetail(await request(`/api/library?action=detail&kind=plan&id=${encodeURIComponent(target.id)}`), target.id);
+}
 export function paymentLabel(payment: LibraryPayment): string {
   if (payment.requiresReview) return "Payment needs review";
   const labels: Record<string, string> = { captured: "Paid", "awaiting-payment": "Payment pending", submitting: "Payment pending",
@@ -122,8 +153,8 @@ export function paymentLabel(payment: LibraryPayment): string {
   return labels[payment.status] || "Payment status unavailable";
 }
 export function productionLabel(entry: LibraryEntry): string {
-  if (entry.production.mediaReady) return "Ready to watch";
-  const labels: Record<string, string> = { prepared: "Prepared", queued: "Queued", submitting: "Starting", processing: "Rendering",
+  if (libraryCanWatch(entry)) return "Ready to watch";
+  const labels: Record<string, string> = { prepared: "Not started", queued: "Queued", submitting: "Starting", processing: "Rendering",
     uncertain: "Status needs review", failed: "Failed", completed: "Delivery pending", uploaded: "Delivery pending" };
   return labels[entry.production.status] || "Status unavailable";
 }

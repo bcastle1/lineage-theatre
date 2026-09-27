@@ -1049,7 +1049,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

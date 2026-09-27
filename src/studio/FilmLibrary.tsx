@@ -1,13 +1,42 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryKey, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
-  paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
+import { libraryActionRequest, libraryCanWatch, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+  parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
 import "./film-library.css";
+import { generationTimeEstimate } from "./film-fulfillment";
+import FilmGenerationStatus from "./FilmGenerationStatus";
+import FilmProductionProgress from "./FilmProductionProgress";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "The film library could not complete this action. Please refresh.";
+export function LibraryGenerationStatus({ entry, allowed }: { entry: LibraryEntry; allowed: boolean }) {
+  const order = allowed ? libraryGenerationOrder(entry) : null;
+  if (!order || !entry.manifestHash) return null;
+  return <FilmGenerationStatus key={`${entry.id}:${order.id}`} preparedId={entry.id} manifestHash={entry.manifestHash} filmId={entry.filmId} orderId={order.id} allowed={allowed} />;
+}
+export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
+  const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
+    && payment.refundedCents === 0 && payment.receiptAvailable);
+  const attemptAllowed = generationAttemptAllowed === true && Boolean(libraryGenerationOrder(entry));
+  return <div className="film-library-progress">
+    <div className="film-library-statuses"><div><span>Payment</span>{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
+      {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
+    </strong>) : <strong>{entry.origin === "magiclight-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
+      <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : attemptAllowed && entry.production.status === "prepared" ? "See generation status" : productionLabel(entry)}</strong></div></div>
+    {libraryCanWatch(entry) ? <p>Your video is complete and ready to watch or download below.</p> : <>
+      {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
+      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. " : ""}Your production plan is saved. Your video has not been created yet.</p>}
+      {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete. Your video is not ready yet.</p>}
+      {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
+      {paid && entry.kind === "plan" && productionAvailable === false && !attemptAllowed && entry.production.status === "prepared" && <p className="feedback info">Film creation is currently unavailable. Your payment and saved version are safe. You do not need to pay again. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with this paid film</a>.</p>}
+    </>}
+    {entry.kind === "plan" && !attemptAllowed && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} status={entry.production.status}
+      completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} />}
+    {entry.kind === "plan" && !attemptAllowed && <p className="field-note">Estimated time remaining: {generationTimeEstimate(libraryCanWatch(entry), productionAvailable)}</p>}
+  </div>;
+}
 function downloadPlan(detail: LibraryDetail) {
   if (!detail.manifest) return;
   const url = URL.createObjectURL(new Blob([JSON.stringify({ id: detail.entry.id, manifestHash: detail.entry.manifestHash, manifest: detail.manifest }, null, 2)], { type: "application/json" }));
@@ -31,8 +60,10 @@ export function SavedPlanVersionAction({ detail, disabled, onCreateVersion }: {
     </button>
   </div>;
 }
-export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft, onLocalAction, onBusyChange, onCreateVersion }: {
+export default function FilmLibrary({ projects, disabled, productionAvailable, generationAttemptAllowed, onCreate, onOpenDraft, onLocalAction, onBusyChange, onCreateVersion }: {
   projects: Film[]; disabled: boolean; onCreate: () => void; onOpenDraft: (id: string) => void;
+  productionAvailable?: boolean;
+  generationAttemptAllowed?: boolean;
   onLocalAction: (id: string, action: LibraryAction) => void;
   onBusyChange: (busy: boolean) => void;
   onCreateVersion: (entry: LibraryEntry) => Promise<void>;
@@ -46,12 +77,20 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
   const [message, setMessage] = useState("");
   const [reload, setReload] = useState(0);
   const [detail, setDetail] = useState<LibraryDetail | null>(null);
+  const [libraryHash, setLibraryHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
   const [playing, setPlaying] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const detailPanel = useRef<HTMLElement>(null);
   const dialog = useRef<HTMLDialogElement>(null), lock = useRef(false), mounted = useRef(false), sequence = useRef(0);
+  const detailSequence = useRef(0);
   const pageCursors = useRef(new Set<string>());
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
+  const linkedFilm = parseLibraryFilmLink(libraryHash)?.id;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; detailSequence.current++; }; }, []);
+  useEffect(() => {
+    const changed = () => setLibraryHash(window.location.hash);
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
   useEffect(() => { onBusyChange(Boolean(busy)); }, [busy, onBusyChange]);
   useEffect(() => () => onBusyChange(false), [onBusyChange]);
   useEffect(() => {
@@ -73,6 +112,21 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
       .finally(() => { if (request === sequence.current) setLoading(false); });
   }, [view, reload]);
   useEffect(() => {
+    const request = ++detailSequence.current;
+    if (!linkedFilm) {
+      lock.current = false; setDetail(null); setPlaying(""); setBusy("");
+      if (libraryHash.startsWith("#library?")) setError("This film link is invalid. Choose a saved film from your library.");
+      return;
+    }
+    let cancelled = false;
+    lock.current = true; setBusy("Opening your film status…"); setError(""); setDetail(null); setPlaying("");
+    void loadLibraryLinkedFilm(libraryHash, api)
+      .then(value => { if (!cancelled && request === detailSequence.current) setDetail(value); })
+      .catch(() => { if (!cancelled && request === detailSequence.current) setError("This saved film could not be opened. It may be unavailable or belong to another account. Sign in to the account that purchased it, or refresh to try again."); })
+      .finally(() => { if (!cancelled && request === detailSequence.current) { lock.current = false; setBusy(""); } });
+    return () => { cancelled = true; lock.current = false; };
+  }, [linkedFilm, libraryHash, reload]);
+  useEffect(() => {
     if (disabled || busy || loading || playing || detail || confirmation) return;
     const timer = setInterval(() => { if (document.visibilityState === "visible") setReload(value => value + 1); }, 60_000);
     return () => clearInterval(timer);
@@ -82,7 +136,28 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
   }, [confirmation]);
   useEffect(() => {
     if (detail) { detailPanel.current?.focus({ preventScroll: true }); detailPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }
-  }, [detail]);
+  }, [detail?.entry.kind, detail?.entry.id]);
+  useEffect(() => {
+    if (!detail || disabled || busy || playing || confirmation) return;
+    let cancelled = false, checking = false;
+    const expected = detail.entry;
+    const refresh = async () => {
+      if (document.visibilityState !== "visible" || checking || lock.current) return;
+      checking = true;
+      try {
+        const value = await verifyLibraryDetail(await api<unknown>(`/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
+        if (!cancelled) {
+          setDetail(value);
+          setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
+        }
+      } catch { if (!cancelled) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); }
+      finally { checking = false; }
+    };
+    const timer = setInterval(() => void refresh(), 30_000);
+    const onReturn = () => void refresh();
+    window.addEventListener("focus", onReturn); document.addEventListener("visibilitychange", onReturn);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("focus", onReturn); document.removeEventListener("visibilitychange", onReturn); };
+  }, [detail, disabled, busy, playing, confirmation]);
   async function loadMore() {
     if (!cursor || lock.current || loading || disabled) return;
     const next = cursor, request = sequence.current;
@@ -98,14 +173,14 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
   }
   async function openDetail(entry: LibraryEntry) {
     if (lock.current || disabled) return;
-    const request = sequence.current;
+    const request = ++detailSequence.current;
     lock.current = true; setBusy("Opening your saved version…"); setError("");
     try {
       const value = await api<unknown>(`/api/library?action=detail&kind=${entry.kind}&id=${encodeURIComponent(entry.id)}`);
       const verified = await verifyLibraryDetail(value, entry);
-      if (request === sequence.current) { setDetail(verified); setPlaying(""); }
-    } catch (cause) { if (mounted.current) setError(errorText(cause)); }
-    finally { lock.current = false; if (mounted.current) setBusy(""); }
+      if (mounted.current && request === detailSequence.current) { setDetail(verified); setPlaying(""); }
+    } catch (cause) { if (mounted.current && request === detailSequence.current) setError(errorText(cause)); }
+    finally { if (mounted.current && request === detailSequence.current) { lock.current = false; setBusy(""); } }
   }
   async function confirmAction() {
     if (!confirmation || lock.current || disabled) return;
@@ -136,7 +211,11 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
   const drafts = projects.filter(project => localLibraryState(project) === view);
   const closeConfirmation = () => { if (!busy) { dialog.current?.close(); setConfirmation(null); } };
   const openConfirmation = (value: Confirmation) => { if (!blocked) { setError(""); setConfirmation(value); } };
-  const savedVersionTitle = detail?.entry.payments.some(payment => payment.status === "captured" && !payment.sandbox) ? "Saved paid version" : "Saved film version";
+  const closeDetail = () => {
+    detailSequence.current++;
+    setDetail(null); setPlaying("");
+    if (linkedFilm) { window.history.replaceState(null, "", "#library"); setLibraryHash("#library"); }
+  };
   return <div className="film-library">
     <div className="page-heading"><div><h1>Your film library</h1><p>Your saved films, production progress, and drafts in one place.</p></div>
       <button type="button" className="button primary" disabled={blocked} onClick={onCreate}><Plus size={17} aria-hidden="true" />Create film</button>
@@ -144,7 +223,7 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
     <div className="film-library-toolbar">
       <nav aria-label="Film library views">{(["active", "archived", "trash"] as LibraryView[]).map(item => <button type="button" key={item}
         className={`button small ${view === item ? "primary" : "secondary"}`} aria-current={view === item ? "page" : undefined}
-        disabled={blocked} onClick={() => { setView(item); setMessage(""); }}>{item === "active" ? "My films" : item === "archived" ? "Archived" : "Trash"}</button>)}</nav>
+        disabled={blocked} onClick={() => { closeDetail(); setView(item); setMessage(""); }}>{item === "active" ? "My films" : item === "archived" ? "Archived" : "Trash"}</button>)}</nav>
       <button type="button" className="text-button" disabled={blocked || loading} onClick={() => setReload(value => value + 1)}><RefreshCw size={15} aria-hidden="true" />Refresh films</button>
     </div>
     {message && <p className="feedback success" role="status">{message}</p>}
@@ -162,16 +241,10 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
           <div className="library-art"><FilmIcon size={27} strokeWidth={1.2} aria-hidden="true" /></div>
           <div className="film-library-content"><h3 id={`film-${entry.kind}-${entry.id}`}>{entry.title || "Untitled family film"}</h3>
             <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · {entry.origin === "magiclight-delivery" ? "Delivered from MagicLight" : "Saved"} {new Date(entry.createdAt).toLocaleString()}</p>
-            <div className="film-library-statuses"><div><span>Payment</span>{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
-              {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
-            </strong>) : <strong>{entry.origin === "magiclight-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
-              <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : productionLabel(entry)}</strong></div></div>
-            {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
-            {entry.production.status === "prepared" && entry.kind === "plan" && <p>Your plan is saved. Rendering has not started.</p>}
-            {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete.</p>}
+            <LibraryFilmStatus entry={entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
             <div className="action-group film-library-actions">
-              <button type="button" className="button secondary small" disabled={blocked} onClick={() => void openDetail(entry)}>{entry.kind === "plan" ? "View saved plan" : "View film details"}</button>
-              {entry.production.mediaReady && entry.mediaUrl && entry.downloadUrl && <>
+              <button type="button" className="button secondary small" disabled={blocked} onClick={() => void openDetail(entry)}>View film status</button>
+              {libraryCanWatch(entry) && <>
                 <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(isPlaying ? "" : key)}>{isPlaying ? "Close player" : "Watch film"}</button>
                 <a className="text-button" href={entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
               </>}
@@ -180,7 +253,7 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
               {view !== "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
               {view !== "trash" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
             </div>
-            {isPlaying && entry.mediaUrl && <video controls playsInline preload="metadata" src={entry.mediaUrl} aria-label={`${entry.title || "Family film"} player`}
+            {isPlaying && libraryCanWatch(entry) && <video controls playsInline preload="metadata" src={entry.mediaUrl} aria-label={`${entry.title || "Family film"} player`}
               onError={() => setError("This film could not be played. Refresh its status or try the download.")} />}
           </div>
         </article>;
@@ -188,9 +261,21 @@ export default function FilmLibrary({ projects, disabled, onCreate, onOpenDraft,
       {cursor && <button type="button" className="button secondary film-library-more" disabled={blocked || loading} onClick={() => void loadMore()}>Load more saved films</button>}
     </section>
     {detail && <section ref={detailPanel} tabIndex={-1} className="panel film-library-detail" aria-labelledby="saved-film-detail-heading">
-      <div className="section-title"><div><h2 id="saved-film-detail-heading">{savedVersionTitle}: {detail.entry.title || "Untitled family film"}</h2>
-        <p>{formatDuration(detail.entry.durationSeconds)} target · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
-        <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={() => setDetail(null)}><X size={18} /></button></div>
+      <div className="section-title"><div><h2 id="saved-film-detail-heading">Film status: {detail.entry.title || "Untitled family film"}</h2>
+        <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
+        <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={closeDetail}><X size={18} /></button></div>
+      <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
+      <LibraryGenerationStatus entry={detail.entry} allowed={generationAttemptAllowed === true} />
+      <div className="action-group film-library-actions">
+        {libraryCanWatch(detail.entry) && <>
+          <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
+          <a className="text-button" href={detail.entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
+        </>}
+        <button type="button" className="text-button" disabled={blocked} onClick={() => void openDetail(detail.entry)}><RefreshCw size={15} aria-hidden="true" />Refresh film status</button>
+      </div>
+      {playing === `detail:${libraryKey(detail.entry)}` && libraryCanWatch(detail.entry) && <video controls playsInline preload="metadata" src={detail.entry.mediaUrl} aria-label={`${detail.entry.title || "Family film"} player`}
+        onError={() => setError("This film could not be played. Refresh its status or try the download.")} />}
+      <p className="field-note">Payment and production status are checked when you return here and while this page is open. A watch link appears only when your video is ready.</p>
       <p className="field-note">This saved version is separate from any edits in your browser draft.</p>
       {detail.scenes?.map((scene, index) => <article className="film-library-scene" key={index}><h3>{index + 1}. {scene.title || "Scene"}</h3>
         {scene.narration && <p><strong>Narration:</strong> {scene.narration}</p>}{scene.visual && <p><strong>Visual:</strong> {scene.visual}</p>}{scene.dialogue && <p><strong>Dialogue:</strong> {scene.dialogue}</p>}</article>)}
