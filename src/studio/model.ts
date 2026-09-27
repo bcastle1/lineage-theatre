@@ -181,6 +181,22 @@ export const newFilm = (): Film => ({
   updatedAt: new Date().toISOString(),
   music: true,
 });
+
+// A separate purchase starts with a new identity and the current story only.
+// Keep source IDs so existing browser uploads and screenplay references work.
+export function createCheckoutDraft(film: Film): Film {
+  return {
+    ...newFilm(),
+    ...structuredClone({
+      title: film.title, ancestor: film.ancestor, script: film.script, era: film.era,
+      style: film.style, duration: film.duration, factuality: film.factuality, music: film.music,
+      sources: film.sources, themes: film.themes, selectedThemes: film.selectedThemes,
+      characters: film.characters, assumptions: film.assumptions, logline: film.logline,
+      generatedBy: film.generatedBy, sourceCoverage: film.sourceCoverage,
+      scenes: film.scenes.map(({ shot: _shot, ...scene }) => scene),
+    }),
+  };
+}
 export function productionStatusMessage(status: Shot["status"]): string {
   switch (status) {
     case "submitting":
