@@ -6,6 +6,7 @@ import {createQuickBooksAccountingTransport} from "./quickbooks.mjs";
 import {PaymentError} from "./payments.mjs";
 import {productionJobPath} from "./film-production.mjs";
 import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
+import {normalizeHostedInvoiceUrl as safeLink} from "../../src/studio/hosted-invoice-url.mjs";
 
 export class HostedCheckoutError extends PaymentError {}
 export const HOSTED_CHECKOUT_SETTINGS_PATH="settings/quickbooks-hosted.json";
@@ -40,20 +41,6 @@ function term(value) {if(typeof value!=="string"||value.length>10_000||/[<>\x00-
 function complete(s) {return Boolean(s&&s.enabled===true&&Number.isSafeInteger(s.revision)&&s.revision>0&&numeric.test(s.serviceItemId||"")&&s.taxCode==="NON"
   &&typeof s.deliveryTerms==="string"&&s.deliveryTerms.trim().length>0&&typeof s.refundTerms==="string"&&s.refundTerms.trim().length>0
   &&s.merchantConfirmed===true&&s.pciAcknowledged===true&&s.automaticInvoiceEmailDisabled===true&&bound(s.merchantBinding));}
-function safeLink(value) {
-  if(typeof value!=="string"||value.length>4096||!value.startsWith("https://connect.intuit.com/")||/[\s\\#\x00-\x1f\x7f]/.test(value))return null;
-  try {
-    const u=new URL(value);
-    if(u.protocol!=="https:"||u.hostname!=="connect.intuit.com"||u.port||u.username||u.password||u.hash||u.href!==value)return null;
-    if(u.pathname.startsWith("/portal/")&&u.pathname.length>8)return value;
-    if(!/^\/t\/scs-v1-[a-fA-F0-9]{96}$/.test(u.pathname))return null;
-    const locales=u.searchParams.getAll("locale");
-    if(locales.length>1||(locales.length===1&&!/^[a-zA-Z]{2}_[a-zA-Z]{2}$/.test(locales[0])))return null;
-    // Query action/tracking values cannot change the payment destination. Keep
-    // only the validated locale on the provider's verified invoice identity.
-    return `https://connect.intuit.com${u.pathname}${locales.length?`?locale=${locales[0]}`:""}`;
-  }catch{return null;}
-}
 const checkStages=["binding","invoice-read","invoice-validation","payment-read","payment-validation","actor-recheck","binding-recheck","complete"];
 const checkReasons=new Set(["CONNECTION_BINDING_FAILED","INVOICE_READ_FAILED","INVOICE_VALIDATION_FAILED","PAYMENT_READ_FAILED","PAYMENT_VALIDATION_FAILED","ACTOR_RECHECK_FAILED","BINDING_RECHECK_FAILED","CHECK_FAILED",
   "INVOICE_ID_INVALID","INVOICE_ID_MISMATCH","INVOICE_CUSTOMER_MISMATCH","INVOICE_CURRENCY_MISMATCH","INVOICE_EMAIL_MISMATCH","INVOICE_TOTAL_MISMATCH","INVOICE_BALANCE_INVALID",
