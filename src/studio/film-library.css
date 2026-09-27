@@ -37,7 +37,9 @@
 .film-library-statuses { display: flex; gap: 30px; flex-wrap: wrap; margin: 16px 0 10px; }
 .film-library-statuses > div { display: grid; gap: 5px; }
 .film-library-statuses span { font-size: 11px; color: var(--muted); }
-.film-library-statuses strong { font-size: 12px; color: var(--forest); }
+.film-library-statuses strong { font-size: 13px; color: var(--forest); font-weight: 400; }
+.film-library-progress > p { margin-top: 10px; line-height: 1.6; }
+.film-library-detail:focus { outline: 2px solid var(--forest); outline-offset: 5px; }
 .film-library-actions { margin-top: 15px; flex-wrap: wrap; gap: 13px; }
 .film-library video { width: 100%; max-height: 540px; margin-top: 20px; border-radius: 8px; background: #17241d; }
 .film-library-empty { padding: 25px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }

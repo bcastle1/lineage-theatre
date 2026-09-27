@@ -1,0 +1,5 @@
+.film-production-progress { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.film-production-progress-heading { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 10px; font-size: 14px; }
+.film-production-progress progress { display: block; width: 100%; height: 12px; accent-color: var(--forest); }
+.film-production-progress > p { margin: 10px 0 0; line-height: 1.6; }
+.film-production-progress .field-note { font-size: 12px; }

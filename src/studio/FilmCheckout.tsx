@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CreditCard, Download, ExternalLink, Loader2, RefreshCw, ShieldCheck } from "lucide-react";
+import { CreditCard, Download, ExternalLink, Loader2, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference, type PreparedProduction } from "./model";
 import {prepareFilmPrice,type FilmPrice} from "./film-pricing";
 import { canStartFilmProduction, normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
@@ -9,14 +9,18 @@ import { captchaToken } from "../lib/captcha";
 import { reservePaymentWindow } from "./payment-window";
 import CaptchaNotice from "../CaptchaNotice";
 import { loadPaidFilmPlan, paidFilmStartRequest, paidOrderMatches, paidPlanMatches, type PaidFilmPlan } from "./paid-film-plan";
+import { startPaymentStatusSync } from "./payment-status-sync";
+import { filmFulfillmentProgress, filmReadyToWatch, generationTimeEstimate, type ProductionStatus } from "./film-fulfillment";
+import { libraryFilmLink, normalizeLibraryEntry, type LibraryEntry } from "./film-library";
+import FilmGenerationStatus from "./FilmGenerationStatus";
+import FilmProductionProgress from "./FilmProductionProgress";
+import { generationStatusLabel, type GenerationAttempt } from "./generation-attempt";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
 
-type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
-
-export default function FilmCheckout({ film, productionAvailable, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
-  film: Film; productionAvailable: boolean;
+export default function FilmCheckout({ film, productionAvailable, generationAttemptAllowed = false, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
+  film: Film; productionAvailable: boolean; generationAttemptAllowed?: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
   onNewFilmCheckout: () => void;
   onPrepared: (prepared: PreparedProduction) => void;
@@ -30,6 +34,8 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
   const [preparationConsent, setPreparationConsent] = useState(false);
   const [savedOrder, setOrder] = useState<FilmOrder | null>(null);
   const [productionStatus, setProduction] = useState<ProductionStatus | null>(null);
+  const [delivery, setDelivery] = useState<LibraryEntry | null>(null);
+  const [generationAttempt, setGenerationAttempt] = useState<GenerationAttempt | null>(null);
   const [paidPlan, setPaidPlan] = useState<PaidFilmPlan | null>(null);
   const [inputHash, setInputHash] = useState("");
   const [consent, setConsent] = useState(false);
@@ -53,6 +59,11 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
   const hostedOrder = order?.checkoutMethod === "quickbooks-hosted-invoice";
   const paidPlanReviewed = paidPlanMatches(paidPlan, paymentReference, order, film.id);
   const canStartProduction = canStartFilmProduction(order, productionAvailable, paidPlanReviewed);
+  const readyToWatch = filmReadyToWatch(delivery, paymentReference, film.id);
+  const progress = filmFulfillmentProgress(order, production, productionAvailable, readyToWatch);
+  const trialAllowed = generationAttemptAllowed && progress.paid && order?.sandbox === false && !progress.ready;
+  const currentAttempt = generationAttempt?.preparedId === paymentReference?.preparedId && generationAttempt?.orderId === paymentReference?.orderId ? generationAttempt : null;
+  const filmStatusLink = paymentReference ? libraryFilmLink(paymentReference.preparedId) : "#library";
   const reviewContext = JSON.stringify([film.id, paymentReference?.orderId, paymentReference?.quoteId, paymentReference?.preparedId, paymentReference?.manifestHash, paymentReference?.sandbox]);
   const latestReviewContext = useRef(reviewContext);
   latestReviewContext.current = reviewContext;
@@ -91,6 +102,23 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     return () => { active = false; };
   }, [payment?.orderId, payment?.quoteId, payment?.preparedId, payment?.sandbox, film.id]);
   useEffect(() => {
+    if (!paymentReference || order?.status !== "awaiting-payment") return;
+    const reference = paymentReference, expectedContext = reviewContext;
+    const sync = startPaymentStatusSync({
+      check: () => checkFilmPayment(api, reference, order),
+      isActive: () => document.visibilityState === "visible" && !lock.current,
+      onOrder: result => {
+        if (!mounted.current || latestReviewContext.current !== expectedContext) return;
+        setOrder(result);
+        if (result.status === "captured") setMessage("Payment received. Your film's production status is shown below.");
+      },
+    });
+    const refresh = () => { if (document.visibilityState === "visible") sync.refresh(); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { sync.stop(); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [reviewContext, order?.status, order?.amountCents]);
+  useEffect(() => {
     if (!paymentReference || !order?.receiptAvailable) return;
     const reference = paymentReference;
     let active = true, timer: ReturnType<typeof setTimeout> | undefined;
@@ -107,6 +135,17 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
     void refresh();
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, production?.status === "queued"]);
+  useEffect(() => {
+    setDelivery(null);
+    if (!paymentReference || order?.status !== "captured" || production?.status !== "completed") return;
+    const reference = paymentReference;
+    let active = true;
+    void api<{ entry: unknown }>(`/api/library?action=detail&kind=plan&id=${encodeURIComponent(reference.preparedId)}`).then(value => {
+      const entry = normalizeLibraryEntry(value.entry);
+      if (active && filmReadyToWatch(entry, reference, film.id)) setDelivery(entry);
+    }).catch(() => { /* The status link offers a fresh authorized delivery check. */ });
+    return () => { active = false; };
+  }, [reviewContext, order?.status, production]);
 
   async function work(label: string, operation: () => Promise<void>, expectedContext?: string) {
     if (lock.current) return;
@@ -271,12 +310,6 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
   }
 
   return <section className="readiness-panel film-checkout" aria-label="Film payment and production">
-    {order?.status === "captured" && <div className="film-price-review" aria-label="Separate film checkout">
-      <h3>Buying a new film?</h3>
-      <p>The payment below covers the saved version of {order.filmTitle}. To buy “{film.title || "your current draft"}” as a separate film, keep its current story and prepare a new price.</p>
-      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length} onClick={onNewFilmCheckout}>Price this draft as a new film</button>
-      <p className="field-note">Your earlier film and payment stay saved. This does not charge you or start production. To continue the film you already paid for, use its controls below.</p>
-    </div>}
     <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Your film price and payment"}</h3>
     {!paymentReference && <>
       <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
@@ -313,24 +346,37 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
       </>}
     </div>}
     {paymentReference && <div className="film-order-status" role="status">
-      <h4>{order?.status === "captured" ? order.sandbox ? "Test payment recorded" : "Payment received" : order?.sandbox ? "Test payment status" : "Payment status"}</h4>
+      <ol className="film-fulfillment-steps" aria-label="Payment and film progress">
+        <li data-complete={progress.paid}><span>1. Payment</span><h4>{progress.payment}</h4></li>
+        <li data-complete={progress.ready}><span>2. Film creation</span><h4>{currentAttempt && !progress.ready ? generationStatusLabel(currentAttempt) : progress.production}</h4></li>
+        <li data-complete={progress.ready}><span>3. Watch & download</span><h4>{progress.watch}</h4></li>
+      </ol>
+      {!trialAllowed && <FilmProductionProgress paid={progress.paid} ready={progress.ready} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} />}
       {order && <p>{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
       {order?.status !== "captured" && <p>{order ? paymentStatusMessage(order) : "A payment request has been recorded. Check its result before taking any further action."}</p>}
+      {order?.status === "awaiting-payment" && <p className="field-note">We check your payment automatically when you return from QuickBooks. You can also check its status below.</p>}
+      <div className="action-group">
+        <a className={`button ${progress.ready ? "primary" : "secondary"} small`} href={filmStatusLink}>{progress.ready ? <Play size={16} /> : <ExternalLink size={16} />}{progress.ready ? "Watch film" : "View film status"}</a>
+        {progress.ready && delivery?.downloadUrl && <a className="button secondary small" href={delivery.downloadUrl} download><Download size={16} />Download film</a>}
+      </div>
+      <p className="field-note">Your film stays in your Film library. When the finished video is ready, you can watch and download it there.</p>
+      {!trialAllowed && <p className="field-note">Generation time estimate: {generationTimeEstimate(progress.ready, productionAvailable)}</p>}
       {order?.status === "captured" && order.requiresReview && <p className="feedback">{paymentStatusMessage(order)}</p>}
       {order?.status === "captured" && order.refundedCents > 0 && <p className="feedback">A refund is recorded for this order. Production cannot start; contact the administrator to review this payment.</p>}
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
-        <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
-          : "Your paid version is saved. Review it below to see the film covered by this payment."}</p>
+        {!currentAttempt && <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
+          : "Your paid version is saved. Review it below to see the film covered by this payment."}</p>}
+        {paymentReference && trialAllowed && <FilmGenerationStatus allowed preparedId={paymentReference.preparedId} manifestHash={paymentReference.manifestHash} filmId={film.id} orderId={paymentReference.orderId} onStatus={setGenerationAttempt} />}
         {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
-        {!productionAvailable && !production?.mediaReady && <p className="feedback">{production && !production.preparationOnly
+        {!productionAvailable && !trialAllowed && !progress.ready && <p className="feedback">{production && !production.preparationOnly
           ? "Starting or resuming film creation is currently unavailable. The production status above remains saved. Contact the administrator for help; you do not need to pay again."
           : "Film creation is not available yet. Your payment and paid version are saved. You do not need to pay again. Contact the administrator for help or a refund."}</p>}
         <p className="field-note">This order covers the saved paid version. Later draft edits are not included; your current draft stays unchanged.</p>
         <div className="action-group">
           <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void reviewPaidPlan()}>{paidPlanReviewed ? "Refresh paid version" : "Review paid version"}</button>
           <button className="text-button" disabled={Boolean(busy)} onClick={() => void productionRequest(false)}><RefreshCw size={15} />Check production status</button>
-          {!productionAvailable && !production?.mediaReady && <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Get help with this paid film</a>}
+          {!productionAvailable && !progress.ready && <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Get help with this paid film</a>}
         </div>
         {paidPlanReviewed && paidPlan && <div className="film-price-review" aria-label="Saved paid version">
           <h4>{paidPlan.title}</h4>
@@ -346,9 +392,8 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
             {(!production || production.preparationOnly || (production.needsAttention && production.status !== "failed")) && <button className="button primary small" disabled={Boolean(busy) || !canStartProduction} onClick={() => void productionRequest(true)}><ShieldCheck size={15} />{production?.needsAttention ? "Resume paid version" : "Start paid version"}</button>}
           </div>
         </div>}
-        {production?.status === "completed" && production.mediaReady && <div className="finished-production">
-          <video controls preload="metadata" aria-label="Your finished film" src={`/api/studio?action=productionMedia&id=${encodeURIComponent(production.id)}`} />
-          <a className="button secondary small" href={`/api/studio?action=productionMedia&id=${encodeURIComponent(production.id)}&download=1`} download><Download size={15} />Download finished film</a>
+        {progress.ready && delivery && <div className="finished-production">
+          <video controls preload="metadata" aria-label="Your finished film" src={delivery.mediaUrl} />
         </div>}
       </div>}
       <details open={order?.status !== "captured"}>
@@ -367,6 +412,12 @@ export default function FilmCheckout({ film, productionAvailable, persistPayment
           <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Contact the administrator</a>
         </div>
       </details>
+      {order?.status === "captured" && inputHash && !currentPlan && <details className="film-price-review" aria-label="Separate film checkout">
+        <summary>Buy your edited draft as a separate film</summary>
+        <p>This payment covers the saved version of {order.filmTitle}. To buy “{film.title || "your current draft"}” as a separate film, prepare a new price.</p>
+        <button className="button secondary small" disabled={Boolean(busy) || !film.scenes.length} onClick={onNewFilmCheckout}>Price this draft as a new film</button>
+        <p className="field-note">Your earlier film and payment stay saved. This does not charge you or start production.</p>
+      </details>}
     </div>}
     {busy && <p role="status"><Loader2 className="spin" size={15} /> {busy}</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}

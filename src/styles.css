@@ -2264,6 +2264,12 @@ button {
 .film-checkout > .button { justify-self: start; }
 .film-price-review, .film-order-status, .film-paid-production { display: grid; gap: .9rem; }
 .film-price-review, .film-paid-production { border-top: 1px solid var(--line); padding-top: 1rem; }
+.film-fulfillment-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; list-style: none; margin: 0; padding: 0; }
+.film-fulfillment-steps li { padding: 1rem; border: 1px solid var(--line); border-radius: .65rem; background: var(--paper, #fff); }
+.film-fulfillment-steps li[data-complete="true"] { background: #e8f0e9; border-color: #9cad9f; }
+.film-fulfillment-steps span { display: block; font-size: .8rem; margin-bottom: .45rem; }
+.film-fulfillment-steps h4 { margin: 0; font-size: 1rem; font-weight: 400; }
+@media (max-width: 640px) { .film-fulfillment-steps { grid-template-columns: 1fr; } }
 .film-price-total { font-size: 1.8rem; color: var(--forest); }
 .film-price-total span { font-size: .8rem; color: var(--muted); }
 .film-card-form fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 1rem; display: grid; gap: .9rem; margin: 0; min-width: 0; }

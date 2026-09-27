@@ -9,6 +9,8 @@ import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 import { createProductionQueue } from "./_lib/production-queue.mjs";
 import { streamProductionMedia } from "./_lib/production-media.mjs";
+import { isOwner } from "./_lib/access.mjs";
+import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-generation.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -81,6 +83,7 @@ export function createStudioHandler(overrides={}) {
  // Production customer checkout uses Intuit-hosted invoices. Explicit legacy
  // service injection is retained for isolated tests, never an HTTP option.
  const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
+ const generation=overrides.paidFilmGeneration||paidFilmGeneration;
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
  const filmPricing=overrides.filmPricing||createFilmPricingService({filmProduction:dependencies.filmProduction,pricingSettings:dependencies.readPricingSettings});
  const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
@@ -90,7 +93,7 @@ export function createStudioHandler(overrides={}) {
   let storyRequest=false;
   try {
     const session=await getSession(req);
-    if(!session) return json(res,401,{message:"Sign in and set your password to use the studio."});
+    if(!session||session.user.mustChangePassword) return json(res,401,{message:"Sign in and set your password to use the studio."});
     const email=session.user.email;
     const url=new URL(req.url,`https://${req.headers.host}`);
     if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
@@ -98,8 +101,20 @@ export function createStudioHandler(overrides={}) {
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
-      if(action==="capabilities") return json(res,200,customerCapabilities(await connections({pricingSettings:await readPricingSettings(),filmService:filmProduction,
-        ...(hosted?{checkoutConfiguration:await hosted.configuration(session.user)}:{})})));
+      if(action==="capabilities") return json(res,200,{...customerCapabilities(await connections({pricingSettings:await readPricingSettings(),filmService:filmProduction,
+        ...(hosted?{checkoutConfiguration:await hosted.configuration(session.user)}:{})})),
+        ...(isOwner(session.user)&&generation.availableFor(session.user)===true?{generationAttempt:true}:{})});
+      if(action==="generationAttempt") {
+        if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
+        const preparedId=url.searchParams.get("id");
+        if([...url.searchParams.keys()].some(key=>!["action","id"].includes(key))
+          ||url.searchParams.getAll("action").length!==1||url.searchParams.getAll("id").length!==1
+          ||typeof preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(preparedId))
+          return json(res,400,{message:"Choose the saved film plan before checking its generation attempt."});
+        if(!(await limitAction(`film-generation-status:${email}`,240,3600_000)))
+          return json(res,429,{message:"Please wait before reading this generation attempt again."});
+        return json(res,200,await generation.status(session.user,{preparedId}));
+      }
       if(action==="checkoutConfiguration") return json(res,200,hosted?await hosted.configuration(session.user):await payments.checkoutConfiguration(session.user));
       if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id")}));
       if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
@@ -117,6 +132,19 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(["requestFilmGeneration","checkFilmGeneration"].includes(body?.action)) {
+      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
+      const starting=body.action==="requestFilmGeneration";
+      if(Object.keys(body).some(key=>!(starting?["action","preparedId","orderId","consent"]:["action","preparedId"]).includes(key))
+        ||typeof body.preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId)
+        ||(starting&&(typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId)||body.consent!==true)))
+        return json(res,400,{message:starting?"Choose the saved film plan and its payment, then confirm the generation attempt.":"Choose the saved film plan before checking its generation attempt."});
+      if(!(await limitAction(`film-generation-${starting?"start":"check"}:${email}`,starting?6:60,3600_000)))
+        return json(res,429,{message:"Please wait before requesting this generation action again."});
+      return json(res,starting?202:200,await (starting
+        ?generation.start(session.user,{preparedId:body.preparedId,orderId:body.orderId,consent:true})
+        :generation.check(session.user,{preparedId:body.preparedId})));
+    }
     if(body?.action==="price") {
       if(!(await limitAction(`price:${email}`,20,3600_000)))
         return json(res,429,{message:"Please wait before requesting another film price."});
@@ -186,6 +214,7 @@ export function createStudioHandler(overrides={}) {
     // A rejected proof says nothing about an earlier request for this order.
     if(e instanceof CaptchaError) return json(res,e.status,{code:e.code,message:e.message,charged:null});
     if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});
+    if(e instanceof PaidFilmGenerationError) return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof PaymentError) return json(res,e.status,{code:e.code,message:e.message,charged:e.charged});
     return json(res,503,{message:e instanceof Error&&customerValidationMessages.has(e.message)?e.message:storyRequest?storyUnavailable:"The studio could not complete this action. Your saved film is unchanged."});
   }

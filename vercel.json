@@ -42,9 +42,13 @@
     },
     "api/payment-reconcile.mjs": {
       "maxDuration": 180
+    },
+    "api/film-generation.mjs": {
+      "maxDuration": 180
     }
   },
   "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" },
+    { "path": "/api/film-generation", "schedule": "*/5 * * * *" },
     { "path": "/api/film-delivery", "schedule": "*/5 * * * *" },
     { "path": "/api/patrick-quickbooks", "schedule": "17 8 * * *" }]
 }
