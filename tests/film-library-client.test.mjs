@@ -197,7 +197,7 @@ test("generation status controls require capability and exactly one eligible rea
   assert.equal(LibraryGenerationStatus({ entry: { ...value, payments: [value.payments[0], { ...value.payments[0], id: "b".repeat(64) }] }, allowed: true }), null);
   const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: value, productionAvailable: false, generationAttemptAllowed: true }));
   assert.match(html, /See generation status/);
-  assert.match(html, /Your video has not been created yet/);
+  assert.match(html, /Open this film&#x27;s status to follow its generation and video review/);
   assert.doesNotMatch(html, /Film creation is currently unavailable|Estimated time remaining|Not started|Ready to watch/);
 });
 

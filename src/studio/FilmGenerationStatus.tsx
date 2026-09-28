@@ -64,7 +64,7 @@ export default function FilmGenerationStatus({ allowed, onStatus, onApproved, ..
     {current ? <>
       <p>Requested {new Date(current.submittedAt).toLocaleString()} · {elapsedMinutes} minutes elapsed.</p>
       <p>Generation time estimate: not available yet. This is an initial full-film attempt; completion timing has not been established.</p>
-      <p>{current.status === "verifying" ? "A video result was returned. It must pass duration, audio, and playback checks before Watch film is available."
+      <p>{current.status === "verifying" ? "A video result was returned. Watch film unlocks after its technical checks and content review are complete."
         : ["failed", "uncertain"].includes(current.status) ? "This saved request needs administrator review. No replacement generation is sent automatically. Your payment is recorded."
           : "Your saved screenplay has been submitted once. This page updates as the saved request progresses. You can return to this film in your library."}</p>
     </> : <>

@@ -11,3 +11,11 @@ Build the reviewed worker Docker image and run its offline runtime acceptance fi
 The timer waits one minute after each bounded pass and cannot overlap itself. Status counts contain no private media URLs or credentials. Inspect `systemctl status lineage-generation-delivery.timer lineage-generation-delivery.service` and the sanitized journal. Stop the timer and service before maintenance.
 
 An enabled request path is not evidence that MagicLight can return the requested full film. Progress percentages are labeled stage estimates until actual reported percentages exist. A completed, paid, verified video alone reaches 100%. A numerical time estimate remains unavailable until real generation timing is established.
+
+## Server acceptance: September 28, 2026 UTC
+
+Source revision `12672785e6532f182925745302cc5cad47f60980` was packaged using an explicit Git archive allowlist. The transferred archive SHA-256 was `88ca7a882ac0581f3df02e0ff79c315781ef1f7189aa7a27d5ab2a961714282c`; the host verified it before extraction. The image is `sha256:754ee96dd6c236b1202624a7a4e02c7aef1363dfb79ca05eb253fa9eb294e74c` at staging directory `/opt/lineage-worker/staging/paid-delivery-1267278`.
+
+All 25 delivery and review tests passed inside that image with networking disabled, no runtime credentials, an unprivileged user, a read-only filesystem, two CPUs, and 3 GiB memory. The actual FFmpeg test verified a complete H.264/AAC sample and rejected absent/short audio, wrong duration, and truncated media. The service and timer templates passed `systemd-analyze verify`.
+
+At this checkpoint the worker is staged, with no installed runtime credentials or activated service/timer. This acceptance proves the delivery code and media runtime, not a successful external generation. The first Nathan Wood generation request remains unconfirmed and must not be automatically resubmitted.

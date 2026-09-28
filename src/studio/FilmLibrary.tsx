@@ -27,7 +27,7 @@ export function LibraryFilmStatus({ entry, productionAvailable, generationAttemp
       <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : attemptAllowed && entry.production.status === "prepared" ? "See generation status" : productionLabel(entry)}</strong></div></div>
     {libraryCanWatch(entry) ? <p>Your video is complete and ready to watch or download below.</p> : <>
       {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
-      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. " : ""}Your production plan is saved. Your video has not been created yet.</p>}
+      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. " : ""}{attemptAllowed ? "Open this film's status to follow its generation and video review." : "Your production plan is saved. Your video has not been created yet."}</p>}
       {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete. Your video is not ready yet.</p>}
       {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
       {paid && entry.kind === "plan" && productionAvailable === false && !attemptAllowed && entry.production.status === "prepared" && <p className="feedback info">Film creation is currently unavailable. Your payment and saved version are safe. You do not need to pay again. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with this paid film</a>.</p>}
@@ -178,7 +178,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     try {
       const value = await api<unknown>(`/api/library?action=detail&kind=${entry.kind}&id=${encodeURIComponent(entry.id)}`);
       const verified = await verifyLibraryDetail(value, entry);
-      if (mounted.current && request === detailSequence.current) { setDetail(verified); setPlaying(""); }
+      if (mounted.current && request === detailSequence.current) {
+        setDetail(verified); setPlaying("");
+        setEntries(current => current.map(saved => libraryKey(saved) === libraryKey(verified.entry) ? verified.entry : saved));
+      }
     } catch (cause) { if (mounted.current && request === detailSequence.current) setError(errorText(cause)); }
     finally { if (mounted.current && request === detailSequence.current) { lock.current = false; setBusy(""); } }
   }
