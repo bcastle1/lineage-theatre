@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
 import FilmCheckout from "./FilmCheckout";
+import LocalVideoPanel from "./LocalVideoPanel";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -1049,6 +1050,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
+      <LocalVideoPanel key={`local:${film.id}`} film={film} update={update} />
       <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">

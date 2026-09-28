@@ -115,6 +115,8 @@ export interface Film {
   music: boolean;
   productionPreparation?: PreparedProduction;
   paymentReference?: FilmPaymentReference;
+  localVideoJobId?: string;
+  localVideoRequestId?: string;
 }
 
 export function normalizePaymentReference(value: unknown): FilmPaymentReference | undefined {

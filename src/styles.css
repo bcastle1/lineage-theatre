@@ -2276,4 +2276,14 @@ button {
 .film-card-form legend { padding: 0 .5rem; }
 .film-card-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
 .film-order-reference { overflow-wrap: anywhere; }
+.local-video-panel { margin: 1.5rem 0 2rem; padding: 1.4rem; border: 1px solid var(--line); border-radius: .8rem; background: #f6f8f3; display: grid; gap: .8rem; min-width: 0; }
+.local-video-panel .section-subtitle { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .8rem; }
+.local-video-panel h3 { font-weight: 400; display: flex; align-items: center; gap: .5rem; margin: 0; }
+.local-video-panel p { margin: 0; }
+.local-video-panel .consent { display: flex; flex-direction: row; align-items: flex-start; gap: .6rem; }
+.local-video-panel .consent input { width: auto; margin-top: .3rem; flex-shrink: 0; }
+.local-video-panel .action-group { flex-wrap: wrap; }
+.local-video-panel progress { width: 100%; accent-color: var(--forest); }
+.local-video-panel video { display: block; width: 100%; max-height: 70vh; border-radius: .5rem; background: #101e27; margin: .8rem 0; }
+@media (max-width: 600px) { .local-video-panel { padding: 1rem; } .local-video-panel .button { white-space: normal; } }
 @media (max-width: 600px) { .film-card-row { grid-template-columns: 1fr; } }

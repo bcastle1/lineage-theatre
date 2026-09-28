@@ -1,0 +1,206 @@
+import { randomUUID } from "node:crypto";
+import { del, get, list } from "@vercel/blob";
+import { generateClientTokenFromReadWriteToken } from "@vercel/blob/client";
+import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
+import { accessStatusForUser } from "./access.mjs";
+import { mediaLibrary } from "./media-library.mjs";
+
+const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+const HASH = /^[a-f0-9]{64}$/;
+const PREFIX = "local-video/jobs/";
+const PENDING = "local-video/pending/";
+const HEARTBEAT = "local-video/worker.json";
+const MAX_BYTES = 100 * 1024 * 1024;
+const conflict = error => /precondition|already exists|etag|if.?match/i.test(`${error?.name} ${error?.message}`);
+export class LocalVideoError extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; }
+}
+const fail = (message, status) => { throw new LocalVideoError(message, status); };
+const pathFor = id => HASH.test(id || "") ? `${PREFIX}${id}.json` : fail("Choose a valid local film.");
+function text(value, max, name, required = false) {
+  if (typeof value !== "string" || value.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value) || required && !value.trim())
+    fail(`Check ${name} before rendering the free film.`);
+  return value.trim();
+}
+export function localFilmInput(input) {
+  if (!input || !UUID.test(input.filmId || "") || !UUID.test(input.requestId || "") || input.consent !== true)
+    fail("Confirm local rendering and choose a saved film.");
+  if (!Number.isInteger(input.duration) || input.duration < 15 || input.duration > 600 || !Array.isArray(input.scenes) || input.scenes.length < 1 || input.scenes.length > 30)
+    fail("Use 1–30 scenes and a target length of 15 seconds to 10 minutes.");
+  const scenes = input.scenes.map(scene => ({
+    title: text(scene?.title, 200, "each scene title", true),
+    narration: text(scene?.narration || "", 2000, "scene narration"),
+    dialogue: text(scene?.dialogue || "", 1000, "scene dialogue"),
+    visual: text(scene?.visual || "", 1200, "scene visuals"),
+    ...(scene?.photoId ? { photoId: UUID.test(scene.photoId) ? scene.photoId : fail("Choose a saved photo from this account.") } : {}),
+  }));
+  if (scenes.reduce((total, scene) => total + scene.narration.length + scene.dialogue.length, 0) > 12_000)
+    fail("Shorten the narration to 12,000 characters for a free archive film.");
+  return { filmId: input.filmId, title: text(input.title, 200, "the film title", true), duration: input.duration, scenes };
+}
+function publicJob(job) {
+  return { id: job.id, filmId: job.filmId, title: job.title, status: job.status, progress: job.progress, createdAt: job.createdAt,
+    ...(job.status === "failed" ? { message: "Local rendering could not finish. Your script and photos are saved. You can start a new render." } : {}),
+    ...(job.media ? { durationSeconds: job.media.durationSeconds, sizeBytes: job.media.sizeBytes,
+      mediaUrl: `/api/studio?local=1&action=video&id=${job.id}` } : {}) };
+}
+
+export function createLocalVideoService({ read = readRecord, write = writeRecord, listBlobs = list, getBlob = get,
+  remove = del,
+  token = generateClientTokenFromReadWriteToken, sources = mediaLibrary, now = Date.now, uuid = randomUUID,
+  enabled = () => Boolean(process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY) } = {}) {
+  async function mutate(path, change) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const old = await read(path), value = await change(old?.value);
+      if (!value) return null;
+      try { await write(path, value, old?.etag); return value; }
+      catch (error) { if (!conflict(error)) throw error; }
+    }
+    fail("The local render queue is busy. Try again.", 409);
+  }
+  async function active(email) {
+    const actor = (await read(userPath(email)))?.value;
+    if (!actor || actor.email !== email || actor.mustChangePassword || accessStatusForUser(actor) !== "approved")
+      fail("This account cannot render a film.", 403);
+    return actor;
+  }
+  async function capabilities() {
+    const value = enabled() ? (await read(HEARTBEAT))?.value : null;
+    const online = Boolean(value && now() - value.at < 120_000 && value.at <= now());
+    return { available: online, label: "Free archive film", priceCents: 0, format: "1280 × 720 MP4", narration: "Computer narration",
+      message: online ? "Local renderer is online. Photos, titles, captions, and narration are included." : "The local renderer is offline. Your saved films remain available; check again later." };
+  }
+  async function own(actor, id) {
+    const job = (await read(pathFor(id)))?.value;
+    if (!job || job.email !== actor.email) fail("This local film was not found.", 404);
+    return job;
+  }
+  async function start(actor, input) {
+    const plan = localFilmInput(input), id = digest(`${actor.email}:${input.requestId}`), path = pathFor(id), inputHash = digest(JSON.stringify(plan));
+    const existing = (await read(path))?.value;
+    if (existing) {
+      if (existing.email !== actor.email || existing.inputHash !== inputHash) fail("This request already belongs to a different saved draft. Start a new render.", 409);
+      await index(actor, id);
+      if (["queued", "rendering"].includes(existing.status)) await mutate(`${PENDING}${id}.json`, () => ({ id }));
+      return publicJob(existing);
+    }
+    if (!(await capabilities()).available) fail("The local renderer is offline. Check again before starting a film.", 503);
+    for (const photoId of new Set(plan.scenes.map(scene => scene.photoId).filter(Boolean))) {
+      const photo = await sources.file(actor, actor.email, photoId);
+      if (!["image/jpeg", "image/png", "image/webp"].includes(photo.contentType) || photo.size > 20 * 1024 * 1024 || photo.customerState === "trash")
+        fail("Use active JPG, PNG, or WebP photos under 20 MB for the free film.");
+    }
+    const job = { version: 1, id, ...plan, email: actor.email, inputHash, status: "queued", progress: 0, attempts: 0, createdAt: new Date(now()).toISOString() };
+    await mutate(path, old => {
+      if (old && (old.email !== actor.email || old.inputHash !== inputHash)) fail("This render request changed.", 409);
+      return old || job;
+    });
+    await index(actor, id);
+    await mutate(`${PENDING}${id}.json`, () => ({ id }));
+    return publicJob(await own(actor, id));
+  }
+  async function index(actor, id) {
+    await mutate(`local-video/accounts/${digest(actor.email)}.json`, old => ({ ids: [id, ...(old?.ids || []).filter(value => value !== id)].slice(0, 50) }));
+  }
+  async function history(actor) {
+    const ids = (await read(`local-video/accounts/${digest(actor.email)}.json`))?.value?.ids || [];
+    const jobs = await Promise.all(ids.slice(0, 50).filter(id => HASH.test(id)).map(id => read(pathFor(id))));
+    return { jobs: jobs.map(record => record?.value).filter(job => job?.email === actor.email).map(publicJob) };
+  }
+  async function lease(id, claim) {
+    const job = (await read(pathFor(id)))?.value;
+    if (!job || !UUID.test(claim || "") || job.status !== "rendering" || job.lease?.token !== claim || job.lease.expiresAt <= now())
+      fail("The render claim expired.", 409);
+    await active(job.email);
+    return job;
+  }
+  async function heartbeat() { await mutate(HEARTBEAT, () => ({ at: now(), engine: "ffmpeg-espeak" })); }
+  async function poll() {
+    await heartbeat();
+    let cursor;
+    for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+      const page = await listBlobs({ prefix: PENDING, limit: 100, ...(cursor ? { cursor } : {}) });
+      for (const blob of page.blobs) {
+        const id = blob.pathname.slice(PENDING.length, -5);
+        if (!HASH.test(id) || blob.pathname !== `${PENDING}${id}.json`) continue;
+        const stored = (await read(pathFor(id)))?.value;
+        if (!stored || ["completed", "failed"].includes(stored.status)) { await remove(blob.pathname); continue; }
+        let claimed = false;
+        const claim = uuid();
+        const job = await mutate(pathFor(id), async old => {
+          claimed = false;
+          if (!old || old.id !== id || !["queued", "rendering"].includes(old.status) || old.lease?.expiresAt > now()) return null;
+          try { await active(old.email); } catch { return { ...old, status: "failed", lease: null }; }
+          if (old.attempts >= 3) return { ...old, status: "failed", lease: null };
+          claimed = true;
+          return { ...old, status: "rendering", progress: 1, attempts: old.attempts + 1, lease: { token: claim, expiresAt: now() + 300_000 } };
+        });
+        if (claimed && job?.lease?.token === claim) return { job: { id: job.id, title: job.title, duration: job.duration, scenes: job.scenes }, claim };
+      }
+      if (!page.hasMore) break;
+      cursor = page.cursor;
+    }
+    return { job: null };
+  }
+  async function progress(id, claim, percent) {
+    await lease(id, claim);
+    await mutate(pathFor(id), old => {
+      if (old?.lease?.token !== claim || old.status !== "rendering" || old.lease.expiresAt <= now()) fail("The render claim expired.", 409);
+      return { ...old, progress: Math.max(old.progress, Math.min(95, Number.isInteger(percent) ? percent : 1)), lease: { token: claim, expiresAt: now() + 300_000 } };
+    });
+    await heartbeat();
+    return { ok: true };
+  }
+  async function source(id, claim, photoId) {
+    const job = await lease(id, claim);
+    if (!job.scenes.some(scene => scene.photoId === photoId)) fail("This photo is not part of the render.", 403);
+    const photo = await sources.file(await active(job.email), job.email, photoId);
+    if (!["image/jpeg", "image/png", "image/webp"].includes(photo.contentType) || photo.size > 20 * 1024 * 1024 || photo.customerState === "trash") fail("This photo is unavailable.", 409);
+    return { pathname: photo.pathname, contentType: photo.contentType, sizeBytes: photo.size };
+  }
+  function validateReport(report) {
+    if (!report || !HASH.test(report.sha256 || "") || !Number.isSafeInteger(report.sizeBytes) || report.sizeBytes < 100 || report.sizeBytes > MAX_BYTES
+      || !Number.isFinite(report.durationSeconds) || report.durationSeconds < 1 || report.durationSeconds > 900
+      || report.width !== 1280 || report.height !== 720 || report.hasAudio !== true || report.engine !== "ffmpeg-espeak") fail("The rendered film could not be verified.", 409);
+    return { sha256: report.sha256, sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds, width: 1280, height: 720, hasAudio: true, contentType: "video/mp4" };
+  }
+  async function upload(id, claim, report) {
+    const job = await lease(id, claim), media = validateReport(report);
+    const pathname = `local-video/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
+    return { pathname, token: await token({ pathname, maximumSizeInBytes: media.sizeBytes, allowedContentTypes: ["video/mp4"],
+      validUntil: now() + 300_000, addRandomSuffix: false, allowOverwrite: false, cacheControlMaxAge: 60 }) };
+  }
+  async function complete(id, claim, report) {
+    const job = await lease(id, claim), media = validateReport(report);
+    media.pathname = `local-video/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
+    const stored = await getBlob(media.pathname, { access: "private", useCache: false, headers: { "accept-encoding": "identity" } });
+    if (!stored?.stream || stored.blob.pathname !== media.pathname || stored.blob.contentType !== "video/mp4" || stored.blob.size !== media.sizeBytes) {
+      await stored?.stream?.cancel(); fail("The uploaded film could not be verified.", 409);
+    }
+    const { createHash } = await import("node:crypto");
+    const hash = createHash("sha256"); let size = 0;
+    for await (const chunk of stored.stream) { size += chunk.length; if (size > media.sizeBytes) fail("The uploaded film changed.", 409); hash.update(chunk); }
+    if (size !== media.sizeBytes || hash.digest("hex") !== media.sha256) fail("The uploaded film checksum changed.", 409);
+    await lease(id, claim);
+    return publicJob(await mutate(pathFor(id), old => {
+      if (old?.lease?.token !== claim || old.status !== "rendering" || old.lease.expiresAt <= now()) fail("The render claim expired.", 409);
+      return { ...old, status: "completed", progress: 100, lease: null, media, completedAt: new Date(now()).toISOString() };
+    }));
+  }
+  async function failed(id, claim) {
+    await lease(id, claim);
+    await mutate(pathFor(id), old => {
+      if (old?.lease?.token !== claim || old.status !== "rendering") fail("The render claim expired.", 409);
+      return { ...old, status: "failed", lease: null };
+    });
+    return { ok: true };
+  }
+  async function video(actor, id) {
+    const job = await own(actor, id), media = job.media;
+    if (job.status !== "completed" || !media || !HASH.test(media.sha256 || "") || media.pathname !== `local-video/media/${digest(actor.email)}/${id}/${media.sha256}.mp4`)
+      fail("Your film is not ready to watch yet.", 409);
+    return media;
+  }
+  return { capabilities, start, history, status: async (actor, id) => publicJob(await own(actor, id)), poll, progress, source, upload, complete, failed, video };
+}
+export const localVideo = createLocalVideoService();
