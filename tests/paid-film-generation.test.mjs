@@ -13,11 +13,11 @@ const NOW = Date.parse("2026-09-28T01:00:00Z");
 const clone = value => structuredClone(value);
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
-test("unconfirmed requests retain only fixed private diagnostics and never resubmit", async () => {
+test("unconfirmed requests expose only fixed owner diagnostics and never automatically resubmit", async () => {
   for (const error of [Object.assign(new Error("private response"), { code: "MAGICLIGHT_PROVIDER_REJECTED", providerCode: 40001, httpStatus: 200 }), Object.assign(new Error("private response"), { code: "untrusted secret", providerCode: "secret", httpStatus: 999 })]) {
     const h = fixture({ submit: () => { throw error; } });
     const value = await h.start();
-    assert.equal(value.status, "uncertain"); assert.equal(value.diagnostic, undefined);
+    assert.equal(value.status, "uncertain"); assert.deepEqual(value.diagnostic, h.stored().diagnostic);
     assert.equal(h.stored().diagnostic.code, error.code === "MAGICLIGHT_PROVIDER_REJECTED" ? error.code : "GENERATION_RESULT_UNCONFIRMED");
     assert.doesNotMatch(JSON.stringify(h.stored()), /private response|untrusted secret/);
     await h.start(); assert.equal(h.submissions.length, 1);
@@ -76,6 +76,7 @@ test("single paid immutable screenplay request preserves content and exposes no 
   assert.equal(submitted.era, h.job.manifest.era); assert.equal(submitted.style, h.job.manifest.style);
   assert.equal(submitted.sources, undefined); assert.equal(h.stored().taskId, TASK); assert.equal(h.stored().submissionCount, 1);
   assert.equal(h.configurations[0].environment, "production"); assert.equal(h.configurations[0].enableSubmission, true);
+  assert.equal(h.configurations[0].requestTimeoutMs, 90_000);
   assert.deepEqual(h.paymentChecks, [{ orderId: ORDER }]);
   h.advance(120_000); const checked = await h.check(); assert.equal(checked.status, "verifying"); assert.equal(checked.elapsedSeconds, 120);
   assert.equal(h.stored().outputUrl, OUTPUT); assert.deepEqual(h.checks, [{ taskId: TASK }]);
@@ -207,4 +208,95 @@ test("scheduled worker checks only saved tasks, rate limits repeated polling and
 test("an oversized screenplay is never truncated or submitted", async () => {
   const h = fixture(); h.job.manifest.screenplay.scenes[0].narration = "x".repeat(100_001); h.job.manifestHash = digest(JSON.stringify(h.job.manifest));
   await assert.rejects(h.start(), e => e.code === "GENERATION_SCRIPT_TOO_LARGE"); assert.equal(h.submissions.length, 0); assert.equal(h.paymentChecks.length, 0);
+});
+
+function replaceInput(h, extras = {}) {
+  return { preparedId: ID, orderId: ORDER, consent: true, expectedChangeId: h.stored().changeId,
+    acknowledgePossibleDuplicate: true, ...extras };
+}
+test("one explicit ambiguous replacement preserves the original record, paid identity and screenplay", async () => {
+  let calls = 0;
+  const h = fixture({ submit: () => { if (++calls === 1) throw new Error("lost response"); return { providerCode: 10000, taskId: TASK }; } });
+  await h.start(); const original = h.stored();
+  assert.deepEqual((await h.status()).recovery, { kind: "provider-review-required", canRetry: false });
+  await assert.rejects(h.service.replace(OWNER, replaceInput(h)), e => e.code === "GENERATION_CHANGED");
+  h.advance(300_000);
+  assert.deepEqual((await h.status()).recovery, { kind: "replacement-available", canRetry: true, expectedChangeId: original.changeId });
+  const paidBefore = clone(h.records.get(`payments/orders/${ORDER}.json`));
+  const jobBefore = clone(h.job);
+  const result = await h.service.replace(OWNER, replaceInput(h));
+  assert.equal(result.status, "processing"); assert.equal(result.orderId, ORDER); assert.equal(result.preparedId, ID);
+  assert.equal(h.submissions.length, 2); assert.deepEqual(h.submissions[0], h.submissions[1]);
+  const current = h.stored(); assert.equal(current.replacementCount, 1); assert.equal(current.priorAttemptHash, digest(JSON.stringify(original)));
+  assert.deepEqual(h.records.get(current.priorAttemptPath).value, original);
+  assert.deepEqual(h.records.get(`payments/orders/${ORDER}.json`), paidBefore); assert.deepEqual(h.job, jobBefore);
+  assert.equal(current.diagnostic, undefined); assert.equal(result.recovery, undefined);
+  assert.doesNotMatch(JSON.stringify(result), /priorAttemptPath|priorAttemptHash|private-api-key|ownerEmail|lost response/);
+});
+test("ambiguous replacement requires fresh identity and duplicate-risk consent; only one is permitted", async () => {
+  const h = fixture({ submit: () => { throw new Error("unknown"); } }); await h.start(); h.advance(300_000);
+  for (const extras of [{ acknowledgePossibleDuplicate: false }, { acknowledgePossibleDuplicate: undefined },
+    { consent: false }, { expectedChangeId: "bad" }, { providerTaskId: TASK }]) {
+    await assert.rejects(h.service.replace(OWNER, replaceInput(h, extras)), e => e.code === "GENERATION_INVALID_REQUEST");
+  }
+  await assert.rejects(h.service.replace(OWNER, replaceInput(h, { expectedChangeId: ID })), e => e.code === "GENERATION_CHANGED");
+  assert.equal(h.submissions.length, 1);
+  const current = await h.service.replace(OWNER, replaceInput(h)); assert.equal(current.status, "uncertain");
+  h.advance(300_000); assert.equal((await h.status()).recovery.canRetry, false);
+  await assert.rejects(h.service.replace(OWNER, replaceInput(h)), e => e.code === "GENERATION_CHANGED");
+  await h.start(); await h.check(); await h.service.run(); assert.equal(h.submissions.length, 2);
+});
+test("concurrent replacement confirmations dispatch at most one new request", async () => {
+  const entered = deferred(), release = deferred(); let calls = 0;
+  const h = fixture({ submit: async () => { if (++calls === 1) throw new Error("unknown"); entered.resolve(); await release.promise; return { providerCode: 10000, taskId: TASK }; } });
+  await h.start(); h.advance(300_000); const input = replaceInput(h);
+  const first = h.service.replace(OWNER, input); await entered.promise;
+  await assert.rejects(h.peer().replace(OWNER, input), e => e.code === "GENERATION_CHANGED");
+  release.resolve(); await first; assert.equal(h.submissions.length, 2);
+});
+test("two replacements racing at the claim write share only one provider dispatch", async () => {
+  const barrier = deferred(); let waiting = 0, submits = 0;
+  const h = fixture({ submit: () => { if (++submits === 1) throw new Error("unknown"); return { providerCode: 10000, taskId: TASK }; },
+    beforeWrite: async (path, value) => { if (path.includes("generation-attempts/") && value.replacementCount === 1 && value.status === "submitting") {
+      if (++waiting === 2) barrier.resolve(); await barrier.promise;
+    } } });
+  await h.start(); h.advance(300_000); const input = replaceInput(h);
+  const results = await Promise.allSettled([h.service.replace(OWNER, input), h.peer().replace(OWNER, input)]);
+  assert.equal(results.filter(value => value.status === "fulfilled").length, 2);
+  assert.equal(h.submissions.length, 2); assert.equal(h.stored().taskId, TASK); assert.equal(h.stored().replacementCount, 1);
+});
+test("replacement checks current owner, unchanged film and confirmed payment before dispatch", async () => {
+  for (const mutate of [h => h.revoke(), h => { h.publicOrder.status = "awaiting-payment"; },
+    h => { h.records.get(`payments/orders/${ORDER}.json`).value.refundedCents = 1; }, h => { h.job.manifest.title = "changed"; }]) {
+    const h = fixture({ submit: () => { throw new Error("unknown"); } }); await h.start(); h.advance(300_000); const input = replaceInput(h);
+    mutate(h); await assert.rejects(h.service.replace(OWNER, input)); assert.equal(h.submissions.length, 1);
+  }
+});
+test("a known accepted task cannot be replaced and failed history storage prevents a replacement POST", async () => {
+  const accepted = fixture(); await accepted.start(); accepted.advance(300_000);
+  await assert.rejects(accepted.service.replace(OWNER, replaceInput(accepted)), e => e.code === "GENERATION_CHANGED");
+  const h = fixture({ submit: () => { throw new Error("unknown"); }, beforeWrite: key => { if (key.includes("generation-attempt-history/")) throw new Error("storage down"); } });
+  await h.start(); h.advance(300_000); const original = h.stored();
+  await assert.rejects(h.service.replace(OWNER, replaceInput(h)), e => e.code === "GENERATION_STORAGE_UNAVAILABLE");
+  assert.deepEqual(h.stored(), original); assert.equal(h.submissions.length, 1);
+});
+test("client preflight failure leaves no permanent generation claim", async () => {
+  const h = fixture({ overrides: { clientFactory: () => { throw new Error("client unavailable"); } } });
+  await assert.rejects(h.start()); assert.equal(h.stored(), undefined); assert.equal(h.submissions.length, 0);
+});
+test("stale no-ID claims show unresolved status and explicit recovery instead of endless submission", async () => {
+  const h = fixture({ beforeWrite: (_path, value) => { if (value.taskId) throw new Error("storage failure"); } });
+  await assert.rejects(h.start()); h.advance(300_000);
+  const value = await h.status(); assert.equal(value.status, "uncertain"); assert.equal(value.recovery.canRetry, true);
+  assert.equal(h.stored().status, "submitting"); assert.equal(h.submissions.length, 1);
+});
+
+test("a successful provider status clears earlier failure diagnostics", async () => {
+  for (const taskStatus of [0, 1, 2, 3]) {
+    let fails = true;
+    const h = fixture({ check: () => { if (fails) throw Object.assign(new Error("timeout"), { code: "MAGICLIGHT_TIMEOUT", stage: "transport" });
+      return { providerCode: 10000, taskStatus, ...(taskStatus === 2 ? { videoUrl: OUTPUT } : {}) }; } });
+    await h.start(); assert.equal((await h.check()).diagnostic.code, "MAGICLIGHT_TIMEOUT");
+    fails = false; assert.equal((await h.check()).diagnostic, undefined); assert.equal(h.stored().diagnostic, undefined);
+  }
 });

@@ -40,10 +40,18 @@ export function createMagicLightClient({ apiKey, environment = "production", ena
     if (typeof value === "string" && (value.includes(apiKey) || value.includes(encodeURIComponent(apiKey)))) fail("MAGICLIGHT_INVALID_RESPONSE");
     return value;
   }
+  function responseFailure(error, { httpStatus, providerCode, stage, submissionUncertain = false }) {
+    const safe = error instanceof MagicLightClientError ? error : new MagicLightClientError("MAGICLIGHT_TRANSPORT_FAILED");
+    if (Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) safe.httpStatus = httpStatus;
+    if (Number.isSafeInteger(providerCode)) safe.providerCode = providerCode;
+    safe.stage = stage;
+    if (submissionUncertain) safe.submissionUncertain = true;
+    return safe;
+  }
   async function request(method, path, body) {
     const secret = key();
     const controller = new AbortController();
-    let reader, response, timer;
+    let reader, response, timer, providerCode, stage = "transport";
     const cancel = () => {
       controller.abort();
       try { const pending = reader ? reader.cancel() : response?.body?.cancel(); pending?.catch(() => {}); } catch { /* Do not expose transport failures. */ }
@@ -60,15 +68,17 @@ export function createMagicLightClient({ apiKey, environment = "production", ena
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
       if (controller.signal.aborted) { cancel(); fail("MAGICLIGHT_TIMEOUT"); }
-      if (response?.status !== 200) fail("MAGICLIGHT_HTTP_REJECTED", {
-        ...(Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599 ? { httpStatus: response.status } : {}),
-      });
+      stage = "response";
+      // An accepted asynchronous task may use 201 or 202. A successful HTTP
+      // status alone is never enough: the same bounded envelope checks follow.
+      if (!Number.isInteger(response?.status) || response.status < 200 || response.status >= 300) fail("MAGICLIGHT_HTTP_REJECTED");
       const mediaType = response.headers?.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
       const declared = response.headers?.get("content-length");
       const encoding = response.headers?.get("content-encoding")?.trim().toLowerCase();
       if (mediaType !== "application/json" || (declared !== null && declared !== undefined
         && (!/^\d+$/.test(declared) || Number(declared) > MAX_RESPONSE_BYTES))) fail("MAGICLIGHT_INVALID_RESPONSE");
       if (typeof response.body?.getReader !== "function") fail("MAGICLIGHT_INVALID_RESPONSE");
+      stage = "body";
       reader = response.body.getReader();
       let length = 0;
       const chunks = [];
@@ -85,6 +95,7 @@ export function createMagicLightClient({ apiKey, environment = "production", ena
       if ((!encoding || encoding === "identity") && declared !== null && declared !== undefined
         && Number(declared) !== length) fail("MAGICLIGHT_INVALID_RESPONSE");
       let result;
+      stage = "envelope";
       try {
         result = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)), (name, value, context) => {
           // Task identifiers are opaque. Preserve a provider's numeric JSON ID
@@ -98,42 +109,44 @@ export function createMagicLightClient({ apiKey, environment = "production", ena
       }
       catch { fail("MAGICLIGHT_INVALID_RESPONSE"); }
       if (!plain(result) || !Number.isSafeInteger(result.biz_code)) fail("MAGICLIGHT_INVALID_RESPONSE");
+      providerCode = result.biz_code;
       // Unknown provider codes stay numeric evidence. No guessed authentication,
       // entitlement, billing or job-status interpretation is attached to them.
-      if (result.biz_code !== 10000) return { providerCode: result.biz_code };
+      if (providerCode !== 10000) return { providerCode, httpStatus: response.status };
       if (!plain(result.data)) fail("MAGICLIGHT_INVALID_RESPONSE");
-      return { providerCode: result.biz_code, data: result.data };
+      return { providerCode, httpStatus: response.status, data: result.data };
     }
     try { return await Promise.race([perform(), deadline]); }
     catch (error) {
-      const safe = error instanceof MagicLightClientError ? error : new MagicLightClientError("MAGICLIGHT_TRANSPORT_FAILED");
       // A transport failure after POST may conceal an accepted job. Never retry
       // automatically; the published protocol has no request-lookup contract.
-      if (method === "POST") safe.submissionUncertain = true;
-      throw safe;
+      throw responseFailure(error, { httpStatus: response?.status, providerCode, stage, submissionUncertain: method === "POST" });
     } finally { clearTimeout(timer); cancel(); }
   }
   async function checkTask({ taskId } = {}) {
     if (!taskReference(taskId)) fail("MAGICLIGHT_INVALID_TASK");
     const result = await request("GET", `/api/misc/openclaw_check_task?task_id=${encodeURIComponent(taskId)}`);
-    if (result.providerCode !== 10000) return result;
-    const data = result.data;
-    if (!Number.isSafeInteger(data.task_status) || (data.task_id !== undefined
-      && (!taskReference(data.task_id) || data.task_id !== taskId))) fail("MAGICLIGHT_INVALID_RESPONSE");
-    const videoUrl = data.video_url === undefined || data.video_url === "" ? undefined : httpsUrl(safeString(data.video_url));
-    if (data.task_status === 2 && !videoUrl) fail("MAGICLIGHT_INVALID_RESPONSE");
-    return { providerCode: result.providerCode, taskStatus: data.task_status,
-      ...(data.task_id !== undefined ? { taskId: safeString(data.task_id) } : {}), ...(videoUrl ? { videoUrl } : {}) };
+    if (result.providerCode !== 10000) return { providerCode: result.providerCode };
+    try {
+      const data = result.data;
+      if (!Number.isSafeInteger(data.task_status) || (data.task_id !== undefined
+        && (!taskReference(data.task_id) || data.task_id !== taskId))) fail("MAGICLIGHT_INVALID_RESPONSE");
+      const videoUrl = data.video_url === undefined || data.video_url === "" ? undefined : httpsUrl(safeString(data.video_url));
+      if (data.task_status === 2 && !videoUrl) fail("MAGICLIGHT_INVALID_RESPONSE");
+      return { providerCode: result.providerCode, taskStatus: data.task_status,
+        ...(data.task_id !== undefined ? { taskId: safeString(data.task_id) } : {}), ...(videoUrl ? { videoUrl } : {}) };
+    } catch (error) { throw responseFailure(error, { ...result, stage: "task" }); }
   }
   async function submitTask({ text, imageUrl } = {}) {
     if (enableSubmission !== true) fail("MAGICLIGHT_SUBMISSION_DISABLED");
     if (typeof text !== "string" || !text.trim() || Buffer.byteLength(text) > MAX_TEXT_BYTES) fail("MAGICLIGHT_INVALID_TEXT");
     const body = { text, ...(imageUrl === undefined ? {} : { image_url: httpsUrl(imageUrl) }) };
     const result = await request("POST", "/api/misc/openclaw_add_task", body);
-    if (result.providerCode !== 10000) fail("MAGICLIGHT_PROVIDER_REJECTED", { providerCode: result.providerCode, submissionUncertain: true });
-    if (!taskReference(result.data.task_id)) fail("MAGICLIGHT_INVALID_RESPONSE", { submissionUncertain: true });
-    try { return { providerCode: result.providerCode, taskId: safeString(result.data.task_id) }; }
-    catch { fail("MAGICLIGHT_INVALID_RESPONSE", { submissionUncertain: true }); }
+    try {
+      if (result.providerCode !== 10000) fail("MAGICLIGHT_PROVIDER_REJECTED");
+      if (!taskReference(result.data.task_id)) fail("MAGICLIGHT_INVALID_RESPONSE");
+      return { providerCode: result.providerCode, taskId: safeString(result.data.task_id) };
+    } catch (error) { throw responseFailure(error, { ...result, stage: result.providerCode === 10000 ? "task" : "provider", submissionUncertain: true }); }
   }
   // No upload or media-download URL is fetched by this client. Those require
   // independently verified hosts, byte limits and consent in the film adapter.

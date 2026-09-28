@@ -80,6 +80,51 @@ test("explicit submission sends the documented body exactly once, without fetchi
   assert.deepEqual(JSON.parse(calls[0][1].body), { text: "Synthetic fictional garden.", image_url: "https://images.example.invalid/fictional.png" });
 });
 
+test("201 and 202 preserve accepted task IDs with the same strict envelope and no retry", async () => {
+  for (const status of [201, 202]) {
+    let calls = 0;
+    const exactId = "2032443088023777281";
+    const { client } = fixture({ enableSubmission: true, fetchImpl: async () => {
+      calls++;
+      return new Response(`{"biz_code":10000,"msg":"${apiKey}","data":{"task_id":${exactId},"task_status":1}}`, {
+        status, headers: { "content-type": "application/json" },
+      });
+    } });
+    assert.deepEqual(await client.submitTask({ text: "Synthetic fictional garden." }), { providerCode: 10000, taskId: exactId });
+    assert.equal(calls, 1);
+    assert.deepEqual(await client.checkTask({ taskId: exactId }), { providerCode: 10000, taskId: exactId, taskStatus: 1 });
+    assert.equal(calls, 2);
+  }
+});
+
+test("successful HTTP status without an accepted task remains uncertain with bounded diagnostics", async () => {
+  const cases = [
+    { status: 204, body: null, stage: "response", code: "MAGICLIGHT_INVALID_RESPONSE" },
+    { status: 202, body: "{malformed", stage: "envelope", code: "MAGICLIGHT_INVALID_RESPONSE" },
+    { status: 201, body: JSON.stringify({ biz_code: 10000, msg: apiKey }), stage: "envelope", code: "MAGICLIGHT_INVALID_RESPONSE", providerCode: 10000 },
+    { status: 202, body: JSON.stringify({ biz_code: 10000, data: {} }), stage: "task", code: "MAGICLIGHT_INVALID_RESPONSE", providerCode: 10000 },
+    { status: 201, body: JSON.stringify({ biz_code: 10000, data: { task_id: apiKey } }), stage: "task", code: "MAGICLIGHT_INVALID_RESPONSE", providerCode: 10000 },
+    { status: 202, body: JSON.stringify({ biz_code: 12345, msg: apiKey, trace_id: apiKey }), stage: "provider", code: "MAGICLIGHT_PROVIDER_REJECTED", providerCode: 12345 },
+  ];
+  for (const sample of cases) {
+    let calls = 0;
+    const { client } = fixture({ enableSubmission: true, fetchImpl: async () => {
+      calls++;
+      return new Response(sample.body, { status: sample.status, headers: { "content-type": "application/json" } });
+    } });
+    await assert.rejects(client.submitTask({ text: "Synthetic fictional garden." }), error => {
+      assert.equal(error.code, sample.code);
+      assert.equal(error.httpStatus, sample.status);
+      assert.equal(error.providerCode, sample.providerCode);
+      assert.equal(error.stage, sample.stage);
+      assert.equal(error.submissionUncertain, true);
+      assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(apiKey), false);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
 test("numeric provider task IDs retain their exact digits through submission and polling", async () => {
   const exactId = "2032443088023777281", calls = [];
   const { client } = fixture({ enableSubmission: true, fetchImpl: async (url, options) => {
@@ -118,6 +163,8 @@ test("submission transport failure never retries and marks the result uncertain 
   await assert.rejects(client.submitTask({ text: "Fictional scene" }), error => {
     assert.equal(error.code, "MAGICLIGHT_TRANSPORT_FAILED");
     assert.equal(error.submissionUncertain, true);
+    assert.equal(error.stage, "transport");
+    assert.equal(error.httpStatus, undefined);
     assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(apiKey), false);
     return true;
   });
@@ -145,6 +192,7 @@ test("HTTP rejection records only the HTTP status and cancels its untrusted body
     await assert.rejects(client.checkTask({ taskId }), error => {
       assert.equal(error.code, "MAGICLIGHT_HTTP_REJECTED");
       assert.equal(error.httpStatus, status);
+      assert.equal(error.stage, "response");
       assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(apiKey), false);
       return true;
     });
@@ -176,7 +224,12 @@ test("truncated, non-JSON, malformed and schema-mismatched responses fail closed
   ];
   for (const response of responses) {
     const { client } = fixture({ fetchImpl: async () => response() });
-    await assert.rejects(client.checkTask({ taskId }), error => error instanceof MagicLightClientError && !JSON.stringify(error).includes(apiKey));
+    await assert.rejects(client.checkTask({ taskId }), error => {
+      assert.ok(error instanceof MagicLightClientError);
+      assert.equal(error.httpStatus, 200);
+      assert.equal(JSON.stringify(error).includes(apiKey), false);
+      return true;
+    });
   }
 });
 
@@ -205,7 +258,12 @@ test("deadline also covers a stalled response body and cancels the reader", asyn
   let cancelled = false;
   const body = new ReadableStream({ pull() { return new Promise(() => {}); }, cancel() { cancelled = true; } });
   const { client } = fixture({ requestTimeoutMs: 10, fetchImpl: async () => new Response(body, { headers: { "content-type": "application/json" } }) });
-  await assert.rejects(client.checkTask({ taskId }), code("MAGICLIGHT_TIMEOUT"));
+  await assert.rejects(client.checkTask({ taskId }), error => {
+    assert.equal(error.code, "MAGICLIGHT_TIMEOUT");
+    assert.equal(error.httpStatus, 200);
+    assert.equal(error.stage, "body");
+    return true;
+  });
   assert.equal(cancelled, true);
 });
 
