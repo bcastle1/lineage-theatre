@@ -19,3 +19,13 @@ Source revision `12672785e6532f182925745302cc5cad47f60980` was packaged using an
 All 25 delivery and review tests passed inside that image with networking disabled, no runtime credentials, an unprivileged user, a read-only filesystem, two CPUs, and 3 GiB memory. The actual FFmpeg test verified a complete H.264/AAC sample and rejected absent/short audio, wrong duration, and truncated media. The service and timer templates passed `systemd-analyze verify`.
 
 At this checkpoint the worker is staged, with no installed runtime credentials or activated service/timer. This acceptance proves the delivery code and media runtime, not a successful external generation. The first Nathan Wood generation request remains unconfirmed and must not be automatically resubmitted.
+
+## Activation: September 28, 2026 UTC
+
+The owner explicitly approved granting the existing worker private film storage access. The existing Blob credential was transferred through SSH standard input into the root-owned mode-0600 runtime file, with `videocos.magiclight.ai` as the sole allowed output host. No provider, Accounting, or Vercel account credential was installed on the worker.
+
+The immutable image above passed its configuration check and a real storage-backed delivery pass. The initial systemd acceptance exposed a cleanup error: after a successful pass Docker had already removed the container, so `ExecStop` reported failure. Cleanup now uses an optional `ExecStopPost`, which also handles interrupted starts and tolerates an already-removed container without masking the worker's exit status.
+
+At 00:32 UTC the corrected service exited successfully with `ExecMainStatus=0`, and the timer was enabled and active. Both the manual service pass and the first timer-triggered pass returned zero pending deliveries, zero delivery errors, and one skipped request. Existing unrelated application containers remained healthy.
+
+This activates delivery for the existing owner pilot. Nathan Wood's saved request is still unconfirmed, with no recoverable task ID or returned video; it is safely skipped. No replacement generation, customer charge, content approval, or completed-film claim resulted from activation. General customer rendering and a reliable generation-time estimate remain unverified.
