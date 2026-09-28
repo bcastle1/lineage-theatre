@@ -11,6 +11,7 @@ import { createProductionQueue } from "./_lib/production-queue.mjs";
 import { streamProductionMedia } from "./_lib/production-media.mjs";
 import { isOwner } from "./_lib/access.mjs";
 import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-generation.mjs";
+import { paidFilmGenerationReview, PaidFilmReviewError } from "./_lib/paid-film-generation-review.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -84,6 +85,7 @@ export function createStudioHandler(overrides={}) {
  // service injection is retained for isolated tests, never an HTTP option.
  const hosted=overrides.hostedCheckout||(overrides.payments?null:hostedCheckout);
  const generation=overrides.paidFilmGeneration||paidFilmGeneration;
+ const generationReview=overrides.paidFilmGenerationReview||paidFilmGenerationReview;
  const dependencies={getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments,...overrides};
  const filmPricing=overrides.filmPricing||createFilmPricingService({filmProduction:dependencies.filmProduction,pricingSettings:dependencies.readPricingSettings});
  const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
@@ -96,6 +98,20 @@ export function createStudioHandler(overrides={}) {
     if(!session||session.user.mustChangePassword) return json(res,401,{message:"Sign in and set your password to use the studio."});
     const email=session.user.email;
     const url=new URL(req.url,`https://${req.headers.host}`);
+    if(["GET","HEAD"].includes(req.method)&&["generationReview","reviewVideo"].includes(url.searchParams.get("action"))) {
+      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can review this generation result."});
+      const preparedId=url.searchParams.get("id"),preview=url.searchParams.get("action")==="reviewVideo",artifactSha256=url.searchParams.get("artifact");
+      if([...url.searchParams.keys()].some(key=>!(preview?["action","id","artifact"]:["action","id"]).includes(key))
+        ||url.searchParams.getAll("action").length!==1||url.searchParams.getAll("id").length!==1
+        ||preview&&(url.searchParams.getAll("artifact").length!==1||typeof artifactSha256!=="string"||!/^[a-f0-9]{64}$/.test(artifactSha256))
+        ||typeof preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(preparedId))
+        return json(res,400,{message:"Choose the saved film before reviewing its video."});
+      if(preview) return generationReview.stream({actor:session.user,preparedId,artifactSha256,req,res});
+      if(req.method!=="GET") return json(res,405,{message:"Method not allowed."});
+      if(!(await limitAction(`film-generation-review:${email}`,240,3600_000)))
+        return json(res,429,{message:"Please wait before refreshing this video review again."});
+      return json(res,200,await generationReview.review(session.user,{preparedId}));
+    }
     if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
       return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,actor:session.user,read:readRecord,
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
@@ -132,6 +148,16 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if(body?.action==="approveGeneration") {
+      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can approve this generation result."});
+      if(Object.keys(body).some(key=>!["action","preparedId","artifactSha256","consent"].includes(key))
+        ||typeof body.preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId)
+        ||typeof body.artifactSha256!=="string"||!/^[a-f0-9]{64}$/.test(body.artifactSha256)||body.consent!==true)
+        return json(res,400,{message:"Choose the saved film and confirm the exact video you reviewed."});
+      if(!(await limitAction(`film-generation-approve:${email}`,12,3600_000)))
+        return json(res,429,{message:"Please wait before requesting another video approval."});
+      return json(res,200,await generationReview.approve(session.user,{preparedId:body.preparedId,artifactSha256:body.artifactSha256,consent:true}));
+    }
     if(["requestFilmGeneration","checkFilmGeneration"].includes(body?.action)) {
       if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
       const starting=body.action==="requestFilmGeneration";
@@ -214,7 +240,7 @@ export function createStudioHandler(overrides={}) {
     // A rejected proof says nothing about an earlier request for this order.
     if(e instanceof CaptchaError) return json(res,e.status,{code:e.code,message:e.message,charged:null});
     if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});
-    if(e instanceof PaidFilmGenerationError) return json(res,e.status,{code:e.code,message:e.message});
+    if(e instanceof PaidFilmGenerationError || e instanceof PaidFilmReviewError) return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof PaymentError) return json(res,e.status,{code:e.code,message:e.message,charged:e.charged});
     return json(res,503,{message:e instanceof Error&&customerValidationMessages.has(e.message)?e.message:storyRequest?storyUnavailable:"The studio could not complete this action. Your saved film is unchanged."});
   }

@@ -6,6 +6,8 @@
  * Checkout route proof: node scripts/test-workflow-server.mjs --checkout-fixtures --check
  * Finished-film playback fixture: node scripts/test-workflow-server.mjs --delivery-fixture
  * Private media route proof: node scripts/test-workflow-server.mjs --delivery-fixture --check
+ * Owner review UI fixture: node scripts/test-workflow-server.mjs --generation-review-fixture
+ * Owner review route proof: node scripts/test-workflow-server.mjs --generation-review-fixture --check
  * URL: http://127.0.0.1:5178
  * Route checks use an ephemeral loopback port so browser QA can remain open.
  * Customer: customer@example.invalid / Cedar lantern rivers wander
@@ -28,7 +30,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const checkOnly = process.argv.includes("--check");
 const checkoutFixtures = process.argv.includes("--checkout-fixtures");
 const deliveryFixture = process.argv.includes("--delivery-fixture");
-if (checkoutFixtures && deliveryFixture) throw new Error("Choose either checkout fixtures or the delivery fixture for this local run.");
+const generationReviewFixture = process.argv.includes("--generation-review-fixture");
+if ([checkoutFixtures, deliveryFixture, generationReviewFixture].filter(Boolean).length > 1) throw new Error("Choose only one synthetic fixture mode for this local run.");
 if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new Error("Test server must not load environment files.");
 
 // Remove inherited provider settings before importing application services.
@@ -102,10 +105,10 @@ const connections = async () => ({ story: false, ...productionReadiness({ env: {
 const refuseProvider = async () => { throw new Error("Synthetic test cannot call an external provider."); };
 const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write });
 const filmPricing = createFilmPricingService({ filmProduction, pricingSettings, env: {} });
-let deliveryMedia, deliveryProject;
+let deliveryMedia, deliveryProject, generationProject;
 let deliveryBlobReads = 0;
 const getDeliveryBlob = async (pathname, options) => {
-  assert.equal(deliveryFixture, true);
+  assert.equal(deliveryFixture || generationReviewFixture, true);
   assert.equal(options.access, "private");
   assert.equal(options.useCache, false);
   deliveryBlobReads++;
@@ -154,10 +157,36 @@ const recordPage = async (prefix, { cursor, limit: size = 50 } = {}) => {
 };
 const shared = { getSession: session, readRecord: read, writeRecord: write, limitAction: limit,
   connections, readPricingSettings: pricingSettings, readRegistrationPolicy: registrationPolicy, filmProduction, filmPricing, payments, captcha };
+const [{ createPaidFilmGenerationService, paidFilmGenerationPath }, { createPaidFilmGenerationReviewService, paidFilmReviewPath }] = await Promise.all([
+  import("../api/_lib/paid-film-generation.mjs"), import("../api/_lib/paid-film-generation-review.mjs"),
+]);
+let generationPaymentChecks = 0;
+const generationFixtureOrder = async (actor, id) => {
+  assert.equal(generationReviewFixture, true);
+  const value = (await read(`payments/orders/${id}.json`))?.value;
+  if (actor?.email !== OWNER_EMAIL || actor?.role !== "owner" || !value || value.customerEmail !== actor.email) {
+    const error = new Error("Synthetic review order not found."); error.status = 404; throw error;
+  }
+  return { id: value.id, quoteId: value.quoteId, preparedId: value.preparedId, filmId: value.filmId, filmTitle: value.filmTitle,
+    status: value.status, currency: value.currency, amountCents: value.amountCents, refundedCents: value.refundedCents,
+    charged: true, requiresReview: false, receiptAvailable: true, createdAt: value.createdAt, updatedAt: value.updatedAt,
+    sandbox: false, checkoutMethod: value.checkoutMethod, confirmationSource: value.confirmationSource, invoiceUrl: null, invoiceNumber: "SYNTHETIC-ONLY" };
+};
+const generationFixturePaymentCheck = async (actor, { orderId }) => { generationPaymentChecks++; return generationFixtureOrder(actor, orderId); };
+const generationFixtureService = createPaidFilmGenerationService({ read, write, env: {},
+  getPrepared: input => filmProduction.getPrepared(input), checkPayment: generationFixturePaymentCheck, clientFactory: refuseProvider });
+const generationReviewService = createPaidFilmGenerationReviewService({ read, write, getBlob: getDeliveryBlob, checkPayment: generationFixturePaymentCheck });
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
-  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider, ...(deliveryFixture ? { getBlob: getDeliveryBlob } : {}) }),
+  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider, ...((deliveryFixture || generationReviewFixture) ? { getBlob: getDeliveryBlob } : {}),
+    ...(generationReviewFixture ? {
+      paidFilmGeneration: { ...generationFixtureService, start: refuseProvider,
+        availableFor: actor => actor?.email === OWNER_EMAIL && actor?.role === "owner" && actor?.mustChangePassword !== true },
+      paidFilmGenerationReview: generationReviewService,
+      hostedCheckout: { configuration: async () => ({ available: false }), ownsOrder: async id => Boolean((await read(`payments/orders/${id}.json`))?.value?.checkoutMethod),
+        order: generationFixtureOrder, check: generationFixturePaymentCheck, prepareCheckout: refuseProvider, quote: refuseProvider, checkout: refuseProvider, receipt: refuseProvider },
+    } : {}) }),
   "/api/admin": createAdminHandler({ ...shared, audit, recordPage }),
 };
 
@@ -251,8 +280,61 @@ if (deliveryFixture) {
   assert.deepEqual(normalizeFilm(deliveryProject).paymentReference, deliveryProject.paymentReference);
   assert.equal(normalizeFilm(deliveryProject).productionPreparation.inputHash, deliveryProject.productionPreparation.inputHash);
 }
-const seedMarker = `lineage-${deliveryFixture ? "delivery" : "checkout"}-fixture:${randomUUID()}`;
-const seedScript = deliveryFixture ? `// SYNTHETIC PLAYBACK ONLY: existing illustrative sample, no new render or charge.
+if (generationReviewFixture) {
+  // Deliberately fabricated review metadata around an existing public MP4.
+  // This does not exercise a provider, worker verification, or real payment.
+  const bytes = websiteBytes, sha256 = auth.digest(bytes);
+  assert.equal(sha256, "68f017454bf2619b972db7b062badf765829e85f0d8f315ca0f674d763bc708d");
+  assert.equal(bytes.length, 17_193_754);
+  const { default: ts } = await import("typescript");
+  const source = await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+  const { normalizeFilm, productionPreparationInput, productionInputHash } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+  generationProject = normalizeFilm({ ...structuredClone(fixture), id: "00000000-0000-4000-8000-000000000022", duration: 79,
+    title: "SYNTHETIC ONLY - generated-film review workflow",
+    logline: "Local review controls using the existing Thomas Wilson demonstration MP4. This is not generated output of the fictional screenplay and no real payment exists." });
+  const requestId = randomUUID(), prepared = await filmProduction.prepare({ email: OWNER_EMAIL, project: generationProject, idempotencyKey: requestId, preparationConsent: true });
+  const timestamp = new Date(Date.now() - 1000).toISOString(), taskId = "SYNTHETIC_REVIEW_TASK_ONLY";
+  // A reserved documentation host satisfies the saved URL shape; it is never fetched.
+  const outputUrl = "https://example.com/synthetic-existing-demonstration.mp4";
+  const quoteId = auth.digest("synthetic-generation-review-quote"), orderId = auth.digest(`${OWNER_EMAIL}:production:${prepared.manifestHash}`);
+  deliveryMedia = { bytes, pathname: `production/media/${auth.digest(OWNER_EMAIL)}/${prepared.id}/${sha256}.mp4`, sha256 };
+  const attempt = { version: 1, id: prepared.id, ownerEmail: OWNER_EMAIL, filmId: generationProject.id, manifestHash: prepared.manifestHash,
+    orderId, status: "verifying", submissionCount: 1, taskId, outputUrl, submittedAt: timestamp, updatedAt: timestamp, checkedAt: timestamp,
+    promptHash: auth.digest("synthetic-screenplay-request-not-sent"), keyFingerprint: auth.digest("no-provider-key-exists"), changeId: randomUUID(),
+    syntheticFixture: { memoryOnly: true, providerGenerated: false } };
+  await write(paidFilmGenerationPath(OWNER_EMAIL, prepared.id), attempt);
+  await write(paidFilmReviewPath(OWNER_EMAIL, prepared.id), { version: 1, id: prepared.id, ownerEmail: OWNER_EMAIL,
+    filmId: generationProject.id, manifestHash: prepared.manifestHash, orderId, taskHash: auth.digest(taskId), sourceHash: auth.digest(outputUrl),
+    submittedAt: timestamp, promptHash: attempt.promptHash, status: "awaiting-review", changeId: randomUUID(), verifiedAt: timestamp,
+    artifact: { pathname: deliveryMedia.pathname, sha256, sizeBytes: bytes.length, contentType: "video/mp4", durationSeconds: 78.506,
+      width: 1280, height: 720, frameRate: 24, hasAudio: true, playable: true, technicalSample: false, manifestHash: prepared.manifestHash,
+      verification: "full-video-and-audio-decode", contentReviewed: false },
+    syntheticFixture: { memoryOnly: true, verificationSimulated: true, providerGenerated: false } });
+  await write(`payments/orders/${orderId}.json`, { id: orderId, quoteId, customerEmail: OWNER_EMAIL, preparedId: prepared.id,
+    filmId: generationProject.id, filmTitle: generationProject.title, manifestHash: prepared.manifestHash, status: "captured", capturedAt: timestamp,
+    currency: "USD", amountCents: 100, refundedCents: 0, createdAt: timestamp, updatedAt: timestamp, provider: "quickbooks", checkoutMethod: "quickbooks-hosted-invoice",
+    merchantBinding: { environment: "production", grantId: "b".repeat(64), realmId: "12345" }, confirmationSource: "quickbooks-accounting",
+    invoiceId: "100", balanceCents: 0, accountingCheckedAt: timestamp, accountingPayments: [{ id: "101", allocatedCents: 100 }],
+    syntheticFixture: { memoryOnly: true, realPayment: false } });
+  generationProject.productionPreparation = { ...prepared, inputHash: await productionInputHash(JSON.stringify(productionPreparationInput(generationProject))),
+    requestId, status: "prepared", issues: [] };
+  generationProject.paymentReference = { preparedId: prepared.id, manifestHash: prepared.manifestHash, quoteId, orderId,
+    checkoutKey: "synthetic-generation-review", submittedAt: timestamp, sandbox: false };
+  assert.deepEqual(normalizeFilm(generationProject).paymentReference, generationProject.paymentReference);
+}
+const seedMarker = `lineage-${generationReviewFixture ? "generation-review" : deliveryFixture ? "delivery" : "checkout"}-fixture:${randomUUID()}`;
+const seedScript = generationReviewFixture ? `// SYNTHETIC REVIEW ONLY: no generated output, real payment, or technical verification claim.
+if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
+  for(const email of ${JSON.stringify(accounts.map(account=>account.email))}) localStorage.setItem('lineage-studio-v3:'+email,JSON.stringify(email===${JSON.stringify(OWNER_EMAIL)}?[${JSON.stringify(generationProject)}]:[${JSON.stringify(fixture)}]));
+  localStorage.setItem(${JSON.stringify(seedMarker)},'seeded');
+}
+const originalFetch=window.fetch.bind(window);
+window.fetch=(input,options)=>{
+  const url=new URL(typeof input==='string'?input:input.url,location.href);
+  if(url.origin!==location.origin) throw new Error('Synthetic review fixture forbids external fetch requests.');
+  return originalFetch(input,options);
+};` : deliveryFixture ? `// SYNTHETIC PLAYBACK ONLY: existing illustrative sample, no new render or charge.
 if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
   for(const email of ${JSON.stringify(accounts.map(account=>account.email))}) localStorage.setItem('lineage-studio-v3:'+email,JSON.stringify(email===${JSON.stringify(accounts[0].email)}?[${JSON.stringify(deliveryProject)}]:[${JSON.stringify(fixture)}]));
   localStorage.setItem(${JSON.stringify(seedMarker)},'seeded');
@@ -293,11 +375,13 @@ const server = createServer(async (req, res) => {
       code: "SYNTHETIC_SERVICE_DISABLED", message: "This service is disabled in the synthetic local workflow test." });
     if (path === "/__workflow/status") return auth.json(res, 200, {
       synthetic: true, memoryOnly: true, providersEnabled: false, mailEnabled: false,
-      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures, deliveryFixture, deliveryBlobReads,
+      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures, deliveryFixture, generationReviewFixture, deliveryBlobReads,
       ...(deliveryFixture ? { deliveryPreparedId: deliveryProject.productionPreparation.id, illustrativePlaybackOnly: true } : {}),
+      ...(generationReviewFixture ? { generationPreparedId: generationProject.productionPreparation.id, generationPaymentChecks, reviewVerificationSimulated: true,
+        generationStatusLink: `/#library?film=${generationProject.productionPreparation.id}`, illustrativePlaybackOnly: true } : {}),
       preparedFilms: [...records.keys()].filter(key=>key.startsWith("production/jobs/")).length,
     });
-    if (path === "/__workflow/fixture") return auth.json(res, 200, { synthetic: true, project: deliveryFixture ? deliveryProject : fixture });
+    if (path === "/__workflow/fixture") return auth.json(res, 200, { synthetic: true, project: generationReviewFixture ? generationProject : deliveryFixture ? deliveryProject : fixture });
     if (path === "/__workflow/seed.js") {
       res.setHeader("Content-Type", "text/javascript; charset=utf-8"); return res.end(seedScript);
     }
@@ -315,6 +399,7 @@ const server = createServer(async (req, res) => {
         visible.push(`<tr><td>${account.email}</td><td>${account.password}</td><td>${code}</td></tr>`);
       }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (generationReviewFixture) return res.end(`<!doctype html><html><head><title>Synthetic generated-film review fixture</title></head><body><h1>SYNTHETIC GENERATION REVIEW FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4. It is not a newly generated film, does not match the fictional garden screenplay, and represents no real payment. Technical verification metadata is deliberately simulated to test the review interface; the worker and provider do not run.</p><p>Sign in as the fictional owner erik@brocotech.ai using its public password below. Open the saved film link, preview the demonstration, then approve only as a synthetic interface test. Every record disappears on exit.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/#library?film=${generationProject.productionPreparation.id}">Open synthetic review film</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
       if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and fabricated confirmed payment use the live record format solely to test payment-gated delivery. Every record exists only in memory; there is no real transaction, production credential, or external provider call.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
       return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? '<h2>Fake checkout fixtures — no real card data</h2><p>Use separate preloaded films for each payment. Card 4111111111111111 captures; 4000000000000002 declines; 4000000000009995 stays uncertain. Expiry 12/2030, CVC 123, Sample Person, 1 Fictional Street, Test City, UT 84003. The browser intercepts fabricated tokenization locally. No card data or payment request leaves this computer.</p>' : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
@@ -338,7 +423,7 @@ if (!checkOnly) {
       return html.replace(/<meta\s+http-equiv="Content-Security-Policy"[\s\S]*?\/>/i,
         `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self' blob: ws://${HOST}:${PORT}">`)
         .replace("</head>", '<script src="/__workflow/seed.js"></script></head>')
-        .replace("<body>", `<body style="padding-bottom:38px"><div role="note" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:#641c24;color:white;padding:9px 16px;text-align:center;font:13px Arial,sans-serif">${deliveryFixture ? "SYNTHETIC PLAYBACK FIXTURE · EXISTING DEMONSTRATION VIDEO · NO NEW RENDER OR REAL CHARGE · MEMORY ONLY" : "SYNTHETIC LOCAL TEST · FICTIONAL DATA · MEMORY-ONLY STORAGE · EMAIL, AI, VIDEO AND PAYMENTS DISABLED"}</div>`);
+        .replace("<body>", `<body style="padding-bottom:38px"><div role="note" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:#641c24;color:white;padding:9px 16px;text-align:center;font:13px Arial,sans-serif">${generationReviewFixture ? "SYNTHETIC REVIEW FIXTURE · EXISTING SAMPLE VIDEO · VERIFICATION SIMULATED · NO GENERATION OR REAL PAYMENT · MEMORY ONLY" : deliveryFixture ? "SYNTHETIC PLAYBACK FIXTURE · EXISTING DEMONSTRATION VIDEO · NO NEW RENDER OR REAL CHARGE · MEMORY ONLY" : "SYNTHETIC LOCAL TEST · FICTIONAL DATA · MEMORY-ONLY STORAGE · EMAIL, AI, VIDEO AND PAYMENTS DISABLED"}</div>`);
     } }],
     server: { middlewareMode: true, host: HOST, hmr: { server }, fs: { strict: true, allow: [root] } },
   });
@@ -655,8 +740,46 @@ async function checkDelivery() {
   assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
   console.log("PASS: actual-handler completed status, synthetic confirmed live-format payment, unpaid/uncertain/sandbox denial, private MP4 playback/ranges, HEAD, verified download bytes, ownership denial, and zero outbound calls or charges. Media and payment are local fixtures, not new provider output or a real transaction.");
 }
+async function checkGenerationReview() {
+  const owner = await login(accounts[1]), customer = await login(accounts[0]);
+  const { productionPreparation: prepared, paymentReference: payment } = generationProject;
+  const reviewUrl = `/api/studio?action=generationReview&id=${prepared.id}`;
+  const libraryUrl = `/api/library?action=detail&kind=plan&id=${prepared.id}`;
+  const mediaUrl = `/api/studio?action=productionMedia&id=${prepared.id}`;
+  const capability = await route("/api/studio?action=capabilities", { cookie: owner });
+  assert.equal(capability.body.generationAttempt, true); assert.equal(capability.body.production, false);
+  assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).body.generationAttempt, undefined);
+  assert.equal((await route(reviewUrl)).status, 401); assert.equal((await route(reviewUrl, { cookie: customer })).status, 403);
+  const status = await route(`/api/studio?action=generationAttempt&id=${prepared.id}`, { cookie: owner });
+  assert.equal(status.status, 200); assert.equal(status.body.status, "verifying"); assert.equal(status.body.orderId, payment.orderId);
+  const before = await route(libraryUrl, { cookie: owner });
+  assert.equal(before.status, 200); assert.equal(before.body.entry.production.mediaReady, false); assert.equal(before.body.entry.production.status, "prepared");
+  assert.equal(before.body.entry.payments[0].status, "captured"); assert.equal(before.body.entry.payments[0].sandbox, false);
+  assert.equal((await mediaRoute(mediaUrl, { cookie: owner })).status, 409);
+  const review = await route(reviewUrl, { cookie: owner });
+  assert.equal(review.status, 200); assert.equal(review.body.status, "awaiting-review"); assert.equal(review.body.artifactSha256, deliveryMedia.sha256);
+  assert.equal(review.body.previewUrl, `/api/studio?action=reviewVideo&id=${prepared.id}&artifact=${deliveryMedia.sha256}`);
+  const preview = await mediaRoute(review.body.previewUrl, { cookie: owner, headers: { Range: "bytes=0-63" } });
+  assert.equal(preview.status, 206); assert.deepEqual(preview.bytes, deliveryMedia.bytes.subarray(0, 64));
+  assert.equal((await mediaRoute(review.body.previewUrl.replace(deliveryMedia.sha256, "f".repeat(64)), { cookie: owner })).status, 409);
+  assert.equal((await mediaRoute(review.body.previewUrl, { cookie: customer })).status, 403);
+  const approve = { action: "approveGeneration", preparedId: prepared.id, artifactSha256: deliveryMedia.sha256, consent: true };
+  assert.equal((await route("/api/studio", { cookie: owner, body: { ...approve, consent: false } })).status, 400);
+  assert.equal((await route("/api/studio", { cookie: customer, body: approve })).status, 403);
+  const result = await route("/api/studio", { cookie: owner, body: approve });
+  assert.equal(result.status, 200); assert.equal(result.body.status, "approved"); assert.equal(result.body.artifactSha256, deliveryMedia.sha256);
+  const after = await route(libraryUrl, { cookie: owner });
+  assert.equal(after.status, 200); assert.equal(after.body.entry.production.mediaReady, true); assert.equal(after.body.entry.production.status, "completed");
+  assert.equal(after.body.entry.mediaUrl, mediaUrl); assert.equal(after.body.entry.downloadUrl, `${mediaUrl}&download=1`);
+  const download = await mediaRoute(after.body.entry.downloadUrl, { cookie: owner });
+  assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), deliveryMedia.sha256);
+  assert.equal((await route(reviewUrl, { cookie: owner })).body.status, "approved");
+  assert.equal((await route(libraryUrl, { cookie: customer })).status, 404);
+  assert.equal(generationPaymentChecks, 1); assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
+  console.log("PASS: SYNTHETIC owner review fixture; exact artifact-bound private preview, approval gating, confirmed readback, finished library playback/download, foreign-account denial, and zero outbound calls or charges. Existing demonstration MP4 and simulated verification/payment metadata prove interface behavior only, not real generation or worker verification.");
+}
 if (checkOnly) {
-  try { if (deliveryFixture) await checkDelivery(); else if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
+  try { if (generationReviewFixture) await checkGenerationReview(); else if (deliveryFixture) await checkDelivery(); else if (checkoutFixtures) await checkCheckout(); else await check(); } finally { await close(); }
 } else {
-  console.log(`Synthetic ${deliveryFixture ? "illustrative playback fixture" : "workflow test"} running at ${origin}. Fictional account helpers: ${origin}/__workflow . No production data or provider calls.`);
+  console.log(`Synthetic ${generationReviewFixture ? "generated-film review fixture" : deliveryFixture ? "illustrative playback fixture" : "workflow test"} running at ${origin}. Fictional account helpers: ${origin}/__workflow . No production data or provider calls.`);
 }

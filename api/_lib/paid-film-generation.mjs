@@ -17,6 +17,12 @@ const plain = value => Boolean(value && typeof value === "object" && !Array.isAr
 const date = value => typeof value === "string" && Number.isFinite(Date.parse(value));
 const clone = value => structuredClone(value);
 const validKey = value => typeof value === "string" && Boolean(value) && value.length <= 4096 && !/\s/.test(value);
+const DIAGNOSTIC_CODES = new Set(["MAGICLIGHT_TIMEOUT", "MAGICLIGHT_HTTP_REJECTED", "MAGICLIGHT_INVALID_RESPONSE", "MAGICLIGHT_RESPONSE_TOO_LARGE", "MAGICLIGHT_TRANSPORT_FAILED", "MAGICLIGHT_PROVIDER_REJECTED", "MAGICLIGHT_INVALID_TEXT", "MAGICLIGHT_INVALID_URL"]);
+function privateFailure(error) {
+  return { code: DIAGNOSTIC_CODES.has(error?.code) ? error.code : "GENERATION_RESULT_UNCONFIRMED",
+    ...(Number.isSafeInteger(error?.providerCode) ? { providerCode: error.providerCode } : {}),
+    ...(Number.isSafeInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? { httpStatus: error.httpStatus } : {}) };
+}
 
 export class PaidFilmGenerationError extends Error {
   constructor(code, status, message) { super(message); this.name = "PaidFilmGenerationError"; this.code = code; this.status = status; }
@@ -182,8 +188,8 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
       result = await clientFactory({ apiKey: config.apiKey, environment: "production", enableSubmission: true, requestTimeoutMs: 15_000 }).submitTask({ text });
       if (result?.providerCode !== 10000 || typeof result.taskId !== "string" || !TASK.test(result.taskId)
         || result.taskId.includes(config.apiKey) || result.taskId.includes(encodeURIComponent(config.apiKey))) throw unavailable();
-    } catch {
-      previous = await save(actor, previous, { ...previous.value, status: "uncertain" }, 3);
+    } catch (error) {
+      previous = await save(actor, previous, { ...previous.value, status: "uncertain", diagnostic: privateFailure(error) }, 3);
       await owner(actor); return view(previous.value);
     }
     // Preserve a known accepted task even if owner access changed during POST.
@@ -207,7 +213,7 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
       if (result.taskStatus === 2) update = { ...update, status: "verifying", outputUrl: safeOutput(result.videoUrl, config.apiKey) };
       else if (result.taskStatus === 3) update.status = "failed";
       else update.status = [0, 1].includes(result.taskStatus) ? "processing" : "uncertain";
-    } catch { update.status = "uncertain"; }
+    } catch (error) { update.status = "uncertain"; update.diagnostic = privateFailure(error); }
     await bound(actor, previous);
     if (configuration().fingerprint !== config.fingerprint) throw conflict();
     previous = await save(actor, previous, { ...previous.value, ...update });
