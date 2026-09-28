@@ -27,9 +27,11 @@ async function run(binary, args, onStderrLine) {
 }
 async function mediaInfo(ffmpeg, path) {
   // Decode the whole file, so a container header alone cannot count as playable.
-  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, previousTime;
+  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, previousTime, videoCodec, audioCodec;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:v:0", "-vf", "showinfo", "-fps_mode", "passthrough", "-f", "null", "-", "-progress", "pipe:1"], line => {
     if (/Stream .*Audio:/.test(line)) hasAudio = true;
+    if (videoCodec === undefined) videoCodec = /Stream .*Video:\s*([A-Za-z0-9_]+)/.exec(line)?.[1];
+    if (audioCodec === undefined) audioCodec = /Stream .*Audio:\s*([A-Za-z0-9_]+)/.exec(line)?.[1];
     if (!/Parsed_showinfo_/.test(line)) return;
     const config = /config in .*frame_rate:\s*(\d+)\/(\d+)/.exec(line);
     if (config) {
@@ -55,7 +57,7 @@ async function mediaInfo(ffmpeg, path) {
   if (!profile || !rate || invalidProfile || decodedFrames < 1 || !frames || Number(frames[1]) < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The file did not decode into a consistent progressive, square-pixel video profile at a constant frame rate.");
   const checked = chooseAssemblyProfile([{ ...profile, frameRate: rate.numerator / rate.denominator,
     frameRateRatio: `${rate.numerator}/${rate.denominator}` }]);
-  return { ...checked, durationSeconds: Number(decoded[1]) / 1_000_000, decodedDurationSeconds: Number(decoded[1]) / 1_000_000, frameCount: Number(frames[1]), hasAudio };
+  return { ...checked, durationSeconds: Number(decoded[1]) / 1_000_000, decodedDurationSeconds: Number(decoded[1]) / 1_000_000, frameCount: Number(frames[1]), hasAudio, videoCodec, audioCodec };
 }
 
 // Same-aspect inputs use their smallest native dimensions and slowest native
@@ -96,6 +98,31 @@ async function audioInfo(ffmpeg, path) {
   const decoded = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gm)].at(-1);
   if (invalid || frames < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The reviewed audio did not fully decode.");
   return { durationSeconds: Math.min(sampleDuration, Number(decoded[1]) / 1_000_000) };
+}
+
+// A returned whole-film file is kept unchanged. Technical verification is not
+// content approval: an owner must still compare its scenes and speech with the
+// immutable screenplay before it can become the delivered paid film.
+export async function verifyFilmMedia({ manifest, manifestHash, path, ffmpeg = "ffmpeg" }) {
+  if (!manifest || manifest.version !== 1 || createHash("sha256").update(JSON.stringify(manifest)).digest("hex") !== manifestHash
+    || !Number.isFinite(manifest.targetDurationSeconds) || manifest.targetDurationSeconds <= 0 || manifest.targetDurationSeconds > 600)
+    throw new Error("The immutable manifest hash or duration does not match.");
+  if (typeof path !== "string" || extname(path).toLowerCase() !== ".mp4") throw new Error("The returned film must be a local MP4.");
+  const local = resolve(path), size = (await stat(local)).size;
+  if (size < 16 || size > 250 * 1024 * 1024) throw new Error("The returned film size is invalid.");
+  const info = await mediaInfo(ffmpeg, local);
+  if (info.videoCodec !== "h264" || info.audioCodec !== "aac" || !info.hasAudio
+    || Math.abs(info.durationSeconds - manifest.targetDurationSeconds) > 1)
+    throw new Error("The returned film needs a complete browser-compatible video and audio track at the requested duration.");
+  const audio = await audioInfo(ffmpeg, local);
+  if (audio.durationSeconds < manifest.targetDurationSeconds - 0.1 || Math.abs(audio.durationSeconds - info.durationSeconds) > 1)
+    throw new Error("The returned film audio does not cover its reviewed timeline.");
+  const bytes = await readFile(local);
+  if (bytes.length !== size) throw new Error("The returned film changed during verification.");
+  return { manifestHash, playable: true, technicalSample: false, hasAudio: true,
+    verification: "full-video-and-audio-decode", contentReviewed: false,
+    width: info.width, height: info.height, frameRate: info.frameRate, durationSeconds: info.durationSeconds,
+    contentType: "video/mp4", sizeBytes: size, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 const timecode = ms => {
   const h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000), s = Math.floor(ms % 60000 / 1000), fraction = Math.round(ms % 1000);

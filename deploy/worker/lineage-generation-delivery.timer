@@ -1,0 +1,11 @@
+[Unit]
+Description=Check returned Lineage Theatre generation videos
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=lineage-generation-delivery.service
+
+[Install]
+WantedBy=timers.target

@@ -3,9 +3,10 @@ import { Loader2, RefreshCw, Video } from "lucide-react";
 import { api } from "./model";
 import { generationStatusLabel, normalizeGenerationAttempt, type GenerationAttempt, type GenerationIdentity } from "./generation-attempt";
 import FilmProductionProgress from "./FilmProductionProgress";
+import FilmGenerationReview from "./FilmGenerationReview";
 
-export default function FilmGenerationStatus({ allowed, onStatus, ...identity }: GenerationIdentity & {
-  allowed: boolean; onStatus?: (attempt: GenerationAttempt | null) => void;
+export default function FilmGenerationStatus({ allowed, onStatus, onApproved, ...identity }: GenerationIdentity & {
+  allowed: boolean; onStatus?: (attempt: GenerationAttempt | null) => void; onApproved?: () => void;
 }) {
   const [attempt, setAttempt] = useState<GenerationAttempt | null>(null);
   const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -72,6 +73,7 @@ export default function FilmGenerationStatus({ allowed, onStatus, ...identity }:
       <button className="button primary small" disabled={busy || loading || !consent || Boolean(error)} onClick={() => void act(true)}><Video size={16} />Start film generation</button>
     </>}
     {current && <button className="button secondary small" disabled={busy} onClick={() => void act(false)}><RefreshCw size={15} />Check generation status</button>}
+    {current?.status === "verifying" && <FilmGenerationReview key={context} {...identity} onApproved={onApproved} />}
     {(busy || loading) && <p role="status"><Loader2 size={15} className="spin" /> Checking your saved generation…</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
   </section>;

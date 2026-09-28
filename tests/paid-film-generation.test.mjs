@@ -13,6 +13,17 @@ const NOW = Date.parse("2026-09-28T01:00:00Z");
 const clone = value => structuredClone(value);
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
+test("unconfirmed requests retain only fixed private diagnostics and never resubmit", async () => {
+  for (const error of [Object.assign(new Error("private response"), { code: "MAGICLIGHT_PROVIDER_REJECTED", providerCode: 40001, httpStatus: 200 }), Object.assign(new Error("private response"), { code: "untrusted secret", providerCode: "secret", httpStatus: 999 })]) {
+    const h = fixture({ submit: () => { throw error; } });
+    const value = await h.start();
+    assert.equal(value.status, "uncertain"); assert.equal(value.diagnostic, undefined);
+    assert.equal(h.stored().diagnostic.code, error.code === "MAGICLIGHT_PROVIDER_REJECTED" ? error.code : "GENERATION_RESULT_UNCONFIRMED");
+    assert.doesNotMatch(JSON.stringify(h.stored()), /private response|untrusted secret/);
+    await h.start(); assert.equal(h.submissions.length, 1);
+  }
+});
+
 function fixture(options = {}) {
   let revision = 0, at = NOW;
   const { manifest, manifestHash } = buildFilmManifest(fictionalOperatorProject());

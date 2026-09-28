@@ -10,6 +10,7 @@
 !scripts/assemble-film.mjs
 !scripts/check-worker-runtime.mjs
 !scripts/check-hosted-reversals.mjs
+!scripts/paid-film-delivery-worker.mjs
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile

@@ -365,9 +365,9 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       {order?.status === "captured" && order.refundedCents > 0 && <p className="feedback">A refund is recorded for this order. Production cannot start; contact the administrator to review this payment.</p>}
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
-        {!currentAttempt && <p>{production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
+        {!currentAttempt && <p>{progress.ready ? "Your finished film is ready to watch and download." : production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
           : "Your paid version is saved. Review it below to see the film covered by this payment."}</p>}
-        {paymentReference && trialAllowed && <FilmGenerationStatus allowed preparedId={paymentReference.preparedId} manifestHash={paymentReference.manifestHash} filmId={film.id} orderId={paymentReference.orderId} onStatus={setGenerationAttempt} />}
+        {paymentReference && trialAllowed && <FilmGenerationStatus allowed preparedId={paymentReference.preparedId} manifestHash={paymentReference.manifestHash} filmId={film.id} orderId={paymentReference.orderId} onStatus={setGenerationAttempt} onApproved={() => void productionRequest(false)} />}
         {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
         {!productionAvailable && !trialAllowed && !progress.ready && <p className="feedback">{production && !production.preparationOnly
           ? "Starting or resuming film creation is currently unavailable. The production status above remains saved. Contact the administrator for help; you do not need to pay again."

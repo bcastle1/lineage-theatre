@@ -183,9 +183,12 @@ test("generation status controls require capability and exactly one eligible rea
   const { LibraryGenerationStatus, LibraryFilmStatus } = await libraryComponents();
   const value = helpers.normalizeLibraryEntry(entry());
   assert.equal(LibraryGenerationStatus({ entry: value, allowed: false }), null);
-  const element = LibraryGenerationStatus({ entry: value, allowed: true });
+  let approved = false;
+  const onApproved = () => { approved = true; };
+  const element = LibraryGenerationStatus({ entry: value, allowed: true, onApproved });
   assert.deepEqual(element.props, { preparedId: value.id, manifestHash: value.manifestHash, filmId: value.filmId,
-    orderId: value.payments[0].id, allowed: true });
+    orderId: value.payments[0].id, allowed: true, onApproved });
+  element.props.onApproved(); assert.equal(approved, true);
   for (const patch of [{ sandbox: true }, { requiresReview: true }, { refundedCents: 1 }, { receiptAvailable: false },
     { status: "awaiting-payment" }, { status: "uncertain" }, { status: "refunded" }]) {
     assert.equal(LibraryGenerationStatus({ entry: { ...value, payments: [{ ...value.payments[0], ...patch }] }, allowed: true }), null);

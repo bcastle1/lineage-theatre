@@ -11,10 +11,10 @@ import FilmProductionProgress from "./FilmProductionProgress";
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "The film library could not complete this action. Please refresh.";
-export function LibraryGenerationStatus({ entry, allowed }: { entry: LibraryEntry; allowed: boolean }) {
+export function LibraryGenerationStatus({ entry, allowed, onApproved }: { entry: LibraryEntry; allowed: boolean; onApproved?: () => void }) {
   const order = allowed ? libraryGenerationOrder(entry) : null;
   if (!order || !entry.manifestHash) return null;
-  return <FilmGenerationStatus key={`${entry.id}:${order.id}`} preparedId={entry.id} manifestHash={entry.manifestHash} filmId={entry.filmId} orderId={order.id} allowed={allowed} />;
+  return <FilmGenerationStatus key={`${entry.id}:${order.id}`} preparedId={entry.id} manifestHash={entry.manifestHash} filmId={entry.filmId} orderId={order.id} allowed={allowed} onApproved={onApproved} />;
 }
 export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
   const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
@@ -265,7 +265,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
         <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={closeDetail}><X size={18} /></button></div>
       <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
-      <LibraryGenerationStatus entry={detail.entry} allowed={generationAttemptAllowed === true} />
+      <LibraryGenerationStatus entry={detail.entry} allowed={generationAttemptAllowed === true} onApproved={() => void openDetail(detail.entry)} />
       <div className="action-group film-library-actions">
         {libraryCanWatch(detail.entry) && <>
           <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
