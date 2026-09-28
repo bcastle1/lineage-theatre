@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { api, formatDuration } from "./model";
 import { ltxEndpoint, ltxStatus, type LtxJob } from "./ltx-film";
+import { voiceName } from "./LtxVoicePicker";
 
 export default function LtxFilmReview({ job, onChange }: { job: LtxJob; onChange: (job: LtxJob) => void }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -23,7 +24,7 @@ export default function LtxFilmReview({ job, onChange }: { job: LtxJob; onChange
       <h4>Review each scene</h4>
       <ol className="ltx-timeline">{job.timeline.map(scene => <li key={scene.id}>
         <button className="text-button" onClick={() => { if (video.current) { video.current.currentTime = scene.start; video.current.focus(); } }}>{formatDuration(scene.start)} · {scene.title}</button>
-        <span className="field-note">{scene.shots} generated {scene.shots === 1 ? "shot" : "shots"} · {scene.referenceApplied ? "Character photo used" : "Text-guided scene"} · {scene.audioMode === "tts" ? "Script narration" : scene.audioMode === "recording" ? "Your recording" : "Silent"}</span>
+        <span className="field-note">{scene.shots} generated {scene.shots === 1 ? "shot" : "shots"} · {scene.referenceApplied ? "Character photo used" : "Text-guided scene"} · {scene.audioMode === "tts" ? `${voiceName(scene.voice || job.plan.scenes.find(item => item.id === scene.id)?.voice || job.plan.voice)} · ${scene.speed ?? job.plan.speed ?? 1}× pace` : scene.audioMode === "recording" ? "Your recording" : "Silent"}</span>
         <details><summary>Scene direction and narration</summary><p>{job.plan.scenes.find(item => item.id === scene.id)?.visual}</p><p className="ltx-transcript">{job.plan.scenes.find(item => item.id === scene.id)?.narration || "No narration script."}</p></details>
       </li>)}</ol>
     </>}

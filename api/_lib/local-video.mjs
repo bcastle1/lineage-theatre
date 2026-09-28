@@ -56,7 +56,7 @@ const ARCHIVE_PROFILE = Object.freeze({ namespace: "local-video", query: "1", en
   enabled: () => Boolean(process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY), maxDuration: 900 });
 function publicJob(job, profile) {
   return { id: job.id, filmId: job.filmId, title: job.title, status: job.status, progress: job.progress, createdAt: job.createdAt,
-    ...(job.mode === "film" ? { mode: "film", plan: { characters: job.characters, scenes: job.scenes, voice: job.voice, era: job.era, style: job.style },
+    ...(job.mode === "film" ? { mode: "film", plan: { characters: job.characters, scenes: job.scenes, voice: job.voice, speed: job.speed, era: job.era, style: job.style },
       review: job.review || null, timeline: job.media?.timeline || [], mediaSha256: job.media?.sha256 } : {}),
     ...(job.status === "failed" ? { message: "Local rendering could not finish. Your script and photos are saved. You can start a new render." } : {}),
     ...(job.media ? { durationSeconds: job.media.durationSeconds, sizeBytes: job.media.sizeBytes,
@@ -153,7 +153,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
           return { ...old, status: "rendering", progress: 1, attempts: old.attempts + 1, lease: { token: claim, expiresAt: now() + 300_000 } };
         });
         if (claimed && job?.lease?.token === claim) return { job: { id: job.id, title: job.title, duration: job.duration, scenes: job.scenes,
-          ...(job.mode === "film" ? { mode: "film", characters: job.characters, era: job.era, style: job.style, voice: job.voice } : {}) }, claim };
+          ...(job.mode === "film" ? { mode: "film", characters: job.characters, era: job.era, style: job.style, voice: job.voice, speed: job.speed } : {}) }, claim };
       }
       if (!page.hasMore) break;
       cursor = page.cursor;

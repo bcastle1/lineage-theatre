@@ -1,0 +1,19 @@
+[
+  {"id":"af_heart","name":"Heart","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_bella","name":"Bella","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_nicole","name":"Nicole","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_aoede","name":"Aoede","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_kore","name":"Kore","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_sarah","name":"Sarah","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_alloy","name":"Alloy","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"af_nova","name":"Nova","accent":"American","gender":"Female","engine":"Kokoro"},
+  {"id":"am_fenrir","name":"Fenrir","accent":"American","gender":"Male","engine":"Kokoro"},
+  {"id":"am_michael","name":"Michael","accent":"American","gender":"Male","engine":"Kokoro"},
+  {"id":"am_puck","name":"Puck","accent":"American","gender":"Male","engine":"Kokoro"},
+  {"id":"bf_emma","name":"Emma","accent":"British","gender":"Female","engine":"Kokoro"},
+  {"id":"bf_isabella","name":"Isabella","accent":"British","gender":"Female","engine":"Kokoro"},
+  {"id":"bm_fable","name":"Fable","accent":"British","gender":"Male","engine":"Kokoro"},
+  {"id":"bm_george","name":"George","accent":"British","gender":"Male","engine":"Kokoro"},
+  {"id":"zira","name":"Zira","accent":"American","gender":"Female","engine":"Windows"},
+  {"id":"david","name":"David","accent":"American","gender":"Male","engine":"Windows"}
+]

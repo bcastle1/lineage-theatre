@@ -38,7 +38,7 @@ test("documentary rejects invented people even when an assumption is supplied",(
 });
 test("Astra request is private, structured, uses the exact model, and preserves source coverage",async()=>{
   let sent;
-  const result=await generateStory({action:"plan",project:project(),storyConsent:true},{key:"synthetic-test-key",fetchImpl:async(url,options)=>{assert.equal(url,"https://api.openai.com/v1/responses");sent=JSON.parse(options.body);return new Response(JSON.stringify({status:"completed",output:[{content:[{type:"output_text",text:JSON.stringify(plan())}]}]}));}});
+  const result=await generateStory({action:"plan",project:project(),storyConsent:true},{key:"synthetic-test-key",fetchImpl:async(url,options)=>{assert.equal(url,"https://api.openai.com/v1/responses");sent=JSON.parse(options.body);return new Response(JSON.stringify({status:"completed",model:"gpt-6-astra",output:[{content:[{type:"output_text",text:JSON.stringify(plan())}]}]}));}});
   assert.equal(sent.model,"gpt-6-astra");assert.equal(sent.store,false);assert.equal(sent.text.format.strict,true);assert.equal(result.generatedBy,"GPT-6 Astra");assert.equal(result.sourceCoverage.readSources,1);assert.match(sent.instructions,/untrusted source material/);assert.match(sent.instructions,/ensemble/);
 });
 test("missing consent sends nothing and unavailable Astra never falls back",async()=>{
@@ -188,7 +188,7 @@ test("earlier titles remain untrusted user data and cannot enter model instructi
   let sent;
   await generateStory({action:"themes",project:project(),exclude:[priorTitle],storyConsent:true},{key:"synthetic",fetchImpl:async(url,options)=>{
     sent=JSON.parse(options.body);
-    return new Response(JSON.stringify({status:"completed",output:[{content:[{type:"output_text",text:JSON.stringify(themes)}]}]}));
+    return new Response(JSON.stringify({status:"completed",model:"gpt-6-astra",output:[{content:[{type:"output_text",text:JSON.stringify(themes)}]}]}));
   }});
   assert.equal(sent.instructions.includes(priorTitle),false);
   const userData=JSON.parse(sent.input[0].content[0].text);
@@ -206,4 +206,12 @@ test("oversized exclusions and source metadata fail before contacting the model"
   const p=project();p.sources[0].extraction="x".repeat(100_001);
   await assert.rejects(generateStory({action:"plan",project:p,storyConsent:true},options),/unusually long source descriptions/);
   assert.equal(calls,0);
+});
+
+test("script generation requires the provider to confirm GPT-6 Astra", async () => {
+  for (const model of [undefined, "gpt-5", "gpt-6-sol", "gpt-6-astra-unverified"]) {
+    await assert.rejects(generateStory({action:"plan", project:project(), storyConsent:true}, {key:"synthetic", fetchImpl:async()=>new Response(JSON.stringify({status:"completed", model, output:[]}))}), /did not confirm GPT-6 Astra/);
+  }
+  const result = await generateStory({action:"plan", project:project(), storyConsent:true}, {key:"synthetic", fetchImpl:async()=>new Response(JSON.stringify({status:"completed", model:"gpt-6-astra-2026-09-01", output:[{content:[{type:"output_text", text:JSON.stringify(plan())}]}]}))});
+  assert.equal(result.model,"gpt-6-astra-2026-09-01");
 });

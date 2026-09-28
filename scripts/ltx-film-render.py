@@ -1,11 +1,57 @@
 """Generate every shot, preserve chosen narration, and assemble a reviewable film."""
 import hashlib
+import json
 import math
+import os
 import re
 import subprocess
 from pathlib import Path
 import av
 import imageio_ffmpeg
+
+VOICE_CATALOG = Path(__file__).parent / 'ltx-voices.json'
+if not VOICE_CATALOG.exists():
+    VOICE_CATALOG = Path(__file__).parent.parent / 'shared/ltx-voices.json'
+VOICES = {voice['id'] for voice in json.loads(VOICE_CATALOG.read_text(encoding='utf-8'))}
+
+
+def narrate(text, voice, speed, audio):
+    if voice not in VOICES or isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 0.8 <= speed <= 1.2:
+        raise ValueError('Invalid narrator or speaking pace')
+    if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1200:
+        raise ValueError('Invalid narration text')
+    raw = audio.with_name('speech-raw.wav')
+    if voice in ('david', 'zira'):
+        import win32com.client
+        speaker = win32com.client.Dispatch('SAPI.SpVoice')
+        desired = 'David' if voice == 'david' else 'Zira'
+        installed = [item for item in speaker.GetVoices() if desired in item.GetDescription()]
+        if len(installed) != 1:
+            raise RuntimeError('The selected local narrator is unavailable')
+        speaker.Voice = installed[0]
+        stream = win32com.client.Dispatch('SAPI.SpFileStream')
+        stream.Open(str(raw), 3)
+        try:
+            speaker.AudioOutputStream = stream
+            speaker.Speak(text, 16)  # Plain text, never speech markup.
+        finally:
+            stream.Close()
+            speaker = None
+    else:
+        root = Path(os.environ.get('LINEAGE_TTS_ROOT', Path(__file__).resolve().parent.parent))
+        python = root / 'tts-venv/Scripts/python.exe'
+        helper = root / 'worker/ltx-neural-voice.py'
+        # The CPU voice process never receives website, storage, or model credentials.
+        env = {key: value for key, value in os.environ.items() if key.upper() in
+            ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA')}
+        result = subprocess.run([str(python), '-X', 'utf8', str(helper)],
+            input=json.dumps({'voice': voice, 'speed': speed, 'text': text, 'output': str(raw)}).encode(),
+            capture_output=True, timeout=180, env=env, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if result.returncode or not raw.exists():
+            raise RuntimeError('The selected neural narrator could not render. Check scene length and the voice installation.')
+    filters = ([f'atempo={speed}'] if voice in ('david', 'zira') else []) + ['loudnorm=I=-16:TP=-1.5:LRA=11']
+    ffmpeg(['-i', raw, '-af', ','.join(filters), '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', audio])
+    raw.unlink()
 
 
 def ffmpeg(args, timeout=300):
@@ -25,7 +71,7 @@ def audio_duration(path):
 def render(job, work, sources, progress, render_clip):
     if not re.fullmatch(r'[a-f0-9]{64}', job.get('id', '')) or not 1 <= len(job.get('scenes', [])) <= 30:
         raise ValueError('Invalid full-film job')
-    if job.get('voice') not in ('david', 'zira'):
+    if job.get('voice') not in VOICES:
         raise ValueError('Invalid narrator')
     cast = {item['id']: item for item in job['characters']}
     prepared = []
@@ -36,26 +82,12 @@ def render(job, work, sources, progress, render_clip):
         audio = folder / 'narration.wav'
         mode = scene['audioMode']
         if mode == 'tts':
-            import win32com.client
-            speaker = win32com.client.Dispatch('SAPI.SpVoice')
-            desired = 'David' if job['voice'] == 'david' else 'Zira'
-            voices = [voice for voice in speaker.GetVoices() if desired in voice.GetDescription()]
-            if len(voices) != 1:
-                raise RuntimeError('The selected local narrator is unavailable')
-            speaker.Voice = voices[0]
-            stream = win32com.client.Dispatch('SAPI.SpFileStream')
-            stream.Open(str(audio), 3)
-            try:
-                speaker.AudioOutputStream = stream
-                speaker.Speak(scene['narration'], 16)  # Plain text; never interpret speech markup.
-            finally:
-                stream.Close()
-                speaker = None
+            narrate(scene['narration'], scene.get('voice') or job['voice'], job.get('speed') or 1, audio)
         elif mode == 'recording':
             original = sources[scene['audioId']]
             if not 0 < audio_duration(original) <= 59.5:
                 raise ValueError('Use a narration recording shorter than one minute per scene')
-            ffmpeg(['-i', original, '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', audio])
+            ffmpeg(['-i', original, '-vn', '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ac', '1', '-ar', '48000', '-c:a', 'pcm_s16le', audio])
         elif mode != 'silent':
             raise ValueError('Invalid scene audio mode')
         speech = audio_duration(audio) if mode != 'silent' else 0
@@ -108,7 +140,8 @@ def render(job, work, sources, progress, render_clip):
             '-t', duration, '-c:v', 'libx264', '-crf', '21', '-pix_fmt', 'yuv420p', '-r', '24',
             '-af', 'apad', '-ar', '48000', '-ac', '2', '-c:a', 'aac', '-b:a', '160k', '-map_metadata', '-1', assembled])
         timeline.append({'id': scene['id'], 'start': start, 'duration': duration, 'shots': len(shot_paths),
-            'referenceApplied': bool(scene.get('photoId')), 'audioMode': scene['audioMode']})
+            'referenceApplied': bool(scene.get('photoId')), 'audioMode': scene['audioMode'],
+            **({'voice': scene.get('voice') or job['voice'], 'speed': job.get('speed') or 1} if scene['audioMode'] == 'tts' else {})})
         start += duration
         scenes.append(assembled)
     progress(92)

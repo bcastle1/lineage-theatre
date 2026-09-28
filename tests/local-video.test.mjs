@@ -235,3 +235,32 @@ test("history preserves earlier films privately and finished jobs leave the pend
   assert.equal(h.records.has(`local-video/pending/${first.id}.json`), false);
   assert.equal((await h.service.status(actor, first.id)).status, "completed");
 });
+
+test("neural narration is validated, claimed, and verified against the saved voice and pace", async () => {
+  const h = harness({profile: AI_VIDEO_PROFILE}); await h.service.poll();
+  const plan = {...filmInput(), voice:"af_heart", speed:0.9};
+  plan.scenes[0].voice="bm_fable";
+  const job=await h.service.start(actor,plan), ticket=await h.service.poll();
+  assert.equal(ticket.job.voice,"af_heart"); assert.equal(ticket.job.speed,0.9);
+  assert.equal(ticket.job.scenes[0].voice,"bm_fable");
+  assert.equal(job.plan.speed,0.9);
+  await assert.rejects(h.service.start(actor,{...plan,speed:1.1}),/different saved draft/);
+  const report=filmReport(h);
+  for (const narration of [{}, {voice:"af_heart",speed:0.9}, {voice:"bm_fable",speed:1}]) {
+    await assert.rejects(h.service.upload(job.id,ticket.claim,{...report,timeline:[{...report.timeline[0],...narration}]}),/voice and pace/);
+  }
+  report.timeline[0]={...report.timeline[0],voice:"bm_fable",speed:0.9};
+  await h.service.upload(job.id,ticket.claim,report);
+  const ready=await h.service.complete(job.id,ticket.claim,report);
+  assert.equal(ready.timeline[0].voice,"bm_fable"); assert.equal(ready.timeline[0].speed,0.9);
+  assert.equal((await h.service.history(actor)).jobs[0].plan.scenes[0].voice,"bm_fable");
+});
+
+test("voice controls reject unknown presets and unsafe pace without changing legacy snapshots", () => {
+  for (const speed of [null,"1",false,0.79,1.21,NaN,Infinity]) assert.throws(()=>aiSceneInput({...filmInput(),speed}),/speaking pace/);
+  const plan=filmInput();
+  assert.equal(Object.hasOwn(aiSceneInput(plan),"speed"),false);
+  assert.throws(()=>aiSceneInput({...plan,scenes:[{...plan.scenes[0],voice:"../../unsafe"}]}),/scene narrator/);
+  const silent=aiSceneInput({...plan,speed:1,scenes:[{...plan.scenes[0],audioMode:"silent",voice:"af_heart"}]});
+  assert.equal(Object.hasOwn(silent.scenes[0],"voice"),false);
+});
