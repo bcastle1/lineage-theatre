@@ -4,6 +4,7 @@ import { generateClientTokenFromReadWriteToken } from "@vercel/blob/client";
 import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { accessStatusForUser } from "./access.mjs";
 import { mediaLibrary } from "./media-library.mjs";
+import { ltxFilmInput, filmSources, imageTypes, audioTypes, checkedTimeline } from "./ltx-film.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -35,6 +36,7 @@ export function localFilmInput(input) {
   return { filmId: input.filmId, title: text(input.title, 200, "the film title", true), duration: input.duration, scenes };
 }
 export function aiSceneInput(input) {
+  if (input?.mode === "film") return ltxFilmInput(input, fail);
   if (!input || !UUID.test(input.filmId || "") || !UUID.test(input.requestId || "") || input.consent !== true)
     fail("Confirm AI rendering and choose a saved film.");
   if (![2, 5].includes(input.duration) || !Array.isArray(input.scenes) || input.scenes.length !== 1)
@@ -54,6 +56,8 @@ const ARCHIVE_PROFILE = Object.freeze({ namespace: "local-video", query: "1", en
   enabled: () => Boolean(process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY), maxDuration: 900 });
 function publicJob(job, profile) {
   return { id: job.id, filmId: job.filmId, title: job.title, status: job.status, progress: job.progress, createdAt: job.createdAt,
+    ...(job.mode === "film" ? { mode: "film", plan: { characters: job.characters, scenes: job.scenes, voice: job.voice, era: job.era, style: job.style },
+      review: job.review || null, timeline: job.media?.timeline || [], mediaSha256: job.media?.sha256 } : {}),
     ...(job.status === "failed" ? { message: "Local rendering could not finish. Your script and photos are saved. You can start a new render." } : {}),
     ...(job.media ? { durationSeconds: job.media.durationSeconds, sizeBytes: job.media.sizeBytes,
       mediaUrl: `/api/studio?local=${profile.query}&action=video&id=${job.id}` } : {}) };
@@ -102,11 +106,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
       return publicResult(existing);
     }
     if (!(await capabilities()).available) fail("The local renderer is offline. Check again before starting a film.", 503);
-    for (const photoId of new Set(plan.scenes.map(scene => scene.photoId).filter(Boolean))) {
-      const photo = await sources.file(actor, actor.email, photoId);
-      if (!["image/jpeg", "image/png", "image/webp"].includes(photo.contentType) || photo.size > 20 * 1024 * 1024 || photo.customerState === "trash")
-        fail("Use active JPG, PNG, or WebP photos under 20 MB for the free film.");
-    }
+    for (const [id, kind] of filmSources(plan)) await checkedSource(actor, id, kind);
     const job = { version: 1, id, ...plan, email: actor.email, inputHash, status: "queued", progress: 0, attempts: 0, createdAt: new Date(now()).toISOString() };
     await mutate(path, old => {
       if (old && (old.email !== actor.email || old.inputHash !== inputHash)) fail("This render request changed.", 409);
@@ -141,7 +141,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
         const id = blob.pathname.slice(PENDING.length, -5);
         if (!HASH.test(id) || blob.pathname !== `${PENDING}${id}.json`) continue;
         const stored = (await read(pathFor(id)))?.value;
-        if (!stored || ["completed", "failed"].includes(stored.status)) { await remove(blob.pathname); continue; }
+        if (!stored || ["completed", "failed", "review", "changes_requested"].includes(stored.status)) { await remove(blob.pathname); continue; }
         let claimed = false;
         const claim = uuid();
         const job = await mutate(pathFor(id), async old => {
@@ -152,7 +152,8 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
           claimed = true;
           return { ...old, status: "rendering", progress: 1, attempts: old.attempts + 1, lease: { token: claim, expiresAt: now() + 300_000 } };
         });
-        if (claimed && job?.lease?.token === claim) return { job: { id: job.id, title: job.title, duration: job.duration, scenes: job.scenes }, claim };
+        if (claimed && job?.lease?.token === claim) return { job: { id: job.id, title: job.title, duration: job.duration, scenes: job.scenes,
+          ...(job.mode === "film" ? { mode: "film", characters: job.characters, era: job.era, style: job.style, voice: job.voice } : {}) }, claim };
       }
       if (!page.hasMore) break;
       cursor = page.cursor;
@@ -168,27 +169,35 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     await heartbeat();
     return { ok: true };
   }
+  async function checkedSource(actor, id, kind) {
+    const item = await sources.file(actor, actor.email, id);
+    if (!(kind === "audio" ? audioTypes : imageTypes).includes(item.contentType) || item.size > 20 * 1024 * 1024 || item.customerState === "trash")
+      fail("Use available JPG, PNG, WebP, MP3, WAV, M4A, or OGG sources under 20 MB.", 409);
+    return item;
+  }
   async function source(id, claim, photoId) {
     const job = await lease(id, claim);
-    if (!job.scenes.some(scene => scene.photoId === photoId)) fail("This photo is not part of the render.", 403);
-    const photo = await sources.file(await active(job.email), job.email, photoId);
-    if (!["image/jpeg", "image/png", "image/webp"].includes(photo.contentType) || photo.size > 20 * 1024 * 1024 || photo.customerState === "trash") fail("This photo is unavailable.", 409);
+    const kind = filmSources(job).find(([sourceId]) => sourceId === photoId)?.[1];
+    if (!kind) fail("This source is not part of the render.", 403);
+    const photo = await checkedSource(await active(job.email), photoId, kind);
     return { pathname: photo.pathname, contentType: photo.contentType, sizeBytes: photo.size };
   }
-  function validateReport(report) {
-    if (!report || !HASH.test(report.sha256 || "") || !Number.isSafeInteger(report.sizeBytes) || report.sizeBytes < 100 || report.sizeBytes > MAX_BYTES
-      || !Number.isFinite(report.durationSeconds) || report.durationSeconds < 1 || report.durationSeconds > profile.maxDuration
+  function validateReport(report, job) {
+    const film = job.mode === "film";
+    if (!report || !HASH.test(report.sha256 || "") || !Number.isSafeInteger(report.sizeBytes) || report.sizeBytes < 100 || report.sizeBytes > (film ? 500 * 1024 * 1024 : MAX_BYTES)
+      || !Number.isFinite(report.durationSeconds) || report.durationSeconds < 1 || report.durationSeconds > (film ? 601 : profile.maxDuration)
       || report.width !== profile.width || report.height !== profile.height || report.hasAudio !== true || report.engine !== profile.engine) fail("The rendered film could not be verified.", 409);
-    return { sha256: report.sha256, sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds, width: profile.width, height: profile.height, hasAudio: true, contentType: "video/mp4" };
+    return { sha256: report.sha256, sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds, width: profile.width, height: profile.height, hasAudio: true, contentType: "video/mp4",
+      ...(film ? { timeline: checkedTimeline(report, job, fail) } : {}) };
   }
   async function upload(id, claim, report) {
-    const job = await lease(id, claim), media = validateReport(report);
+    const job = await lease(id, claim), media = validateReport(report, job);
     const pathname = `${profile.namespace}/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
     return { pathname, token: await token({ pathname, maximumSizeInBytes: media.sizeBytes, allowedContentTypes: ["video/mp4"],
       validUntil: now() + 300_000, addRandomSuffix: false, allowOverwrite: false, cacheControlMaxAge: 60 }) };
   }
   async function complete(id, claim, report) {
-    const job = await lease(id, claim), media = validateReport(report);
+    const job = await lease(id, claim), media = validateReport(report, job);
     media.pathname = `${profile.namespace}/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
     const stored = await getBlob(media.pathname, { access: "private", useCache: false, headers: { "accept-encoding": "identity" } });
     if (!stored?.stream || stored.blob.pathname !== media.pathname || stored.blob.contentType !== "video/mp4" || stored.blob.size !== media.sizeBytes) {
@@ -201,7 +210,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     await lease(id, claim);
     return publicResult(await mutate(pathFor(id), old => {
       if (old?.lease?.token !== claim || old.status !== "rendering" || old.lease.expiresAt <= now()) fail("The render claim expired.", 409);
-      return { ...old, status: "completed", progress: 100, lease: null, media, completedAt: new Date(now()).toISOString() };
+      return { ...old, status: old.mode === "film" ? "review" : "completed", progress: 100, lease: null, media, completedAt: new Date(now()).toISOString() };
     }));
   }
   async function failed(id, claim) {
@@ -214,11 +223,26 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
   }
   async function video(actor, id) {
     const job = await own(actor, id), media = job.media;
-    if (job.status !== "completed" || !media || !HASH.test(media.sha256 || "") || media.pathname !== `${profile.namespace}/media/${digest(actor.email)}/${id}/${media.sha256}.mp4`)
+    if (!["completed", "review", "changes_requested"].includes(job.status) || !media || !HASH.test(media.sha256 || "") || media.pathname !== `${profile.namespace}/media/${digest(actor.email)}/${id}/${media.sha256}.mp4`)
       fail("Your film is not ready to watch yet.", 409);
     return media;
   }
-  return { capabilities, start, history, status: async (actor, id) => publicResult(await own(actor, id)), poll, progress, source, upload, complete, failed, video };
+  async function review(actor, input) {
+    await active(actor.email);
+    const job = await own(actor, input.id);
+    if (job.mode !== "film" || !["review", "changes_requested", "completed"].includes(job.status) || !HASH.test(input.sha256 || "") || input.sha256 !== job.media?.sha256)
+      fail("Refresh the film before reviewing this version.", 409);
+    if (!["approve", "changes"].includes(input.decision)) fail("Choose an approval or request changes.");
+    const notes = text(input.notes || "", 2000, "your review notes", input.decision === "changes");
+    if (input.decision === "approve" && !["characters", "narration", "timing"].every(key => input.checks?.[key] === true)) fail("Review character continuity, narration, and timing before approval.");
+    return publicResult(await mutate(pathFor(job.id), old => {
+      if (old?.media?.sha256 !== input.sha256 || old.status !== job.status) fail("The film review changed. Refresh it.", 409);
+      return { ...old, status: input.decision === "approve" ? "completed" : "changes_requested",
+        review: { decision: input.decision, notes, at: new Date(now()).toISOString(), sha256: input.sha256,
+          checks: Object.fromEntries(["characters", "narration", "timing"].map(key => [key, input.checks?.[key] === true])) } };
+    }));
+  }
+  return { capabilities, start, history, status: async (actor, id) => publicResult(await own(actor, id)), poll, progress, source, upload, complete, failed, video, review };
 }
 export const localVideo = createLocalVideoService();
 export const aiVideo = createLocalVideoService({ profile: AI_VIDEO_PROFILE });

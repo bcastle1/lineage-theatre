@@ -10,6 +10,7 @@ from pathlib import Path
 import av
 import imageio_ffmpeg
 import psutil
+from PIL import Image, ImageOps
 
 BASE = "http://127.0.0.1:8189"
 COMFY_ROOT = Path(os.environ.get("LINEAGE_COMFY_ROOT", Path(__file__).resolve().parent.parent / "ComfyUI")).resolve()
@@ -19,7 +20,7 @@ def request(path, body=None):
     with urllib.request.urlopen(req, timeout=30) as response:
         return json.load(response)
 
-def workflow(prompt, duration=2, seed=20260928, width=1024, height=576):
+def workflow(prompt, duration=2, seed=20260928, width=1024, height=576, reference=None):
     graph = {}
     def node(id, kind, **inputs):
         graph[str(id)] = {'class_type': kind, 'inputs': inputs}
@@ -51,6 +52,12 @@ def workflow(prompt, duration=2, seed=20260928, width=1024, height=576):
     decoded=node(25,'LTXVAudioVAEDecode',samples=['23',1],audio_vae=audio)
     movie=node(26,'CreateVideo',images=images,audio=decoded,fps=24,bit_depth=8,color_space='sRGB')
     node(27,'SaveVideo',video=movie,filename_prefix='lineage/pc-ltx-test',format='mp4',**{'format.codec':'h264'})
+    if reference:
+        loaded = node(30, 'LoadImage', image=reference)
+        guided = node(31, 'LTXVImgToVideoInplace', vae=vae, image=loaded, latent=video, strength=0.85, bypass=False)
+        graph['11']['inputs']['video_latent'] = guided
+        refined = node(32, 'LTXVImgToVideoInplace', vae=vae, image=loaded, latent=up, strength=0.85, bypass=False)
+        graph['19']['inputs']['video_latent'] = refined
     return graph
 
 
@@ -65,21 +72,38 @@ def check():
         raise RuntimeError('AI renderer needs more available system memory')
 
 
-def render(job, work, photos, progress):
+def render_clip(job, work, photos, progress):
     if not re.fullmatch(r'[a-f0-9]{64}', job.get('id', '')) or job.get('duration') not in (2, 5) or len(job.get('scenes', [])) != 1:
         raise ValueError('Invalid AI scene job')
     prompt = job['scenes'][0]['visual']
-    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 1800 or photos:
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 12000:
         raise ValueError('Invalid AI scene description')
     check()
-    graph = workflow(prompt, duration=job['duration'], seed=int(job['id'][:12], 16))
+    reference = None
+    if job.get('photoId'):
+        path = photos[job['photoId']]
+        reference = COMFY_ROOT / 'input/lineage-worker' / (job['id'] + '.png')
+        reference.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as original:
+            if original.width * original.height > 40_000_000:
+                raise ValueError('Reference image is too large')
+            picture = ImageOps.exif_transpose(original).convert('RGB')
+            picture.thumbnail((1536, 1536))
+            picture.save(reference)
+    graph = workflow(prompt, duration=job['duration'], seed=int(job['id'][:12], 16),
+        reference='lineage-worker/' + reference.name if reference else None)
     graph['27']['inputs']['filename_prefix'] = 'lineage-worker/' + job['id']
-    submitted = request('/prompt', {'prompt': graph, 'client_id': 'lineage-private-worker'})
+    try:
+        submitted = request('/prompt', {'prompt': graph, 'client_id': 'lineage-private-worker'})
+    except Exception:
+        if reference:
+            reference.unlink(missing_ok=True)
+        raise
     prompt_id = submitted['prompt_id']
     source = None
     started = time.monotonic()
-    progress(10)
     try:
+        progress(10)
         while time.monotonic() - started < 1800:
             item = request('/history/' + prompt_id).get(prompt_id)
             if item:
@@ -133,3 +157,15 @@ def render(job, work, photos, progress):
             pass
         if source and source.exists():
             source.unlink()
+        if reference:
+            reference.unlink(missing_ok=True)
+
+
+def render(job, work, photos, progress):
+    if job.get('mode') == 'film':
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('ltx_film', Path(__file__).with_name('ltx-film-render.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.render(job, Path(work), photos, progress, render_clip)
+    return render_clip(job, work, photos, progress)

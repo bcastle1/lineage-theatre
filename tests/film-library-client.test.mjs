@@ -15,6 +15,7 @@ const modelUrl = moduleUrl(compile(await readFile(new URL("../src/studio/model.t
 const helperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-library.ts", import.meta.url), "utf8")));
 const fulfillmentUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-fulfillment.ts", import.meta.url), "utf8")));
 const generationStatusUrl = moduleUrl("export default function FilmGenerationStatus() { return null; }");
+const ltxLibraryUrl = moduleUrl("export default function LtxFilmLibrary() { return null; }");
 const progressHelperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-production-progress.ts", import.meta.url), "utf8")));
 const progressSource = compile(await readFile(new URL("../src/studio/FilmProductionProgress.tsx", import.meta.url), "utf8"))
   .replace(/import "\.\/film-production-progress\.css";\s*/g, "")
@@ -143,6 +144,7 @@ async function libraryComponents() {
   source = source.replaceAll('from "./model"', `from "${modelUrl}"`).replaceAll('from "./film-library"', `from "${helperUrl}"`);
   source = source.replaceAll('from "./film-fulfillment"', `from "${fulfillmentUrl}"`).replaceAll('from "./FilmGenerationStatus"', `from "${generationStatusUrl}"`);
   source = source.replaceAll('from "./FilmProductionProgress"', `from "${progressComponentUrl}"`);
+  source = source.replaceAll('from "./LtxFilmLibrary"', `from "${ltxLibraryUrl}"`);
   return import(moduleUrl(source));
 }
 

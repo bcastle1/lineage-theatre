@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Download, Film as FilmIcon, Loader2, RefreshCw } from "lucide-react";
 import { api, type Film } from "./model";
 
-type Job = { id: string; title?: string; status: string; progress: number; message?: string; mediaUrl?: string; durationSeconds?: number };
+type Job = { id: string; mode?: string; title?: string; status: string; progress: number; message?: string; mediaUrl?: string; durationSeconds?: number };
 type Availability = { available: boolean; message: string };
 const endpoint = "/api/studio?local=ltx";
 
@@ -28,7 +28,7 @@ export default function AiVideoPanel({ film, update }: { film: Film; update: (pa
           film.aiVideoJobId ? api<Job>(`${endpoint}&action=status&id=${encodeURIComponent(film.aiVideoJobId)}`) : Promise.resolve(null),
           api<{ jobs: Job[] }>(`${endpoint}&action=history`),
         ]);
-        if (!cancelled) { setAvailability(caps); setJob(status); setHistory(recent.jobs || []); }
+        if (!cancelled) { setAvailability(caps); setJob(status); setHistory((recent.jobs || []).filter(item => item.mode !== "film")); }
       } catch (e) { if (!cancelled) setError(e instanceof Error ? e.message : "The AI renderer could not be checked."); }
     };
     void check();

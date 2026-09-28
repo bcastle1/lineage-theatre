@@ -55,14 +55,14 @@ def process(ticket):
         with tempfile.TemporaryDirectory(prefix="lineage-render-") as directory:
             work = Path(directory)
             photos = {}
-            for photo_id in {scene["photoId"] for scene in job["scenes"] if scene.get("photoId")}:
+            for photo_id in {scene[key] for scene in job["scenes"] for key in ("photoId", "audioId") if scene.get(key)}:
                 url = ENDPOINT + "&action=source&id=" + job["id"] + "&photo=" + urllib.parse.quote(photo_id)
                 req = urllib.request.Request(url, headers={"Authorization": "Bearer " + KEY, "X-Render-Claim": claim})
                 with opener.open(req, timeout=120) as response:
                     data = response.read(20 * 1024 * 1024 + 1)
                     if len(data) > 20 * 1024 * 1024:
                         raise ValueError("Photo exceeds local rendering limit")
-                    path = work / (photo_id + ".image")
+                    path = work / (photo_id + ".source")
                     path.write_bytes(data)
                     photos[photo_id] = path
 

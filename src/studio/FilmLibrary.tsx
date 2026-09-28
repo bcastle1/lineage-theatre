@@ -7,6 +7,7 @@ import "./film-library.css";
 import { generationTimeEstimate } from "./film-fulfillment";
 import FilmGenerationStatus from "./FilmGenerationStatus";
 import FilmProductionProgress from "./FilmProductionProgress";
+import LtxFilmLibrary from "./LtxFilmLibrary";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
@@ -233,6 +234,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     {error && !confirmation && <p className="feedback error" role="alert">{error}</p>}
     {busy && <p role="status"><Loader2 className="spin" size={16} aria-hidden="true" /> {busy}</p>}
     {view !== "active" && <p className="field-note">{view === "trash" ? "Nothing here is permanently deleted." : "Archived films stay in your account."} Active production continues, and payment records are retained. Restore returns a film to My films.</p>}
+    {view === "active" && <LtxFilmLibrary />}
     <section aria-labelledby="saved-films-heading" aria-busy={loading}>
       <div className="section-title"><div><h2 id="saved-films-heading">Saved to your account</h2><p>Each card is a saved version. Its payment and production status are shown separately.</p></div></div>
       {loading && <p role="status">Loading your saved films…</p>}

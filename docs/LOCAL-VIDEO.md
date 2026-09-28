@@ -40,6 +40,20 @@ The PC worker submits only a fixed graph with customer text as a string input. I
 
 Stop the scheduled task and the two process IDs recorded in this installation's `worker.pid` and `comfy.pid` to take the renderer offline; verify their executable paths belong to this installation first. Restart the task to resume. Jobs interrupted during a stop retain the existing lease/retry behavior.
 
+## LTX full films
+
+**LTX full film**, in Create & watch, uses the same PC worker to produce a complete private review copy. The separate AI scene panel retains its two/five-second workflow. Full-film requests use `mode: "film"` on `/api/studio?local=ltx`; they share the six-starts-per-day allowance. No paid generation service is called.
+
+Each cast member can have an account-owned JPG/PNG/WebP reference. Each scene selects one lead reference and includes its cast descriptions. The fixed ComfyUI graph applies `LTXVImgToVideoInplace` in both sampling stages; subsequent five-second shots continue from the preceding generated frame. This guides appearance but cannot guarantee likeness or perfect continuity. Scenes without a selected reference use their text direction. The renderer generates all footage; it does not loop or stretch clips to fill a scene.
+
+Narration is explicit per scene: read the editable script with local Windows David/Zira, use an account-owned MP3/WAV/M4A/OGG recording, or use silence. The Windows venv requires `pywin32==312` for SAPI speech. Speech is passed as plain text, never SSML. The selected track replaces LTX-generated audio. Script narration uses one voice, including dialogue, and does not promise lip-sync. Recordings are limited to 59.5 seconds and sources to 20 MB each. All narration is measured before GPU work; scenes extend when needed without trimming speech.
+
+Full-film limits: 1–30 scenes, 2–60 minimum seconds per scene, 600 seconds total including narration, 12,000 narration characters total, and 500 MB final MP4. Each generated shot has the existing 30-minute timeout. Output remains 1024 × 576 at 24 fps, H.264/AAC. `ltx-film-render.py` assembles shots and scenes, validates the entire video/audio decode and frame count, and reports a contiguous scene timeline. Multipart upload uses the existing short-lived immutable output grant. The API validates source ownership/type, timeline order, runtime, engine, dimensions, size and stored SHA-256 before exposing playback.
+
+A successful full render ends at `review`, not `completed`. The account holder can seek to each scene, watch/download the review copy, and save notes. Approval requires character, narration and timing checks tied to the exact output SHA-256. Requesting changes requires notes and keeps the existing version playable; editing the draft submits a new request/version. Reviews persist with the private job record. LTX films appear in the account film library even when the original browser draft is unavailable. Draft settings themselves continue to use the existing browser storage.
+
+Install the updated worker, `ltx-video-render.py`, `ltx-film-render.py` and multipart upload helper together before enabling full-film jobs. Preserve `worker-settings.json` and the scheduled-task setup. Both Spark language-model services remain unchanged.
+
 ## Release validation
 
 Run `node --test tests/local-video.test.mjs`, `pnpm test`, and `pnpm run build`. Test a real film in the container, including an image scene and a title-card scene; use ffprobe plus a full ffmpeg decode to validate its output. Then verify an authenticated custom-domain job through queue, rendering, completion, reload, playback, and download; reject anonymous and foreign-account media access. Retain only nonsecret test receipts.

@@ -29,6 +29,73 @@ function harness(options = {}) {
 }
 
 const aiInput = () => ({ ...input(), duration: 2, scenes: [{ title: "A shared harvest", visual: "A slow camera move across a family garden. Leaves move in the breeze." }] });
+const filmInput = () => ({ ...input(), mode: "film", voice: "zira", era: "A family garden", style: "Cinematic",
+  characters: [{ id: "gardener", name: "Alex", description: "An adult gardener in a straw hat", photoId }],
+  scenes: [{ id: "harvest", title: "A shared harvest", visual: "The gardener picks vegetables.", narration: "The garden brought us together.",
+    duration: 5, characterIds: ["gardener"], referenceCharacterId: "gardener", audioMode: "tts" }] });
+const filmReport = h => ({ ...h.report(), engine: AI_VIDEO_PROFILE.engine, width: 1024, height: 576, durationSeconds: 5.042,
+  timeline: [{ id: "harvest", start: 0, duration: 5, shots: 1, referenceApplied: true, audioMode: "tts" }] });
+
+test("full-film plans bind character photos and narration, reject invalid cast, runtime, and audio", () => {
+  const plan = filmInput(), normalized = aiSceneInput(plan);
+  assert.equal(normalized.scenes[0].photoId, photoId);
+  assert.equal(normalized.scenes[0].narration, plan.scenes[0].narration);
+  assert.equal(normalized.duration, 5);
+  assert.throws(() => aiSceneInput({ ...plan, scenes: [{ ...plan.scenes[0], audioMode: "recording", audioId: photoId }] }), /separate image and audio/);
+  for (const scene of [{ ...plan.scenes[0], characterIds: [] }, { ...plan.scenes[0], audioMode: "recording" },
+    { ...plan.scenes[0], narration: "" }, { ...plan.scenes[0], duration: 61 }, { ...plan.scenes[0], visual: "" }])
+    assert.throws(() => aiSceneInput({ ...plan, scenes: [scene] }));
+  assert.throws(() => aiSceneInput({ ...plan, characters: [...plan.characters, ...plan.characters] }), /unique/);
+  assert.throws(() => aiSceneInput({ ...plan, voice: "external-voice" }), /narrator/);
+  assert.throws(() => aiSceneInput({ ...plan, scenes: Array.from({ length: 11 }, (_, i) => ({ ...plan.scenes[0], id: `scene-${i}`, duration: 60 })) }), /10 minutes/);
+});
+test("film sources are owned, typed, scoped to the claim, and cannot be arbitrary files", async () => {
+  const audioId = "a0000000-0000-4000-8000-000000000009";
+  const h = harness({ profile: AI_VIDEO_PROFILE, sources: { file: async (current, owner, id) => {
+    assert.equal(owner, current.email);
+    if (![photoId, audioId].includes(id)) throw new Error("not owned");
+    return { contentType: id === photoId ? "image/png" : "audio/wav", size: 300, pathname: `private/${id}`, customerState: "active" };
+  } } });
+  await h.service.poll(); const plan = filmInput(); plan.scenes[0].audioMode = "recording"; plan.scenes[0].audioId = audioId;
+  const job = await h.service.start(actor, plan), ticket = await h.service.poll();
+  assert.equal(ticket.job.mode, "film"); assert.equal(ticket.job.characters[0].photoId, photoId);
+  assert.equal((await h.service.source(job.id, ticket.claim, audioId)).contentType, "audio/wav");
+  await assert.rejects(h.service.source(job.id, ticket.claim, filmId), /not part/);
+  const foreign = filmInput(); foreign.requestId = filmId; foreign.characters[0].photoId = filmId;
+  await assert.rejects(h.service.start(actor, foreign), /not owned/);
+  const wrongType = filmInput(); wrongType.requestId = filmId; wrongType.characters[0].photoId = audioId;
+  await assert.rejects(h.service.start(actor, wrongType), /sources under/);
+});
+test("full films require complete scene evidence then review of the exact verified output", async () => {
+  const h = harness({ profile: AI_VIDEO_PROFILE }); await h.service.poll();
+  const job = await h.service.start(actor, filmInput()), ticket = await h.service.poll(), report = filmReport(h);
+  for (const changed of [{ ...report, timeline: [] }, { ...report, durationSeconds: 12 },
+    { ...report, timeline: [{ ...report.timeline[0], referenceApplied: false }] }, { ...report, timeline: [{ ...report.timeline[0], id: "wrong" }] }])
+    await assert.rejects(h.service.upload(job.id, ticket.claim, changed));
+  await h.service.upload(job.id, ticket.claim, report);
+  const ready = await h.service.complete(job.id, ticket.claim, report);
+  assert.equal(ready.status, "review"); assert.equal(ready.plan.scenes[0].narration, filmInput().scenes[0].narration);
+  assert.equal((await h.service.video(actor, job.id)).sha256, report.sha256);
+  assert.equal((await h.service.poll()).job, null);
+  const review = { id: job.id, sha256: report.sha256, decision: "approve", checks: { characters: true, narration: true, timing: true } };
+  await assert.rejects(h.service.review({ ...actor, email: "other@example.invalid" }, review));
+  await assert.rejects(h.service.review(actor, { ...review, sha256: "f".repeat(64) }), /Refresh/);
+  await assert.rejects(h.service.review(actor, { ...review, checks: { characters: true } }), /Review character/);
+  const approved = await h.service.review(actor, review);
+  assert.equal(approved.status, "completed"); assert.equal(approved.review.sha256, report.sha256);
+  assert.equal((await h.service.status(actor, job.id)).review.decision, "approve");
+});
+test("requests for changes save notes and keep the review version accessible without requeueing", async () => {
+  const h = harness({ profile: AI_VIDEO_PROFILE }); await h.service.poll();
+  const job = await h.service.start(actor, filmInput()), ticket = await h.service.poll(), report = filmReport(h);
+  await h.service.upload(job.id, ticket.claim, report); await h.service.complete(job.id, ticket.claim, report);
+  await assert.rejects(h.service.review(actor, { id: job.id, sha256: report.sha256, decision: "changes", notes: "" }), /review notes/);
+  const changed = await h.service.review(actor, { id: job.id, sha256: report.sha256, decision: "changes", notes: "Revise the opening shot." });
+  assert.equal(changed.status, "changes_requested"); assert.equal(changed.review.notes, "Revise the opening shot.");
+  assert.equal((await h.service.history(actor)).jobs[0].status, "changes_requested");
+  assert.equal((await h.service.poll()).job, null);
+  assert.equal((await h.service.video(actor, job.id)).sha256, report.sha256);
+});
 test("AI scene input limits duration and scope without accepting unverified reference photos", () => {
   assert.equal(aiSceneInput(aiInput()).scenes[0].visual, aiInput().scenes[0].visual);
   for (const duration of [0, 1, 3, 6, 600]) assert.throws(() => aiSceneInput({ ...aiInput(), duration }), /two- or five-second/);
@@ -58,7 +125,7 @@ test("AI and archive queues, heartbeats, history and output paths remain isolate
 });
 test("AI worker requires its own credential and applies its own daily quota", async () => {
   const limits = [];
-  const handler = createLocalVideoHandler({ service: { poll: async () => ({ job: null }), start: async () => ({ id: "ai" }) },
+  const handler = createLocalVideoHandler({ service: { poll: async () => ({ job: null }), start: async () => ({ id: "ai" }), review: async () => ({ status: "completed" }) },
     sessionFor: async () => ({ user: actor }), workerKey: () => "a".repeat(48), ratePrefix: "ai-video", dailyLimit: 6,
     limiter: async (...args) => { limits.push(args); return true; } });
   async function call(url, headers, body) {
@@ -71,6 +138,10 @@ test("AI worker requires its own credential and applies its own daily quota", as
   assert.equal((await call("/api/studio?local=ltx&worker=1", { authorization: `Bearer ${"a".repeat(48)}` }, { action: "poll" })).status, 200);
   assert.equal((await call("/api/studio?local=ltx", { origin: "https://lineagetheater.com" }, aiInput())).status, 202);
   assert.deepEqual(limits, [[`ai-video:${actor.email}`, 6, 86400_000]]);
+  assert.equal((await call("/api/studio?local=ltx&action=review", { origin: "https://unrelated.invalid" }, {})).status, 403);
+  assert.equal(limits.length, 1);
+  assert.equal((await call("/api/studio?local=ltx&action=review", { origin: "https://lineagetheater.com" }, {})).status, 200);
+  assert.deepEqual(limits[1], [`ai-video-review:${actor.email}`, 60, 3600_000]);
 });
 test("offline renderer refuses new jobs; durable status remains available", async () => {
   const h = harness();

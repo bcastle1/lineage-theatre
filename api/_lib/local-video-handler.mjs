@@ -42,7 +42,7 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
         if (req.method === "GET" && action === "source")
           return await stream(req, res, await service.source(url.searchParams.get("id"), req.headers["x-render-claim"], url.searchParams.get("photo")), false);
         if (req.method !== "POST") return json(res, 405, { message: "Method not allowed." });
-        const body = await readBody(req, 4096);
+        const body = await readBody(req, 32768);
         const result = body.action === "poll" ? await service.poll()
           : body.action === "progress" ? await service.progress(body.id, body.claim, body.progress)
           : body.action === "upload" ? await service.upload(body.id, body.claim, body.report)
@@ -56,8 +56,12 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
       if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in to create or watch your film." });
       if (req.method === "POST") {
         if (!sameOrigin(req)) return json(res, 403, { message: "Start the render inside Lineage Theatre." });
+        if (action === "review") {
+          if (!(await limiter(`${ratePrefix}-review:${session.user.email}`, 60, 3600_000))) return json(res, 429, { message: "Wait before updating this review again." });
+          return json(res, 200, await service.review(session.user, await readBody(req, 8000)));
+        }
         if (!(await limiter(`${ratePrefix}:${session.user.email}`, dailyLimit, 86400_000))) return json(res, 429, { message: "Your daily free-render limit is reached. Existing films remain available." });
-        return json(res, 202, await service.start(session.user, await readBody(req, 100_000)));
+        return json(res, 202, await service.start(session.user, await readBody(req, 200_000)));
       }
       if (!["GET", "HEAD"].includes(req.method)) return json(res, 405, { message: "Method not allowed." });
       if (action === "capabilities" && req.method === "GET") return json(res, 200, await service.capabilities());

@@ -22,6 +22,7 @@ import { type Source, type Scene, type Theme, type FilmPaymentReference, formatD
 import FilmCheckout from "./FilmCheckout";
 import LocalVideoPanel from "./LocalVideoPanel";
 import AiVideoPanel from "./AiVideoPanel";
+import LtxFilmPanel from "./LtxFilmPanel";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -1051,6 +1052,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
+      <LtxFilmPanel key={`ltx-film:${film.id}`} film={film} update={update} />
       <LocalVideoPanel key={`local:${film.id}`} film={film} update={update} />
       <AiVideoPanel key={`ai:${film.id}`} film={film} update={update} />
       <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />

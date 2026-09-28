@@ -122,6 +122,10 @@ export interface Film {
   aiVideoSceneId?: string;
   aiVideoPrompt?: string;
   aiVideoDuration?: 2 | 5;
+  ltxFilmDraft?: import("./ltx-film").LtxDraft;
+  ltxFilmRequestId?: string;
+  ltxFilmJobId?: string;
+  ltxFilmSubmission?: import("./ltx-film").LtxPlan & { title: string };
 }
 
 export function normalizePaymentReference(value: unknown): FilmPaymentReference | undefined {
