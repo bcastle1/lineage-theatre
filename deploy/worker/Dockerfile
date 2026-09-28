@@ -9,6 +9,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 COPY api/_lib/ ./api/_lib/
+COPY src/studio/hosted-invoice-url.mjs ./src/studio/
 COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/check-worker-runtime.mjs scripts/check-hosted-reversals.mjs scripts/paid-film-delivery-worker.mjs ./scripts/
 
 ENV NODE_ENV=production FFMPEG_PATH=/usr/bin/ffmpeg

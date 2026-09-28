@@ -5,6 +5,9 @@
 !api/
 !api/_lib/
 !api/_lib/*.mjs
+!src/
+!src/studio/
+!src/studio/hosted-invoice-url.mjs
 !scripts/
 !scripts/production-worker.mjs
 !scripts/assemble-film.mjs
