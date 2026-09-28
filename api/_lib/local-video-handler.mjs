@@ -4,7 +4,7 @@ import { pipeline } from "node:stream/promises";
 import { get } from "@vercel/blob";
 import { json, readBody, sameOrigin, getSession, limitAction } from "./auth.mjs";
 import { parseRange } from "./archive.mjs";
-import { localVideo, LocalVideoError } from "./local-video.mjs";
+import { localVideo, aiVideo, LocalVideoError } from "./local-video.mjs";
 
 function workerAuthorized(req, key) {
   const given = req.headers.authorization;
@@ -13,7 +13,7 @@ function workerAuthorized(req, key) {
     && timingSafeEqual(Buffer.from(given), Buffer.from(`Bearer ${key}`));
 }
 export function createLocalVideoHandler({ service = localVideo, sessionFor = getSession, limiter = limitAction, getBlob = get,
-  workerKey = () => process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY } = {}) {
+  workerKey = () => process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY, ratePrefix = "local-video", dailyLimit = 12 } = {}) {
   async function stream(req, res, media, download) {
     const range = parseRange(req.headers.range, media.sizeBytes);
     const result = await getBlob(media.pathname, { access: "private", useCache: false,
@@ -56,7 +56,7 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
       if (!session || session.user.mustChangePassword) return json(res, 401, { message: "Sign in to create or watch your film." });
       if (req.method === "POST") {
         if (!sameOrigin(req)) return json(res, 403, { message: "Start the render inside Lineage Theatre." });
-        if (!(await limiter(`local-video:${session.user.email}`, 12, 86400_000))) return json(res, 429, { message: "Your daily free-render limit is reached. Existing films remain available." });
+        if (!(await limiter(`${ratePrefix}:${session.user.email}`, dailyLimit, 86400_000))) return json(res, 429, { message: "Your daily free-render limit is reached. Existing films remain available." });
         return json(res, 202, await service.start(session.user, await readBody(req, 100_000)));
       }
       if (!["GET", "HEAD"].includes(req.method)) return json(res, 405, { message: "Method not allowed." });
@@ -74,3 +74,4 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
   };
 }
 export const localVideoHandler = createLocalVideoHandler();
+export const aiVideoHandler = createLocalVideoHandler({ service: aiVideo, workerKey: () => process.env.LINEAGE_AI_VIDEO_WORKER_KEY, ratePrefix: "ai-video", dailyLimit: 6 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createLocalVideoService, localFilmInput } from "../api/_lib/local-video.mjs";
+import { createLocalVideoService, localFilmInput, aiSceneInput, AI_VIDEO_PROFILE } from "../api/_lib/local-video.mjs";
 import { createLocalVideoHandler } from "../api/_lib/local-video-handler.mjs";
 import { digest, userPath } from "../api/_lib/auth.mjs";
 
@@ -25,8 +25,53 @@ function harness(options = {}) {
     sources: { file: async (current, owner, id) => { assert.equal(owner, current.email); assert.equal(id, photoId); return { contentType: "image/png", size: 256, pathname: "private/photo.png", customerState: "active" }; } },
     token: async value => { grants.push(value); uploaded = value.pathname; return "synthetic-scoped-grant"; },
     getBlob: async pathname => ({ stream: new Blob([data]).stream(), blob: { pathname: uploaded || pathname, contentType: "video/mp4", size: data.length } }), ...options });
-  return { service, records, grants, data, advance: ms => { time += ms; }, report: () => ({ sha256: digest(data), sizeBytes: data.length, durationSeconds: 15, width: 1280, height: 720, hasAudio: true, engine: "ffmpeg-espeak" }) };
+  return { service, records, grants, data, storage: { read, write, listBlobs }, advance: ms => { time += ms; }, report: () => ({ sha256: digest(data), sizeBytes: data.length, durationSeconds: 15, width: 1280, height: 720, hasAudio: true, engine: "ffmpeg-espeak" }) };
 }
+
+const aiInput = () => ({ ...input(), duration: 2, scenes: [{ title: "A shared harvest", visual: "A slow camera move across a family garden. Leaves move in the breeze." }] });
+test("AI scene input limits duration and scope without accepting unverified reference photos", () => {
+  assert.equal(aiSceneInput(aiInput()).scenes[0].visual, aiInput().scenes[0].visual);
+  for (const duration of [0, 1, 3, 6, 600]) assert.throws(() => aiSceneInput({ ...aiInput(), duration }), /two- or five-second/);
+  assert.throws(() => aiSceneInput({ ...aiInput(), scenes: [aiInput().scenes[0], aiInput().scenes[0]] }), /one scene/);
+  assert.throws(() => aiSceneInput({ ...aiInput(), scenes: [{ ...aiInput().scenes[0], visual: " " }] }), /description/);
+  assert.throws(() => aiSceneInput({ ...aiInput(), scenes: [{ ...aiInput().scenes[0], photoId }] }), /Reference photos/);
+  assert.throws(() => aiSceneInput({ ...aiInput(), consent: false }), /Confirm/);
+});
+test("AI and archive queues, heartbeats, history and output paths remain isolated", async () => {
+  const h = harness({ profile: AI_VIDEO_PROFILE });
+  const archive = createLocalVideoService({ ...h.storage, enabled: () => true, now: () => 1000 });
+  await h.service.poll();
+  assert.equal((await archive.capabilities()).available, false);
+  const job = await h.service.start(actor, aiInput());
+  await assert.rejects(archive.status(actor, job.id), /not found/);
+  assert.equal((await archive.poll()).job, null);
+  const ticket = await h.service.poll();
+  assert.equal(ticket.job.id, job.id);
+  await assert.rejects(h.service.upload(job.id, ticket.claim, h.report()), /verified/);
+  const report = { ...h.report(), engine: AI_VIDEO_PROFILE.engine, width: 1024, height: 576, durationSeconds: 2.042 };
+  await h.service.upload(job.id, ticket.claim, report);
+  const completed = await h.service.complete(job.id, ticket.claim, report);
+  assert.match(completed.mediaUrl, /local=ltx/);
+  assert.match(h.grants[0].pathname, /^ai-video\/media\//);
+  assert.deepEqual((await archive.history(actor)).jobs, []);
+  await assert.rejects(h.service.video({ email: "other@example.invalid" }, job.id), /not found/);
+});
+test("AI worker requires its own credential and applies its own daily quota", async () => {
+  const limits = [];
+  const handler = createLocalVideoHandler({ service: { poll: async () => ({ job: null }), start: async () => ({ id: "ai" }) },
+    sessionFor: async () => ({ user: actor }), workerKey: () => "a".repeat(48), ratePrefix: "ai-video", dailyLimit: 6,
+    limiter: async (...args) => { limits.push(args); return true; } });
+  async function call(url, headers, body) {
+    const result = {};
+    await handler({ url, method: "POST", headers: { host: "lineagetheater.com", ...headers }, body }, {
+      set statusCode(value) { result.status = value; }, setHeader() {}, removeHeader() {}, end(value) { result.body = JSON.parse(value); },
+    }); return result;
+  }
+  assert.equal((await call("/api/studio?local=ltx&worker=1", { authorization: `Bearer ${"s".repeat(48)}` }, { action: "poll" })).status, 401);
+  assert.equal((await call("/api/studio?local=ltx&worker=1", { authorization: `Bearer ${"a".repeat(48)}` }, { action: "poll" })).status, 200);
+  assert.equal((await call("/api/studio?local=ltx", { origin: "https://lineagetheater.com" }, aiInput())).status, 202);
+  assert.deepEqual(limits, [[`ai-video:${actor.email}`, 6, 86400_000]]);
+});
 test("offline renderer refuses new jobs; durable status remains available", async () => {
   const h = harness();
   assert.equal((await h.service.capabilities()).available, false);

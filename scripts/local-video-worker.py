@@ -1,4 +1,4 @@
-"""Outbound-only worker. The Spark never exposes its render API to the internet."""
+"""Outbound-only worker. The studio computer has no public rendering port."""
 import importlib.util
 import json
 import os
@@ -10,14 +10,15 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
-spec = importlib.util.spec_from_file_location("renderer", Path(__file__).with_name("local-video-render.py"))
+AI_VIDEO = os.environ.get("LINEAGE_VIDEO_ENGINE") == "ltx"
+spec = importlib.util.spec_from_file_location("renderer", Path(__file__).with_name("ltx-video-render.py" if AI_VIDEO else "local-video-render.py"))
 renderer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(renderer)
 BASE = os.environ.get("LINEAGE_VIDEO_ORIGIN", "https://www.lineagetheater.com").rstrip("/")
 if BASE not in ("https://www.lineagetheater.com", "https://lineagetheater.com"):
     raise RuntimeError("Choose the verified production origin")
-KEY = os.environ["LINEAGE_LOCAL_VIDEO_WORKER_KEY"]
-ENDPOINT = BASE + "/api/studio?local=1&worker=1"
+KEY = os.environ["LINEAGE_AI_VIDEO_WORKER_KEY" if AI_VIDEO else "LINEAGE_LOCAL_VIDEO_WORKER_KEY"]
+ENDPOINT = BASE + "/api/studio?local=" + ("ltx" if AI_VIDEO else "1") + "&worker=1"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -74,8 +75,9 @@ def process(ticket):
             stage = "upload-grant"
             grant = request({"action": "upload", **identity, "report": report})
             stage = "upload"
-            upload = subprocess.run(["node", str(Path(__file__).with_name("local-video-upload.mjs"))],
-                                    input=json.dumps({**grant, "path": str(output)}).encode(), capture_output=True, timeout=240)
+            upload = subprocess.run([os.environ.get("LINEAGE_NODE_PATH", "node"), str(Path(__file__).with_name("local-video-upload.mjs"))],
+                                    input=json.dumps({**grant, "path": str(output)}).encode(), capture_output=True, timeout=240,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if upload.returncode:
                 raise RuntimeError("Film upload failed")
             stage = "publication"
@@ -94,11 +96,16 @@ def process(ticket):
 
 
 if __name__ == "__main__":
-    renderer.run(["ffmpeg", "-version"])
-    renderer.run(["espeak-ng", "--version"])
-    print(json.dumps({"event": "started", "engine": "ffmpeg-espeak", "gpu": False}), flush=True)
+    if AI_VIDEO:
+        renderer.check()
+    else:
+        renderer.run(["ffmpeg", "-version"])
+        renderer.run(["espeak-ng", "--version"])
+    print(json.dumps({"event": "started", "engine": "ltx-2.5-nvfp4" if AI_VIDEO else "ffmpeg-espeak", "gpu": AI_VIDEO}), flush=True)
     while True:
         try:
+            if AI_VIDEO:
+                renderer.check()
             ticket = request({"action": "poll"})
             if ticket.get("job"):
                 process(ticket)

@@ -61,7 +61,7 @@ export default function LocalVideoPanel({ film, update }: { film: Film; update: 
   return <section className="local-video-panel" aria-labelledby="free-film-heading">
     <div className="section-subtitle"><h3 id="free-film-heading"><FilmIcon size={19} />Free archive film</h3><span className="eyebrow">$0 · Local rendering</span></div>
     <p>Turn your script and family photos into a narrated film with gentle photo motion, scene titles, and captions.</p>
-    <p className="field-note">720p MP4 · Computer narration · Title cards for scenes without photos. Timing follows your narration. This option creates an archive film; animated scenes use the production option below.</p>
+    <p className="field-note">720p MP4 · Computer narration · Title cards for scenes without photos. Timing follows your narration. For generated movement, use AI scene video below.</p>
     <p className="field-note" role="status">{availability?.message || "Checking the local renderer…"}</p>
     {!active && job?.status !== "completed" && job?.status !== "failed" && <>
       <label className="consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={!!busy} />

@@ -7,16 +7,12 @@ import { mediaLibrary } from "./media-library.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const PREFIX = "local-video/jobs/";
-const PENDING = "local-video/pending/";
-const HEARTBEAT = "local-video/worker.json";
 const MAX_BYTES = 100 * 1024 * 1024;
 const conflict = error => /precondition|already exists|etag|if.?match/i.test(`${error?.name} ${error?.message}`);
 export class LocalVideoError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 const fail = (message, status) => { throw new LocalVideoError(message, status); };
-const pathFor = id => HASH.test(id || "") ? `${PREFIX}${id}.json` : fail("Choose a valid local film.");
 function text(value, max, name, required = false) {
   if (typeof value !== "string" || value.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value) || required && !value.trim())
     fail(`Check ${name} before rendering the free film.`);
@@ -38,17 +34,38 @@ export function localFilmInput(input) {
     fail("Shorten the narration to 12,000 characters for a free archive film.");
   return { filmId: input.filmId, title: text(input.title, 200, "the film title", true), duration: input.duration, scenes };
 }
-function publicJob(job) {
+export function aiSceneInput(input) {
+  if (!input || !UUID.test(input.filmId || "") || !UUID.test(input.requestId || "") || input.consent !== true)
+    fail("Confirm AI rendering and choose a saved film.");
+  if (![2, 5].includes(input.duration) || !Array.isArray(input.scenes) || input.scenes.length !== 1)
+    fail("Choose one scene and a two- or five-second clip.");
+  const scene = input.scenes[0];
+  if (scene?.photoId) fail("This AI scene renderer uses a text description. Reference photos are not supported.");
+  return { filmId: input.filmId, title: text(input.title, 200, "the clip title", true), duration: input.duration,
+    scenes: [{ title: text(scene?.title, 200, "the scene title", true), visual: text(scene?.visual, 1800, "the scene description", true), narration: "", dialogue: "" }] };
+}
+export const AI_VIDEO_PROFILE = Object.freeze({ namespace: "ai-video", query: "ltx", engine: "ltx-2.5-nvfp4", width: 1024, height: 576,
+  label: "AI scene video", format: "1024 × 576 MP4", narration: "Generated sound", input: aiSceneInput,
+  online: "AI video renderer is online. Create a short scene with generated motion and sound.",
+  enabled: () => Boolean(process.env.LINEAGE_AI_VIDEO_WORKER_KEY), maxDuration: 6 });
+const ARCHIVE_PROFILE = Object.freeze({ namespace: "local-video", query: "1", engine: "ffmpeg-espeak", width: 1280, height: 720,
+  label: "Free archive film", format: "1280 × 720 MP4", narration: "Computer narration", input: localFilmInput,
+  online: "Local renderer is online. Photos, titles, captions, and narration are included.",
+  enabled: () => Boolean(process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY), maxDuration: 900 });
+function publicJob(job, profile) {
   return { id: job.id, filmId: job.filmId, title: job.title, status: job.status, progress: job.progress, createdAt: job.createdAt,
     ...(job.status === "failed" ? { message: "Local rendering could not finish. Your script and photos are saved. You can start a new render." } : {}),
     ...(job.media ? { durationSeconds: job.media.durationSeconds, sizeBytes: job.media.sizeBytes,
-      mediaUrl: `/api/studio?local=1&action=video&id=${job.id}` } : {}) };
+      mediaUrl: `/api/studio?local=${profile.query}&action=video&id=${job.id}` } : {}) };
 }
 
 export function createLocalVideoService({ read = readRecord, write = writeRecord, listBlobs = list, getBlob = get,
   remove = del,
   token = generateClientTokenFromReadWriteToken, sources = mediaLibrary, now = Date.now, uuid = randomUUID,
-  enabled = () => Boolean(process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY) } = {}) {
+  profile = ARCHIVE_PROFILE, enabled = profile.enabled } = {}) {
+  const PREFIX = `${profile.namespace}/jobs/`, PENDING = `${profile.namespace}/pending/`, HEARTBEAT = `${profile.namespace}/worker.json`;
+  const pathFor = id => HASH.test(id || "") ? `${PREFIX}${id}.json` : fail("Choose a valid local film.");
+  const publicResult = job => publicJob(job, profile);
   async function mutate(path, change) {
     for (let attempt = 0; attempt < 5; attempt++) {
       const old = await read(path), value = await change(old?.value);
@@ -67,8 +84,8 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
   async function capabilities() {
     const value = enabled() ? (await read(HEARTBEAT))?.value : null;
     const online = Boolean(value && now() - value.at < 120_000 && value.at <= now());
-    return { available: online, label: "Free archive film", priceCents: 0, format: "1280 × 720 MP4", narration: "Computer narration",
-      message: online ? "Local renderer is online. Photos, titles, captions, and narration are included." : "The local renderer is offline. Your saved films remain available; check again later." };
+    return { available: online, label: profile.label, priceCents: 0, format: profile.format, narration: profile.narration,
+      message: online ? profile.online : "The local renderer is offline. Your saved films remain available; check again later." };
   }
   async function own(actor, id) {
     const job = (await read(pathFor(id)))?.value;
@@ -76,13 +93,13 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     return job;
   }
   async function start(actor, input) {
-    const plan = localFilmInput(input), id = digest(`${actor.email}:${input.requestId}`), path = pathFor(id), inputHash = digest(JSON.stringify(plan));
+    const plan = profile.input(input), id = digest(`${actor.email}:${input.requestId}`), path = pathFor(id), inputHash = digest(JSON.stringify(plan));
     const existing = (await read(path))?.value;
     if (existing) {
       if (existing.email !== actor.email || existing.inputHash !== inputHash) fail("This request already belongs to a different saved draft. Start a new render.", 409);
       await index(actor, id);
       if (["queued", "rendering"].includes(existing.status)) await mutate(`${PENDING}${id}.json`, () => ({ id }));
-      return publicJob(existing);
+      return publicResult(existing);
     }
     if (!(await capabilities()).available) fail("The local renderer is offline. Check again before starting a film.", 503);
     for (const photoId of new Set(plan.scenes.map(scene => scene.photoId).filter(Boolean))) {
@@ -97,15 +114,15 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     });
     await index(actor, id);
     await mutate(`${PENDING}${id}.json`, () => ({ id }));
-    return publicJob(await own(actor, id));
+    return publicResult(await own(actor, id));
   }
   async function index(actor, id) {
-    await mutate(`local-video/accounts/${digest(actor.email)}.json`, old => ({ ids: [id, ...(old?.ids || []).filter(value => value !== id)].slice(0, 50) }));
+    await mutate(`${profile.namespace}/accounts/${digest(actor.email)}.json`, old => ({ ids: [id, ...(old?.ids || []).filter(value => value !== id)].slice(0, 50) }));
   }
   async function history(actor) {
-    const ids = (await read(`local-video/accounts/${digest(actor.email)}.json`))?.value?.ids || [];
+    const ids = (await read(`${profile.namespace}/accounts/${digest(actor.email)}.json`))?.value?.ids || [];
     const jobs = await Promise.all(ids.slice(0, 50).filter(id => HASH.test(id)).map(id => read(pathFor(id))));
-    return { jobs: jobs.map(record => record?.value).filter(job => job?.email === actor.email).map(publicJob) };
+    return { jobs: jobs.map(record => record?.value).filter(job => job?.email === actor.email).map(publicResult) };
   }
   async function lease(id, claim) {
     const job = (await read(pathFor(id)))?.value;
@@ -114,7 +131,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     await active(job.email);
     return job;
   }
-  async function heartbeat() { await mutate(HEARTBEAT, () => ({ at: now(), engine: "ffmpeg-espeak" })); }
+  async function heartbeat() { await mutate(HEARTBEAT, () => ({ at: now(), engine: profile.engine })); }
   async function poll() {
     await heartbeat();
     let cursor;
@@ -160,19 +177,19 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
   }
   function validateReport(report) {
     if (!report || !HASH.test(report.sha256 || "") || !Number.isSafeInteger(report.sizeBytes) || report.sizeBytes < 100 || report.sizeBytes > MAX_BYTES
-      || !Number.isFinite(report.durationSeconds) || report.durationSeconds < 1 || report.durationSeconds > 900
-      || report.width !== 1280 || report.height !== 720 || report.hasAudio !== true || report.engine !== "ffmpeg-espeak") fail("The rendered film could not be verified.", 409);
-    return { sha256: report.sha256, sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds, width: 1280, height: 720, hasAudio: true, contentType: "video/mp4" };
+      || !Number.isFinite(report.durationSeconds) || report.durationSeconds < 1 || report.durationSeconds > profile.maxDuration
+      || report.width !== profile.width || report.height !== profile.height || report.hasAudio !== true || report.engine !== profile.engine) fail("The rendered film could not be verified.", 409);
+    return { sha256: report.sha256, sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds, width: profile.width, height: profile.height, hasAudio: true, contentType: "video/mp4" };
   }
   async function upload(id, claim, report) {
     const job = await lease(id, claim), media = validateReport(report);
-    const pathname = `local-video/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
+    const pathname = `${profile.namespace}/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
     return { pathname, token: await token({ pathname, maximumSizeInBytes: media.sizeBytes, allowedContentTypes: ["video/mp4"],
       validUntil: now() + 300_000, addRandomSuffix: false, allowOverwrite: false, cacheControlMaxAge: 60 }) };
   }
   async function complete(id, claim, report) {
     const job = await lease(id, claim), media = validateReport(report);
-    media.pathname = `local-video/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
+    media.pathname = `${profile.namespace}/media/${digest(job.email)}/${id}/${media.sha256}.mp4`;
     const stored = await getBlob(media.pathname, { access: "private", useCache: false, headers: { "accept-encoding": "identity" } });
     if (!stored?.stream || stored.blob.pathname !== media.pathname || stored.blob.contentType !== "video/mp4" || stored.blob.size !== media.sizeBytes) {
       await stored?.stream?.cancel(); fail("The uploaded film could not be verified.", 409);
@@ -182,7 +199,7 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
     for await (const chunk of stored.stream) { size += chunk.length; if (size > media.sizeBytes) fail("The uploaded film changed.", 409); hash.update(chunk); }
     if (size !== media.sizeBytes || hash.digest("hex") !== media.sha256) fail("The uploaded film checksum changed.", 409);
     await lease(id, claim);
-    return publicJob(await mutate(pathFor(id), old => {
+    return publicResult(await mutate(pathFor(id), old => {
       if (old?.lease?.token !== claim || old.status !== "rendering" || old.lease.expiresAt <= now()) fail("The render claim expired.", 409);
       return { ...old, status: "completed", progress: 100, lease: null, media, completedAt: new Date(now()).toISOString() };
     }));
@@ -197,10 +214,11 @@ export function createLocalVideoService({ read = readRecord, write = writeRecord
   }
   async function video(actor, id) {
     const job = await own(actor, id), media = job.media;
-    if (job.status !== "completed" || !media || !HASH.test(media.sha256 || "") || media.pathname !== `local-video/media/${digest(actor.email)}/${id}/${media.sha256}.mp4`)
+    if (job.status !== "completed" || !media || !HASH.test(media.sha256 || "") || media.pathname !== `${profile.namespace}/media/${digest(actor.email)}/${id}/${media.sha256}.mp4`)
       fail("Your film is not ready to watch yet.", 409);
     return media;
   }
-  return { capabilities, start, history, status: async (actor, id) => publicJob(await own(actor, id)), poll, progress, source, upload, complete, failed, video };
+  return { capabilities, start, history, status: async (actor, id) => publicResult(await own(actor, id)), poll, progress, source, upload, complete, failed, video };
 }
 export const localVideo = createLocalVideoService();
+export const aiVideo = createLocalVideoService({ profile: AI_VIDEO_PROFILE });

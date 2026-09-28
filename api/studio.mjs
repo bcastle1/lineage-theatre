@@ -12,7 +12,7 @@ import { streamProductionMedia } from "./_lib/production-media.mjs";
 import { isOwner } from "./_lib/access.mjs";
 import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-generation.mjs";
 import { paidFilmGenerationReview, PaidFilmReviewError } from "./_lib/paid-film-generation-review.mjs";
-import { localVideoHandler } from "./_lib/local-video-handler.mjs";
+import { localVideoHandler, aiVideoHandler } from "./_lib/local-video-handler.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -93,6 +93,7 @@ export function createStudioHandler(overrides={}) {
    read:dependencies.readRecord,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
  return async function handler(req,res) {
   if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="1") return (overrides.localVideoHandler||localVideoHandler)(req,res);
+  if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="ltx") return (overrides.aiVideoHandler||aiVideoHandler)(req,res);
   const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments}=dependencies;
   let storyRequest=false;
   try {

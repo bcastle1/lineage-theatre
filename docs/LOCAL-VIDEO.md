@@ -24,6 +24,22 @@ Two saved workflows adapt the official ComfyUI LTX-2.5 template: **Lineage LTX-2
 
 Advanced generation needs separate memory capacity. The initial preflight found only 10.2 GiB available while the existing language-model service was active. `deploy/local-video/enable-ltx-gpu.sh` refuses GPU activation below a conservative 48 GiB of available system memory or before all six components are verified. It only replaces the task's `lineage-comfy` container and never stops the language-model service. The 48 GiB check is a safety threshold, not a verified peak-memory benchmark. After capacity is available, the advanced path still needs an actual GPU render and output playback before it can be offered to customers. Confirm the publisher's commercial-license applicability before activation.
 
-## Validation
+## PC AI scene worker — September 28, 2026
+
+The **AI scene video** panel creates one text-to-video scene at a time using LTX-2.5 on Windows PC `EPC`, with its RTX 5080 (16 GB VRAM) and 64 GB RAM. It offers two or five seconds at 1024 × 576, 24 fps, with model-generated sound. It does not use reference photos or promise exact spoken narration or historical likeness. This is separate from the narrated archive-film option.
+
+Installation directory: `C:\Users\erikc\Documents\Codex\lineage-pc-video`. The isolated runtime uses Python 3.13.15, PyTorch 2.14.0+cu130, ComfyUI commit `8d534945ebd53cff61e8def81757c6a6c1b9cf2d`, and the same six checksum-verified LTX files as Spark. The worker's fixed workflow uses the NVFP4 distilled transformer, int8 Gemma encoder, convolutional video VAE, audio VAE, and the publisher's two-stage sampling/upscaling recipe. It uses disk-backed weight streaming and reserves an additional 2 GB of GPU headroom. The heavier diffusion VAE is installed but is not used in this profile.
+
+The Windows scheduled task **Lineage AI Video Worker** starts at this user's sign-in. Its `pc-supervisor.py` supervises the private ComfyUI process and outbound worker, restarting them after failure. ComfyUI listens only at `http://127.0.0.1:8189`. Windows must remain awake and this user must remain signed in. No public rendering port or firewall exception is required. Both Spark LLM services keep their existing configurations.
+
+`worker-settings.json` holds the production origin and dedicated `LINEAGE_AI_VIDEO_WORKER_KEY`, with file access restricted to the Windows user and SYSTEM. Only the outbound worker receives that key. A copied Node executable and `@vercel/blob` 2.8.0 handle scoped uploads. Neither the Hugging Face credential nor the site's Blob credential is copied to the PC worker. ComfyUI partner API nodes are disabled.
+
+The same private-job implementation uses separate `ai-video/` job, pending, account-history, heartbeat, and media paths through `/api/studio?local=ltx`. The Spark archive worker cannot claim AI jobs. Starts are limited to six per account per day, one scene, and two or five seconds. Output reports must identify the configured engine and exact dimensions. Completion, account isolation, expiring leases, immutable upload grants, and SHA-256 publication follow the archive worker's checks.
+
+The PC worker submits only a fixed graph with customer text as a string input. It allows up to 30 minutes per render, validates the returned local path, decodes the output, re-encodes browser-compatible H.264/AAC with workflow metadata removed, and publishes through the private account endpoint. Its ComfyUI history and intermediate output for the job are removed afterward; models are unloaded when idle. It waits for an idle ComfyUI queue and at least 8 GB available system RAM before claiming work.
+
+Stop the scheduled task and the two process IDs recorded in this installation's `worker.pid` and `comfy.pid` to take the renderer offline; verify their executable paths belong to this installation first. Restart the task to resume. Jobs interrupted during a stop retain the existing lease/retry behavior.
+
+## Release validation
 
 Run `node --test tests/local-video.test.mjs`, `pnpm test`, and `pnpm run build`. Test a real film in the container, including an image scene and a title-card scene; use ffprobe plus a full ffmpeg decode to validate its output. Then verify an authenticated custom-domain job through queue, rendering, completion, reload, playback, and download; reject anonymous and foreign-account media access. Retain only nonsecret test receipts.

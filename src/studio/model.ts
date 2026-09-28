@@ -117,6 +117,11 @@ export interface Film {
   paymentReference?: FilmPaymentReference;
   localVideoJobId?: string;
   localVideoRequestId?: string;
+  aiVideoJobId?: string;
+  aiVideoRequestId?: string;
+  aiVideoSceneId?: string;
+  aiVideoPrompt?: string;
+  aiVideoDuration?: 2 | 5;
 }
 
 export function normalizePaymentReference(value: unknown): FilmPaymentReference | undefined {

@@ -5,6 +5,7 @@ tmp
 *.local
 *.log
 *.tsbuildinfo
+__pycache__/
 vite.config.js
 vite.config.d.ts
 video-projects/
