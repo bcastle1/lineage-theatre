@@ -4,5 +4,5 @@ import { put } from "@vercel/blob/client";
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 const { pathname, token, path } = JSON.parse(input);
-await put(pathname, await readFile(path), { token, access: "private", contentType: "video/mp4", addRandomSuffix: false });
+await put(pathname, await readFile(path), { token, access: "private", contentType: "video/mp4" });
 console.log(JSON.stringify({ uploaded: true }));

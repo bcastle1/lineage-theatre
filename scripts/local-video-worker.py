@@ -39,6 +39,7 @@ def process(ticket):
     identity = {"id": job["id"], "claim": claim}
     percent = [1]
     stopped = threading.Event()
+    stage = "sources"
 
     def heartbeat():
         while not stopped.wait(30):
@@ -68,17 +69,21 @@ def process(ticket):
                 percent[0] = value
                 request({"action": "progress", **identity, "progress": value})
 
+            stage = "render"
             output, report = renderer.render(job, work, photos, progress)
+            stage = "upload-grant"
             grant = request({"action": "upload", **identity, "report": report})
+            stage = "upload"
             upload = subprocess.run(["node", str(Path(__file__).with_name("local-video-upload.mjs"))],
                                     input=json.dumps({**grant, "path": str(output)}).encode(), capture_output=True, timeout=240)
             if upload.returncode:
                 raise RuntimeError("Film upload failed")
+            stage = "publication"
             result = request({"action": "complete", **identity, "report": report})
             print(json.dumps({"event": "completed", "id": job["id"], "duration": result["durationSeconds"], "bytes": report["sizeBytes"]}), flush=True)
     except Exception as error:
         # Never log source text, credentials, upload grants, or provider bodies.
-        print(json.dumps({"event": "failed", "id": job["id"], "type": type(error).__name__}), flush=True)
+        print(json.dumps({"event": "failed", "id": job["id"], "stage": stage, "type": type(error).__name__}), flush=True)
         try:
             request({"action": "failed", **identity})
         except Exception:
