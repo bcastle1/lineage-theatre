@@ -127,6 +127,7 @@ test("concurrent callers share one permanent claim and accepted task", async () 
   const h = fixture({ submit: async () => { entered.resolve(); await release.promise; return { providerCode: 10000, taskId: TASK }; } });
   const first = h.start(); await entered.promise;
   const second = await h.peer().start(OWNER, { preparedId: ID, orderId: ORDER, consent: true }); assert.equal(second.status, "submitting");
+  assert.equal(second.recovery, undefined);
   release.resolve(); await first;
   await Promise.all([h.start(), h.peer().start(OWNER, { preparedId: ID, orderId: ORDER, consent: true })]);
   assert.equal(h.submissions.length, 1); assert.equal(h.stored().taskId, TASK);

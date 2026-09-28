@@ -117,8 +117,8 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
   }
   function view(value) {
     if (!value) return null;
-    const unresolved = !value.taskId && ["submitting", "uncertain"].includes(value.status);
     const stalled = value.status === "submitting" && now() - Date.parse(value.submittedAt) >= 300_000;
+    const unresolved = !value.taskId && (value.status === "uncertain" || stalled);
     return { id: value.id, preparedId: value.id, manifestHash: value.manifestHash, filmId: value.filmId, orderId: value.orderId,
       status: stalled ? "uncertain" : value.status, submittedAt: value.submittedAt, ...(value.checkedAt ? { checkedAt: value.checkedAt } : {}),
       ...(value.diagnostic ? { diagnostic: privateFailure(value.diagnostic) } : {}),
