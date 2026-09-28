@@ -14,6 +14,7 @@ const ORDER = "a".repeat(64);
 const SECRET = "synthetic-generation-cron-secret-0001";
 const START = { action: "requestFilmGeneration", preparedId: PREPARED, orderId: ORDER, consent: true };
 const CHECK = { action: "checkFilmGeneration", preparedId: PREPARED };
+const REPLACE = { ...START, action: "replaceFilmGeneration", expectedChangeId: PREPARED, acknowledgePossibleDuplicate: true };
 const ATTEMPT = { id: PREPARED, orderId: ORDER, filmId: "saved-film", manifestHash: "b".repeat(64),
   status: "processing", submittedAt: "2026-09-27T12:00:00Z", elapsedSeconds: 10, estimateAvailable: false };
 
@@ -21,6 +22,7 @@ function harness({ user = OWNER, limit = true, available = true, service = {} } 
   const calls = [], limits = [];
   const generation = { availableFor: () => available,
     start: async (...args) => { calls.push(["start", ...args]); return ATTEMPT; },
+    replace: async (...args) => { calls.push(["replace", ...args]); return ATTEMPT; },
     status: async (...args) => { calls.push(["status", ...args]); return ATTEMPT; },
     check: async (...args) => { calls.push(["check", ...args]); return ATTEMPT; }, ...service };
   const handler = createStudioHandler({ getSession: async () => user ? { user } : null,
@@ -42,7 +44,7 @@ test("generation attempt routes require a completed owner session before accessi
   for (const user of [null, { ...OWNER, mustChangePassword: true }, CUSTOMER,
     { ...CUSTOMER, role: "admin" }, { ...OWNER, status: "suspended" }, { ...CUSTOMER, role: "owner" }]) {
     const h = harness({ user });
-    for (const request of [{}, post(START), post(CHECK)]) {
+    for (const request of [{}, post(START), post(CHECK), post(REPLACE)]) {
       const result = await h.run(request);
       assert.equal(result.status, !user || user.mustChangePassword ? 401 : 403);
     }
@@ -53,7 +55,7 @@ test("generation attempt routes require a completed owner session before accessi
 
 test("generation start and provider checks require same-origin POST with exact saved references", async () => {
   const h = harness();
-  for (const body of [START, CHECK]) {
+  for (const body of [START, CHECK, REPLACE]) {
     for (const origin of [undefined, "https://other.example.invalid", "null"]) {
       const request = { ...post(body), origin };
       // Undefined uses the harness default; an absent-origin request is represented
@@ -76,6 +78,21 @@ test("generation start and provider checks require same-origin POST with exact s
   assert.equal((await h.run({ method: "PUT", body: START })).status, 405);
   assert.deepEqual(h.calls, []);
   assert.deepEqual(h.limits, []);
+});
+
+test("replacement requires explicit duplicate-risk acknowledgment and exact prior revision", async () => {
+  const h = harness();
+  for (const change of [{ expectedChangeId: undefined }, { expectedChangeId: "stale" },
+    { acknowledgePossibleDuplicate: undefined }, { acknowledgePossibleDuplicate: false }, { consent: false }])
+    assert.equal((await h.run(post({ ...REPLACE, ...change }))).status, 400);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(await h.run(post(REPLACE)), { status: 202, body: ATTEMPT });
+  assert.deepEqual(h.calls, [["replace", OWNER, { preparedId: PREPARED, orderId: ORDER, consent: true,
+    expectedChangeId: PREPARED, acknowledgePossibleDuplicate: true }]]);
+  assert.equal((await harness({ limit: false }).run(post(REPLACE))).status, 429);
+  const failed = harness({ service: { replace: async () => { throw Error("private-key private-response"); } } });
+  const result = await failed.run(post(REPLACE)); assert.equal(result.status, 503);
+  assert.doesNotMatch(JSON.stringify(result), /private-key|private-response/);
 });
 
 test("saved attempt reads accept one exact plan reference and no provider or account selectors", async () => {

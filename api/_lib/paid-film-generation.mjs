@@ -18,8 +18,10 @@ const date = value => typeof value === "string" && Number.isFinite(Date.parse(va
 const clone = value => structuredClone(value);
 const validKey = value => typeof value === "string" && Boolean(value) && value.length <= 4096 && !/\s/.test(value);
 const DIAGNOSTIC_CODES = new Set(["MAGICLIGHT_TIMEOUT", "MAGICLIGHT_HTTP_REJECTED", "MAGICLIGHT_INVALID_RESPONSE", "MAGICLIGHT_RESPONSE_TOO_LARGE", "MAGICLIGHT_TRANSPORT_FAILED", "MAGICLIGHT_PROVIDER_REJECTED", "MAGICLIGHT_INVALID_TEXT", "MAGICLIGHT_INVALID_URL"]);
+const DIAGNOSTIC_STAGES = new Set(["transport", "response", "body", "envelope", "provider", "task"]);
 function privateFailure(error) {
   return { code: DIAGNOSTIC_CODES.has(error?.code) ? error.code : "GENERATION_RESULT_UNCONFIRMED",
+    ...(DIAGNOSTIC_STAGES.has(error?.stage) ? { stage: error.stage } : {}),
     ...(Number.isSafeInteger(error?.providerCode) ? { providerCode: error.providerCode } : {}),
     ...(Number.isSafeInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599 ? { httpStatus: error.httpStatus } : {}) };
 }
@@ -98,6 +100,10 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
       || ["processing", "verifying", "failed"].includes(value.status) && !value.taskId
       || value.status === "verifying" && !value.outputUrl
       || value.outputUrl !== undefined && value.status !== "verifying") throw conflict();
+    if (value.replacementCount !== undefined && (value.replacementCount !== 1
+      || value.priorAttemptPath !== `production/generation-attempt-history/${digest(actor.email)}/${id}/${value.priorChangeId}.json`
+      || !UUID.test(value.priorChangeId || "") || !HASH.test(value.priorAttemptHash || "")
+      || !date(value.duplicateRiskAcknowledgedAt))) throw conflict();
     if (value.outputUrl) safeOutput(value.outputUrl);
     return value;
   }
@@ -111,9 +117,19 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
   }
   function view(value) {
     if (!value) return null;
+    const stalled = value.status === "submitting" && now() - Date.parse(value.submittedAt) >= 300_000;
+    const unresolved = !value.taskId && (value.status === "uncertain" || stalled);
     return { id: value.id, preparedId: value.id, manifestHash: value.manifestHash, filmId: value.filmId, orderId: value.orderId,
-      status: value.status, submittedAt: value.submittedAt, ...(value.checkedAt ? { checkedAt: value.checkedAt } : {}),
+      status: stalled ? "uncertain" : value.status, submittedAt: value.submittedAt, ...(value.checkedAt ? { checkedAt: value.checkedAt } : {}),
+      ...(value.diagnostic ? { diagnostic: privateFailure(value.diagnostic) } : {}),
+      ...(unresolved ? { recovery: canReplace(value)
+        ? { kind: "replacement-available", canRetry: true, expectedChangeId: value.changeId }
+        : { kind: "provider-review-required", canRetry: false } } : {}),
       elapsedSeconds: Math.max(0, Math.floor((now() - Date.parse(value.submittedAt)) / 1000)), estimateAvailable: false };
+  }
+  function canReplace(value) {
+    return value && !value.taskId && !value.outputUrl && ["submitting", "uncertain"].includes(value.status)
+      && value.replacementCount === undefined && now() - Date.parse(value.submittedAt) >= 300_000;
   }
   async function save(actor, previous, value, attempts = 1) {
     const path = paidFilmGenerationPath(actor.email, value.id), next = { ...value, changeId: randomUUID(), updatedAt: new Date(now()).toISOString() };
@@ -154,27 +170,44 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
     if (previous && (previous.value.manifestHash !== job.manifestHash || previous.value.filmId !== job.filmId)) throw conflict();
     await owner(actor); return view(previous?.value);
   }
-  async function start(actor, input) {
-    exact(input, ["preparedId", "orderId", "consent"]);
+  async function submit(actor, input, replacing = false) {
+    exact(input, replacing ? ["preparedId", "orderId", "consent", "expectedChangeId", "acknowledgePossibleDuplicate"] : ["preparedId", "orderId", "consent"]);
     if (input.consent !== true || !HASH.test(input.orderId || "")) throw invalid();
+    if (replacing && (input.acknowledgePossibleDuplicate !== true || !UUID.test(input.expectedChangeId || ""))) throw invalid();
     await owner(actor);
     const job = await plan(actor, input.preparedId);
     let previous = await saved(actor, input.preparedId);
+    if (replacing && (!canReplace(previous?.value) || previous.value.changeId !== input.expectedChangeId)) throw conflict();
     if (previous) {
       if (previous.value.orderId !== input.orderId || previous.value.manifestHash !== job.manifestHash || previous.value.filmId !== job.filmId) throw conflict();
-      await owner(actor); return view(previous.value);
+      if (!replacing) { await owner(actor); return view(previous.value); }
     }
     if (job.status !== "prepared" || !Array.isArray(job.shots) || !job.shots.length || job.shots.some(shot => shot.status !== "prepared")) throw conflict();
     const text = promptFor(job.manifest), config = configuration();
+    // Construct and validate the client before creating a durable dispatch claim.
+    const client = clientFactory({ apiKey: config.apiKey, environment: "production", enableSubmission: true, requestTimeoutMs: 90_000 });
     let checked;
     try { checked = await checkPayment(actor, { orderId: input.orderId }); } catch { throw unpaid(); }
     await paid(actor, job, input.orderId, checked); await owner(actor);
     const currentJob = await plan(actor, job.id);
     if (currentJob.manifestHash !== job.manifestHash || currentJob.status !== "prepared") throw conflict();
+    let replacement = {};
+    if (replacing) {
+      await bound(actor, previous);
+      const priorAttemptPath = `production/generation-attempt-history/${digest(actor.email)}/${job.id}/${previous.value.changeId}.json`;
+      const priorAttemptHash = digest(JSON.stringify(previous.value));
+      // Preserve the exact original before replacing its current pointer. This
+      // create-only history entry can never be rewritten by another recovery.
+      try { await write(priorAttemptPath, previous.value); } catch { /* Verify a possibly committed history write below. */ }
+      const archive = await stored(priorAttemptPath);
+      if (!archive?.etag || digest(JSON.stringify(archive.value)) !== priorAttemptHash) throw storage();
+      replacement = { replacementCount: 1, priorAttemptPath, priorAttemptHash, priorChangeId: previous.value.changeId,
+        duplicateRiskAcknowledgedAt: new Date(now()).toISOString() };
+    }
     const claim = { version: 1, id: job.id, ownerEmail: actor.email, filmId: job.filmId, manifestHash: job.manifestHash,
       orderId: input.orderId, keyFingerprint: config.fingerprint, promptHash: digest(text), submissionCount: 1,
-      status: "submitting", submittedAt: new Date(now()).toISOString() };
-    try { previous = await save(actor, null, claim); }
+      status: "submitting", submittedAt: new Date(now()).toISOString(), ...replacement };
+    try { previous = await save(actor, previous, claim); }
     catch (error) {
       const winner = await saved(actor, job.id);
       if (winner && winner.value.orderId === input.orderId && winner.value.manifestHash === job.manifestHash) { await owner(actor); return view(winner.value); }
@@ -185,7 +218,7 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
     if (configuration().fingerprint !== config.fingerprint) throw conflict();
     let result;
     try {
-      result = await clientFactory({ apiKey: config.apiKey, environment: "production", enableSubmission: true, requestTimeoutMs: 15_000 }).submitTask({ text });
+      result = await client.submitTask({ text });
       if (result?.providerCode !== 10000 || typeof result.taskId !== "string" || !TASK.test(result.taskId)
         || result.taskId.includes(config.apiKey) || result.taskId.includes(encodeURIComponent(config.apiKey))) throw unavailable();
     } catch (error) {
@@ -197,6 +230,8 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
     previous = await save(actor, previous, { ...previous.value, status: "processing", taskId: result.taskId }, 3);
     await owner(actor); return view(previous.value);
   }
+  const start = (actor, input) => submit(actor, input, false);
+  const replace = (actor, input) => submit(actor, input, true);
   async function check(actor, input) {
     exact(input, ["preparedId"]); await owner(actor);
     let previous = await saved(actor, input.preparedId);
@@ -205,7 +240,7 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
     if (!previous.value.taskId || ["verifying", "failed"].includes(previous.value.status)) { await owner(actor); return view(previous.value); }
     const config = configuration();
     if (config.fingerprint !== previous.value.keyFingerprint) throw conflict();
-    let update = { checkedAt: new Date(now()).toISOString() };
+    let update = { checkedAt: new Date(now()).toISOString(), diagnostic: undefined };
     try {
       const result = await clientFactory({ apiKey: config.apiKey, environment: "production", enableSubmission: false, requestTimeoutMs: 15_000 }).checkTask({ taskId: previous.value.taskId });
       if (!plain(result) || result.providerCode !== 10000 || !Number.isSafeInteger(result.taskStatus)
@@ -242,7 +277,7 @@ export function createPaidFilmGenerationService({ read = readRecord, write = wri
     return counts;
   }
   const availableFor = actor => isOwner(actor) && !actor.mustChangePassword && accessStatusForUser(actor) === "approved" && validKey(env.MAGICLIGHT_API_KEY);
-  return { start, status, check, run, availableFor };
+  return { start, replace, status, check, run, availableFor };
 }
 
 export const paidFilmGeneration = createPaidFilmGenerationService();

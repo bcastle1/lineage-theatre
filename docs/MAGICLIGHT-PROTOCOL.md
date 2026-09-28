@@ -20,6 +20,10 @@ The text skill disables TLS verification. The image skills use certificate verif
 
 Authentication is the source's `Authorization: Bearer` header. Submission uses `POST /api/misc/openclaw_add_task` with JSON `text`, optional `image_url`, and `X-DashScope-Async: enable`. Status uses `GET /api/misc/openclaw_check_task?task_id=...`. The samples use business code `10000`, creation's `data.task_id`, and status's `data.task_status` and `data.video_url`. The published polling code treats status 2 as success and 3 as failure. Other numeric codes/statuses are retained without invented meanings.
 
+The source scripts and latest-version metadata were checked again on September 27, 2026. The text and production image examples remain at the versions listed above. Both permit 90 seconds for task creation and 60 seconds for a status request. The client accepts a successful HTTP status in the 200-299 range, including asynchronous 201/202 responses, only through the same bounded JSON and business-envelope validation. Submission additionally requires business code 10000 and a valid task ID. Empty 204 replies, malformed bodies, and missing IDs remain uncertain; a successful HTTP status alone is not acceptance evidence. No live 201/202 response was observed during this review.
+
+The text-only example uses the test origin; the production-origin example requires an image. These examples do not establish text-only production support. Adding an unrelated image or changing a paid request to the test origin would not resolve that evidence gap.
+
 The image source also describes signed image-upload URLs through `openclaw_put_url` and `openclaw_get_url`. Those operations are not implemented here: the isolated client never fetches user image URLs, signed upload destinations, or returned media URLs. Upload/download need reviewed destination hosts and media checks before use in a film adapter.
 
 ## Server interface and limits
@@ -38,7 +42,7 @@ const evidence = await client.checkTask({ taskId });
 - Numeric JSON task identifiers are preserved from the original number token instead of rounding 64-bit IDs. String IDs remain unchanged. An unsupported runtime fails closed on unsafe integers rather than polling a rounded identifier.
 - Only the two fixed origins above are accepted. There is no configurable base URL, arbitrary request path, redirect following, or credential forwarding to media URLs.
 - Each response is limited to 128 KiB of decoded bytes while streaming, with cancellation on rejection. The default 15-second deadline covers fetch and body consumption; the configured ceiling is 90 seconds. Declared lengths must match unencoded bodies; native fetch decompresses encoded bodies while retaining their compressed length header, so that header is not compared to decoded size. JSON, UTF-8, task identifiers and response fields are validated. Input text is capped at 100,000 UTF-8 bytes as an application limit, not a claimed provider limit.
-- Errors use fixed redacted messages/codes and optionally an HTTP status or numeric provider code. Provider messages, response bodies, trace IDs and transport error messages are not exposed. Raw responses containing credentials in returned task/media fields are rejected.
+- Errors use fixed redacted messages/codes and preserve an HTTP status or numeric provider code when those values were actually received. A fixed diagnostic stage identifies `transport`, `response`, `body`, `envelope`, `provider`, or `task` validation. The stage describes where validation failed, not whether a job was created or charged. Provider messages, response bodies, trace IDs and transport error messages are not exposed. Raw responses containing credentials in returned task/media fields are rejected.
 
 ## Requirements still outside this protocol
 
@@ -50,7 +54,7 @@ The implemented Administration overview button calls same-origin owner-only `POS
 
 ## Verification
 
-`node --test tests/magiclight-client.test.mjs` uses synthetic fetch/stream fixtures only. It covers fixed hosts, path validation, disabled submission, exact request shape, uncertainty without retries, bounded/stalled/truncated responses, secret redaction, and unchanged film availability. It makes no live provider requests.
+`node --test tests/magiclight-client.test.mjs` uses synthetic fetch/stream fixtures only. It covers fixed hosts, path validation, disabled submission, exact request shape, accepted 201/202 task IDs, empty or malformed successful responses, retained diagnostic status/stages, uncertainty without retries, bounded/stalled/truncated responses, secret redaction, and unchanged film availability. It makes no live provider requests.
 
 ## Single owner live test
 

@@ -158,16 +158,19 @@ export function createStudioHandler(overrides={}) {
         return json(res,429,{message:"Please wait before requesting another video approval."});
       return json(res,200,await generationReview.approve(session.user,{preparedId:body.preparedId,artifactSha256:body.artifactSha256,consent:true}));
     }
-    if(["requestFilmGeneration","checkFilmGeneration"].includes(body?.action)) {
+    if(["requestFilmGeneration","replaceFilmGeneration","checkFilmGeneration"].includes(body?.action)) {
       if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
-      const starting=body.action==="requestFilmGeneration";
-      if(Object.keys(body).some(key=>!(starting?["action","preparedId","orderId","consent"]:["action","preparedId"]).includes(key))
+      const replacing=body.action==="replaceFilmGeneration", starting=body.action!=="checkFilmGeneration";
+      if(Object.keys(body).some(key=>!(replacing?["action","preparedId","orderId","consent","expectedChangeId","acknowledgePossibleDuplicate"]:starting?["action","preparedId","orderId","consent"]:["action","preparedId"]).includes(key))
         ||typeof body.preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId)
-        ||(starting&&(typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId)||body.consent!==true)))
+        ||(starting&&(typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId)||body.consent!==true))
+        ||(replacing&&(body.acknowledgePossibleDuplicate!==true||typeof body.expectedChangeId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.expectedChangeId))))
         return json(res,400,{message:starting?"Choose the saved film plan and its payment, then confirm the generation attempt.":"Choose the saved film plan before checking its generation attempt."});
       if(!(await limitAction(`film-generation-${starting?"start":"check"}:${email}`,starting?6:60,3600_000)))
         return json(res,429,{message:"Please wait before requesting this generation action again."});
-      return json(res,starting?202:200,await (starting
+      return json(res,starting?202:200,await (replacing
+        ?generation.replace(session.user,{preparedId:body.preparedId,orderId:body.orderId,consent:true,expectedChangeId:body.expectedChangeId,acknowledgePossibleDuplicate:true})
+        :starting
         ?generation.start(session.user,{preparedId:body.preparedId,orderId:body.orderId,consent:true})
         :generation.check(session.user,{preparedId:body.preparedId})));
     }

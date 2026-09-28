@@ -1,6 +1,6 @@
 # Paid generation delivery
 
-The owner can request one generation for an exact paid screenplay. A permanent claim prevents another provider submission even when its response is uncertain. The Vercel generation cron checks saved task IDs every five minutes.
+The owner can request one generation for an exact paid screenplay. A permanent claim prevents automatic resubmission even when its response is uncertain. The Vercel generation cron checks saved task IDs every five minutes.
 
 The separate delivery worker handles returned video only. It cannot submit generation, charge or refund money, approve content, or mark a film completed. It requires Node 22, FFmpeg, the existing private Blob token, and `LINEAGE_GENERATION_OUTPUT_HOSTS`, a comma-separated allowlist of reviewed exact output hosts. Missing hosts disable the worker. Redirects, oversized media, wrong duration, incomplete decoding, and missing browser-compatible video/audio fail verification.
 
@@ -29,3 +29,13 @@ The immutable image above passed its configuration check and a real storage-back
 At 00:32 UTC the corrected service exited successfully with `ExecMainStatus=0`, and the timer was enabled and active. Both the manual service pass and the first timer-triggered pass returned zero pending deliveries, zero delivery errors, and one skipped request. Existing unrelated application containers remained healthy.
 
 This activates delivery for the existing owner pilot. Nathan Wood's saved request is still unconfirmed, with no recoverable task ID or returned video; it is safely skipped. No replacement generation, customer charge, content approval, or completed-film claim resulted from activation. General customer rendering and a reliable generation-time estimate remain unverified.
+
+## Explicit recovery of a missing acknowledgement
+
+The owner can confirm at most one replacement of a request that has no task ID or output and has been unresolved for at least five minutes. This is a new provider request, not recovery of the original job. The confirmation explicitly acknowledges that the earlier request might still finish or consume provider credits. Ordinary starts, status checks, reloads and scheduled workers never use this option.
+
+The server rechecks current owner access, the exact immutable paid plan and the existing confirmed payment. It archives the original request into create-only private history and verifies that copy before conditionally replacing the current claim using the expected revision. Concurrent confirmations can dispatch at most one replacement. The replacement uses the same screenplay and payment, records the risk acknowledgment and history hash, and cannot itself be replaced. A known provider task is never eligible. No new customer invoice or charge is created.
+
+New submissions allow up to 90 seconds for the provider acknowledgement within the 180-second route limit. The client retains exact accepted task IDs from valid 2xx envelopes and records only fixed diagnostic codes, stages, and numeric HTTP/business codes. These diagnostics are shown to the owner; provider response bodies and credentials remain undisclosed. Stale no-ID claims display unconfirmed status instead of indefinite active submission.
+
+The original Nathan request had no saved error detail, changed to unconfirmed roughly 0.34 seconds after its claim, and ran on Node 24. The absence of a corresponding provider usage entry does not establish that it was rejected. Preventive acknowledgement fixes and a recovery option do not establish full-film support or a successful video result.
