@@ -4,6 +4,14 @@ import { createPatrickQuickBooks, readFinanceResponse } from '../api/_lib/patric
 import { createPatrickQuickBooksHandler } from '../api/patrick-quickbooks.mjs';
 
 const key = 'A'.repeat(43), binding = { environment: 'production', realmId: '123', grantId: 'a'.repeat(64) };
+test('rejected QuickBooks reads are distinguished from outages without exposing provider details', async () => {
+  for (const [status, code] of [[400, 'QBO_REQUEST_REJECTED'], [401, 'QBO_ACCESS_DENIED'], [403, 'QBO_ACCESS_DENIED'], [429, 'QBO_RATE_LIMITED'], [500, 'QBO_PROVIDER_UNAVAILABLE']]) {
+    const response = new Response('private query and account details', { status });
+    await assert.rejects(readFinanceResponse(response), error => error.message === code);
+    assert.equal(response.body.locked, false);
+    assert.equal(response.bodyUsed, true);
+  }
+});
 function fixture(overrides = {}) {
   const calls = [];
   const service = createPatrickQuickBooks({ env: { PAC_QUICKBOOKS_REALM_ID: '123' }, transport: {

@@ -10,7 +10,7 @@ const object = (properties = {}, required = []) => ({ type: 'object', additional
 export const QUICKBOOKS_TOOLS = Object.freeze([
   { name: 'quickbooks_connection_status', description: 'Check whether Patrick can read the BROCO Tech QuickBooks company. Returns connection health and verification times.', inputSchema: object() },
   { name: 'quickbooks_company_info', description: 'Read the connected BROCO Tech QuickBooks company identity and accounting settings.', inputSchema: object() },
-  { name: 'quickbooks_query', description: 'Read a page of live BROCO Tech accounting records. Use an allowed entity and optional QuickBooks WHERE expression. Always report pagination and source time; never treat a partial page as a complete total.', inputSchema: object({
+  { name: 'quickbooks_query', description: 'Read a page of live BROCO Tech accounting records. For JournalEntry, filter by supported fields such as TxnDate; Description is a line field and cannot be filtered. Inspect descriptions in returned lines. Report pagination and source time; never treat a partial page as a complete total or infer employee payroll totals from incomplete accounting records.', inputSchema: object({
     entity: { type: 'string', enum: ENTITY_NAMES },
     where: { type: 'string', maxLength: 1500, description: 'Optional QuickBooks filter, e.g. Balance > 0 or TxnDate >= \'2026-09-01\'. No SELECT, paging, or ORDER BY clauses.' },
     start_position: { type: 'integer', minimum: 1, maximum: 1000000 },
