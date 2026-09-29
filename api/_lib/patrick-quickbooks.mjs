@@ -4,8 +4,15 @@ import { validateQuickbooksArguments } from './quickbooks-finance-contract.mjs';
 const fail = code => { throw new Error(code); };
 const normalized = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 export async function readFinanceResponse(response) {
-  if (response.status === 429) fail('QBO_RATE_LIMITED');
-  if (!response.ok) fail('QBO_PROVIDER_UNAVAILABLE');
+  if (!response.ok) {
+    // Provider bodies may contain account data or the rejected query. Do not
+    // expose them to the assistant; release the stream and classify by status.
+    await response.body?.cancel();
+    if (response.status === 429) fail('QBO_RATE_LIMITED');
+    if (response.status === 401 || response.status === 403) fail('QBO_ACCESS_DENIED');
+    if ([400, 404, 422].includes(response.status)) fail('QBO_REQUEST_REJECTED');
+    fail('QBO_PROVIDER_UNAVAILABLE');
+  }
   const reader = response.body.getReader(), chunks = []; let size = 0;
   for (;;) { const { done, value } = await reader.read(); if (done) break;
     size += value.byteLength; if (size > 120000) { await reader.cancel(); fail('QBO_RESULT_TOO_LARGE'); } chunks.push(value); }
