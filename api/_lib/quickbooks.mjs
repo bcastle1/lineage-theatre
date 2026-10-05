@@ -682,7 +682,8 @@ export function createQuickBooksPaymentsTransport(overrides={}) {
 // claims and response projection. Accounting access is not Payments approval.
 // https://developer.intuit.com/app/developer/qbo/docs/api/accounting/most-commonly-used/invoice
 export function createQuickBooksAccountingTransport(overrides={}) {
-  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,connection=quickbooks,financeReadOnly=false}=overrides;
+  const {read=readRecord,fetchImpl=fetch,env=process.env,now=Date.now,connection=quickbooks,financeReadOnly=false,pacFinanceWrite=false}=overrides;
+  if(financeReadOnly&&pacFinanceWrite)throw new Error('ACCOUNTING_MODE_INVALID');
   const unavailable=()=>new QuickBooksError("The Accounting connection needs administrator review.",503,"ACCOUNTING_CONNECTION_UNAVAILABLE");
   const invalid=()=>new QuickBooksError("This Accounting request is not supported.",400,"ACCOUNTING_REQUEST_INVALID");
   const plain=value=>Boolean(value&&typeof value==="object"&&!Array.isArray(value)
@@ -792,11 +793,35 @@ export function createQuickBooksAccountingTransport(overrides={}) {
     }catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
   }
   async function request(expected,operation) {
-    if(!validBinding(expected)||!fields(operation,["method","path","query","body","requestId"],["method","path"])||typeof operation.path!=="string")throw invalid();
+    if(!validBinding(expected)||!fields(operation,["method","path","query","body","requestId",...(pacFinanceWrite?["entity","targetId"]:[])],["method","path"])||typeof operation.path!=="string")throw invalid();
     const bound={...expected},{method,path,query,body,requestId}=operation,parameters=new URLSearchParams();
     let serializedBody;
     if(financeReadOnly && method!=="GET")throw invalid();
-    if(method==="GET") {
+    if(pacFinanceWrite){
+      const {QBO_WRITE_ENTITIES,validateQboWriteArguments,validateQboFile,qboId,qboUuid}=await import('./pac-quickbooks-write-contract.mjs');
+      if(query!==undefined)throw invalid();
+      if(method==='GET'){
+        if(body!==undefined||requestId!==undefined||operation.targetId!==undefined)throw invalid();
+        if(path===`/companyinfo/${bound.realmId}`){if(operation.entity!==undefined)throw invalid();}
+        else if(![...QBO_WRITE_ENTITIES,'Attachable'].includes(operation.entity)||!qboId(path.split('/')[2])||path!==`/${operation.entity.toLowerCase()}/${path.split('/')[2]}`)throw invalid();
+      }else if(method==='POST'&&qboUuid(requestId)){
+        parameters.set('requestid',requestId);
+        if(path==='/upload'){
+          if(!QBO_WRITE_ENTITIES.includes(operation.entity)||!qboId(operation.targetId))throw invalid();
+          validateQboFile(body);const bytes=Buffer.from(body.base64,'base64');
+          if(digest(bytes)!==body.sha256)throw invalid();
+          const metadata={FileName:body.name,ContentType:body.media_type,AttachableRef:[{EntityRef:{type:operation.entity,value:operation.targetId},IncludeOnSend:false}]};
+          serializedBody=new FormData();serializedBody.append('file_metadata_01',new Blob([JSON.stringify(metadata)],{type:'application/json'}),'metadata.json');
+          serializedBody.append('file_content_01',new Blob([bytes],{type:body.media_type}),body.name);
+        }else{
+          if(!QBO_WRITE_ENTITIES.includes(operation.entity)||path!==`/${operation.entity.toLowerCase()}`||operation.targetId!==undefined||!plain(body))throw invalid();
+          const {Id,SyncToken,sparse,...data}=body;
+          if(Id!==undefined){if(sparse!==true)throw invalid();validateQboWriteArguments('quickbooks_update',{entity:operation.entity,id:Id,expected_version:SyncToken,data});}
+          else{if(SyncToken!==undefined||sparse!==undefined)throw invalid();validateQboWriteArguments('quickbooks_create',{entity:operation.entity,data});}
+          serializedBody=JSON.stringify(body);
+        }
+      }else throw invalid();
+    }else if(method==="GET") {
       if(body!==undefined||requestId!==undefined)throw invalid();
       if(financeReadOnly && path==="/query") {
         const {validateQuickbooksArguments}=await import("./quickbooks-finance-contract.mjs");
@@ -831,17 +856,18 @@ export function createQuickBooksAccountingTransport(overrides={}) {
         ||!isOwner(owner)||owner.mustChangePassword||digest(owner.passwordHash||"")!==digest(current.owner.passwordHash||"")
         ||Date.parse(current.token.accessTokenExpiresAt)<=now())throw unavailable();
       const strings=value=>typeof value==="string"?[value]:value&&typeof value==="object"?Object.values(value).flatMap(strings):[];
-      const contents=[...parameters.values(),...(serializedBody?strings(JSON.parse(serializedBody)):[])];
+      const contents=[...parameters.values(),...(serializedBody?strings(body):[])];
       if([current.token.accessToken,current.token.refreshToken,current.config.clientSecret,current.config.key.toString("base64")]
         .some(secret=>typeof secret==="string"&&secret.length>=8&&contents.some(value=>value.includes(secret))))throw invalid();
     }catch(error) {if(error instanceof QuickBooksError)throw error;throw unavailable();}
     const suffix=parameters.size?`?${parameters}`:"";
     try {
-      // No automatic retry, mutation outside the two creation paths, or /send.
+      // No automatic retry or /send. The PAC mode has its own explicit contract;
+      // existing checkout creation and read-only modes retain their boundaries.
       // Return a server-only Response; the caller must bound/project its body.
       return await fetchImpl(`${INTUIT_ACCOUNTING_ORIGINS[bound.environment]}/v3/company/${bound.realmId}${path}${suffix}`,{
         method,redirect:"error",signal:AbortSignal.timeout(20_000),
-        headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json",...(method==="POST"?{"Content-Type":"application/json"}:{})},
+        headers:{Authorization:`Bearer ${current.token.accessToken}`,Accept:"application/json",...(method==="POST"&&!(serializedBody instanceof FormData)?{"Content-Type":"application/json"}:{})},
         ...(serializedBody?{body:serializedBody}:{}),
       });
     }catch {throw new QuickBooksError("The Accounting request result could not be confirmed. Check its saved status before retrying.",502,"ACCOUNTING_REQUEST_UNCERTAIN");}

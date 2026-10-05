@@ -28,7 +28,7 @@ function fixture(options={}) {
     credentialVersion:config.credentialVersion,fingerprint:config.fingerprint,encryptedTokens:encryptQuickBooksTokens(tokens,config)});
   const read=async path=>{await readHook?.(path);return structuredClone(records.get(path)||null);};
   const binding={environment:config.environment,grantId:digest(`${config.credentialVersion}:${REALM}:synthetic-attempt`),realmId:REALM};
-  const transport=createQuickBooksAccountingTransport({read,env,now:()=>clock,financeReadOnly:options.financeReadOnly===true,
+  const transport=createQuickBooksAccountingTransport({read,env,now:()=>clock,financeReadOnly:options.financeReadOnly===true,pacFinanceWrite:options.pacFinanceWrite===true,
     connection:{refresh:async(actor,body)=>{
       refreshes.push({actor:structuredClone(actor),body});
       const saved=records.get(QUICKBOOKS_CONNECTION_PATH).value;
@@ -42,6 +42,33 @@ function fixture(options={}) {
 }
 const invalid=error=>error?.code==="ACCOUNTING_REQUEST_INVALID";
 const unavailable=error=>error?.code==="ACCOUNTING_CONNECTION_UNAVAILABLE";
+
+test('PAC write mode scopes supported records and multipart uploads without widening existing modes',async()=>{
+  const h=fixture({pacFinanceWrite:true});
+  await h.transport.request(h.binding,{method:'GET',path:`/companyinfo/${REALM}`});
+  await h.transport.request(h.binding,{method:'GET',entity:'Vendor',path:'/vendor/4'});
+  await h.transport.request(h.binding,{method:'POST',entity:'Vendor',path:'/vendor',requestId:REQUEST,body:{DisplayName:'Synthetic vendor'}});
+  assert.equal(new URL(h.calls.at(-1)[0]).searchParams.get('requestid'),REQUEST);
+  await h.transport.request(h.binding,{method:'POST',entity:'Vendor',path:'/vendor',requestId:REQUEST,body:{Id:'4',SyncToken:'2',sparse:true,DisplayName:'Renamed'}});
+  const file={name:'invoice.txt',media_type:'text/plain',base64:'YWJj',sha256:digest(Buffer.from('abc'))};
+  await h.transport.request(h.binding,{method:'POST',entity:'Invoice',targetId:'2',path:'/upload',requestId:REQUEST,body:file});
+  const options=h.calls.at(-1)[1];assert.ok(options.body instanceof FormData);assert.equal(options.headers['Content-Type'],undefined);
+  assert.equal(await options.body.get('file_content_01').text(),'abc');
+  assert.deepEqual(JSON.parse(await options.body.get('file_metadata_01').text()).AttachableRef,[{EntityRef:{type:'Invoice',value:'2'},IncludeOnSend:false}]);
+  const before=h.calls.length;
+  for(const op of [
+    {method:'POST',entity:'Vendor',path:'/vendor/4/send',requestId:REQUEST,body:{}},
+    {method:'GET',entity:'Vendor',path:'/vendor/extra/4'},
+    {method:'POST',entity:'Vendor',path:'/vendor',requestId:REQUEST,body:{Id:'4',SyncToken:'2',sparse:false,DisplayName:'x'}},
+    {method:'POST',entity:'CompanyInfo',path:'/companyinfo',requestId:REQUEST,body:{CompanyName:'changed'}},
+    {method:'POST',entity:'Invoice',targetId:'2',path:'/upload',requestId:REQUEST,body:{...file,base64:'eHl6'}},
+  ])await assert.rejects(h.transport.request(h.binding,op));
+  assert.equal(h.calls.length,before);
+  for(const readonly of [fixture(),fixture({financeReadOnly:true})]){
+    await assert.rejects(readonly.transport.request(readonly.binding,{method:'POST',entity:'Vendor',path:'/vendor',requestId:REQUEST,body:{DisplayName:'x'}}),invalid);
+    assert.equal(readonly.calls.length,0);
+  }
+});
 
 test("Accounting binding and reads use only the current environment/company without Payments approval",async()=>{
   for(const environment of ["production","sandbox"]) {
