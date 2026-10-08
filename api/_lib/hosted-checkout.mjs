@@ -137,6 +137,7 @@ function paymentAllocation(payment,order,paymentId) {
 
 export function createHostedCheckoutService({read=readRecord,write=writeRecord,now=Date.now,env=process.env,transport=createQuickBooksAccountingTransport(),
   receiptDelivery={deliver:async order=>(await import("./receipt-delivery.mjs")).receiptDelivery.deliver(order)},
+  productionAutomation={schedule:async input=>(await import("./automatic-production.mjs")).automaticProduction.schedule(input)},
   pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
   productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),
   verifyReversals=createHostedReversalVerifier({transport,now})}={}) {
@@ -295,7 +296,8 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     record=await save(path,record,{...record.value,status:"ready",customerId:value.Id});return record.value.customerId;
   }
   async function checkout(actor,body) {
-    exact(body,["quoteId","idempotencyKey","consent"]);reference(body.quoteId);reference(body.idempotencyKey,keys);if(body.consent!==true)throw new HostedCheckoutError("Confirm the exact total and checkout terms before continuing.");
+    exact(body,["quoteId","idempotencyKey","consent","productionConsent"]);reference(body.quoteId);reference(body.idempotencyKey,keys);if(body.consent!==true)throw new HostedCheckoutError("Confirm the exact total and checkout terms before continuing.");
+    if(body.productionConsent!==undefined&&typeof body.productionConsent!=="boolean")throw new HostedCheckoutError("Confirm whether this paid version should start automatically.");
     const email=emailFor(actor),{binding,settings:s}=await enabled(actor,true),q=(await read(quotePath(email,body.quoteId)))?.value;
     if(!q||q.customerEmail!==email||!sameBinding(q.merchantBinding,binding))throw conflict();
     await legacyGuard(q);const id=orderId(q),path=orderPath(id),existing=await read(path);
@@ -307,7 +309,8 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(Date.parse(q.expiresAt)<=now()||q.checkoutSettings.revision!==s.revision)throw expired();
     let record;
     try {record=existing?await save(path,existing,{...existing.value,status:"submitting"}):await save(path,null,{...q,id,version:1,provider:"quickbooks",quoteId:q.id,checkoutMethod:METHOD,status:"submitting",refundedCents:0,providerChargeId:null,capturedAt:null,
-      invoiceId:null,invoiceUrl:null,invoiceNumber:null,invoiceRequestId:uuid(`invoice:${id}`),checkoutKeyHash:digest(body.idempotencyKey),consentAt:stamp(now()),createdAt:stamp(now())});}
+      invoiceId:null,invoiceUrl:null,invoiceNumber:null,invoiceRequestId:uuid(`invoice:${id}`),checkoutKeyHash:digest(body.idempotencyKey),consentAt:stamp(now()),createdAt:stamp(now()),
+      ...(body.productionConsent===true?{productionConsent:true,productionConsentAt:stamp(now())}:{})});}
     catch(error) {const winner=await read(path);if(winner?.value.checkoutMethod===METHOD&&winner.value.customerEmail===email&&winner.value.quoteId===q.id&&winner.value.preparedId===q.preparedId&&winner.value.checkoutKeyHash===digest(body.idempotencyKey)&&sameBinding(winner.value.merchantBinding,binding))return presentOrder(winner.value);throw error;}
     try {
       const customerId=await customer(actor,binding);record=await save(path,record,{...record.value,customerId});
@@ -364,6 +367,10 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     }catch(error) {update={status:"uncertain",invoiceUrl:null,lastCheckStage:stage,lastCheckFailureReason:checkReason(error,stage),lastCheckUrlDiagnostics:urlDiagnostics};}
     const current=await read(orderPath(value.id));if(current?.etag!==record.etag)throw conflict();
     const saved=(await save(orderPath(value.id),record,{...record.value,...update,checkOperation:null})).value;
+    // Persist production intent independently of the browser and receipt mail.
+    // A transient queue failure is retried by payment reconciliation; payment
+    // confirmation remains the verified Accounting result.
+    if(saved.status==="captured"&&saved.productionConsent===true)try {await productionAutomation.schedule({id:saved.id});}catch{}
     // Receipt delivery is recoverable independently; mail problems must never
     // turn a verified payment into an uncertain financial result.
     if(saved.status==="captured")try {await receiptDelivery.deliver(saved);}catch{}
