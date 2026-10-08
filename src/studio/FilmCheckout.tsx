@@ -69,6 +69,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   latestReviewContext.current = reviewContext;
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => { setConsent(false); }, [productionAvailable]);
 
   useEffect(() => {
     let active = true; setInputHash(""); setConsent(false);
@@ -255,7 +256,8 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       const reference = { preparedId: quote.preparedId, manifestHash: quote.manifestHash, quoteId: quote.id, orderId: quote.orderId, checkoutKey: checkoutKey.current, submittedAt: new Date().toISOString(), sandbox: quote.sandbox };
       // Save recovery before requesting one invoice. An uncertain response
       // can only recover this order, never create a replacement invoice.
-      const result = await commitFilmPayment({ request: api, quote, reference, checkoutProof: proof.checkoutProof, persist: saved => {
+      const result = await commitFilmPayment({ request: api, quote, reference, checkoutProof: proof.checkoutProof,
+        productionConsent: productionAvailable && quote.method === "quickbooks-hosted-invoice" && !quote.sandbox, persist: saved => {
         persistPaymentReference(saved);
         attemptedPayment.current = saved;
       } });
@@ -330,12 +332,14 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       <p>{quote.filmTitle} · {prepared?.durationSeconds} seconds target</p>
       <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
-      <p className="field-note">A payment does not start film production. Your administrator will confirm production availability.</p>
+      <p className="field-note">{productionAvailable && !quote.sandbox
+        ? "Your saved film enters production automatically after QuickBooks confirms payment. You can close the browser; progress stays in your Film library."
+        : "A payment does not start film production. Your administrator will confirm production availability."}</p>
       <h4>Delivery</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.deliveryTerms}</p>
       <h4>Refund policy</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.refundTerms}</p>
       {!quoteCurrent && <p className="feedback">This price has expired or the plan has changed. Request a new price before paying.</p>}
       <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent} onChange={event => setConsent(event.target.checked)} />
-        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks.`}</span>
+        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks.${productionAvailable ? " Start this saved version automatically when my payment is confirmed." : ""}`}</span>
       </label>
       {configuration?.available && quoteCurrent && <>
         <p className="field-note">Your secure payment page opens in another tab. Enter your payment details there, then return here to check payment status. Your finished film unlocks only after payment is confirmed.</p>

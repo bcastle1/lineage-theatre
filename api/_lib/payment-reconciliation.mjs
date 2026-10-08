@@ -49,7 +49,8 @@ export function createReconciliationTransport({ transport, now = Date.now, deadl
 }
 
 export function createPaymentReconciliationService({ read = readRecord, write = writeRecord, page = recordPage,
-  receipts = receiptDelivery, now = Date.now, env = process.env, fetchImpl = fetch, makeHosted } = {}) {
+  receipts = receiptDelivery, now = Date.now, env = process.env, fetchImpl = fetch, makeHosted,
+  productionAutomation = { schedule: async input => (await import("./automatic-production.mjs")).automaticProduction.schedule(input) } } = {}) {
   function hostedFor({ deadline, stillOwned }) {
     if (makeHosted) return makeHosted({ deadline, stillOwned });
     const boundedFetch = async (url, init = {}) => {
@@ -63,6 +64,7 @@ export function createPaymentReconciliationService({ read = readRecord, write = 
     const transport = createReconciliationTransport({ now, deadline, stillOwned,
       transport: createQuickBooksAccountingTransport({ read, env, now, connection, fetchImpl: boundedFetch }) });
     return createHostedCheckoutService({ read, write, env, now, transport,
+      productionAutomation,
       receiptDelivery: { deliver: async () => ({ status: "skipped" }) } });
   }
   async function run() {
@@ -126,6 +128,9 @@ export function createPaymentReconciliationService({ read = readRecord, write = 
           if (confirmed.customerEmail !== order.customerEmail || !currentActor || currentActor.email !== confirmed.customerEmail
             || currentActor.mustChangePassword || currentActor.status === "suspended" || accessStatusForUser(currentActor) !== "approved") { result.skipped++; continue; }
           if (!await owned() || now() > deadline - 60_000) throw unavailable();
+          if (confirmed.productionConsent === true) {
+            try { await productionAutomation.schedule({ id }); } catch { result.failed++; }
+          }
           const delivered = await receipts.deliver({ id });
           if (delivered?.status === "accepted") result.receiptsAccepted++;
           else if (delivered?.status !== "skipped") result.receiptsPending++;

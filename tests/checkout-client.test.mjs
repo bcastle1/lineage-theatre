@@ -26,6 +26,15 @@ const order = status => ({ id: quote().orderId, quoteId: quote().id, preparedId:
   invoiceUrl: "https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture", invoiceNumber: "1234", ...(status === "captured" ? { confirmationSource: "quickbooks-accounting" } : {}) });
 const token = "SYNTHETIC_TOKEN_NOT_A_REAL_CARD";
 
+test("checkout forwards automatic production only after explicit customer consent", async () => {
+  for (const consent of [undefined, false, true]) {
+    let submitted;
+    await commitFilmPayment({ quote: quote(), reference: reference(), checkoutProof: "d".repeat(64), now: () => now,
+      productionConsent: consent, persist: () => {}, request: async (_path, body) => { submitted = body; return order("awaiting-payment"); } });
+    assert.equal(submitted.productionConsent, consent === true ? true : undefined);
+  }
+});
+
 test("a confirmed hosted payment can start only its unchanged plan with available production", () => {
   const paid = normalizeFilmOrder(order("captured"));
   assert.equal(canStartFilmProduction(paid, true, true), true);

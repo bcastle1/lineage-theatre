@@ -40,6 +40,7 @@ function fixture(options={}) {
     assert.fail(`Unexpected operation ${operation.method} ${operation.path}`);
   }};
   const dependencies={read,write,transport,receiptDelivery:options.receiptDelivery||{deliver:async()=>{}},now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
+    ...(options.productionAutomation?{productionAutomation:options.productionAutomation}:{}),
     pricingSettings:async()=>({revision:0,markupBasisPoints:5000}),quoteProvider:async(project,actor,request)=>{
       quotes.push({project,actor,request});return {preparedId:PREPARED,manifestHash:manifest,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",providerCostCents:1000,
         pricingBasis:"planning-rate",pricingRevision:0,quoteReference:"fictional-reference",environment:binding.environment,expiresAt:new Date(time+300_000).toISOString(),...options.quoteOverrides};}};
@@ -430,4 +431,29 @@ test("confirmed payment persists before receipt delivery and mail failure preser
   assert.equal(paid.status,"captured");
   assert.equal(paid.receiptAvailable,true);
   assert.equal(attempts,1);
+});
+
+test("automatic production requires recorded checkout consent and confirmed payment",async()=>{
+  const scheduled=[];
+  const h=fixture({env:{LINEAGE_PAYMENT_ACCESS:"approved"},productionAutomation:{schedule:async input=>{
+    const saved=(await h.read(`payments/orders/${input.id}.json`)).value;
+    assert.equal(saved.status,"captured");assert.equal(saved.productionConsent,true);scheduled.push(input);
+  }}});
+  const q=await h.makeQuote(CUSTOMER),body={quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true};
+  const order=await h.service.checkout(CUSTOMER,body);
+  assert.equal((await h.read(`payments/orders/${order.id}.json`)).value.productionConsentAt,new Date(NOW).toISOString());
+  await h.service.check(CUSTOMER,{orderId:order.id});assert.equal(scheduled.length,0);
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  assert.equal((await h.service.check(CUSTOMER,{orderId:order.id})).status,"captured");
+  assert.deepEqual(scheduled,[{id:order.id}]);assert.equal(mutationRequests(h).length,2);
+  const legacy=fixture({productionAutomation:{schedule:async()=>assert.fail("Legacy consent must not be expanded")}});
+  const old=await legacy.checkout();legacy.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  assert.equal((await legacy.service.check(OWNER,{orderId:old.id})).status,"captured");
+});
+
+test("production scheduling failure cannot erase a confirmed payment",async()=>{
+  const h=fixture({productionAutomation:{schedule:async()=>{throw Error("synthetic outbox unavailable");}}});
+  const q=await h.makeQuote(),order=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  assert.equal((await h.service.check(OWNER,{orderId:order.id})).status,"captured");
 });

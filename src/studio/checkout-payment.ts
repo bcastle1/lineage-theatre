@@ -46,8 +46,9 @@ export async function retryFilmPayment({ request, order, reference, checkoutProo
 
 // The caller creates one attempt, saves this safe reference, and then makes one
 // checkout POST. Every uncertain outcome uses reads, including after a reload.
-export async function commitFilmPayment({ request, quote, reference, checkoutProof, persist, now = Date.now }: {
+export async function commitFilmPayment({ request, quote, reference, checkoutProof, persist, now = Date.now, productionConsent = false }: {
   request: Request; quote: FilmQuote; reference: FilmPaymentReference; checkoutProof: string;
+  productionConsent?: boolean;
   persist: (reference: FilmPaymentReference) => void; now?: () => number;
 }): Promise<FilmOrder> {
   if (!normalizeFilmQuote(quote) || quote.orderId !== reference.orderId || quote.id !== reference.quoteId || quote.preparedId !== reference.preparedId
@@ -62,7 +63,8 @@ export async function commitFilmPayment({ request, quote, reference, checkoutPro
     return order;
   };
   try {
-    const result = await request("/api/studio", { action: "checkout", quoteId: quote.id, idempotencyKey: reference.checkoutKey, checkoutProof, consent: true });
+    const result = await request("/api/studio", { action: "checkout", quoteId: quote.id, idempotencyKey: reference.checkoutKey, checkoutProof, consent: true,
+      ...(productionConsent ? { productionConsent: true } : {}) });
     return verifyAmount(orderForReference(result, reference));
   } catch {
     try { return verifyAmount(await recoverFilmPayment(request, reference)); }

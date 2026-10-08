@@ -29,6 +29,7 @@ function fixture(orders = [order(1)], options = {}) {
     return { records: structuredClone(values.slice(offset, next)), ...(next < values.length ? { cursor: String(next) } : {}) };
   };
   const dependencies = { read, write, page, now: () => time,
+    productionAutomation: options.productionAutomation || { schedule: async () => ({ state: "skipped" }) },
     makeHosted: bounds => ({ check: async (actor, input) => {
       checks.push({ actor: structuredClone(actor), ...input, deadline: bounds.deadline });
       if (options.check) return options.check({ actor, input, records, seed, advance: ms => time += ms, bounds });
@@ -84,6 +85,19 @@ test("legacy, sandbox, unknown invoices and unapproved users never enter backgro
     const h = fixture();if (user) h.seed(userPath(CUSTOMER.email), user);else h.records.delete(userPath(CUSTOMER.email));
     assert.equal((await h.service.run()).skipped, 1);assert.equal(h.checks.length + h.deliveries.length, 0);
   }
+});
+
+test("background reconciliation schedules only saved consent and retries independently of receipts", async () => {
+  const scheduled = [];
+  const h = fixture([order(1, { productionConsent: true }), order(2, { status: "captured", productionConsent: true }), order(3)], {
+    productionAutomation: { schedule: async input => { scheduled.push(input.id); if (input.id === idFor(1)) throw Error("outbox temporarily unavailable"); } },
+  });
+  const result = await h.service.run();
+  assert.deepEqual(scheduled, [idFor(1), idFor(2)]);
+  assert.equal(result.failed, 1); assert.equal(result.receiptsAccepted, 3);
+  assert.equal(h.records.get(`payments/orders/${idFor(1)}.json`).value.status, "captured");
+  await h.service.run();
+  assert.equal(scheduled.filter(id => id === idFor(1)).length, 2);
 });
 
 test("saved cursor and remaining IDs advance across bounded runs without starving later invoices", async () => {

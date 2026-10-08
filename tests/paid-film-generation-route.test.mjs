@@ -158,8 +158,9 @@ async function cron(handler, { method = "GET", authorization = `Bearer ${SECRET}
 }
 
 test("scheduled generation checks require GET and an exact configured cron credential", async () => {
-  let calls = 0;
-  const handler = createFilmGenerationHandler({ env: { CRON_SECRET: SECRET }, service: { run: async () => { calls++; return { examined: 1 }; } } });
+  let calls = 0, automaticCalls = 0;
+  const handler = createFilmGenerationHandler({ env: { CRON_SECRET: SECRET }, service: { run: async () => { calls++; return { examined: 1 }; } },
+    automation: { run: async () => { automaticCalls++; return { queued: 1, pending: 0, skipped: 0 }; } } });
   for (const authorization of [null, "", SECRET, "Bearer incorrect", `bearer ${SECRET}`, `Bearer ${SECRET} `, [SECRET]])
     assert.equal((await cron(handler, { authorization })).status, 401);
   for (const method of ["POST", "PUT", "HEAD", "DELETE"]) {
@@ -168,17 +169,32 @@ test("scheduled generation checks require GET and an exact configured cron crede
     assert.equal(result.headers.Allow, "GET");
   }
   assert.equal(calls, 0);
-  assert.deepEqual((await cron(handler)).body, { examined: 1 });
+  assert.equal(automaticCalls, 0);
+  assert.deepEqual((await cron(handler)).body, { examined: 1, automatic: { queued: 1, pending: 0, skipped: 0 } });
   assert.equal(calls, 1);
+  assert.equal(automaticCalls, 1);
   for (const secret of [undefined, "", "short", " ".repeat(40), "a".repeat(513)]) {
     const disabled = createFilmGenerationHandler({ env: { CRON_SECRET: secret }, service: { run: async () => { calls++; } } });
     assert.equal((await cron(disabled)).status, 503);
   }
   assert.equal(calls, 1);
-  const failed = createFilmGenerationHandler({ env: { CRON_SECRET: SECRET }, service: { run: async () => { throw Error(`private-provider-data ${SECRET}`); } } });
+  const failed = createFilmGenerationHandler({ env: { CRON_SECRET: SECRET }, service: { run: async () => { throw Error(`private-provider-data ${SECRET}`); } },
+    automation: { run: async () => { automaticCalls++; return { queued: 1 }; } } });
   const result = await cron(failed);
   assert.equal(result.status, 503);
+  assert.equal(result.body.automatic.queued, 1);
+  assert.equal(automaticCalls, 2);
   assert.doesNotMatch(JSON.stringify(result), /private-provider-data|synthetic-generation-cron/);
+});
+
+test("a scheduling outage preserves existing task polling and reports partial failure", async () => {
+  let polled = false;
+  const handler = createFilmGenerationHandler({ env: { CRON_SECRET: SECRET },
+    service: { run: async () => { polled = true; return { checked: 2 }; } },
+    automation: { run: async () => { throw Error("PRIVATE_STORAGE_FAILURE"); } } });
+  const result = await cron(handler);
+  assert.equal(polled, true); assert.equal(result.status, 503); assert.equal(result.body.checked, 2);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STORAGE_FAILURE/);
 });
 
 test("deployment schedules bounded saved generation checks every five minutes", async () => {
