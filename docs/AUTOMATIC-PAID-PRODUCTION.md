@@ -10,6 +10,8 @@ Existing payments have no new consent inferred. Sandbox, refunded, unpaid and un
 
 As checked on October 8, 2026, the application's full-film MagicLight adapter is still unavailable. The signed-in MagicLight API portal exposes Hailuo image-to-video credits. The saved text-only full-film attempt has no provider task ID or output. The existing general production worker also requires a working adapter. The payment outbox does not supply or validate one.
 
+An authenticated production check of the existing September 24 fictional image-to-video task at `2026-10-08T22:16:50.642Z` still returned business code 10000 and task status 1. A separate read-only check using the same existing account key confirmed HTTP 200 with an empty `data.video_url`; the bounded response contains only `task_id`, `task_status` and `video_url` in `data`. There is no overlooked finished-media field in that response. No additional generation or credit spend occurred during those checks.
+
 Do not interpret passing synthetic payment/queue tests, the existing completed-export delivery path, or a successful website deployment as evidence of new full-film generation. Completing activation requires a supported MagicLight generation path with verified output and a running compatible worker, or an explicitly chosen alternative renderer with truthful pricing and customer terms. The installed LTX renderer is a separate integration and is not silently substituted by this change.
 
 ## Verification
