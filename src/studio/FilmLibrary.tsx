@@ -25,7 +25,7 @@ export function LibraryFilmStatus({ entry, productionAvailable, generationAttemp
       {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
       {paid && entry.kind === "plan" && <p className="field-note">Your payment covers this saved version. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
     </>}
-    {entry.kind === "plan" && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} status={entry.production.status}
+    {entry.kind === "plan" && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} available={productionAvailable} status={entry.production.status}
       completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention} />}
   </div>;
 }

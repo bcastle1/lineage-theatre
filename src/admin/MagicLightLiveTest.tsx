@@ -75,6 +75,11 @@ function statusText(status: TestStatus, mediaReady = false): string {
     case "failed": return "The saved test failed. Review its diagnostic result before taking any further action.";
   }
 }
+export function liveTestWaitMessage(test: SavedTest): string | null {
+  if (test.status !== "submitted" || test.providerCode !== 10000 || test.taskStatus !== 1 || !test.checkedAt) return null;
+  const minutes = Math.max(0, Math.floor((Date.parse(test.checkedAt) - Date.parse(test.createdAt)) / 60_000));
+  return `MagicLight accepted the task but has not returned a finished video. At the last check, ${minutes} minutes had elapsed since submission. API acceptance does not confirm working film production. Do not submit another test to retry this job.`;
+}
 
 export default function MagicLightLiveTest({ disabled = false }: { disabled?: boolean }) {
   const [state, setState] = useState<LiveTestState | null>(null);
@@ -145,12 +150,13 @@ export default function MagicLightLiveTest({ disabled = false }: { disabled?: bo
         : busy === "import" ? "Importing the completed test clip…" : "Checking the saved provider job…"}</p>}
     </div>
     {test && <div className="admin-feedback info">
-      <p className="field-note">One submission · Saved {new Date(test.updatedAt).toLocaleString()}
+      <p className="field-note">One submission · Submitted {new Date(test.createdAt).toLocaleString()}
         {test.checkedAt ? ` · Checked ${new Date(test.checkedAt).toLocaleString()}` : ""}</p>
       {(test.code || test.providerCode !== undefined || test.httpStatus !== undefined || test.taskStatus !== undefined) && <p className="field-note">
         {[test.code, test.providerCode !== undefined ? `Provider code ${test.providerCode}` : "",
           test.httpStatus !== undefined ? `HTTP ${test.httpStatus}` : "", test.taskStatus !== undefined ? `Task status ${test.taskStatus}` : ""].filter(Boolean).join(" · ")}
       </p>}
+      {liveTestWaitMessage(test) && <p>{liveTestWaitMessage(test)}</p>}
       {test.outputOrigin && <p className="field-note" style={{ overflowWrap: "anywhere" }}>Output origin: {test.outputOrigin}</p>}
     </div>}
     {error && <div className="admin-inline-error" role="alert">

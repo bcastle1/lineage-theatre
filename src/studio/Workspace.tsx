@@ -44,6 +44,8 @@ import MediaLibrary from "./MediaLibrary";
 import { downloadMediaFile, type MediaItem } from "./media-library";
 import LibraryArtwork from "./LibraryArtwork";
 import { initialWorkspaceView, localLibraryPatch, localLibraryState, verifyLibraryDetail, type LibraryAction, type LibraryEntry } from "./film-library";
+import PaymentConfirmation from "./PaymentConfirmation";
+import { paymentReturnOrder, paymentReturnLink, releasePaymentWindows } from "./payment-window";
 import { createDerivedFilmDraft, persistCreatedDraft } from "./derived-film";
 const Admin = lazy(() => import("../admin/Admin"));
 const AccountSecurity = lazy(() => import("../AccountSecurity"));
@@ -109,11 +111,14 @@ export default function Workspace({
   const [activeId, setActiveId] = useState(
     projects.find((p) => localLibraryState(p) === "active")?.id || projects[0].id,
   );
-  const [view, setView] = useState<"create" | "library" | "admin" | "media">(() =>
+  const [view, setView] = useState<"create" | "library" | "admin" | "media" | "payment">(() =>
     initialWorkspaceView(window.location.hash, user.role),
   );
+  const [paymentOrderId, setPaymentOrderId] = useState(() => paymentReturnOrder(window.location.hash));
+  useEffect(() => () => releasePaymentWindows(), []);
   useEffect(() => {
     const openPayments = () => {
+      if (window.location.hash.startsWith("#paid-film")) setPaymentOrderId(paymentReturnOrder(window.location.hash));
       if (window.location.hash !== "#studio") setView(initialWorkspaceView(window.location.hash, user.role));
     };
     window.addEventListener("hashchange", openPayments);
@@ -693,7 +698,7 @@ export default function Workspace({
       </aside>
       <div className="studio-main">
         <header className="topbar">
-          {view === "library" || view === "media" ? <div className="project-switch"><Library size={17} aria-hidden="true" /><span>{view === "media" ? "Media library" : "Film library"}</span></div> :
+          {view === "library" || view === "media" || view === "payment" ? <div className="project-switch"><Library size={17} aria-hidden="true" /><span>{view === "media" ? "Media library" : view === "payment" ? "Your paid film" : "Film library"}</span></div> :
           <div className="project-switch">
             <FilmIcon size={17} />
             <select
@@ -739,6 +744,8 @@ export default function Workspace({
           </div>
         </header>
         <main className={`workspace${view === "library" && !accountOpen ? " workspace-library" : ""}`}>
+          <PaymentConfirmation orderId={paymentOrderId} visible={view === "payment" && !accountOpen} productionAvailable={caps?.production}
+            onPaid={id => { setAccountOpen(false); setView("payment"); window.history.replaceState(null, "", paymentReturnLink(id)); }} />
           {accountOpen ? <Suspense fallback={<div className="panel" role="status">Opening account settings…</div>}>
             <AccountSecurity user={user} onUserChange={onUserChange} onClose={() => setAccountOpen(false)} onBusyChange={setAccountBusy} />
           </Suspense> : <>

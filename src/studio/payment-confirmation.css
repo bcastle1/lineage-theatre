@@ -1,0 +1,10 @@
+.payment-confirmation { max-width: 780px; margin: 0 auto; padding: 28px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+.payment-confirmation[hidden] { display: none; }
+.payment-confirmation h1 { margin: 6px 0 24px; scroll-margin-top: 90px; }
+.payment-confirmation-status { display: flex; align-items: flex-start; gap: 14px; padding: 18px; border-radius: 9px; background: var(--soft); color: var(--forest); margin-bottom: 20px; }
+.payment-confirmation-status h2 { font-size: 25px; margin-bottom: 5px; }
+.payment-confirmation-status > svg { flex-shrink: 0; margin-top: 4px; }
+.payment-confirmation > p { margin: 14px 0; line-height: 1.65; }
+.payment-confirmation .action-group { flex-wrap: wrap; margin: 20px 0; }
+.payment-confirmation video { display: block; width: 100%; margin: 20px 0; border-radius: 9px; }
+@media (max-width: 560px) { .payment-confirmation { padding: 18px; } .payment-confirmation h1 { font-size: 30px; } .payment-confirmation-status { padding: 14px; gap: 10px; } .payment-confirmation-status h2 { font-size: 22px; } }

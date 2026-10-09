@@ -297,12 +297,12 @@ test("an expired original retry quote is surfaced without creating a replacement
   assert.equal(calls, 1);
 });
 
-test("payment navigation reserves a tab immediately and strips its opener before verified navigation", () => {
+test("payment navigation reserves a returnable tab immediately before verified Intuit navigation", () => {
   const calls=[];
   const tab={opener:{},document:{title:"",body:{textContent:""}},closed:false,location:{replace:url=>calls.push(url)},close:()=>calls.push("close")};
   const handle=reservePaymentWindow(()=>{calls.push("reserve");return tab;});
   assert.deepEqual(calls,["reserve"]);
-  assert.equal(tab.opener,null);
+  assert.ok(tab.opener);
   assert.match(tab.document.body.textContent,/Preparing/);
   assert.equal(handle.open(order("awaiting-payment").invoiceUrl),true);
   handle.close();
