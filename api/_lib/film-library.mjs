@@ -5,6 +5,7 @@ import { accessStatusForUser, isOwner } from "./access.mjs";
 import { productionJobPath } from "./film-production.mjs";
 import { metadataPath, mediaPath, MAX_FILM_BYTES } from "./archive.mjs";
 import { requireFinishedFilmPayment, validateStoredProductionMedia } from "./production-media.mjs";
+import { createProductionProgress } from "./production-progress.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -40,6 +41,7 @@ export const libraryStatePath = (email, kind, id) => {
 // an entry never rewrites a plan, payment, queue ticket or media object.
 export function createFilmLibraryService({ read = readRecord, write = writeRecord, listBlobs = listBlobRecords,
   now = Date.now, cursorSecret = () => process.env.LINEAGE_SESSION_SECRET } = {}) {
+  const progress = createProductionProgress({ read, write, now });
   async function approved(actor) {
     const email = actorEmail(actor), current = (await read(userPath(email)))?.value;
     if (!current || current.email !== email || current.mustChangePassword || accessStatusForUser(current) !== "approved") throw denied();
@@ -129,6 +131,9 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
       production = { status: value.status === "prepared" && ticket?.state === "pending" ? "queued" : value.status === "awaiting-assembly" ? "processing" : value.status,
         completedShots: value.shots.filter(shot => shot.status === "completed").length, shotCount: value.shots.length, mediaReady,
         needsAttention: ticket?.state === "attention" || value.status === "uncertain" || value.status === "failed" || value.status === "completed" && !mediaReady };
+      production.progress = await progress.snapshot({ job: value, email: actor.email, queue: ticket, mediaReady, needsAttention: production.needsAttention });
+      if (production.progress.stage === "attention") production.needsAttention = true;
+      if (value.status === "prepared" && ["creating", "finishing"].includes(production.progress.stage)) production.status = "processing";
     } else {
       const video = value.video;
       if (video && ["video/mp4", "video/webm"].includes(video.contentType) && integer(video.size, 16, MAX_FILM_BYTES)
@@ -139,7 +144,7 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
     return { kind, id, filmId: kind === "plan" ? value.filmId : id, title: kind === "plan" ? value.manifest.title : value.title,
       durationSeconds: kind === "plan" ? value.manifest.targetDurationSeconds : value.duration,
       createdAt: value.createdAt, updatedAt: value.updatedAt, libraryState: metadata.libraryState, revision: metadata.revision, production, payments,
-      ...(kind === "plan" ? { manifestHash: value.manifestHash } : value.delivery?.provider === "magiclight" ? { origin: "magiclight-delivery" } : {}),
+      ...(kind === "plan" ? { manifestHash: value.manifestHash } : value.delivery?.provider === "magiclight" ? { origin: "studio-delivery" } : {}),
       ...(mediaReady ? { mediaUrl, downloadUrl: `${mediaUrl}&download=1` } : {}) };
   }
   async function list(actor, { view = "active", cursor } = {}) {

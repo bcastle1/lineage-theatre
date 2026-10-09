@@ -10,11 +10,9 @@ import { reservePaymentWindow } from "./payment-window";
 import CaptchaNotice from "../CaptchaNotice";
 import { loadPaidFilmPlan, paidFilmStartRequest, paidOrderMatches, paidPlanMatches, type PaidFilmPlan } from "./paid-film-plan";
 import { startPaymentStatusSync } from "./payment-status-sync";
-import { filmFulfillmentProgress, filmReadyToWatch, generationTimeEstimate, type ProductionStatus } from "./film-fulfillment";
+import { filmFulfillmentProgress, filmReadyToWatch, type ProductionStatus } from "./film-fulfillment";
 import { libraryFilmLink, normalizeLibraryEntry, type LibraryEntry } from "./film-library";
-import FilmGenerationStatus from "./FilmGenerationStatus";
 import FilmProductionProgress from "./FilmProductionProgress";
-import { generationStatusLabel, type GenerationAttempt } from "./generation-attempt";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
@@ -35,7 +33,6 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const [savedOrder, setOrder] = useState<FilmOrder | null>(null);
   const [productionStatus, setProduction] = useState<ProductionStatus | null>(null);
   const [delivery, setDelivery] = useState<LibraryEntry | null>(null);
-  const [generationAttempt, setGenerationAttempt] = useState<GenerationAttempt | null>(null);
   const [paidPlan, setPaidPlan] = useState<PaidFilmPlan | null>(null);
   const [inputHash, setInputHash] = useState("");
   const [consent, setConsent] = useState(false);
@@ -61,8 +58,6 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const canStartProduction = canStartFilmProduction(order, productionAvailable, paidPlanReviewed);
   const readyToWatch = filmReadyToWatch(delivery, paymentReference, film.id);
   const progress = filmFulfillmentProgress(order, production, productionAvailable, readyToWatch);
-  const trialAllowed = generationAttemptAllowed && progress.paid && order?.sandbox === false && !progress.ready;
-  const currentAttempt = generationAttempt?.preparedId === paymentReference?.preparedId && generationAttempt?.orderId === paymentReference?.orderId ? generationAttempt : null;
   const filmStatusLink = paymentReference ? libraryFilmLink(paymentReference.preparedId) : "#library";
   const reviewContext = JSON.stringify([film.id, paymentReference?.orderId, paymentReference?.quoteId, paymentReference?.preparedId, paymentReference?.manifestHash, paymentReference?.sandbox]);
   const latestReviewContext = useRef(reviewContext);
@@ -120,22 +115,28 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     return () => { sync.stop(); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [reviewContext, order?.status, order?.amountCents]);
   useEffect(() => {
-    if (!paymentReference || !order?.receiptAvailable) return;
+    if (!paymentReference || !order?.receiptAvailable || readyToWatch) return;
     const reference = paymentReference;
-    let active = true, timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true, reading = false, timer: ReturnType<typeof setTimeout> | undefined;
     async function refresh() {
+      if (!active || reading) return;
+      if (timer) clearTimeout(timer);
+      if (document.visibilityState !== "visible") { timer = setTimeout(() => void refresh(), 30_000); return; }
+      reading = true;
       try {
         const value = await api<ProductionStatus>(`/api/studio?action=productionStatus&id=${encodeURIComponent(reference.preparedId)}`);
         if (!active) return;
         if (value.id !== reference.preparedId || value.manifestHash !== reference.manifestHash
           || !["prepared", "queued", "submitting", "processing", "uncertain", "failed", "completed"].includes(value.status)) return;
         setProduction(value);
-        if (!["prepared", "failed", "completed"].includes(value.status) && !value.needsAttention) timer = setTimeout(() => void refresh(), 10_000);
-      } catch { /* Manual status recovery remains available after a temporary outage. */ }
+      } catch { /* Preserve the last confirmed status; its estimate will expire. */ }
+      finally { reading = false; if (active && !readyToWatch) timer = setTimeout(() => void refresh(), 15_000); }
     }
     void refresh();
-    return () => { active = false; if (timer) clearTimeout(timer); };
-  }, [paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, production?.status === "queued"]);
+    const returned = () => void refresh();
+    window.addEventListener("focus", returned); document.addEventListener("visibilitychange", returned);
+    return () => { active = false; if (timer) clearTimeout(timer); window.removeEventListener("focus", returned); document.removeEventListener("visibilitychange", returned); };
+  }, [paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, readyToWatch]);
   useEffect(() => {
     setDelivery(null);
     if (!paymentReference || order?.status !== "captured" || production?.status !== "completed") return;
@@ -352,10 +353,10 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     {paymentReference && <div className="film-order-status" role="status">
       <ol className="film-fulfillment-steps" aria-label="Payment and film progress">
         <li data-complete={progress.paid}><span>1. Payment</span><h4>{progress.payment}</h4></li>
-        <li data-complete={progress.ready}><span>2. Film creation</span><h4>{currentAttempt && !progress.ready ? generationStatusLabel(currentAttempt) : progress.production}</h4></li>
+        <li data-complete={progress.ready}><span>2. Film creation</span><h4>{progress.production}</h4></li>
         <li data-complete={progress.ready}><span>3. Watch & download</span><h4>{progress.watch}</h4></li>
       </ol>
-      {!trialAllowed && <FilmProductionProgress paid={progress.paid} ready={progress.ready} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} />}
+      <FilmProductionProgress paid={progress.paid} ready={progress.ready} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} />
       {order && <p>{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
       {order?.status !== "captured" && <p>{order ? paymentStatusMessage(order) : "A payment request has been recorded. Check its result before taking any further action."}</p>}
       {order?.status === "awaiting-payment" && <p className="field-note">We check your payment automatically when you return from QuickBooks. You can also check its status below.</p>}
@@ -364,16 +365,13 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         {progress.ready && delivery?.downloadUrl && <a className="button secondary small" href={delivery.downloadUrl} download><Download size={16} />Download film</a>}
       </div>
       <p className="field-note">Your film stays in your Film library. When the finished video is ready, you can watch and download it there.</p>
-      {!trialAllowed && <p className="field-note">Generation time estimate: {generationTimeEstimate(progress.ready, productionAvailable)}</p>}
       {order?.status === "captured" && order.requiresReview && <p className="feedback">{paymentStatusMessage(order)}</p>}
       {order?.status === "captured" && order.refundedCents > 0 && <p className="feedback">A refund is recorded for this order. Production cannot start; contact the administrator to review this payment.</p>}
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
-        {!currentAttempt && <p>{progress.ready ? "Your finished film is ready to watch and download." : production ? production.preparationOnly ? "Your production plan is saved. Rendering has not started." : `Production status: ${production.status}. ${production.completedShots} of ${production.shotCount} shots complete.`
-          : "Your paid version is saved. Review it below to see the film covered by this payment."}</p>}
-        {paymentReference && trialAllowed && <FilmGenerationStatus allowed preparedId={paymentReference.preparedId} manifestHash={paymentReference.manifestHash} filmId={film.id} orderId={paymentReference.orderId} onStatus={setGenerationAttempt} onApproved={() => void productionRequest(false)} />}
+        <p>{progress.ready ? "Your finished film is ready to watch and download." : "Your paid version is saved. Follow its progress above or open it in your film library."}</p>
         {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
-        {!productionAvailable && !trialAllowed && !progress.ready && <p className="feedback">{production && !production.preparationOnly
+        {!productionAvailable && !progress.ready && <p className="feedback">{production && !production.preparationOnly
           ? "Starting or resuming film creation is currently unavailable. The production status above remains saved. Contact the administrator for help; you do not need to pay again."
           : "Film creation is not available yet. Your payment and paid version are saved. You do not need to pay again. Contact the administrator for help or a refund."}</p>}
         <p className="field-note">This order covers the saved paid version. Later draft edits are not included; your current draft stays unchanged.</p>

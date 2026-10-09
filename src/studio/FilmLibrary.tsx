@@ -1,41 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryCanWatch, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+import { libraryActionRequest, libraryCanWatch, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
   parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
 import "./film-library.css";
-import { generationTimeEstimate } from "./film-fulfillment";
-import FilmGenerationStatus from "./FilmGenerationStatus";
 import FilmProductionProgress from "./FilmProductionProgress";
 import LtxFilmLibrary from "./LtxFilmLibrary";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "The film library could not complete this action. Please refresh.";
-export function LibraryGenerationStatus({ entry, allowed, onApproved }: { entry: LibraryEntry; allowed: boolean; onApproved?: () => void }) {
-  const order = allowed ? libraryGenerationOrder(entry) : null;
-  if (!order || !entry.manifestHash) return null;
-  return <FilmGenerationStatus key={`${entry.id}:${order.id}`} preparedId={entry.id} manifestHash={entry.manifestHash} filmId={entry.filmId} orderId={order.id} allowed={allowed} onApproved={onApproved} />;
-}
 export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
   const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
     && payment.refundedCents === 0 && payment.receiptAvailable);
-  const attemptAllowed = generationAttemptAllowed === true && Boolean(libraryGenerationOrder(entry));
   return <div className="film-library-progress">
     <div className="film-library-statuses"><div><span>Payment</span>{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
       {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
-    </strong>) : <strong>{entry.origin === "magiclight-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
-      <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : attemptAllowed && entry.production.status === "prepared" ? "See generation status" : productionLabel(entry)}</strong></div></div>
+    </strong>) : <strong>{entry.origin === "studio-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
+      <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : paid && entry.kind === "plan" && !libraryCanWatch(entry) ? "See progress below" : productionLabel(entry)}</strong></div></div>
     {libraryCanWatch(entry) ? <p>Your video is complete and ready to watch or download below.</p> : <>
       {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
-      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. " : ""}{attemptAllowed ? "Open this film's status to follow its generation and video review." : "Your production plan is saved. Your video has not been created yet."}</p>}
+      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. Your paid version is saved; follow its progress below." : "Your production plan is saved. Your video has not been created yet."}</p>}
       {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete. Your video is not ready yet.</p>}
       {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
-      {paid && entry.kind === "plan" && productionAvailable === false && !attemptAllowed && entry.production.status === "prepared" && <p className="feedback info">Film creation is currently unavailable. Your payment and saved version are safe. You do not need to pay again. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with this paid film</a>.</p>}
+      {paid && entry.kind === "plan" && <p className="field-note">Your payment covers this saved version. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
     </>}
-    {entry.kind === "plan" && !attemptAllowed && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} status={entry.production.status}
-      completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} />}
-    {entry.kind === "plan" && !attemptAllowed && <p className="field-note">Estimated time remaining: {generationTimeEstimate(libraryCanWatch(entry), productionAvailable)}</p>}
+    {entry.kind === "plan" && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} status={entry.production.status}
+      completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention} />}
   </div>;
 }
 function downloadPlan(detail: LibraryDetail) {
@@ -245,7 +236,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         return <article className="library-item film-library-item" key={key} aria-labelledby={`film-${entry.kind}-${entry.id}`}>
           <div className="library-art"><FilmIcon size={27} strokeWidth={1.2} aria-hidden="true" /></div>
           <div className="film-library-content"><h3 id={`film-${entry.kind}-${entry.id}`}>{entry.title || "Untitled family film"}</h3>
-            <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · {entry.origin === "magiclight-delivery" ? "Delivered from MagicLight" : "Saved"} {new Date(entry.createdAt).toLocaleString()}</p>
+            <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · {entry.origin === "studio-delivery" ? "Delivered to your library" : "Saved"} {new Date(entry.createdAt).toLocaleString()}</p>
             <LibraryFilmStatus entry={entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
             <div className="action-group film-library-actions">
               <button type="button" className="button secondary small" disabled={blocked} onClick={() => void openDetail(entry)}>View film status</button>
@@ -270,7 +261,6 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
         <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={closeDetail}><X size={18} /></button></div>
       <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
-      <LibraryGenerationStatus entry={detail.entry} allowed={generationAttemptAllowed === true} onApproved={() => void openDetail(detail.entry)} />
       <div className="action-group film-library-actions">
         {libraryCanWatch(detail.entry) && <>
           <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>

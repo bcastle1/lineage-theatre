@@ -51,7 +51,8 @@ test("queued delivery reaches only the assigned customer library, with honest pr
   const saved = f.records.get(metadataPath(customer.email, job.id)).value;
   assert.equal(saved.consent, undefined); assert.equal(saved.delivery.assignedBy, owner.email); assert.equal(saved.video.origin, "magiclight-delivery");
   const detail = await f.library.detail(customer, { kind: "upload", id: job.id });
-  assert.equal(detail.entry.origin, "magiclight-delivery"); assert.equal(detail.entry.production.mediaReady, true);
+  assert.equal(detail.entry.origin, "studio-delivery"); assert.equal(detail.entry.production.mediaReady, true);
+  assert.doesNotMatch(JSON.stringify(detail), /magiclight|videocos|sourceUrl/);
   assert.equal(detail.entry.mediaUrl, `/api/archive?action=media&id=${job.id}`);
   await assert.rejects(f.library.detail(second, { kind: "upload", id: job.id }), { status: 404 });
   assert.equal((await f.service.enqueue(owner, input)).id, job.id);
