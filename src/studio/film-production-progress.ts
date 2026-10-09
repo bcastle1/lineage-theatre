@@ -1,5 +1,5 @@
 export type FilmProductionProgressInput = {
-  paid: boolean; ready: boolean; status?: string | null; completedShots?: number; shotCount?: number;
+  paid: boolean; ready: boolean; available?: boolean; status?: string | null; completedShots?: number; shotCount?: number;
   reportedPercent?: number | null; progress?: unknown; needsAttention?: boolean; now?: number;
 };
 type Stage = "waiting" | "queued" | "creating" | "finishing" | "ready" | "attention";
@@ -48,6 +48,11 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
   if (input.needsAttention) stageKey = "attention";
   if (stageKey === "ready" && !input.ready) stageKey = "finishing";
   if (input.paid && input.ready) stageKey = "ready";
+  if (input.paid && stageKey === "waiting" && input.available === false) return {
+    percent: 0, label: "Production progress", stageKey, stage: "Production has not started",
+    explanation: "Film production is currently unavailable. Your payment and saved film are safe; you do not need to pay again.",
+    timing: "paused", remaining: "Delivery estimate unavailable", estimate: null, updatedAt: snapshot?.observedAt ?? null,
+  };
   let percent: number | null = snapshot?.percent ?? (stageKey === "creating" ? 10 : stageKey === "finishing" ? 90 : stageKey === "queued" ? 5 : 0);
   if (!snapshot && stageKey === "creating" && count(input.completedShots) && count(input.shotCount) && input.shotCount > 0 && input.completedShots <= input.shotCount)
     percent = 10 + Math.floor(input.completedShots / input.shotCount * 75);

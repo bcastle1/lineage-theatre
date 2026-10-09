@@ -6,7 +6,7 @@ import { canStartFilmProduction, normalizeCheckoutConfiguration, normalizeFilmOr
 import { checkFilmPayment, commitFilmPayment, retryFilmPayment } from "./checkout-payment";
 import { createFilmReceiptData, createFilmReceiptHtml } from "./payment-receipt";
 import { captchaToken } from "../lib/captcha";
-import { reservePaymentWindow } from "./payment-window";
+import { reservePaymentWindow, rememberPaymentWindow, paymentReturnLink } from "./payment-window";
 import CaptchaNotice from "../CaptchaNotice";
 import { loadPaidFilmPlan, paidFilmStartRequest, paidOrderMatches, paidPlanMatches, type PaidFilmPlan } from "./paid-film-plan";
 import { startPaymentStatusSync } from "./payment-status-sync";
@@ -237,9 +237,8 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   function presentPaymentPage(result: FilmOrder, paymentWindow: ReturnType<typeof reservePaymentWindow>) {
     setOrder(result);
     if (result.status === "awaiting-payment" && result.invoiceUrl && !result.requiresReview) {
-      setMessage(paymentWindow.open(result.invoiceUrl)
-        ? "Your secure payment page opened in another tab. Complete payment there, then return here to check its status."
-        : "Your secure payment page is ready. Select Open secure payment page below to enter your payment details.");
+      if (paymentWindow.open(result.invoiceUrl)) rememberPaymentWindow(result.id, paymentWindow);
+      window.location.hash = paymentReturnLink(result.id);
     } else setMessage(paymentStatusMessage(result));
   }
   async function submitPayment() {
@@ -356,7 +355,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         <li data-complete={progress.ready}><span>2. Film creation</span><h4>{progress.production}</h4></li>
         <li data-complete={progress.ready}><span>3. Watch & download</span><h4>{progress.watch}</h4></li>
       </ol>
-      <FilmProductionProgress paid={progress.paid} ready={progress.ready} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} />
+      <FilmProductionProgress paid={progress.paid} ready={progress.ready} available={productionAvailable} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} />
       {order && <p>{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
       {order?.status !== "captured" && <p>{order ? paymentStatusMessage(order) : "A payment request has been recorded. Check its result before taking any further action."}</p>}
       {order?.status === "awaiting-payment" && <p className="field-note">We check your payment automatically when you return from QuickBooks. You can also check its status below.</p>}
@@ -407,7 +406,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         <p className="field-note">Order reference: <span className="film-order-reference">{paymentReference.orderId}</span></p>
         <div className="action-group">
           {order?.retryAllowed === true && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void retryPaymentPage()}><RefreshCw size={15} />Retry preparing this payment page</button>}
-          {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <a className="button primary small" href={order.invoiceUrl} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} />Open secure payment page</a>}
+          {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <button className="button primary small" onClick={() => { const handle = reservePaymentWindow(); presentPaymentPage(order, handle); handle.close(); }}><ExternalLink size={15} />Open secure payment page</button>}
           <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { const latest = await readOrder(paymentReference); setMessage(`Status checked. ${paymentStatusMessage(latest)}`); })}><RefreshCw size={15} />Check payment status</button>
           {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt()}><Download size={15} />Download receipt</button>}
           {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt("json")}>Receipt data (JSON)</button>}

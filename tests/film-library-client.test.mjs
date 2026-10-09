@@ -167,14 +167,14 @@ test("paid saved plan status confirms payment without claiming a completed video
   const { LibraryFilmStatus } = await libraryComponents();
   const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()), productionAvailable: false }));
   assert.match(html, /Paid · \$3\.30/);
-  assert.match(html, /Preparing production/);
+  assert.match(html, /Production has not started/);
   assert.match(html, /Payment is confirmed/);
   assert.match(html, /Your paid version is saved/);
   assert.match(html, /Get help with your film/);
-  assert.match(html, /Calculating your delivery estimate/);
-  assert.match(html, /Estimated progress/);
+  assert.match(html, /Delivery estimate unavailable/);
+  assert.match(html, /Production progress/);
   assert.match(html, /<span>0%<\/span>/);
-  assert.match(html, /confirmed production stages/);
+  assert.match(html, /production is currently unavailable/);
   assert.doesNotMatch(html, /Production complete|video is complete|>Watch film<|>Download film<|MagicLight|QuickBooks/i);
   const unknown = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()) }));
   assert.doesNotMatch(unknown, /Film creation is currently unavailable/);
