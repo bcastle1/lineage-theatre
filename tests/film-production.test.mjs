@@ -375,19 +375,32 @@ test("untrusted separate audio cannot move a completed provider result into asse
 });
 
 test("completed clips remain processing until actual private assembled media passes playback and duration verification", async () => {
-  const data = store(); let verified = false;
-  const service = createFilmProductionService({ ...data, now: () => at, authorize: grant, adapter: adapter(),
+  const data = store(); let verified = false, clock = at;
+  const service = createFilmProductionService({ ...data, now: () => clock, authorize: grant, adapter: adapter(),
     verifyAssembledMedia: async ({ email, id, manifestHash }) => ({ playable: verified, manifestHash, pathname: productionJobPath(email, id).replace("jobs", "media").replace(".json", "/final.mp4"), sha256: "a".repeat(64), contentType: "video/mp4", sizeBytes: 2000, durationSeconds: 15, width: 1920, height: 1080, frameRate: 24 }),
   });
   const job = await prepare(service);
-  for (let i = 0; i < 6; i++) await service.advance({ email, id: job.id });
+  for (let i = 0; i < 6; i++) { clock += 10_000; await service.advance({ email, id: job.id }); }
   assert.equal((await service.status({ email, id: job.id })).status, "processing");
   assert.equal((await service.getPrepared({ email, id: job.id })).status, "awaiting-assembly");
   await assert.rejects(service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash }), e => e.code === "OUTPUT_UNVERIFIED");
+  const waiting = await service.getPrepared({ email, id: job.id });
+  assert.equal(waiting.productionStartedAt, new Date(at + 10_000).toISOString());
+  assert.equal(waiting.finishingStartedAt, new Date(at + 60_000).toISOString());
+  assert.equal(waiting.lastCheckedAt, waiting.finishingStartedAt);
+  assert.deepEqual(waiting.timingBaseline.samples, []);
+  assert.equal(data.records.has(`production/timing/${waiting.timingProfile}.json`), false);
+  clock += 10_000;
   verified = true;
   const result = await service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash });
   assert.equal(result.status, "completed"); assert.equal(result.mediaReady, true);
   assert.equal((await service.getPrepared({ email, id: job.id })).media.height, 1080);
+  const timing = data.records.get(`production/timing/${waiting.timingProfile}.json`).value;
+  assert.equal(timing.samples.length, 1);
+  assert.equal(timing.samples[0].totalSeconds, 60);
+  assert.equal(timing.samples[0].renderSeconds, 50);
+  await service.acceptAssembly({ email, id: job.id, manifestHash: job.manifestHash });
+  assert.equal(data.records.get(`production/timing/${waiting.timingProfile}.json`).value.samples.length, 1);
   assert.doesNotMatch(JSON.stringify(result), /private-test-token|media\.example|pathname|provider/);
 });
 

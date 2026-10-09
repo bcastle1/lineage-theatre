@@ -33,6 +33,7 @@ import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
 import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
 import MagicLightLiveTest from "./MagicLightLiveTest";
+import FilmGenerationOperations from "./FilmGenerationOperations";
 import FilmDelivery from "./FilmDelivery";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
@@ -1426,6 +1427,7 @@ export default function Admin({
             {isOwner && <ProductionPreparation operator />}
             {isOwner && <MagicLightConnectionCheck disabled={busy || loading} />}
             {isOwner && <MagicLightLiveTest disabled={busy || loading} />}
+            {isOwner && <FilmGenerationOperations disabled={busy || loading} />}
             <div className="admin-overview-grid">
               <section className="admin-card">
                 <div className="admin-section-heading">

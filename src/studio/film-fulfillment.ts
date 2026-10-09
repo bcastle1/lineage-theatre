@@ -2,7 +2,7 @@ import type { FilmOrder } from "./checkout-contract";
 import type { FilmPaymentReference } from "./model";
 import type { LibraryEntry } from "./film-library";
 
-export type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean };
+export type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean; progress?: unknown };
 
 // A job's completed flag alone is not delivery. The library verifies stored
 // media and payment access before returning these exact private playback URLs.

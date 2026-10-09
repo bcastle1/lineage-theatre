@@ -4,6 +4,7 @@ import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { accessStatusForUser } from "./access.mjs";
 import { filmProduction, productionJobPath, FilmProductionError } from "./film-production.mjs";
 import { payments } from "./payments.mjs";
+import { createProductionProgress } from "./production-progress.mjs";
 
 const prefix = "production/queue/";
 const conflict = error => /precondition|already exists|etag|if.?match/i.test(`${error?.name} ${error?.message}`);
@@ -25,6 +26,7 @@ function approved(actor, email = actor?.email) {
 export function createProductionQueue({ read = readRecord, write = writeRecord, listBlobs = list,
   film = filmProduction, paymentService = payments, now = Date.now, uuid = randomUUID,
   setIntervalImpl = setInterval, clearIntervalImpl = clearInterval } = {}) {
+  const progress = createProductionProgress({ read, write, now });
   async function currentAccount(email) {
     return approved((await read(userPath(email)))?.value, email);
   }
@@ -70,9 +72,14 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
   async function status({ email, id }) {
     const job = await film.status({ email, id });
     const ticket = await read(productionQueuePath(email, id));
-    if (!ticket) return job;
-    return { ...job, ...(job.status === "prepared" && ticket.value.state === "pending" ? { status: "queued", preparationOnly: false } : {}),
-      ...(ticket.value.state === "attention" ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
+    const validTicket = ticket?.value.email === email && ticket.value.id === id && ticket.value.manifestHash === job.manifestHash ? ticket.value : null;
+    const saved = await film.getPrepared({ email, id });
+    const snapshot = await progress.snapshot({ job: saved, email, queue: validTicket });
+    return { ...job, progress: snapshot,
+      ...(job.status === "prepared" && ["creating", "finishing"].includes(snapshot.stage) ? { status: "processing", preparationOnly: false } : {}),
+      ...(snapshot.stage === "attention" ? { needsAttention: true } : {}),
+      ...(job.status === "prepared" && validTicket?.state === "pending" ? { status: "queued", preparationOnly: false } : {}),
+      ...(validTicket?.state === "attention" ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
   }
   async function claim(path) {
     const old = await read(path), value = old?.value;

@@ -1,78 +1,65 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
-import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
-
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import ts from 'typescript';
 const require = createRequire(import.meta.url);
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const helperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-production-progress.ts", import.meta.url), "utf8")));
-const { filmProductionProgress } = await import(helperUrl);
-const source = compile(await readFile(new URL("../src/studio/FilmProductionProgress.tsx", import.meta.url), "utf8"))
-  .replace(/import "\.\/film-production-progress\.css";\s*/g, "")
+const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+const helperUrl = moduleUrl(compile(await readFile(new URL('../src/studio/film-production-progress.ts', import.meta.url), 'utf8')));
+const { filmProductionProgress, normalizeFilmProgress } = await import(helperUrl);
+const source = compile(await readFile(new URL('../src/studio/FilmProductionProgress.tsx', import.meta.url), 'utf8'))
+  .replace(/import "\.\/film-production-progress\.css";\s*/g, '')
   .replaceAll('from "./film-production-progress"', `from "${helperUrl}"`)
-  .replaceAll('from "react/jsx-runtime"', `from "${pathToFileURL(require.resolve("react/jsx-runtime")).href}"`);
+  .replaceAll('from "react"', `from "${pathToFileURL(require.resolve('react')).href}"`)
+  .replaceAll('from "react/jsx-runtime"', `from "${pathToFileURL(require.resolve('react/jsx-runtime')).href}"`);
 const { default: FilmProductionProgress } = await import(moduleUrl(source));
-const input = { paid: true, ready: false };
+const NOW = Date.parse('2026-10-08T12:00:00Z'), input = { paid: true, ready: false, now: NOW };
+const time = seconds => new Date(NOW + seconds * 1000).toISOString();
+const progress = () => ({ version: 1, stage: 'creating', percent: 42, basis: 'measured-estimate', timing: 'available',
+  asOf: time(0), observedAt: time(-15), completedScenes: 2, totalScenes: 5,
+  estimate: { earliestAt: time(600), latestAt: time(900), sampleCount: 8 } });
 
-test("production percentages are stable estimates of confirmed workflow stages", () => {
-  for (const [status, percent] of [["prepared", 0], ["not-started", 0], ["queued", 10], ["submitting", 10], ["submitted", 10], ["processing", 20], ["verifying", 85], ["completed", 85]]) {
-    const result = filmProductionProgress({ ...input, status });
-    assert.equal(result.percent, percent);
-    assert.equal(result.label, "Estimated progress");
-    assert.match(result.explanation, /frame-by-frame production percentage is not available/);
-    assert.deepEqual(filmProductionProgress({ ...input, status, elapsedSeconds: 86400 }), result, "Elapsed time cannot invent production progress.");
-  }
+test('measured delivery range and ongoing percentage render together without exposing the supplier', () => {
+  const html = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, progress: progress() }));
+  assert.match(html, /42%/); assert.match(html, /About 10–15 minutes remaining/); assert.match(html, /Delivery window:/);
+  assert.match(html, /aria-current="step"/); assert.match(html, /Last production update/);
+  assert.doesNotMatch(html, /MagicLight|provider|credits|API|task.id/i);
 });
-
-test("verified shot counts advance an estimate without claiming full delivery", () => {
-  const partial = filmProductionProgress({ ...input, status: "processing", completedShots: 5, shotCount: 10 });
-  assert.equal(partial.percent, 50);
-  assert.match(partial.stage, /5 of 10 shots complete/);
-  assert.equal(filmProductionProgress({ ...input, status: "processing", completedShots: 10, shotCount: 10 }).percent, 80);
-  for (const counts of [{ completedShots: 20, shotCount: 10 }, { completedShots: -1, shotCount: 10 },
-    { completedShots: 1.5, shotCount: 10 }, { completedShots: 1, shotCount: 0 }, { completedShots: NaN, shotCount: 10 }]) {
-    assert.equal(filmProductionProgress({ ...input, status: "processing", ...counts }).percent, 20);
-  }
+test('unverified and stale timing never produces a fake countdown', () => {
+  const unknown = filmProductionProgress({ ...input, status: 'processing' });
+  assert.equal(unknown.percent, 10); assert.equal(unknown.estimate, null);
+  assert.equal(filmProductionProgress({ ...input, status: 'processing', now: NOW + 1000000 }).percent, 10);
+  const stale = filmProductionProgress({ ...input, progress: progress(), now: NOW + 601000 });
+  assert.equal(stale.percent, 42); assert.equal(stale.timing, 'stale'); assert.equal(stale.estimate, null);
+  const delayed = filmProductionProgress({ ...input, progress: { ...progress(), asOf: time(900) }, now: NOW + 900000 });
+  assert.equal(delayed.timing, 'delayed'); assert.equal(delayed.estimate, null); assert.doesNotMatch(delayed.remaining, /0 minutes/);
 });
-
-test("actual reported percentages take precedence but only verified playback permits 100 percent", () => {
-  const actual = filmProductionProgress({ ...input, status: "processing", reportedPercent: 63 });
-  assert.equal(actual.percent, 63);
-  assert.equal(actual.label, "Reported progress");
-  assert.equal(filmProductionProgress({ ...input, status: "completed", reportedPercent: 100 }).percent, 99);
-  assert.equal(filmProductionProgress({ ...input, status: "completed", ready: true }).percent, 100);
-  assert.equal(filmProductionProgress({ ...input, status: "completed" }).percent, 85);
-  for (const reportedPercent of [-1, 101, Infinity, NaN, "100"]) {
-    assert.equal(filmProductionProgress({ ...input, status: "processing", reportedPercent }).percent, 20);
-  }
+test('only independently verified playback reaches one hundred percent', () => {
+  const completed = { ...progress(), stage: 'ready', percent: 100, timing: 'complete', estimate: null };
+  assert.equal(filmProductionProgress({ ...input, progress: completed }).percent, 99);
+  assert.equal(filmProductionProgress({ ...input, progress: completed }).stageKey, 'finishing');
+  assert.equal(filmProductionProgress({ ...input, progress: completed, ready: true }).percent, 100);
+  assert.equal(filmProductionProgress({ ...input, status: 'completed' }).percent, 90);
 });
-
-test("failed, uncertain and unknown states remain indeterminate without a completion claim", () => {
-  for (const status of ["failed", "uncertain", "unexpected", undefined, null]) {
-    const result = filmProductionProgress({ ...input, status, reportedPercent: 100 });
-    assert.equal(result.percent, null);
-    assert.doesNotMatch(result.stage, /ready to watch/);
-  }
+test('attention states stay paused even when a stale percentage exists', () => {
+  const html = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, progress: progress(), needsAttention: true }));
+  assert.match(html, /Delivery estimate paused/); assert.match(html, /role="progressbar"/);
+  assert.doesNotMatch(html, /<progress|aria-valuenow|42%|Delivery window:/);
+  assert.match(html, /do not need to pay again/);
+  assert.equal(renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, paid: false })), '');
 });
-
-test("progress UI is accessible, hidden before payment and honest about incomplete output", () => {
-  assert.equal(renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, paid: false, status: "prepared" })), "");
-  const working = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, status: "processing" }));
-  assert.match(working, /Estimated progress/);
-  assert.match(working, /<span>20%<\/span>/);
-  assert.match(working, /<progress[^>]*max="100"[^>]*value="20"/);
-  assert.match(working, /aria-valuetext="20% · Creating your film"/);
-  assert.doesNotMatch(working, /MagicLight|provider|api|frames rendered|time remaining/i);
-  const unknown = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, status: "uncertain" }));
-  assert.match(unknown, /Not available/);
-  assert.match(unknown, /<progress/);
-  assert.doesNotMatch(unknown, /value="[0-9]+"/);
-  const ready = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, status: "completed", ready: true }));
-  assert.match(ready, /<span>100%<\/span>/);
-  assert.match(ready, /Complete — ready to watch/);
+test('invalid timing and percentages fail closed to stage-based progress', () => {
+  for (const patch of [{ percent: 101 }, { percent: -1 }, { percent: NaN }, { stage: 'secret' }, { observedAt: 'bad' },
+    { estimate: { ...progress().estimate, sampleCount: 1 } }, { estimate: { ...progress().estimate, latestAt: 'bad' } },
+    { estimate: null }, { totalScenes: 1 }]) assert.equal(normalizeFilmProgress({ ...progress(), ...patch }), null);
+  const safe = normalizeFilmProgress({ ...progress(), providerKey: 'PRIVATE', taskId: 'PRIVATE' });
+  assert.doesNotMatch(JSON.stringify(safe), /PRIVATE/);
+});
+test('confirmed scene completions advance progress without timing history', () => {
+  assert.equal(filmProductionProgress({ ...input, status: 'processing', completedShots: 5, shotCount: 10 }).percent, 47);
+  assert.equal(filmProductionProgress({ ...input, status: 'processing', completedShots: 10, shotCount: 10 }).percent, 85);
 });

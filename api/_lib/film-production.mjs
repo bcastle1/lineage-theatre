@@ -3,6 +3,7 @@ import { digest, readRecord, writeRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
+import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -169,6 +170,7 @@ export function createFilmProductionService(dependencies = {}) {
   const authorize = dependencies.authorize || (async () => ({ allowed: false }));
   const uuid = dependencies.uuid || randomUUID;
   const stamp = () => new Date(now()).toISOString();
+  const progress = createProductionProgress({ read, write, now });
   async function get(email, id) {
     const record = await read(productionJobPath(email, id));
     if (!record || record.value.ownerHash !== digest(owner(email))) throw new FilmProductionError("This production does not belong to your account.", 404, "PRODUCTION_NOT_FOUND");
@@ -312,7 +314,14 @@ export function createFilmProductionService(dependencies = {}) {
     grant ||= {};
     const token = uuid();
     job.lease = { token, expiresAt: now() + 90_000 };
-    if (previousStatus === "prepared") { shot.status = "submitting"; shot.submittedAt = stamp(); }
+    if (previousStatus === "prepared") {
+      shot.status = "submitting"; shot.submittedAt = stamp();
+      job.productionStartedAt ||= stamp();
+      job.timingProfile ||= productionTimingProfile(job, adapter);
+      // Freeze the comparable timing sample for this run. Later completions
+      // must not move its estimate backwards during a customer's session.
+      job.timingBaseline ||= await progress.calibrate(job);
+    }
     job.status = shot.status === "uncertain" || previousStatus === "submitting" ? "uncertain" : "processing";
     try { await save(productionJobPath(email, id), job, record.etag); }
     catch (error) { if (conflict(error)) return customerJob((await get(email, id)).value); throw error; }
@@ -325,6 +334,7 @@ export function createFilmProductionService(dependencies = {}) {
         && current.requestKey === shot.requestKey && !current.providerJobId) {
         current.status = "prepared";
         delete current.submittedAt;
+        for (const field of ["productionStartedAt", "timingProfile", "timingBaseline"]) if (!record.value[field]) delete restored[field];
         delete restored.lease;
         restored.status = record.value.status;
         if (record.value.authorization) restored.authorization = clone(record.value.authorization);
@@ -360,8 +370,12 @@ export function createFilmProductionService(dependencies = {}) {
       try { current.output = validateProviderOutput(result.output, adapter.outputHosts); }
       catch { current.status = "uncertain"; }
     }
+    job.lastCheckedAt = stamp();
+    if (current.status === "completed") current.completedAt ||= stamp();
+    if (["uncertain", "failed"].includes(current.status)) job.timingDisrupted = true;
     delete job.lease;
     job.status = current.status === "failed" ? "failed" : current.status === "uncertain" ? "uncertain" : job.shots.every(s => s.status === "completed") ? "awaiting-assembly" : "processing";
+    if (job.status === "awaiting-assembly") job.finishingStartedAt ||= stamp();
     try { await save(productionJobPath(email, id), job, record.etag); }
     catch (error) { if (!conflict(error)) throw error; }
     return customerJob((await get(email, id)).value);
@@ -370,7 +384,10 @@ export function createFilmProductionService(dependencies = {}) {
   async function acceptAssembly({ email, id, manifestHash, artifact, stillOwned = async () => true }) {
     if (typeof dependencies.verifyAssembledMedia !== "function") throw unavailable();
     const record = await get(email, id), job = clone(record.value);
-    if (job.status === "completed" && job.manifestHash === manifestHash) return customerJob(job);
+    if (job.status === "completed" && job.manifestHash === manifestHash) {
+      try { await progress.record(job); } catch { /* Timing cannot block delivery. */ }
+      return customerJob(job);
+    }
     if (job.status !== "awaiting-assembly" || job.manifestHash !== manifestHash) throw new FilmProductionError("This film is not ready for assembly.", 409, "ASSEMBLY_NOT_READY");
     const verified = await dependencies.verifyAssembledMedia({ email: owner(email), id, manifestHash, artifact, manifest: clone(job.manifest) });
     // Verification can stream a large private artifact. Recheck the worker's
@@ -386,7 +403,9 @@ export function createFilmProductionService(dependencies = {}) {
     catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     job.status = "completed";
+    job.completedAt = stamp();
     await save(productionJobPath(email, id), job, record.etag);
+    try { await progress.record(job); } catch { /* Timing cannot block delivery. */ }
     return customerJob(job);
   }
   return {

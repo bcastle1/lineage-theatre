@@ -20,6 +20,7 @@ const progressHelperUrl = moduleUrl(compile(await readFile(new URL("../src/studi
 const progressSource = compile(await readFile(new URL("../src/studio/FilmProductionProgress.tsx", import.meta.url), "utf8"))
   .replace(/import "\.\/film-production-progress\.css";\s*/g, "")
   .replaceAll('from "./film-production-progress"', `from "${progressHelperUrl}"`)
+  .replaceAll('from "react"', `from "${pathToFileURL(require.resolve("react")).href}"`)
   .replaceAll('from "react/jsx-runtime"', `from "${pathToFileURL(require.resolve("react/jsx-runtime")).href}"`);
 const progressComponentUrl = moduleUrl(progressSource);
 const helpers = await import(helperUrl);
@@ -166,41 +167,32 @@ test("paid saved plan status confirms payment without claiming a completed video
   const { LibraryFilmStatus } = await libraryComponents();
   const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()), productionAvailable: false }));
   assert.match(html, /Paid · \$3\.30/);
-  assert.match(html, /Not started/);
+  assert.match(html, /Preparing production/);
   assert.match(html, /Payment is confirmed/);
-  assert.match(html, /Your video has not been created yet/);
-  assert.match(html, /Film creation is currently unavailable/);
-  assert.match(html, /You do not need to pay again/);
-  assert.match(html, /Get help with this paid film/);
-  assert.match(html, /Estimated time remaining: Unavailable/);
+  assert.match(html, /Your paid version is saved/);
+  assert.match(html, /Get help with your film/);
+  assert.match(html, /Calculating your delivery estimate/);
   assert.match(html, /Estimated progress/);
   assert.match(html, /<span>0%<\/span>/);
-  assert.match(html, /frame-by-frame production percentage is not available/);
-  assert.doesNotMatch(html, /Ready to watch|video is complete|>Watch film<|>Download film<|MagicLight|QuickBooks/i);
+  assert.match(html, /confirmed production stages/);
+  assert.doesNotMatch(html, /Production complete|video is complete|>Watch film<|>Download film<|MagicLight|QuickBooks/i);
   const unknown = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()) }));
   assert.doesNotMatch(unknown, /Film creation is currently unavailable/);
 });
 
-test("generation status controls require capability and exactly one eligible real payment", async () => {
-  const { LibraryGenerationStatus, LibraryFilmStatus } = await libraryComponents();
+test("customer library keeps operator controls private even for the signed-in owner", async () => {
+  const { LibraryFilmStatus } = await libraryComponents();
   const value = helpers.normalizeLibraryEntry(entry());
-  assert.equal(LibraryGenerationStatus({ entry: value, allowed: false }), null);
-  let approved = false;
-  const onApproved = () => { approved = true; };
-  const element = LibraryGenerationStatus({ entry: value, allowed: true, onApproved });
-  assert.deepEqual(element.props, { preparedId: value.id, manifestHash: value.manifestHash, filmId: value.filmId,
-    orderId: value.payments[0].id, allowed: true, onApproved });
-  element.props.onApproved(); assert.equal(approved, true);
+  assert.equal(helpers.libraryGenerationOrder(value).id, value.payments[0].id);
   for (const patch of [{ sandbox: true }, { requiresReview: true }, { refundedCents: 1 }, { receiptAvailable: false },
     { status: "awaiting-payment" }, { status: "uncertain" }, { status: "refunded" }]) {
-    assert.equal(LibraryGenerationStatus({ entry: { ...value, payments: [{ ...value.payments[0], ...patch }] }, allowed: true }), null);
+    assert.equal(helpers.libraryGenerationOrder({ ...value, payments: [{ ...value.payments[0], ...patch }] }), null);
   }
-  assert.equal(LibraryGenerationStatus({ entry: { ...value, kind: "upload" }, allowed: true }), null);
-  assert.equal(LibraryGenerationStatus({ entry: { ...value, payments: [value.payments[0], { ...value.payments[0], id: "b".repeat(64) }] }, allowed: true }), null);
+  assert.equal(helpers.libraryGenerationOrder({ ...value, kind: "upload" }), null);
+  assert.equal(helpers.libraryGenerationOrder({ ...value, payments: [value.payments[0], { ...value.payments[0], id: "b".repeat(64) }] }), null);
   const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: value, productionAvailable: false, generationAttemptAllowed: true }));
-  assert.match(html, /See generation status/);
-  assert.match(html, /Open this film&#x27;s status to follow its generation and video review/);
-  assert.doesNotMatch(html, /Film creation is currently unavailable|Estimated time remaining|Not started|Ready to watch/);
+  assert.match(html, /Estimated delivery/);
+  assert.doesNotMatch(html, /MagicLight|provider|credits|replacement|Start film generation/i);
 });
 
 test("only verified playable delivery receives a ready-to-watch status", async () => {
