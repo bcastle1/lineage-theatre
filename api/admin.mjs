@@ -13,6 +13,7 @@ import { checkMagicLightConnection } from "./_lib/magiclight-diagnostics.mjs";
 import { checkHostedReversals } from "./_lib/hosted-reversal-diagnostics.mjs";
 import { createMagicLightLiveTestService, MagicLightLiveTestError } from "./_lib/magiclight-live-test.mjs";
 import { createMagicLightTestMediaService } from "./_lib/magiclight-live-test-media.mjs";
+import { createMagicLightActivationStatus } from "./_lib/magiclight-activation-status.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -36,6 +37,7 @@ export function createAdminHandler(overrides={}) {
  const receipts=overrides.receiptDelivery||createReceiptDeliveryService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const liveTest=overrides.magiclightLiveTest||createMagicLightLiveTestService({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  const testMedia=overrides.magiclightTestMedia||createMagicLightTestMediaService({liveTest,read:dependencies.readRecord,write:dependencies.writeRecord});
+ const activationTest=overrides.magiclightActivationStatus||createMagicLightActivationStatus({read:dependencies.readRecord,write:dependencies.writeRecord,...(overrides.now?{now:overrides.now}:{})});
  return async function handler(req,res) {
   const {getSession,readRecord,writeRecord,limitAction,audit,recordPage,readPricingSettings,connections,filmProduction,payments,readRegistrationPolicy,checkMagicLightConnection,checkHostedReversals}=dependencies;
   try {
@@ -75,6 +77,11 @@ export function createAdminHandler(overrides={}) {
       return testMedia.stream({actor,req,res,download:url.searchParams.get("download")==="1"});
     }
     if (req.method==="GET") {
+      if(action==="magicLightActivationStatus") {
+        if(!isOwner(actor)) return resultError(res,403,"Only the owner can view the activation test.");
+        if([...url.searchParams.keys()].some(key=>key!=="action")) return resultError(res,400,"The activation check uses only its saved task.");
+        return json(res,200,await activationTest.status(actor));
+      }
       if(action==="magicLightLiveTest") {
         if(!isOwner(actor)) return resultError(res,403,"Only the owner can view the live generation test.");
         return json(res,200,await testMedia.state(actor));
@@ -136,6 +143,14 @@ export function createAdminHandler(overrides={}) {
     }
     if(req.method!=="POST") return resultError(res,405,"Method not allowed.");
     if(!(await limitAction(`admin-write:${actor.email}`,60,3600_000))) return resultError(res,429,"Please wait before making more administrator changes.");
+    if(action==="checkMagicLightActivationStatus") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can check the activation test.");
+      if(Object.keys(body).some(key=>key!=="action")||[...url.searchParams.keys()].some(key=>key!=="action")) return resultError(res,400,"The activation check uses only its saved task.");
+      if(!(await limitAction(`magiclight-activation-check:${actor.email}`,6,60_000))) return resultError(res,429,"Please wait before checking the saved task again.");
+      const result=await activationTest.check(actor);
+      await audit(actor.email,"production.activation_test.checked","magiclight",{status:result.test?.status||"not-submitted"});
+      return json(res,200,result);
+    }
     if(action==="importMagicLightLiveTestMedia") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can import the live test clip.");
       if(Object.keys(body).some(key=>key!=="action")) return resultError(res,400,"Import uses only the saved test clip.");
