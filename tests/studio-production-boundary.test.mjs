@@ -6,7 +6,7 @@ import { createFilmProductionService, FilmProductionError } from "../api/_lib/fi
 import { productionReadiness } from "../api/_lib/production.mjs";
 
 const user = { email: "customer@example.invalid", role: "customer", status: "active" };
-const fixtureAdapter = () => ({ id: "magiclight", environment: "production", available: true,
+const fixtureAdapter = () => ({ id: "fal", environment: "production", available: true,
   evidence: { apiVerified: true, qualityVerified: true, commercialTermsVerified: true, reconciliationVerified: true },
   ...Object.fromEntries(["quote", "submitShot", "reconcileShot", "pollShot", "validateManifest"].map(name => [name, async () => { throw new Error("Readiness must not make provider requests."); }])) });
 async function request(handler, action, body) {

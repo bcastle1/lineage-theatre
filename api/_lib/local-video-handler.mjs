@@ -13,7 +13,7 @@ function workerAuthorized(req, key) {
     && timingSafeEqual(Buffer.from(given), Buffer.from(`Bearer ${key}`));
 }
 export function createLocalVideoHandler({ service = localVideo, sessionFor = getSession, limiter = limitAction, getBlob = get,
-  workerKey = () => process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY, ratePrefix = "local-video", dailyLimit = 12 } = {}) {
+  workerKey = () => process.env.LINEAGE_LOCAL_VIDEO_WORKER_KEY, ratePrefix = "local-video", dailyLimit = 12, creationEnabled = true } = {}) {
   async function stream(req, res, media, download) {
     const range = parseRange(req.headers.range, media.sizeBytes);
     const result = await getBlob(media.pathname, { access: "private", useCache: false,
@@ -37,6 +37,8 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
     res.setHeader("X-Content-Type-Options", "nosniff");
     try {
       const url = new URL(req.url, `https://${req.headers.host}`), action = url.searchParams.get("action");
+      if (!creationEnabled && (url.searchParams.get("worker") === "1" || req.method === "POST" && action !== "review"))
+        return json(res, 410, { message: "This creation method has retired. Prepare your film and complete checkout for automatic realistic production." });
       if (url.searchParams.get("worker") === "1") {
         if (!workerAuthorized(req, workerKey())) return json(res, 401, { message: "Worker authentication required." });
         if (req.method === "GET" && action === "source")
@@ -64,7 +66,7 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
         return json(res, 202, await service.start(session.user, await readBody(req, 200_000)));
       }
       if (!["GET", "HEAD"].includes(req.method)) return json(res, 405, { message: "Method not allowed." });
-      if (action === "capabilities" && req.method === "GET") return json(res, 200, await service.capabilities());
+      if (action === "capabilities" && req.method === "GET") return json(res, 200, creationEnabled ? await service.capabilities() : { available: false, retired: true });
       if (action === "history" && req.method === "GET") return json(res, 200, await service.history(session.user));
       if (action === "status" && req.method === "GET") return json(res, 200, await service.status(session.user, url.searchParams.get("id")));
       if (action === "video") return await stream(req, res, await service.video(session.user, url.searchParams.get("id")), url.searchParams.get("download") === "1");
@@ -77,5 +79,5 @@ export function createLocalVideoHandler({ service = localVideo, sessionFor = get
     }
   };
 }
-export const localVideoHandler = createLocalVideoHandler();
-export const aiVideoHandler = createLocalVideoHandler({ service: aiVideo, workerKey: () => process.env.LINEAGE_AI_VIDEO_WORKER_KEY, ratePrefix: "ai-video", dailyLimit: 6 });
+export const localVideoHandler = createLocalVideoHandler({ creationEnabled: false });
+export const aiVideoHandler = createLocalVideoHandler({ service: aiVideo, creationEnabled: false, workerKey: () => process.env.LINEAGE_AI_VIDEO_WORKER_KEY, ratePrefix: "ai-video", dailyLimit: 6 });

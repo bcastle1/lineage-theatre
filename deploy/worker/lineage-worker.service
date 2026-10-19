@@ -11,7 +11,9 @@ Type=oneshot
 EnvironmentFile=/etc/lineage-worker/host.conf
 ExecStartPre=/usr/bin/test -s /etc/lineage-worker/runtime.env
 ExecStart=/usr/bin/docker run --rm --init --name lineage-production-worker --label app=lineage-production-worker --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 3g --memory-swap 3g --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 --env-file /etc/lineage-worker/runtime.env ${LINEAGE_WORKER_IMAGE} --once
-ExecStop=/usr/bin/docker stop --time 120 lineage-production-worker
+# A successful oneshot has already removed its container; stopping an absent
+# container must not convert that completed pass into a failed service.
+ExecStop=-/usr/bin/docker stop --timeout 120 lineage-production-worker
 TimeoutStartSec=2h
 TimeoutStopSec=150s
 StandardOutput=journal

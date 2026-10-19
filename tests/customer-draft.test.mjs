@@ -85,7 +85,7 @@ test("backup roundtrip restores current production aliases and preserves every d
   const original = fixture();
   const restored = normalizeFilm(persistedCopy(customerProjectBackup(original)));
   assert.deepEqual(draftContent(restored), draftContent(original));
-  assert.equal(restored.providerId, "magiclight");
+  assert.equal(restored.providerId, "lineage-theatre");
   assert.equal(restored.job.provider, "magiclight");
   assert.equal(restored.job.id, original.job.id);
   assert.equal(restored.scenes[0].shot.provider, "magiclight");

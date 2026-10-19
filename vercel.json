@@ -49,8 +49,8 @@
       "maxDuration": 180
     }
   },
-  "crons": [{ "path": "/api/payment-reconcile", "schedule": "*/5 * * * *" },
-    { "path": "/api/film-generation", "schedule": "*/5 * * * *" },
-    { "path": "/api/film-delivery", "schedule": "*/5 * * * *" },
+  "crons": [{ "path": "/api/payment-reconcile", "schedule": "* * * * *" },
+    { "path": "/api/film-generation", "schedule": "* * * * *" },
+    { "path": "/api/film-delivery", "schedule": "* * * * *" },
     { "path": "/api/patrick-quickbooks", "schedule": "17 8 * * *" }]
 }
