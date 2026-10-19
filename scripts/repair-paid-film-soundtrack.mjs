@@ -3,6 +3,7 @@
 // This entry point has no generation, quote, payment, or provider-submit calls.
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { get, put } from '@vercel/blob';
 import { mkdir, readFile, writeFile, lstat, realpath, copyFile } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
@@ -17,7 +18,7 @@ import { falProductionAdapter, FAL_RECIPE_VERSION } from '../api/_lib/fal-produc
 import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } from './production-worker.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
-import { assembleFilm } from './assemble-film.mjs';
+import { assembleFilm, verifyFilmMedia, filmCaptions } from './assemble-film.mjs';
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -425,11 +426,25 @@ export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha2
       return reviewed;
     };
     const assemble = async input => {
-      const report = await assembleFilm(input);
-      // Publication must use exactly the video inspected in the private
-      // preview. Any encoding difference stops before the private upload.
-      if (report.sha256 !== reviewedPreviewSha256) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
-      return report;
+      if (!await owns() || input.manifestHash !== snapshot.manifestHash
+        || hash(input.manifest) !== snapshot.manifestHash || input.technicalSample !== false)
+        throw fail('REPAIR_JOB_CHANGED');
+      const inspected = await localFile(join(buildRoot, 'preview.mp4'), buildRoot);
+      if (inspected.sha256 !== reviewedPreviewSha256 || inspected.sizeBytes !== build.preview.sizeBytes
+        || build.preview.manifestHash !== snapshot.manifestHash || build.preview.technicalSample !== false
+        || build.preview.playable !== true || build.preview.hasAudio !== true) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
+      // Deliver the exact inspected bytes after fresh decoding. A second
+      // encode is unnecessary and cannot establish preview-byte identity.
+      await copyFile(inspected.path, input.outputPath, fsConstants.COPYFILE_EXCL);
+      const report = await verifyFilmMedia({ manifest: input.manifest, manifestHash: input.manifestHash,
+        path: input.outputPath, ffmpeg: input.ffmpeg });
+      if (report.sha256 !== reviewedPreviewSha256 || report.sizeBytes !== build.preview.sizeBytes
+        || report.contentType !== build.preview.contentType || report.width !== build.preview.width
+        || report.height !== build.preview.height || report.frameRate !== build.preview.frameRate
+        || report.durationSeconds !== build.preview.durationSeconds) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
+      if (!await owns()) throw fail('REPAIR_LEASE_LOST');
+      await writeFile(`${input.outputPath}.vtt`, filmCaptions(input.manifest), { flag: 'wx', mode: 0o600 });
+      return { ...report, outputPath: resolve(input.outputPath) };
     };
     const assembly = createWorkerAssembly({ ...dependencies, adapter: falProductionAdapter, ffmpeg, prepareClips, reviewSpeech, assemble });
     artifact = await assembly({ email: current.email, id: snapshot.preparedId, job: current.job.value, stillOwned: owns });
