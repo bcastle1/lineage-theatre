@@ -16,7 +16,7 @@ import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { falProductionAdapter, FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } from './production-worker.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
-import { rebuildFilmSoundtrack } from './rebuild-film-soundtrack.mjs';
+import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
 import { assembleFilm } from './assemble-film.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -479,8 +479,9 @@ async function main() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
   const failure = finishingFailure(error), recovery = error?.repairRecovery;
   const reason = error?.code === 'SOUNDTRACK_REBUILD_REQUIRED' && /^[A-Z_]{1,80}$/.test(error?.reason || '') ? error.reason : null;
-  process.stderr.write(`${JSON.stringify({ state: 'not-confirmed', code: /^REPAIR_[A-Z_]+$/.test(error?.code || '') ? error.code : 'REPAIR_FAILED',
-    ...(failure ? { failure } : {}), ...(reason ? { reason } : {}),
+  const diagnostic = soundtrackFailureDiagnostic(error?.diagnostic);
+  process.stdout.write(`${JSON.stringify({ state: 'not-confirmed', code: /^REPAIR_[A-Z_]+$/.test(error?.code || '') ? error.code : 'REPAIR_FAILED',
+    ...(failure ? { failure } : {}), ...(reason ? { reason } : {}), ...(diagnostic ? { diagnostic } : {}),
     ...(typeof recovery?.constructedPath === 'string' && HASH.test(recovery.constructedSha256 || '') ? { recovery } : {}) })}\n`);
   process.exitCode = 1;
 });
