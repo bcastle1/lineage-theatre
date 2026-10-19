@@ -5,6 +5,7 @@ import {readPricingSettings} from "./admin.mjs";
 import {createQuickBooksAccountingTransport} from "./quickbooks.mjs";
 import {PaymentError} from "./payments.mjs";
 import {productionJobPath} from "./film-production.mjs";
+import {readProductionAllowance} from "./production-allowance.mjs";
 import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
 import {normalizeHostedInvoiceUrl as safeLink} from "../../src/studio/hosted-invoice-url.mjs";
 
@@ -423,6 +424,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       &&Array.isArray(order.paymentIds)&&order.paymentIds.length===order.accountingPayments.length
       &&order.paymentIds.every((id,index)=>id===order.accountingPayments[index].id));
     if(typeof record?.etag!=="string"||typeof paidQuote?.etag!=="string"||!captured(value))throw productionUnavailable();
+    const allowance=await readProductionAllowance({order:value,read,now});
     let planPath;
     try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable();}
     const plan=await read(planPath),job=plan?.value;
@@ -436,6 +438,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       ||!sameCompany(binding,value.merchantBinding)||!sameCompany(binding,s.merchantBinding))throw productionUnavailable();
     let authorizedRecord=record;
     async function recheck() {
+      await allowance.recheck();
       if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw productionUnavailable();
       const order=await read(path),quote=await read(paidQuotePath),prepared=await read(planPath),settings=await readSettings();
       if(order?.etag!==authorizedRecord.etag||!captured(order?.value)||quote?.etag!==paidQuote.etag
@@ -477,8 +480,9 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     let verifiedAt=await verifyPaidInvoice(),fresh=value.fulfillmentQuote;
     const quoteValid=quote=>quote&&quote.preparedId===preparedId&&quote.manifestHash===manifestHash&&quote.environment===binding.environment&&quote.currency==="USD"
       &&quote.apiVerified===true&&quote.qualityVerified===true&&quote.commercialTermsVerified===true
-      &&Number.isSafeInteger(quote.providerCostCents)&&quote.providerCostCents>=0&&quote.providerCostCents<=value.providerCostCents
-      &&Number.isSafeInteger(quote.maximumCostCents)&&quote.maximumCostCents>=quote.providerCostCents&&quote.maximumCostCents<=value.providerCostCents
+      &&Number.isSafeInteger(quote.providerCostCents)&&quote.providerCostCents>=0&&quote.providerCostCents<=allowance.budgetCents
+      &&Number.isSafeInteger(quote.maximumCostCents)&&quote.maximumCostCents>=quote.providerCostCents&&quote.maximumCostCents<=allowance.budgetCents
+      &&(!allowance.quoteReference||quote.quoteReference===allowance.quoteReference)
       &&typeof quote.quoteReference==="string"&&quote.quoteReference.trim()&&quote.quoteReference.length<=200
       &&typeof quote.expiresAt==="string"&&Number.isFinite(Date.parse(quote.expiresAt));
     if(fresh&&!quoteValid(fresh))throw productionUnavailable();
@@ -488,7 +492,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(!fresh||Date.parse(fresh.expiresAt)<=now()) {
       // An expired full-film quote cannot be replaced after even one submission.
       if(started)throw productionUnavailable();
-      fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:value.providerCostCents});
+      fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:allowance.budgetCents});
       if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw productionUnavailable();
       // Payment may have been voided/refunded while the provider quote was read.
       verifiedAt=await verifyPaidInvoice();

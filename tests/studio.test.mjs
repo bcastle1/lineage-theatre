@@ -61,7 +61,8 @@ test("admin connection diagnostics still retain model, provider, merchant, and p
   const result=await connections({key:"synthetic-test-key",fetchImpl:async()=>new Response("",{status:200}),pricingSettings:{markupBasisPoints:1250,revision:2}});
   assert.equal(result.storyModel,"gpt-6-astra");assert.equal(result.story,true);
   assert.match(result.connections.story.reason,/GPT-6 Astra/);
-  assert.match(result.connections.magiclight.reason,/MagicLight/);
+  assert.equal(result.connections.magiclight.provider,"fal");
+  assert.match(result.connections.magiclight.reason,/Film production setup/);
   assert.match(result.connections.billing.reason,/QuickBooks/);
   assert.match(result.connections.billing.reason,/planning estimate plus the saved administrator markup/);
   assert.equal(result.pricing.markupBasisPoints,1250);

@@ -5,9 +5,21 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { assembleFilm, chooseAssemblyProfile } from "../scripts/assemble-film.mjs";
+import { assembleFilm, chooseAssemblyProfile, filmOverlayAss } from "../scripts/assemble-film.mjs";
 
 const profile = (width, height, frameRate = 30, frameRateRatio) => ({ width, height, frameRate, ...(frameRateRatio ? { frameRateRatio } : {}) });
+test('film overlays preserve explicit date captions and a legible final dramatization disclosure', () => {
+  const manifest = { factuality: 'based-on-a-true-story', shots: [
+    { startMs: 0, targetDurationMs: 7371, visual: 'A forest. Caption: “Saratoga • 1777”.' },
+    { startMs: 7371, targetDurationMs: 6853, visual: 'A family table.' },
+  ] };
+  const ass = filmOverlayAss(manifest);
+  assert.match(ass, /0:00:00.00,0:00:07.37,Location.*Saratoga • 1777/);
+  assert.match(ass, /0:00:07.37,0:00:14.22,Disclosure.*Based on a true story\. Some scenes, dialogue and supporting characters are dramatized\./);
+  manifest.shots[0].visual = 'Caption: "{\\pos(1,1)}untrusted"';
+  assert.doesNotMatch(filmOverlayAss(manifest), /\{\\pos/);
+  assert.equal(filmOverlayAss({ shots: [{ visual: 'Uncaptioned fictional scene.' }] }), null);
+});
 test("native assembly profiles retain 1080p and exact fractional frame rates", () => {
   assert.deepEqual(chooseAssemblyProfile([profile(1920, 1080, 30000 / 1001, "30000/1001")]),
     { width: 1920, height: 1080, frameRate: 30000 / 1001, frameRateRatio: "30000/1001" });

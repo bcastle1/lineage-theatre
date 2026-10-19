@@ -8,6 +8,7 @@ import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { productionQueuePath } from "../api/_lib/production-queue.mjs";
 import { createProductionWorker } from "../scripts/production-worker.mjs";
 import { HOSTED_REVERSAL_SCOPE } from "../api/_lib/hosted-reversals.mjs";
+import { createProductionAllowance, productionAllowancePath } from "../api/_lib/production-allowance.mjs";
 
 const NOW = Date.parse("2026-09-23T18:00:00Z"), EMAIL = "customer@example.invalid";
 const BINDING = { environment: "production", grantId: "a".repeat(64), realmId: "1234" };
@@ -139,6 +140,46 @@ test("hosted production never treats a planning price or partner flag as an actu
     const h = await fixture(options); h.env.MAGICLIGHT_PARTNER = "true";
     await denied(h.authorize()); assert.deepEqual(h.records.get(h.orderPath).value, h.initialOrder);
   }
+});
+
+async function merchantAllowance(h) {
+  const owner = { email: OWNER_EMAIL, role: 'owner', status: 'active' };
+  await h.write(userPath(OWNER_EMAIL), owner);
+  return createProductionAllowance({ actor: owner, orderId: h.request.orderId, maximumCostCents: 4000,
+    quoteProvider: input => h.film.quoteForProductionBudget(input), read: h.read, write: h.write, now: h.now });
+}
+const expandedQuote = { validation: { maximumCostCents: 4000 }, productionQuote: { providerCostCents: 3800, quoteReference: 'fixture-merchant-funded-film' } };
+test('owner-funded allowance expands provider expense without changing the captured price, payment or receipt', async () => {
+  const h = await fixture(expandedQuote), original = structuredClone(h.initialOrder);
+  await denied(h.authorize());
+  const allowance = await merchantAllowance(h);
+  assert.equal(allowance.funding, 'merchant'); assert.equal(allowance.customerAmountCents, original.amountCents);
+  assert.deepEqual(h.records.get(h.orderPath).value, original);
+  const grant = await h.authorize(); assert.equal(grant.budgetCents, 4000);
+  const saved = h.records.get(h.orderPath).value;
+  for (const field of ['amountCents', 'providerCostCents', 'markupCents', 'quoteId', 'invoiceId', 'accountingPayments', 'capturedAt', 'refundedCents']) assert.deepEqual(saved[field], original[field]);
+  assert.ok(h.requests.every(r => r.method === 'GET'));
+  h.editPayment({ Voided: true }); await denied(h.authorize());
+});
+test('merchant allowances require exact order, amount, quote and current persisted owner approval', async () => {
+  for (const mutate of [v => { v.orderId = 'f'.repeat(64); }, v => { v.customerAmountCents++; }, v => { v.manifestHash = 'f'.repeat(64); },
+    v => { v.quoteReference = 'different-provider-quote'; }, v => { v.maximumCostCents--; }, v => { v.funding = 'customer'; },
+    v => { v.expiresAt = new Date(NOW).toISOString(); }]) {
+    const h = await fixture(expandedQuote); await merchantAllowance(h);
+    const path = productionAllowancePath(h.request.orderId), current = await h.read(path); mutate(current.value); await h.write(path, current.value, current.etag);
+    await denied(h.authorize()); assert.equal(h.records.get(h.orderPath).value.fulfillmentQuote, undefined);
+  }
+  const h = await fixture(expandedQuote); await merchantAllowance(h);
+  h.setProductionEffect(async () => { const record = await h.read(userPath(OWNER_EMAIL)); record.value.status = 'suspended'; await h.write(userPath(OWNER_EMAIL), record.value, record.etag); });
+  await denied(h.authorize()); assert.equal(h.records.get(h.orderPath).value.fulfillmentQuote, undefined);
+});
+test('a customer or forged owner session cannot create a merchant allowance', async () => {
+  const h = await fixture(expandedQuote);
+  for (const actor of [h.actor, { ...h.actor, role: 'owner' }, { email: OWNER_EMAIL, role: 'owner' }]) {
+    await denied(createProductionAllowance({ actor, orderId: h.request.orderId, maximumCostCents: 4000, read: h.read, write: h.write,
+      quoteProvider: () => assert.fail('Must reject before reading a provider quote'), now: h.now }));
+  }
+  assert.equal(await h.read(productionAllowancePath(h.request.orderId)), null);
 });
 
 test("account approval, active status and exact owner/order/plan identity are required before any provider read", async () => {

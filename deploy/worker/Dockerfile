@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install --yes --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global pnpm@11.7.0
 

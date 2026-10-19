@@ -12,6 +12,7 @@ import { createProductionQueue } from "../api/_lib/production-queue.mjs";
 import { createPaymentsService } from "../api/_lib/payments.mjs";
 import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
+import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -145,7 +146,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
   };
 }
 
-export function createProductionWorker({ adapter = unavailableMagicLightAdapter, paymentService, ...dependencies } = {}) {
+export function createProductionWorker({ adapter = falProductionAdapter, paymentService, ...dependencies } = {}) {
   const read = dependencies.read || dependencies.readRecordImpl;
   const write = dependencies.write || dependencies.writeRecordImpl;
   // Quotes and generation must use this worker's same configured adapter. A

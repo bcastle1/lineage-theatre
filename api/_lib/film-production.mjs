@@ -4,6 +4,7 @@ import { isOwner } from "./access.mjs";
 import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
+import { falProductionAdapter } from "./fal-production.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -112,7 +113,7 @@ export const unavailableMagicLightAdapter = Object.freeze({
   gaps: MAGICLIGHT_GAPS,
 });
 function checkAdapter(adapter) {
-  if (adapter?.id !== "magiclight" || adapter.available !== true || !["production", "sandbox"].includes(adapter.environment)
+  if (!["magiclight", "fal"].includes(adapter?.id) || adapter.available !== true || !["production", "sandbox"].includes(adapter.environment)
     || !["apiVerified", "qualityVerified", "commercialTermsVerified", "reconciliationVerified"].every(k => adapter.evidence?.[k] === true)
     || !["quote", "submitShot", "reconcileShot", "pollShot", "validateManifest"].every(k => typeof adapter[k] === "function")) throw unavailable();
 }
@@ -291,6 +292,8 @@ export function createFilmProductionService(dependencies = {}) {
     email = owner(email);
     let record = await get(email, id);
     let job = clone(record.value);
+    if (job.provider && (job.provider.id !== adapter.id || job.provider.model !== (adapter.model || null)
+      || job.provider.recipe !== (adapter.modelVersion || null))) throw unavailable();
     await requireProductionContext(job, actor, email);
     if (["completed", "failed", "awaiting-assembly"].includes(job.status)) return customerJob(job);
     if (job.lease && job.lease.expiresAt > now()) return customerJob(job);
@@ -308,8 +311,10 @@ export function createFilmProductionService(dependencies = {}) {
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
       if (Date.parse(grant.expiresAt) <= now()) throw authorizationRequired();
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
+      job.provider ||= { id: adapter.id, model: adapter.model || null, recipe: adapter.modelVersion || null };
     }
-    // Polling and reconciliation never spend money and continue after a quote/grant expires.
+    // Status reads continue after a grant expires. A multi-stage provider must
+    // call authorizeSpend before submitting any new paid operation.
     // A recovered old claim can reconcile with its stable request key even if its grant was lost.
     grant ||= {};
     const token = uuid();
@@ -339,12 +344,22 @@ export function createFilmProductionService(dependencies = {}) {
         restored.status = record.value.status;
         if (record.value.authorization) restored.authorization = clone(record.value.authorization);
         else delete restored.authorization;
+        if (!record.value.provider) delete restored.provider;
         try { await save(productionJobPath(email, id), restored, pending.etag); }
         catch (error) { if (!conflict(error)) throw error; }
       }
       throw authorizationRequired();
     }
-    const request = { manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+    const request = { productionId: id, manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+      // A provider pipeline may need reference images before the scene render.
+      // Each new paid operation obtains a current grant; status GETs do not.
+      authorizeSpend: async () => {
+        const current = Date.parse(grant.expiresAt) > now() ? grant
+          : await authorize({ email, id, manifestHash: job.manifestHash, mode: job.mode, authorizationReference });
+        return current?.allowed === true && current.manifestHash === job.manifestHash && current.environment === adapter.environment
+          && current.quoteReference === job.authorization?.quoteReference && current.budgetCents === job.authorization?.budgetCents
+          && Number.isFinite(Date.parse(current.expiresAt)) && Date.parse(current.expiresAt) > now();
+      },
       ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
     // Storage and request preparation can outlast the short-lived grant too.
     if (previousStatus === "prepared" && Date.parse(grant.expiresAt) <= now()) await releaseUnsubmittedClaim();
@@ -416,12 +431,13 @@ export function createFilmProductionService(dependencies = {}) {
     readiness: () => {
       let available = false;
       try { checkAdapter(adapter); available = true; } catch { /* Keep undocumented providers disabled. */ }
-      return { available, preparationAvailable: true, adapter: adapter.id, environment: adapter.environment, gaps: available ? [] : [...MAGICLIGHT_GAPS] };
+      return { available, preparationAvailable: true, adapter: adapter.id, environment: adapter.environment, gaps: available ? [] : [...(adapter.gaps || MAGICLIGHT_GAPS)] };
     },
   };
 }
 
 export const filmProduction = createFilmProductionService({
+  adapter: falProductionAdapter,
   // Lazy import avoids a construction-time cycle with payment quotes. The
   // payment service verifies the saved account, plan, order and merchant grant.
   authorize: async ({ email, id, manifestHash, authorizationReference }) =>

@@ -2,13 +2,13 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, writeFile, stat, mkdir } from "node:fs/promises";
-import { dirname, extname, resolve } from "node:path";
+import { dirname, extname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
 
-async function run(binary, args, onStderrLine) {
+async function run(binary, args, onStderrLine, cwd) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(binary, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], shell: false });
+    const child = spawn(binary, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], shell: false, cwd });
     let stdout = "", stderr = "", pendingLine = "";
     const timer = setTimeout(() => { child.kill(); reject(new Error("The media operation exceeded its time limit.")); }, 15 * 60_000);
     const collect = (value, chunk) => (value + chunk.toString()).slice(-200_000);
@@ -131,6 +131,30 @@ const timecode = ms => {
 export function filmCaptions(manifest) {
   return "WEBVTT\n\n" + manifest.shots.map(shot => `${shot.id}\n${timecode(shot.startMs)} --> ${timecode(shot.startMs + shot.targetDurationMs)}\n${`${shot.narration}\n${shot.dialogue}`.trim().replace(/[\r\n]+/g, " ").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}\n`).join("\n");
 }
+const DISCLOSURE = "Based on a true story. Some scenes, dialogue and supporting characters are dramatized.";
+const assTime = ms => {
+  const cs = Math.round(ms / 10);
+  return `${Math.floor(cs / 360000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
+};
+const assText = text => text.replaceAll('\\', '＼').replaceAll('{', '｛').replaceAll('}', '｝').replace(/[\r\n\u0000-\u001f]/g, ' ');
+export function filmOverlayAss(manifest) {
+  const events = [];
+  for (const shot of manifest.shots) {
+    // Only explicit, quoted on-screen text is extracted from the saved visual
+    // direction. Dates and places are never inferred from surrounding prose.
+    const captions = [...String(shot.visual || '').matchAll(/\b(?:caption|on-screen text|title card)\s*:?\s*["“]([^"”\n]{1,160})["”]/gi)];
+    for (const match of captions) {
+      if (match[1].startsWith('Based on a true story.')) continue;
+      events.push(`Dialogue: 0,${assTime(shot.startMs)},${assTime(shot.startMs + shot.targetDurationMs)},Location,,0,0,0,,${assText(match[1])}`);
+    }
+  }
+  if (manifest.factuality === 'based-on-a-true-story') {
+    const last = manifest.shots.at(-1);
+    events.push(`Dialogue: 1,${assTime(last.startMs)},${assTime(last.startMs + last.targetDurationMs)},Disclosure,,0,0,0,,${DISCLOSURE}`);
+  }
+  if (!events.length) return null;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Location,DejaVu Sans,38,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,7,80,80,70,1\nStyle: Disclosure,DejaVu Sans,34,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,3,12,0,2,180,180,70,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join('\n')}\n`;
+}
 export async function assembleFilm({ manifest, manifestHash, clips, outputPath, ffmpeg = "ffmpeg", technicalSample = false }) {
   if (typeof technicalSample !== "boolean") throw new Error("The technical sample marker must be explicit.");
   if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > 30
@@ -174,9 +198,15 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     filters.push(clip.audioPath ? `[${audioIndex}:a:0]atrim=duration=${clip.seconds},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${index}]` : `anullsrc=r=48000:cl=stereo,atrim=duration=${clip.seconds}[a${index}]`);
     segments.push(`[v${index}][a${index}]`);
   }
-  filters.push(`${segments.join("")}concat=n=${clips.length}:v=1:a=1[video][audio]`);
   await mkdir(dirname(output), { recursive: true });
-  await run(ffmpeg, ["-hide_banner", "-nostdin", "-n", ...inputs, "-filter_complex", filters.join(";"), "-map", "[video]", "-map", "[audio]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", profile.frameRateRatio, "-fps_mode", "cfr", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-metadata", `comment=${technicalSample ? "SAMPLE ONLY - FICTIONAL DATA. Technical assembly demonstration; no generated historical film." : "Lineage Theatre assembled film"}`, output]);
+  const overlays = filmOverlayAss(manifest);
+  filters.push(`${segments.join("")}concat=n=${clips.length}:v=1:a=1[${overlays ? 'joined' : 'video'}][audio]`);
+  if (overlays) {
+    const overlayName = `${manifestHash}.ass`;
+    await writeFile(join(dirname(output), overlayName), overlays, { flag: 'wx' });
+    filters.push(`[joined]subtitles=filename=${overlayName}:original_size=${profile.width}x${profile.height}[video]`);
+  }
+  await run(ffmpeg, ["-hide_banner", "-nostdin", "-n", ...inputs, "-filter_complex", filters.join(";"), "-map", "[video]", "-map", "[audio]", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-r", profile.frameRateRatio, "-fps_mode", "cfr", "-c:a", "aac", "-b:a", "320k", "-movflags", "+faststart", "-metadata", `comment=${technicalSample ? "SAMPLE ONLY - FICTIONAL DATA. Technical assembly demonstration; no generated historical film." : "Lineage Theatre assembled film"}`, output], undefined, dirname(output));
   const info = await mediaInfo(ffmpeg, output);
   if (Math.abs(info.durationSeconds - manifest.targetDurationSeconds) > 1 || Math.abs(info.decodedDurationSeconds - manifest.targetDurationSeconds) > 1) throw new Error("The assembled duration does not match the reviewed film.");
   if (info.width !== profile.width || info.height !== profile.height || Math.abs(info.frameRate - profile.frameRate) > 0.000001 || !info.hasAudio) throw new Error("The assembled video does not match its reviewed output profile.");
