@@ -66,10 +66,16 @@ function relevantReversal(entity,value,context,saleTime) {
   }
   if(entity==="Deposit")for(const line of rows) {
     if(!plain(line)||cents(line.Amount)===null)throw unavailable("DEPOSIT_LINE_INVALID");
-    if(line.DetailType===undefined&&line.DepositLineDetail===undefined&&Array.isArray(line.LinkedTxn)&&line.LinkedTxn.length
-      &&line.LinkedTxn.every(link=>["Payment","SalesReceipt"].includes(link.TxnType)))continue;
-    if(line.DetailType!=="DepositLineDetail"||!plain(line.DepositLineDetail))throw unavailable("DEPOSIT_DETAIL_INVALID");
-    if(line.DepositLineDetail.Entity!==undefined)reference(line.DepositLineDetail.Entity);
+    const detail=line.DepositLineDetail;
+    // Linked payment deposits can carry optional detail metadata without DetailType.
+    // https://static.developer.intuit.com/sdkdocs/qbv3doc/ipp-v3-java-devkit-javadoc/com/intuit/ipp/data/Line.html
+    const linkedPayment=line.DetailType===undefined&&Array.isArray(line.LinkedTxn)&&line.LinkedTxn.length>0&&line.LinkedTxn.length<=1000
+      &&line.LinkedTxn.every(link=>plain(link)&&id(link.TxnId)&&["Payment","SalesReceipt"].includes(link.TxnType));
+    if(linkedPayment) {
+      if(detail!==undefined&&!plain(detail))throw unavailable("DEPOSIT_DETAIL_INVALID");
+      for(const key of ["PaymentMethodRef","AccountRef","ClassRef"])if(detail?.[key]!==undefined)reference(detail[key]);
+    }else if(line.DetailType!=="DepositLineDetail"||!plain(detail))throw unavailable("DEPOSIT_DETAIL_INVALID");
+    if(detail?.Entity!==undefined)reference(detail.Entity);
   }
   // Server-generated LastUpdatedTime predating order creation is reliable
   // chronology; a user-editable TxnDate or equal amount is not.
