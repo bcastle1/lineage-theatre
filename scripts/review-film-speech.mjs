@@ -44,7 +44,11 @@ function repairMatches(expected,actual,proof){
       ||span.recognizedTokensSha256!==hash(JSON.stringify(actual.slice(actualStart,actualEnd))))return false;
     if(span.kind==='cast-name'){
       if(expectedEnd!==expectedStart+1||actualEnd!==actualStart+1||expected[expectedStart]===actual[actualStart]
-        ||!['full-name','unique-first-name'].includes(span.nameScope))return false;
+        ||!['full-name','unique-first-name','honorific-surname'].includes(span.nameScope))return false;
+      if(span.nameScope==='honorific-surname'&&(expectedStart<1||actualStart<1
+        ||!['mr','mrs','ms','dr'].includes(expected[expectedStart-1])||actual[actualStart-1]!==expected[expectedStart-1]
+        ||span.honorific?.token!==expected[expectedStart-1]||span.honorific.expectedWordIndex!==expectedStart-1
+        ||span.honorific.actualWordIndex!==actualStart-1))return false;
     }else if(span.kind==='cardinal'){
       const a=repairCardinalSpan(expected,expectedStart),b=repairCardinalSpan(actual,actualStart);
       if(!a||!b||a.end!==expectedEnd||b.end!==actualEnd||a.form===b.form||a.value!==b.value
@@ -102,8 +106,8 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
       catch(contextError){
         if(finishingFailure(error)?.reason!=='SPEECH_SCRIPT_MISMATCH'
           ||finishingFailure(contextError)?.reason!=='SPEECH_SCRIPT_MISMATCH'||typeof resolveSpeechDifferences!=='function')throw contextError;
-        // A separately configured operator recovery may prove an exact saved
-        // cast pronunciation or cardinal form. Ordinary production never does.
+        // Only separately configured, provenance-bound authored-audio recovery
+        // may prove an exact saved cast pronunciation or cardinal form.
         // Raw transcripts remain unchanged and all timing checks still run.
         repairProof=await resolveSpeechDifferences({manifest:structuredClone(manifest),shot:structuredClone(shot),audioPath,
           normalTranscript:structuredClone(normalTranscript),contextTranscript:structuredClone(transcript)});

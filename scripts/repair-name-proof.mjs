@@ -132,24 +132,39 @@ export function createRepairSpeechResolver({ manifest, manifestHash, voices, pro
           expectedForm: expectedNumber.form, recognizedForm: actualNumber.form, method: 'canonical-cardinal-0-99-v1' };
       } else {
         let candidates = nameSpans.filter(span => left >= span.start && left < span.end);
-        if (!candidates.length) {
+        const honorificPrecedes = left > 0 && right > 0 && ['mr', 'mrs', 'ms', 'dr'].includes(expected[left - 1])
+          && normal[right - 1].token === expected[left - 1];
+        if (!candidates.length && !honorificPrecedes) {
           // A lone first name qualifies only when it uniquely identifies one
-          // saved cast member. Surnames and arbitrary words never qualify.
+          // saved cast member. This branch permits no surname or other alias.
           const firstNames = castNames.filter(({ name }) => name[0] === expected[left]);
           if (firstNames.length === 1 && firstNames[0].name.length >= 2 && firstNames[0].name.length <= 8
             && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: firstNames[0].cast.id,
               start: left, end: left + 1, nameScope: 'unique-first-name' }];
         }
+        if (!candidates.length && honorificPrecedes && binding[left - 1].turn === binding[left].turn) {
+          // A surname is permitted only immediately after an already exact
+          // honorific, within one verified synthesis turn, and unique in cast.
+          const surnames = castNames.filter(({ name }) => name.at(-1) === expected[left]);
+          if (surnames.length === 1 && surnames[0].name.length >= 2 && surnames[0].name.length <= 8
+            && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: surnames[0].cast.id,
+              start: left - 1, end: left + 1, nameScope: 'honorific-surname',
+              honorific: { token: expected[left - 1], expectedWordIndex: left - 1, actualWordIndex: right - 1,
+                normalTiming: { start: normal[right - 1].start, end: normal[right - 1].end },
+                contextTiming: { start: contextual[right - 1].start, end: contextual[right - 1].end } } }];
+        }
         requireValue(candidates.length === 1);
         change = { kind: 'cast-name', expectedStart: left, expectedEnd: left + 1, actualStart: right, actualEnd: right + 1,
           castId: candidates[0].castId, nameScope: candidates[0].nameScope,
-          castNameSpan: { start: candidates[0].start, end: candidates[0].end } };
+          castNameSpan: { start: candidates[0].start, end: candidates[0].end },
+          ...(candidates[0].honorific ? { honorific: candidates[0].honorific } : {}) };
       }
       const bound = binding[left], generated = bound.generated;
       requireValue(binding.slice(change.expectedStart, change.expectedEnd).every(value => value.turn === bound.turn));
       // Both unchanged ASR timestamp spans must lie in the exact verified
       // synthesis turn; the bounded variation is only a decoder boundary.
-      for (const transcript of [normal, contextual]) for (const actual of transcript.slice(change.actualStart, change.actualEnd))
+      const timingStart = change.honorific ? change.honorific.actualWordIndex : change.actualStart;
+      for (const transcript of [normal, contextual]) for (const actual of transcript.slice(timingStart, change.actualEnd))
         requireValue(actual.start >= Math.max(0, generated.startSeconds - .35)
           && actual.end <= Math.min(shot.targetDurationMs / 1000, generated.endSeconds + .35));
       changes.push({ ...change, bound }); requireValue(changes.length <= 64);
