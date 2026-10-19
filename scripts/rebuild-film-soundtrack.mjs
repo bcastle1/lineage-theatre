@@ -11,12 +11,37 @@ const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const VOICE = /^(?:af|am|bf|bm)_[a-z]{2,24}$/;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const label = value => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-const error = reason => Object.assign(new Error('The local soundtrack needs review.'), { code: 'SOUNDTRACK_REBUILD_REQUIRED', reason });
+const error = (reason, diagnostic) => {
+  const safe = soundtrackFailureDiagnostic(diagnostic);
+  return Object.assign(new Error('The local soundtrack needs review.'), {
+    code: 'SOUNDTRACK_REBUILD_REQUIRED', reason, ...(safe ? { diagnostic: safe } : {}),
+  });
+};
 const requireValue = (condition, reason) => { if (!condition) throw error(reason); };
 const text = value => typeof value === 'string' && value.length <= 12_000 && !/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value);
 const reasonCodes = new Set(['INPUT_INVALID', 'MANIFEST_CHANGED', 'CAST_INVALID', 'VOICE_MAPPING_REQUIRED', 'DIALOGUE_LABEL_REQUIRED',
   'DIALOGUE_LABEL_AMBIGUOUS', 'SPEAKER_NOT_IN_SCENE', 'TOO_MANY_TURNS', 'OUTPUT_INVALID', 'OUTPUT_EXISTS', 'RUNTIME_FAILED',
   'TIME_LIMIT', 'MODEL_UNAVAILABLE', 'PRONUNCIATION_UNSUPPORTED', 'SPEECH_INVALID', 'SCENE_DURATION_EXCEEDED', 'SCORE_FAILED']);
+const diagnosticStages = new Set(['input', 'import-numpy', 'import-onnxruntime', 'import-soundfile', 'import-spacy', 'import-kokoro',
+  'import-misaki', 'validate-input', 'verify-assets', 'load-onnx', 'load-kokoro', 'prepare-scene', 'prepare-turn', 'load-espeak',
+  'load-pronunciation', 'pronounce-turn', 'synthesize-turn', 'validate-speech', 'fit-turn', 'write-turn', 'write-speech',
+  'release-model', 'prepare-score', 'render-score', 'normalize-score', 'resample-speech', 'mix-scene', 'write-provenance']);
+const diagnosticCategories = new Set(['validation', 'dependency_missing', 'import_error', 'permission_denied', 'file_missing',
+  'memory_limit', 'attribute_missing', 'invalid_type', 'invalid_value', 'os_error', 'runtime_error', 'other']);
+const diagnosticModules = new Set(['numpy', 'onnxruntime', 'soundfile', 'spacy', 'kokoro_onnx', 'misaki', 'phonemizer',
+  'espeakng_loader', 'num2words', 'regex', 'addict', 'en_core_web_sm', 'dlinfo', 'click']);
+
+// Only fixed labels and bounded numbers may reach operator output.
+export function soundtrackFailureDiagnostic(value) {
+  if (!plain(value) || !diagnosticStages.has(value.stage) || !diagnosticCategories.has(value.category)) return null;
+  const result = { stage: value.stage, category: value.category };
+  if (value.category === 'dependency_missing' && diagnosticModules.has(value.module)) result.module = value.module;
+  for (const [key, minimum, maximum] of [['sceneIndex', 1, 30], ['turnIndex', 1, 20],
+    ['generatedMs', 0, 120_000], ['availableMs', 0, 30_000], ['overrunMs', 0, 120_000]]) {
+    if (Number.isSafeInteger(value[key]) && value[key] >= minimum && value[key] <= maximum) result[key] = value[key];
+  }
+  return result;
+}
 
 export function soundtrackPlan({ manifest, manifestHash, narratorVoice = 'am_michael', characterVoices = {}, speakerAliases = {}, music }) {
   requireValue(plain(manifest) && HASH.test(manifestHash || '') && hash(JSON.stringify(manifest)) === manifestHash, 'MANIFEST_CHANGED');
@@ -105,8 +130,8 @@ function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirector
         OMP_NUM_THREADS: '2', OPENBLAS_NUM_THREADS: '2', MKL_NUM_THREADS: '2', NUMEXPR_NUM_THREADS: '2' },
     });
     let size = 0, settled = false; const chunks = [];
-    const stop = reason => {
-      if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); reject(error(reason));
+    const stop = (reason, diagnostic) => {
+      if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); reject(error(reason, diagnostic));
     };
     const timer = setTimeout(() => stop('TIME_LIMIT'), 20 * 60_000);
     child.stdout.on('data', chunk => { size += chunk.length; if (size > 200_000) stop('OUTPUT_INVALID'); else chunks.push(chunk); });
@@ -116,7 +141,7 @@ function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirector
       if (settled) return;
       try {
         const output = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        if (code !== 0) { stop(reasonCodes.has(output?.reason) ? output.reason : 'RUNTIME_FAILED'); return; }
+        if (code !== 0) { stop(reasonCodes.has(output?.reason) ? output.reason : 'RUNTIME_FAILED', output?.diagnostic); return; }
         requireValue(output?.status === 'constructed' && output.manifestHash === plan.manifestHash, 'OUTPUT_INVALID');
         settled = true; clearTimeout(timer); resolveBuild(output);
       } catch { stop('OUTPUT_INVALID'); }
@@ -183,7 +208,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const result = await rebuildFilmSoundtrack({ ...value, workDir });
     process.stdout.write(`${JSON.stringify({ status: 'constructed-needs-review', sceneCount: result.clips.length, providerGenerationCalls: 0 })}\n`);
   })().catch(failure => {
-    process.stdout.write(`${JSON.stringify({ status: 'failed', reason: reasonCodes.has(failure?.reason) ? failure.reason : 'RUNTIME_FAILED' })}\n`);
+    const diagnostic = soundtrackFailureDiagnostic(failure?.diagnostic);
+    process.stdout.write(`${JSON.stringify({ status: 'failed', reason: reasonCodes.has(failure?.reason) ? failure.reason : 'RUNTIME_FAILED',
+      ...(diagnostic ? { diagnostic } : {}) })}\n`);
     process.exitCode = 1;
   });
 }
