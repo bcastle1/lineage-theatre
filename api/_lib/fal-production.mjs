@@ -5,6 +5,7 @@ import { falQualification } from './fal-qualification.mjs';
 import { createFalPricing } from './fal-pricing.mjs';
 import { falReferenceData } from './fal-reference.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from './film-visual-style.mjs';
+import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoDataUrl } from './production-photo-reference.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-wan-v2';
@@ -33,8 +34,13 @@ export function falPlan(manifest, model) {
   const used = new Set(shots.flatMap(shot => shot.characterIds));
   const characters = manifest.screenplay.characters.filter(c => used.has(c.id));
   if (new Set(characters.map(c => c.id)).size !== characters.length) invalid();
+  for (const character of characters) if (character.referencePhotoId !== undefined) {
+    validateProductionPhotoBinding(character.referencePhoto, character.referencePhotoId);
+    if (!character.sourceIds.includes(character.referencePhotoId)
+      || !manifest.sources?.some(source => source.id === character.referencePhotoId && ['image/jpeg', 'image/png', 'image/webp'].includes(source.type))) invalid();
+  }
   return { model, endpoint: FAL_MODELS[model], shots, characters,
-    generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.length };
+    generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length };
 }
 
 export function characterReferenceInput(manifest, character) {
@@ -49,9 +55,11 @@ export function falShotInput(manifest, shot, model, references) {
   if (!selected) invalid();
   const cast = selected.characterIds.map((id, index) => {
     const character = plan.characters.find(c => c.id === id);
-    return `${model === 'seedance' ? '@Image' : 'Image '}${index + 1}: ${character.name}; ${realisticCreativeText(character.description)}`;
+    return `${model === 'seedance' ? '@Image' : 'Image '}${index + 1}: ${character.name}; ${realisticCreativeText(character.description)}`
+      + (character.referencePhotoId ? '. This is the user-selected photograph of this person. Preserve their visible facial identity and appearance across scenes, adapting only the explicitly described age and period styling. Do not substitute a different person or infer biographical or sensitive traits from the photograph.' : '');
   });
-  const urls = selected.characterIds.map(id => falMediaUrl(references[id]));
+  const urls = selected.characterIds.map(id => plan.characters.find(c => c.id === id).referencePhotoId
+    ? validatedPhotoDataUrl(references[id]) : falMediaUrl(references[id]));
   const direction = realisticCreativeText(selected.visual).replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[“"][^”"]*[”"]/gi, '');
   const prompt = [
     `A finished photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinematic live-action'} film scene. Era: ${manifest.era}.`,
@@ -86,7 +94,8 @@ export function qualifiedFalRelease(value, model) {
 
 export function createFalProductionAdapter({ model = 'wan', qualification = falQualification,
   key = () => process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now,
-  pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData, read = readRecord, requireWorker = false } = {}) {
+  pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData, read = readRecord, requireWorker = false,
+  selectedPhoto = productionPhotoData } = {}) {
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
   const maximumCost = async manifest => {
@@ -97,6 +106,8 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
       if(heartbeat?.recipe!==FAL_RECIPE_VERSION||heartbeat.model!=='wan'||heartbeat.ready!==true
         ||!Number.isFinite(Date.parse(heartbeat.checkedAt))||now()-Date.parse(heartbeat.checkedAt)>180000||Date.parse(heartbeat.checkedAt)>now())
         throw new Error('Film production is temporarily unavailable. Please try again shortly.');
+      if (plan.characters.some(character => character.referencePhotoId) && heartbeat.referencePhotoVersion !== 1)
+        throw new Error('Character photo production is being updated. Please try again shortly.');
     }
     const rates = await pricing(model);
     if (!Number.isSafeInteger(rates.videoMicroUsdPerSecond) || rates.videoMicroUsdPerSecond <= 0
@@ -146,8 +157,13 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     // References are shared by every shot and by the two comparison candidates.
     // Up to four independently journaled references can render together. A
     // new submission still requires its own fresh payment/budget authorization.
+    // Verify every selected original before any new reference-generation spend.
+    // An unavailable or changed photograph must never become an invented portrait.
+    for (const character of plan.characters.filter(c => c.referencePhotoId !== undefined))
+      references[character.id] = await selectedPhoto(manifest, character, { read });
     let pendingReferences = 0;
     for (const character of plan.characters) {
+      if (character.referencePhotoId !== undefined) continue;
       const referenceId = digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`);
       const result = await operation(referenceId, FAL_MODELS.reference, characterReferenceInput(manifest, character));
       if (['failed','submitting','uncertain'].includes(result.state)) return { providerJobId, status: result.state === 'failed' ? 'failed' : 'uncertain' };
@@ -157,7 +173,8 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     }
     if (pendingReferences) return { providerJobId, status: 'processing' };
     const request = falShotInput(manifest, shot, model, references);
-    if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url => normalizeReference(url, { fetchImpl })));
+    if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url =>
+      url.startsWith('data:') ? validatedPhotoDataUrl(url) : normalizeReference(url, { fetchImpl })));
     result = await operation(renderIdentity, plan.endpoint, request);
     }
     if (result.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(result.state) ? 'uncertain' : result.state };

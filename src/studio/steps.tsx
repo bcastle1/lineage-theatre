@@ -489,6 +489,7 @@ export function CuttingStep({
     ...film.characters.flatMap((c) => c.sourceIds),
   ]);
   const coverage = film.sourceCoverage;
+  const referencePhotos = film.sources.filter(source => ["image/jpeg", "image/png", "image/webp"].includes(source.type));
   const evidenceSources: Source[] = [
     ...(film.script.trim()
       ? [
@@ -673,6 +674,30 @@ export function CuttingStep({
               />
             </label>
             <label>
+              Appearance reference photo
+              <select aria-label={`Appearance reference photo for ${character.name || "character"}`}
+                value={character.referencePhotoId || ""} disabled={!!busy}
+                onChange={(event) => {
+                  const referencePhotoId = event.target.value;
+                  changeCharacter(character.id, { referencePhotoId: referencePhotoId || undefined,
+                    sourceIds: referencePhotoId && !character.sourceIds.includes(referencePhotoId)
+                      ? [...character.sourceIds, referencePhotoId] : character.sourceIds });
+                  notify(referencePhotoId ? `Photo selected for ${character.name || "this character"}. Prepare a new plan to include it.`
+                    : `Appearance for ${character.name || "this character"} will use the written description.`);
+                }}>
+                <option value="">Use written appearance description</option>
+                {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId)
+                  && <option value={character.referencePhotoId}>Selected photo is missing — choose a photo</option>}
+                {referencePhotos.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
+              </select>
+            </label>
+            <p className="field-note">Choose a clear photo of this person from your sources. Production uses it to guide their appearance.
+              Add known identity and age details in the description above. Review generated scenes for likeness.</p>
+            {character.referencePhotoId && referencePhotos.find(source => source.id === character.referencePhotoId) &&
+              <SourceThumb source={referencePhotos.find(source => source.id === character.referencePhotoId)!} />}
+            {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId) &&
+              <p className="feedback error" role="alert">Restore the selected photo or choose a replacement before preparing production.</p>}
+            <label>
               Basis
               <select
                 value={character.basis}
@@ -696,6 +721,7 @@ export function CuttingStep({
                   <input
                     type="checkbox"
                     checked={character.sourceIds.includes(s.id)}
+                    disabled={character.referencePhotoId === s.id}
                     onChange={(e) =>
                       changeCharacter(character.id, {
                         sourceIds: e.target.checked

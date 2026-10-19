@@ -10,11 +10,19 @@ import { OWNER_EMAIL, isOwner, accessStatusForUser } from '../api/_lib/access.mj
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS, falMediaUrl, falRequestUrl } from '../api/_lib/fal-client.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from '../api/_lib/film-visual-style.mjs';
+import { productionPhotoData } from '../api/_lib/production-photo-reference.mjs';
 
 const ENDPOINTS = Object.freeze({ seedance: 'bytedance/seedance-2.5/us/reference-to-video', kling: 'fal-ai/kling-video/o3/pro/reference-to-video' });
 // Reviewed 1080p/native-audio bounds; see docs/MODEL-EVALUATION.md. The pricing
 // API exposes base units, so a base-price match alone cannot lower these floors.
 const RATE_FLOORS = Object.freeze({ seedance: 1_200_000, kling: 150_000 });
+// Reviewed together on the exact US endpoint: the API's 480p/720p base is
+// $0.0214/1000 tokens; the published 1080p rate is $0.0234/1000 tokens.
+// Preserve that resolution premium and the conservative per-second margin if
+// the live base increases. This profile covers 1080p16:9 with images only.
+const SEEDANCE_PRICING = Object.freeze({ basePerThousandTokens: 0.0214,
+  highResolutionPerThousandTokens: 0.0234, width: 1920, height: 1080, framesPerSecond: 24, tokenPixels: 1024 });
+const MAXIMUM_APPROVED_COST_CENTS = 2000;
 const HASH = /^[a-f0-9]{64}$/, UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const requireValue = (condition, code) => { if (!condition) fail(code); };
@@ -64,30 +72,93 @@ async function pricing() {
   }
   return { checkedAt: stamp(), prices };
 }
-async function source(preparedId, shotIndex) {
-  requireValue(UUID.test(preparedId) && Number.isSafeInteger(shotIndex) && shotIndex >= 0, 'SOURCE_SELECTION_INVALID');
+function sourceSelection(config) {
+  const { correctedPreparedId, originalManifestHash, correctedManifestHash, shotIndex } = config || {};
+  requireValue(UUID.test(correctedPreparedId || '') && HASH.test(originalManifestHash || '')
+    && HASH.test(correctedManifestHash || '') && Number.isSafeInteger(shotIndex) && shotIndex >= 0, 'CORRECTED_SOURCE_SELECTION_REQUIRED');
+  const mapping = config.referenceCharacterMap ?? {};
+  requireValue(mapping && typeof mapping === 'object' && !Array.isArray(mapping)
+    && Object.keys(mapping).length <= 7 && Object.entries(mapping).every(([id, originalId]) =>
+      id.length > 0 && id.length <= 2000 && typeof originalId === 'string' && originalId.length > 0 && originalId.length <= 2000), 'REFERENCE_MAPPING_INVALID');
+  return { correctedPreparedId, originalManifestHash, correctedManifestHash, shotIndex,
+    referenceCharacterMap: Object.fromEntries(Object.entries(mapping).sort(([a], [b]) => a.localeCompare(b))) };
+}
+function charactersById(manifest) {
+  const characters = manifest?.screenplay?.characters;
+  requireValue(Array.isArray(characters) && characters.length >= 1 && characters.length <= 16
+    && characters.every(character => typeof character?.id === 'string' && character.id.length > 0
+      && typeof character.name === 'string' && typeof character.description === 'string')
+    && new Set(characters.map(character => character.id)).size === characters.length, 'SOURCE_CAST_INVALID');
+  return new Map(characters.map(character => [character.id, character]));
+}
+async function source(preparedId, config) {
+  const selection = sourceSelection(config), { shotIndex, referenceCharacterMap } = selection;
+  requireValue(UUID.test(preparedId) && preparedId !== selection.correctedPreparedId, 'SOURCE_SELECTION_INVALID');
   const owner = (await readRecord(userPath(OWNER_EMAIL)))?.value;
   requireValue(isOwner(owner) && !owner.mustChangePassword && accessStatusForUser(owner) === 'approved', 'OWNER_REQUIRED');
-  const job = (await readRecord(`production/jobs/${digest(OWNER_EMAIL)}/${preparedId}.json`))?.value;
-  requireValue(job?.status === 'completed' && job.ownerHash === digest(OWNER_EMAIL) && job.id === preparedId
-    && job.mode === 'customer' && HASH.test(job.media?.sha256 || '') && HASH.test(job.manifestHash || '')
-    && jsonHash(job.manifest) === job.manifestHash && job.filmId === job.manifest.filmId, 'COMPLETED_SOURCE_REQUIRED');
+  const original = (await readRecord(`production/jobs/${digest(OWNER_EMAIL)}/${preparedId}.json`))?.value;
+  requireValue(original?.status === 'completed' && original.ownerHash === digest(OWNER_EMAIL) && original.id === preparedId
+    && original.mode === 'customer' && HASH.test(original.media?.sha256 || '') && original.manifestHash === selection.originalManifestHash
+    && jsonHash(original.manifest) === original.manifestHash && original.filmId === original.manifest.filmId, 'COMPLETED_SOURCE_REQUIRED');
+  const job = (await readRecord(`production/jobs/${digest(OWNER_EMAIL)}/${selection.correctedPreparedId}.json`))?.value;
+  requireValue(job?.status === 'prepared' && job.ownerHash === original.ownerHash && job.id === selection.correctedPreparedId
+    && job.mode === 'customer' && job.manifestHash === selection.correctedManifestHash
+    && jsonHash(job.manifest) === job.manifestHash && job.filmId === job.manifest.filmId && UUID.test(job.filmId || '')
+    && Number.isFinite(Date.parse(job.preparationConsentAt)) && !job.media
+    && Array.isArray(job.shots) && job.shots.length === job.manifest.shots?.length
+    && job.shots.every((shot, index) => shot.status === 'prepared' && shot.id === job.manifest.shots[index].id), 'CORRECTED_PREPARED_SOURCE_REQUIRED');
+  // A corrected draft may have a new film ID. The approved plan binds both
+  // immutable manifests explicitly, and limits this operation to a visual
+  // correction of the original script, scene order and requested runtime.
+  requireValue(job.manifest.targetDurationSeconds === original.manifest.targetDurationSeconds
+    && job.manifest.ancestor === original.manifest.ancestor && job.manifest.style === original.manifest.style
+    && job.manifest.factuality === original.manifest.factuality && job.manifest.shots.length === original.manifest.shots?.length
+    && job.manifest.shots.every((shot, index) => ['narration', 'dialogue'].every(field =>
+      typeof shot[field] === 'string' && shot[field] === original.manifest.shots[index][field])), 'CORRECTION_CHANGED_SAVED_SCRIPT');
+  const originalCharacters = charactersById(original.manifest), characters = charactersById(job.manifest);
   const shot = job.manifest.shots?.[shotIndex];
   requireValue(shot && Array.isArray(shot.characterIds) && shot.characterIds.length >= 1
     && shot.characterIds.length <= 7 && new Set(shot.characterIds).size === shot.characterIds.length, 'SOURCE_SHOT_INVALID');
+  const generatedIds = shot.characterIds.filter(id => !characters.get(id)?.referencePhotoId);
+  requireValue(Object.keys(referenceCharacterMap).length === generatedIds.length
+    && generatedIds.every(id => Object.hasOwn(referenceCharacterMap, id))
+    && new Set(Object.values(referenceCharacterMap)).size === generatedIds.length, 'EXPLICIT_REFERENCE_MAPPING_REQUIRED');
   const references = [];
   for (const characterId of shot.characterIds) {
-    const character = job.manifest.screenplay.characters.find(value => value.id === characterId);
-    const identity = digest(`${FAL_RECIPE_VERSION}:cast:${job.id}:${job.manifestHash}:${characterId}`);
+    const character = characters.get(characterId);
+    requireValue(character, 'SOURCE_CHARACTER_INVALID');
+    if (character.referencePhotoId) {
+      const photo = character.referencePhoto;
+      requireValue(UUID.test(character.referencePhotoId) && photo?.sourceId === character.referencePhotoId
+        && photo.ownerHash === original.ownerHash && HASH.test(photo.sha256 || '') && HASH.test(photo.normalizedSha256 || '')
+        && job.manifest.sources?.some(item => item.id === photo.sourceId), 'BOUND_CHARACTER_PHOTO_REQUIRED');
+      // The helper freshly checks the owner-scoped ready record, private bytes,
+      // source SHA, metadata and deterministic normalized JPEG SHA each time.
+      const url = await productionPhotoData(job.manifest, character);
+      requireValue(typeof url === 'string' && url.startsWith('data:image/jpeg;base64,'), 'PHOTO_TRANSPORT_INVALID');
+      references.push({ characterId, kind: 'selected-photo', photo, url, character });
+      continue;
+    }
+    requireValue(!character.referencePhoto, 'PHOTO_SELECTION_MISSING');
+    const originalCharacterId = referenceCharacterMap[characterId], originalCharacter = originalCharacters.get(originalCharacterId);
+    requireValue(originalCharacter && originalCharacter.name.trim().toLowerCase() === character.name.trim().toLowerCase(), 'REFERENCE_MAPPING_CHANGED_PERSON');
+    const identity = digest(`${FAL_RECIPE_VERSION}:cast:${original.id}:${original.manifestHash}:${originalCharacterId}`);
     const record = (await readRecord(`production/fal/requests/${identity}.json`))?.value;
     requireValue(character && record?.state === 'completed' && record.identity === identity
       && record.endpoint === FAL_MODELS.reference && /^[\w-]{8,100}$/.test(record.requestId || '')
       && record.result?.images?.length === 1, 'EXISTING_REFERENCE_REQUIRED');
-    references.push({ characterId, identity, requestId: record.requestId, url: falMediaUrl(record.result.images[0].url), character });
+    references.push({ characterId, kind: 'existing-generated-reference', originalCharacterId,
+      originalCharacterHash: jsonHash(originalCharacter), identity, requestId: record.requestId,
+      url: falMediaUrl(record.result.images[0].url), character });
   }
-  const binding = { preparedId, filmId: job.filmId, manifestHash: job.manifestHash,
-    deliveredMediaSha256: job.media.sha256, shotIndex, shotHash: jsonHash(shot), referencesHash: jsonHash(references) };
-  return { job, shot, references, binding };
+  requireValue(references.some(reference => reference.kind === 'selected-photo'), 'SELECTED_CHARACTER_PHOTO_REQUIRED');
+  const referenceBindings = references.map(({ url, character, ...reference }) => ({ ...reference,
+    characterHash: jsonHash(character), ...(reference.kind === 'existing-generated-reference' ? { url } : {}) }));
+  const binding = { preparedId, filmId: original.filmId, manifestHash: original.manifestHash,
+    deliveredMediaSha256: original.media.sha256, correctedPreparedId: job.id, correctedFilmId: job.filmId,
+    correctedManifestHash: job.manifestHash, shotIndex, originalShotHash: jsonHash(original.manifest.shots[shotIndex]),
+    correctedShotHash: jsonHash(shot), references: referenceBindings, referencesHash: jsonHash(referenceBindings) };
+  return { job, shot, references, binding, sourceSelection: selection };
 }
 function excerpt(config, shot) {
   requireValue(Number.isSafeInteger(config.durationSeconds) && config.durationSeconds >= 4 && config.durationSeconds <= 15,
@@ -114,6 +185,15 @@ function inputs(context, selection) {
   kling: { prompt, duration: String(selection.durationSeconds), image_urls: urls,
     generate_audio: true, aspect_ratio: '16:9', shot_type: 'customize' } };
 }
+function inputProof(payloads, context) {
+  return Object.fromEntries(Object.entries(payloads).map(([model, payload]) => [model, {
+    sha256: jsonHash(payload),
+    // Persist reviewable inputs without writing private photo bytes twice.
+    review: { ...payload, image_urls: payload.image_urls.map((url, index) => context.references[index].kind === 'selected-photo'
+      ? { transport: 'base64-data-uri', sourceId: context.references[index].photo.sourceId,
+        normalizedSha256: context.references[index].photo.normalizedSha256 } : url) },
+  }]));
+}
 function auditedRates(rates, live, seconds) {
   let total = 0;
   for (const [model, endpoint] of Object.entries(ENDPOINTS)) {
@@ -121,8 +201,20 @@ function auditedRates(rates, live, seconds) {
     requireValue(rate && rate.unitPrice === current.unitPrice && rate.unit === current.unit
       && Number.isSafeInteger(rate.maximumMicroUsdPerSecond) && rate.maximumMicroUsdPerSecond > 0
       && rate.maximumMicroUsdPerSecond <= 10_000_000 && typeof rate.sourceUrl === 'string', 'PRICE_REVIEW_REQUIRED');
-    const minimum = Math.max(RATE_FLOORS[model], model === 'kling' || ['second', 'seconds'].includes(current.unit)
-      ? Math.ceil(current.unitPrice * 1_000_000) : 0);
+    const unit = current.unit.trim().toLowerCase().replace(/\s+/g, ' ');
+    let minimum;
+    if (model === 'seedance') {
+      requireValue(unit === '1000 tokens', 'PRICE_UNIT_UNREVIEWED');
+      const profile = SEEDANCE_PRICING, baseRatio = current.unitPrice / profile.basePerThousandTokens;
+      const outputTokensPerSecond = profile.width * profile.height * profile.framesPerSecond / profile.tokenPixels;
+      const resolutionRate = current.unitPrice * profile.highResolutionPerThousandTokens / profile.basePerThousandTokens;
+      const tokenCostMicroUsdPerSecond = outputTokensPerSecond / 1000 * resolutionRate * 1_000_000;
+      minimum = Math.ceil(Math.max(RATE_FLOORS.seedance, tokenCostMicroUsdPerSecond,
+        RATE_FLOORS.seedance * baseRatio));
+    } else {
+      requireValue(['second', 'seconds'].includes(unit), 'PRICE_UNIT_UNREVIEWED');
+      minimum = Math.ceil(Math.max(RATE_FLOORS.kling, current.unitPrice * 1_000_000));
+    }
     requireValue(rate.maximumMicroUsdPerSecond >= minimum, 'PRICE_BOUND_TOO_LOW');
     let url; try { url = new URL(rate.sourceUrl); } catch { fail('PRICE_REVIEW_REQUIRED'); }
     requireValue(url.protocol === 'https:' && url.hostname === 'fal.ai' && url.pathname.startsWith(`/models/${endpoint}`)
@@ -133,17 +225,18 @@ function auditedRates(rates, live, seconds) {
 }
 async function prepare(args, directory) {
   const config = await localJson(resolve(args.config || ''));
-  const context = await source(args['prepared-id'] || '', config.shotIndex), selection = excerpt(config, context.shot);
+  const context = await source(args['prepared-id'] || '', config), selection = excerpt(config, context.shot);
   const maximumCostCents = Number(args['maximum-cost-cents']);
-  requireValue(Number.isSafeInteger(maximumCostCents) && maximumCostCents > 0 && maximumCostCents <= 10000, 'EXPLICIT_BUDGET_REQUIRED');
+  requireValue(Number.isSafeInteger(maximumCostCents) && maximumCostCents > 0 && maximumCostCents <= MAXIMUM_APPROVED_COST_CENTS, 'EXPLICIT_BUDGET_REQUIRED');
   const live = await pricing();
   await saveExclusive(join(directory, `pricing-${Date.now()}-${randomUUID()}.json`), live);
   if (!config.rates) { emit({ status: 'price-review-required', ...live, maximumCostCents, providerSubmissions: 0 }); return; }
   const maximumEstimatedCostCents = auditedRates(config.rates, live, selection.durationSeconds);
   requireValue(maximumEstimatedCostCents <= maximumCostCents, 'BUDGET_EXCEEDED');
-  const plan = { version: 1, kind: 'isolated-film-model-evaluation', evaluationId: randomUUID(), createdAt: stamp(),
+  const plan = { version: 2, kind: 'isolated-film-model-evaluation', evaluationId: randomUUID(), createdAt: stamp(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString(), ownerEmail: OWNER_EMAIL, funding: 'merchant',
-    source: context.binding, selection, endpoints: ENDPOINTS, inputs: inputs(context, selection), pricing: live,
+    source: context.binding, sourceSelection: context.sourceSelection, selection, endpoints: ENDPOINTS,
+    inputProof: inputProof(inputs(context, selection), context), pricing: live,
     rates: config.rates, maximumCostCents, maximumEstimatedCostCents };
   const planSha256 = jsonHash(plan);
   await saveExclusive(join(directory, 'plan.json'), { planSha256, plan });
@@ -152,7 +245,7 @@ async function prepare(args, directory) {
 }
 async function loadPlan(directory) {
   const saved = await localJson(join(directory, 'plan.json')), plan = saved?.plan;
-  requireValue(plan?.version === 1 && plan.kind === 'isolated-film-model-evaluation' && plan.ownerEmail === OWNER_EMAIL
+  requireValue(plan?.version === 2 && plan.kind === 'isolated-film-model-evaluation' && plan.ownerEmail === OWNER_EMAIL
     && plan.funding === 'merchant' && UUID.test(plan.evaluationId || '') && HASH.test(saved.planSha256 || '')
     && jsonHash(plan) === saved.planSha256 && jsonHash(plan.endpoints) === jsonHash(ENDPOINTS), 'PLAN_INVALID');
   return saved;
@@ -166,19 +259,20 @@ async function submit(args, directory) {
       requireValue(existing.planSha256 === planSha256 && existing.endpoint === endpoint, 'CLAIM_CONFLICT');
       emit({ model, status: 'already-claimed-no-resubmission' }); continue;
     }
-    const current = await source(plan.source.preparedId, plan.source.shotIndex);
+    const current = await source(plan.source.preparedId, plan.sourceSelection);
     requireValue(jsonHash(current.binding) === jsonHash(plan.source), 'SOURCE_CHANGED');
     const selected = excerpt(plan.selection, current.shot);
-    requireValue(jsonHash(inputs(current, selected)) === jsonHash(plan.inputs), 'INPUT_CHANGED');
+    const payloads = inputs(current, selected);
+    requireValue(jsonHash(inputProof(payloads, current)) === jsonHash(plan.inputProof), 'INPUT_CHANGED');
     const live = await pricing(), cost = auditedRates(plan.rates, live, selected.durationSeconds);
     requireValue(cost === plan.maximumEstimatedCostCents && Number.isSafeInteger(plan.maximumCostCents)
-      && cost <= plan.maximumCostCents && plan.maximumCostCents <= 10000, 'BUDGET_CHANGED');
+      && cost <= plan.maximumCostCents && plan.maximumCostCents <= MAXIMUM_APPROVED_COST_CENTS, 'BUDGET_CHANGED');
     requireValue(Date.parse(plan.expiresAt) > Date.now(), 'CURRENT_PLAN_APPROVAL_REQUIRED');
     const claim = { version: 1, evaluationId: plan.evaluationId, planSha256, model, endpoint,
-      inputSha256: jsonHash(plan.inputs[model]), claimedAt: stamp(), state: 'submission-claimed', pricing: live };
+      inputSha256: plan.inputProof[model].sha256, claimedAt: stamp(), state: 'submission-claimed', pricing: live };
     await saveExclusive(claimPath, claim);
     try {
-      const response = await request(`https://queue.fal.run/${endpoint}`, 'POST', plan.inputs[model]);
+      const response = await request(`https://queue.fal.run/${endpoint}`, 'POST', payloads[model]);
       // Preserve the provider's request identity before validating convenience
       // URLs, so an unexpected receipt remains available for manual reconciliation.
       await saveExclusive(join(directory, `${model}-response.json`), { planSha256, receivedAt: stamp(),
@@ -201,7 +295,7 @@ async function poll(directory) {
     const receipt = await localJson(join(directory, `${model}-receipt.json`), true);
     if (!receipt) { emit({ model, status: await localJson(join(directory, `${model}-claim.json`), true) ? 'uncertain-no-resubmission' : 'not-submitted' }); continue; }
     requireValue(receipt.planSha256 === planSha256 && receipt.endpoint === endpoint
-      && receipt.inputSha256 === jsonHash(plan.inputs[model]), 'RECEIPT_CONFLICT');
+      && receipt.inputSha256 === plan.inputProof?.[model]?.sha256, 'RECEIPT_CONFLICT');
     const terminalPath = join(directory, `${model}-terminal.json`), terminal = await localJson(terminalPath, true);
     if (terminal) {
       requireValue(terminal.planSha256 === planSha256 && terminal.requestId === receipt.requestId && terminal.endpoint === endpoint
