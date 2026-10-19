@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeSpeech } from './review-film-speech.mjs';
+import { normalizeSpeech, repairCardinalSpan } from './review-film-speech.mjs';
 import { soundtrackPlan } from './rebuild-film-soundtrack.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
@@ -16,12 +16,22 @@ const PRONUNCIATION_RUNTIME = Object.freeze({ misaki: '0.9.4', spacy: '3.8.7', '
   phonemizer: '3.4.0', 'espeakng-loader': '0.2.4', 'kokoro-onnx': '0.6.1' });
 const hash = value => createHash('sha256').update(value).digest('hex');
 const jsonHash = value => hash(JSON.stringify(value));
-const fail = () => markFinishingFailure(Object.assign(new Error('The cast-name pronunciation could not be verified.'),
+const fail = () => markFinishingFailure(Object.assign(new Error('The exact repair speech equivalence could not be verified.'),
   { code: 'FILM_SPEECH_REVIEW_REQUIRED' }), 'speech-review', 'SPEECH_SCRIPT_MISMATCH');
 const requireValue = value => { if (!value) throw fail(); };
-const words = transcript => (transcript.words || []).flatMap(word => normalizeSpeech(word.word)
-  .map(token => ({ token, start: word.start, end: word.end })));
+const words = transcript => (transcript.words || []).flatMap((word, rawIndex) => normalizeSpeech(word.word)
+  .map(token => ({ token, raw: word.word, rawIndex, start: word.start, end: word.end })));
 const intendedWords = shot => normalizeSpeech(`${shot.narration || ''} ${(shot.dialogue || '').replace(/(?:^|\n)[A-Z][A-Z\s'-]*:\s*/g, ' ')}`);
+function rawCardinalSpanValid(rawTokens, first, last, canonicalTokens) {
+  // Normalization drops punctuation-only tokens. Retain their raw adjacency
+  // so a separated sign, decimal point or fraction bar cannot disappear.
+  const unsafeNeighbor = raw => /^[\s\("'“‘\[{]*[+\-−±.\/⁄][\s\)"'”’\]}]*$/.test(String(raw || ''));
+  if (unsafeNeighbor(rawTokens[first - 1]) || unsafeNeighbor(rawTokens[last + 1])) return false;
+  const raw = rawTokens.slice(first, last + 1).join(' ').normalize('NFKC').trim().toLowerCase();
+  // Tokens come only from the fixed cardinal grammar: digits or ASCII words.
+  // A hyphen is allowed only between the two canonical spoken number words.
+  return new RegExp(`^[\\("'“‘]?${canonicalTokens.join('[\\s-]+')}[\\)"'”’]?[,.!?;:]?$`).test(raw);
+}
 
 async function checkedFile(path, root, descriptor) {
   const stat = await lstat(path), full = await realpath(path), base = await realpath(root), within = relative(base, full);
@@ -56,7 +66,7 @@ function comparePronunciations(pairs, python) {
   });
 }
 
-export function createRepairCastNameResolver({ manifest, manifestHash, voices, provenance, constructionRoot, receiptRoot,
+export function createRepairSpeechResolver({ manifest, manifestHash, voices, provenance, constructionRoot, receiptRoot,
   python = process.env.LINEAGE_TTS_PYTHON || '/opt/soundtrack/bin/python' }) {
   requireValue(HASH.test(manifestHash || '') && jsonHash(manifest) === manifestHash && typeof constructionRoot === 'string'
     && typeof receiptRoot === 'string' && provenance?.manifestHash === manifestHash
@@ -77,7 +87,7 @@ export function createRepairCastNameResolver({ manifest, manifestHash, voices, p
     requireValue(audioSha256 === source.mix?.sha256 && currentAudio.length === source.mix.sizeBytes);
     await checkedFile(resolve(sourceDirectory, source.mix.file), sourceDirectory, source.mix);
     const expected = intendedWords(shot), normal = words(input.normalTranscript), contextual = words(input.contextTranscript);
-    requireValue(expected.length && expected.length === normal.length && expected.length === contextual.length
+    requireValue(expected.length && normal.length && normal.length === contextual.length
       && normal.every((word, index) => word.token === contextual[index].token)
       && [input.normalTranscript, input.contextTranscript].every(value => Number.isFinite(value.duration)
         && value.duration >= shot.targetDurationMs / 1000 - .05));
@@ -93,55 +103,95 @@ export function createRepairCastNameResolver({ manifest, manifestHash, voices, p
         && HASH.test(generated.phonemesSha256 || '') && Number.isFinite(generated.startSeconds) && Number.isFinite(generated.endSeconds)
         && generated.startSeconds >= 0 && generated.endSeconds > generated.startSeconds && generated.endSeconds <= shot.targetDurationMs / 1000);
       await checkedFile(resolve(sourceDirectory, generated.audio.file), sourceDirectory, generated.audio);
-      for (const token of normalizeSpeech(turn.text)) binding.push({ token, generated, turn });
+      const rawTokens = turn.text.split(/\s+/);
+      for (const [rawIndex, raw] of rawTokens.entries()) for (const token of normalizeSpeech(raw)) binding.push({ token, raw, rawIndex, rawTokens, generated, turn });
     }
     requireValue(binding.length === expected.length && binding.every((value, index) => value.token === expected[index]));
-    const spans = [];
-    for (const cast of manifest.screenplay.characters) {
-      const name = normalizeSpeech(cast.name);
-      // Only full multi-token cast names qualify. Common isolated words and
-      // isolated first/surnames do not become a general spelling exception.
+    const nameSpans = [], castNames = manifest.screenplay.characters.map(cast => ({ cast, name: normalizeSpeech(cast.name) }));
+    for (const { cast, name } of castNames) {
       if (name.length < 2 || name.length > 8) continue;
       for (let start = 0; start <= expected.length - name.length; start++) if (name.every((token, offset) => expected[start + offset] === token)
-        && name.every((_, offset) => binding[start + offset].turn === binding[start].turn)) spans.push({ castId: cast.id, start, end: start + name.length });
+        && name.every((_, offset) => binding[start + offset].turn === binding[start].turn)) nameSpans.push({ castId: cast.id, start, end: start + name.length, nameScope: 'full-name' });
     }
-    const mismatches = expected.flatMap((token, index) => token === normal[index].token ? [] : [index]);
-    requireValue(mismatches.length > 0 && mismatches.length <= 64);
-    const matches = mismatches.map(index => {
-      const selectedSpans = spans.filter(span => index >= span.start && index < span.end);
-      requireValue(selectedSpans.length === 1);
-      const bound = binding[index], turn = bound.generated;
-      // ASR boundary variation is bounded to the exact synthesized turn. No
-      // recognized timestamp is moved or replaced by the construction timing.
-      for (const actual of [normal[index], contextual[index]]) requireValue(actual.start >= Math.max(0, turn.startSeconds - .35)
-        && actual.end <= Math.min(shot.targetDurationMs / 1000, turn.endSeconds + .35));
-      return { index, span: selectedSpans[0], bound };
-    });
-    const compared = await comparePronunciations(matches.map(({ index }) => ({ expected: expected[index], recognized: normal[index].token })), python);
-    requireValue(compared?.version === 1 && compared.status === 'compared' && Array.isArray(compared.pairs) && compared.pairs.length === matches.length);
-    const tokens = matches.map(({ index, span, bound }, pairIndex) => {
+    const actualTokens = normal.map(word => word.token), changes = [];
+    let left = 0, right = 0;
+    while (left < expected.length || right < normal.length) {
+      requireValue(left < expected.length && right < normal.length);
+      if (expected[left] === normal[right].token) { left++; right++; continue; }
+      const expectedNumber = repairCardinalSpan(expected, left), actualNumber = repairCardinalSpan(actualTokens, right);
+      let change;
+      if (expectedNumber && actualNumber && expectedNumber.form !== actualNumber.form && expectedNumber.value === actualNumber.value) {
+        requireValue(binding.slice(left, expectedNumber.end).every(value => value.turn === binding[left].turn));
+        requireValue(rawCardinalSpanValid(binding[left].rawTokens, binding[left].rawIndex,
+          binding[expectedNumber.end - 1].rawIndex, expected.slice(left, expectedNumber.end)));
+        for (const [transcript, rawTranscript] of [[normal, input.normalTranscript], [contextual, input.contextTranscript]])
+          requireValue(rawCardinalSpanValid(rawTranscript.words.map(word => word.word), transcript[right].rawIndex,
+            transcript[actualNumber.end - 1].rawIndex, actualTokens.slice(right, actualNumber.end)));
+        change = { kind: 'cardinal', expectedStart: left, expectedEnd: expectedNumber.end,
+          actualStart: right, actualEnd: actualNumber.end, canonicalValue: expectedNumber.value,
+          expectedForm: expectedNumber.form, recognizedForm: actualNumber.form, method: 'canonical-cardinal-0-99-v1' };
+      } else {
+        let candidates = nameSpans.filter(span => left >= span.start && left < span.end);
+        if (!candidates.length) {
+          // A lone first name qualifies only when it uniquely identifies one
+          // saved cast member. Surnames and arbitrary words never qualify.
+          const firstNames = castNames.filter(({ name }) => name[0] === expected[left]);
+          if (firstNames.length === 1 && firstNames[0].name.length >= 2 && firstNames[0].name.length <= 8
+            && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: firstNames[0].cast.id,
+              start: left, end: left + 1, nameScope: 'unique-first-name' }];
+        }
+        requireValue(candidates.length === 1);
+        change = { kind: 'cast-name', expectedStart: left, expectedEnd: left + 1, actualStart: right, actualEnd: right + 1,
+          castId: candidates[0].castId, nameScope: candidates[0].nameScope,
+          castNameSpan: { start: candidates[0].start, end: candidates[0].end } };
+      }
+      const bound = binding[left], generated = bound.generated;
+      requireValue(binding.slice(change.expectedStart, change.expectedEnd).every(value => value.turn === bound.turn));
+      // Both unchanged ASR timestamp spans must lie in the exact verified
+      // synthesis turn; the bounded variation is only a decoder boundary.
+      for (const transcript of [normal, contextual]) for (const actual of transcript.slice(change.actualStart, change.actualEnd))
+        requireValue(actual.start >= Math.max(0, generated.startSeconds - .35)
+          && actual.end <= Math.min(shot.targetDurationMs / 1000, generated.endSeconds + .35));
+      changes.push({ ...change, bound }); requireValue(changes.length <= 64);
+      left = change.expectedEnd; right = change.actualEnd;
+    }
+    requireValue(changes.length > 0);
+    const names = changes.filter(change => change.kind === 'cast-name');
+    const compared = names.length ? await comparePronunciations(names.map(change => ({ expected: expected[change.expectedStart],
+      recognized: normal[change.actualStart].token })), python) : null;
+    if (names.length) requireValue(compared?.version === 1 && compared.status === 'compared'
+      && Array.isArray(compared.pairs) && compared.pairs.length === names.length);
+    const spans = changes.map(change => {
+      const { bound, ...alignment } = change;
+      const base = { ...alignment, expectedTokensSha256: jsonHash(expected.slice(change.expectedStart, change.expectedEnd)),
+        recognizedTokensSha256: jsonHash(actualTokens.slice(change.actualStart, change.actualEnd)),
+        normalTiming: normal.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
+        contextTiming: contextual.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
+        turnIndex: bound.turn.turnIndex, turnTextSha256: bound.turn.textSha256, turnAudioSha256: bound.generated.audio.sha256,
+        voice: bound.turn.voice, synthesisPhonemesSha256: bound.generated.phonemesSha256 };
+      if (change.kind === 'cardinal') return { ...base, evidenceHash: jsonHash(base) };
+      const pairIndex = names.indexOf(change);
       const proof = compared.pairs[pairIndex];
-      requireValue(proof?.equal === true && proof.expectedSha256 === hash(expected[index]) && proof.recognizedSha256 === hash(normal[index].token)
+      requireValue(proof?.equal === true && proof.expectedSha256 === hash(expected[change.expectedStart])
+        && proof.recognizedSha256 === hash(normal[change.actualStart].token)
         && ['misaki-exact', 'cmudict-exact'].includes(proof.method) && proof.engineVersion === 'misaki-0.9.4'
         && HASH.test(proof.phonemeHash || '') && HASH.test(proof.evidenceHash || '')
         && HASH.test(proof.expectedPhonemeHash || '') && HASH.test(proof.recognizedPhonemeHash || '')
         && proof.dictionarySha256 === DICTIONARY_SHA256 && proof.dictionaryCommit === DICTIONARY_COMMIT
         && Object.entries(PRONUNCIATION_RUNTIME).every(([name, version]) => proof.runtimeVersions?.[name] === version));
-      return { wordIndex: index, castId: span.castId, castNameSpan: { start: span.start, end: span.end },
+      return { ...base,
         expectedSha256: proof.expectedSha256, recognizedSha256: proof.recognizedSha256,
-        normalTiming: { start: normal[index].start, end: normal[index].end }, contextTiming: { start: contextual[index].start, end: contextual[index].end },
-        turnIndex: bound.turn.turnIndex, turnTextSha256: bound.turn.textSha256, turnAudioSha256: bound.generated.audio.sha256,
-        voice: bound.turn.voice, synthesisPhonemesSha256: bound.generated.phonemesSha256,
         method: proof.method, phonemeHash: proof.phonemeHash, evidenceHash: proof.evidenceHash,
         expectedPhonemeHash: proof.expectedPhonemeHash, recognizedPhonemeHash: proof.recognizedPhonemeHash,
         engineVersion: proof.engineVersion, dictionarySha256: proof.dictionarySha256, dictionaryCommit: proof.dictionaryCommit,
         runtimeVersions: { ...PRONUNCIATION_RUNTIME } };
     });
     requireValue(hash(await readFile(input.audioPath)) === audioSha256);
-    const proof = { kind: 'repair-cast-name-phoneme-proof-v1', version: 1, manifestHash, shotId: shot.id, audioSha256,
+    const proof = { kind: 'repair-speech-equivalence-proof-v2', version: 2, manifestHash, shotId: shot.id, audioSha256,
       normalTranscriptSha256: jsonHash(input.normalTranscript), contextTranscriptSha256: jsonHash(input.contextTranscript),
-      provenanceSha256: jsonHash(provenance), voiceAssignmentsSha256: jsonHash(voices), tokens };
-    const directory = join(receiptRoot, 'review', 'name-proofs'); await mkdir(directory, { recursive: true, mode: 0o700 });
+      provenanceSha256: jsonHash(provenance), voiceAssignmentsSha256: jsonHash(voices), expectedWordCount: expected.length,
+      actualWordCount: normal.length, spans };
+    const directory = join(receiptRoot, 'review', 'speech-proofs'); await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(join(directory, `${randomUUID()}.json`), JSON.stringify(proof, null, 2), { flag: 'wx', mode: 0o600 });
     return proof;
   };

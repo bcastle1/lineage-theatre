@@ -18,7 +18,7 @@ import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } fro
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
 import { assembleFilm } from './assemble-film.mjs';
-import { createRepairCastNameResolver } from './repair-name-proof.mjs';
+import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 const KIND = 'lineage-paid-soundtrack-repair-v1';
@@ -140,7 +140,7 @@ function repairTranscriber(root, { python = process.env.PYTHON_PATH || 'python3'
 async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices, provenance, ffmpeg, constructionRoot = root }, dependencies) {
   const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
   const speechReview = await reviewFilmSpeech({ manifest: snapshot.originalJob.manifest, clips, ffmpeg,
-    transcribe: repairTranscriber(root, { now }), resolveCastNames: createRepairCastNameResolver({ manifest: snapshot.originalJob.manifest,
+    transcribe: repairTranscriber(root, { now }), resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest,
       manifestHash: snapshot.manifestHash, voices, provenance, constructionRoot, receiptRoot: root }) });
   if (speechReview?.passed !== true) throw fail('REPAIR_SPEECH_UNVERIFIED');
   const selectedAudio = [];
@@ -411,7 +411,7 @@ export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha2
       // A synthesis receipt never substitutes for its real script comparison.
       const reviewed = await reviewFilmSpeech({ ...input,
         transcribe: repairTranscriber(dirname(input.clips[0].path), { now, receiptRoot: buildRoot }),
-        resolveCastNames: createRepairCastNameResolver({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
+        resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
           voices: build.voices, provenance, constructionRoot: build.constructionRoot, receiptRoot: buildRoot }) });
       selectedAudio = await Promise.all(input.clips.map(async clip => {
         const audio = await localFile(clip.audioPath, dirname(clip.path));
