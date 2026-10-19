@@ -6,6 +6,7 @@ import { filmProduction, productionJobPath, FilmProductionError } from "./film-p
 import { payments } from "./payments.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
 import { FAL_RECIPE_VERSION } from "./fal-production.mjs";
+import { finishingFailure, sanitizeFinishingFailure } from "./film-finishing-diagnostics.mjs";
 
 const prefix = "production/queue/";
 const automaticPrefix = "production/automatic-starts/";
@@ -66,7 +67,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
         if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash) throw blocked();
         await currentAccount(actor.email);
         const { lease, ...value } = old.value;
-        try { await write(path, { ...value, state: "pending", attempts: 0, nextAttemptAt: now(), lastResult: "RESUMED" }, old.etag); }
+        try { await write(path, { ...value, state: "pending", attempts: 0, nextAttemptAt: now(), lastResult: "RESUMED", lastFailure: null }, old.etag); }
         catch (error) { if (!conflict(error)) throw error; }
       }
       return status({ email: actor.email, id });
@@ -179,24 +180,24 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       return true;
     } catch (error) { if (!conflict(error)) throw error; return false; }
   }
-  async function finish(ticket, state, code) {
+  async function finish(ticket, state, code, failure) {
     const saved = await read(ticket.path);
     if (saved?.value.lease?.token !== ticket.token || saved.value.lease.expiresAt <= now()) return false;
     const { lease, ...rest } = saved.value;
     const next = { ...rest, state, attempts: code === "PROGRESS" ? 0 : rest.attempts, updatedAt: new Date(now()).toISOString(),
       nextAttemptAt: now() + (code === "PROGRESS" ? 5000 : Math.min(300_000, 5000 * 2 ** Math.min(rest.attempts, 6))),
       // Fixed codes only: never persist provider responses, signed URLs or errors.
-      lastResult: code };
+      lastResult: code, lastFailure: sanitizeFinishingFailure(failure) };
     try { await write(ticket.path, next, saved.etag); return true; }
     catch (error) { if (!conflict(error)) throw error; return false; }
   }
   async function runTicket(path, { assemble } = {}) {
     const ticket = await claim(path);
     if (!ticket) return { state: "skipped" };
-    let renewal = Promise.resolve();
+    let renewal = Promise.resolve(), finishingStage = null;
     const timer = setIntervalImpl(() => (renewal = renewal.then(() => renew(ticket)).catch(() => false)), 30_000);
     timer?.unref?.();
-    const finishTicket = async (state, code) => { clearIntervalImpl(timer); await renewal; return finish(ticket, state, code); };
+    const finishTicket = async (state, code, failure) => { clearIntervalImpl(timer); await renewal; return finish(ticket, state, code, failure); };
     try {
       const actor = await currentAccount(ticket.value.email);
       const input = { email: ticket.value.email, id: ticket.value.id };
@@ -205,10 +206,13 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       if (job.status === "completed") { await finishTicket("completed", "COMPLETED"); return { state: "completed" }; }
       if (job.status === "failed") { await finishTicket("attention", "PROVIDER_FAILED"); return { state: "attention" }; }
       if (job.status === "awaiting-assembly") {
+        finishingStage = 'assembly';
         if (typeof assemble !== "function") throw blocked();
         const artifact = await assemble({ ...input, job, stillOwned: () => owns(ticket) });
         if (!await owns(ticket)) return { state: "skipped" };
+        finishingStage = 'stored-verification';
         await film.acceptAssembly({ ...input, manifestHash: job.manifestHash, artifact, stillOwned: () => owns(ticket) });
+        finishingStage = null;
       } else {
         await film.advance({ ...input, actor, authorizationReference: ticket.value.orderId });
       }
@@ -219,7 +223,9 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       return { state };
     } catch (error) {
       const needsReview = error instanceof FilmProductionError || error?.code==='FILM_SPEECH_REVIEW_REQUIRED' || ticket.value.attempts >= 10;
-      await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE");
+      const failure = finishingFailure(error, finishingStage);
+      if (failure) console.warn("FILM_FINISHING_FAILED", failure);
+      await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE", failure);
       return { state: needsReview ? "attention" : "pending" };
     } finally { clearIntervalImpl(timer); await renewal; }
   }

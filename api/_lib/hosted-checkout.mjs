@@ -438,10 +438,13 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     let planPath;
     try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable("PLAN_REFERENCE_INVALID");}
     const plan=await read(planPath),job=plan?.value;
+    // A paused assembly resumes the same completed clips. It still needs the
+    // existing live payment and saved-budget checks; it never prepares new shots.
     if(typeof plan?.etag!=="string"||!job||job.id!==preparedId||job.ownerHash!==digest(email)||job.manifestHash!==manifestHash
       ||!job.manifest||digest(JSON.stringify(job.manifest))!==manifestHash||job.filmId!==value.filmId||job.manifest.filmId!==value.filmId
       ||!Array.isArray(job.manifest.shots)||!job.manifest.shots.length||!Array.isArray(job.shots)||job.shots.length!==job.manifest.shots.length
-      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain"].includes(job.status))throw productionUnavailable("PLAN_INVALID");
+      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain","awaiting-assembly"].includes(job.status)
+      ||job.status==="awaiting-assembly"&&job.shots.some(shot=>shot.status!=="completed"))throw productionUnavailable("PLAN_INVALID");
     stage="settings";
     const settingsRecord=await readSettings(),s=settingsRecord?.value;
     stage="binding";

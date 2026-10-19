@@ -15,11 +15,13 @@ import { assembleFilm } from "./assemble-film.mjs";
 import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
 import { createRemoteProductionAuthorization } from "../api/_lib/remote-production-authorization.mjs";
 import { reviewFilmSpeech } from './review-film-speech.mjs';
+import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 const workerTempRoot = join(tmpdir(), "lineage-production-worker");
 const markerName = ".lineage-worker.json";
+const finishingError = (message, reason) => markFinishingFailure(new Error(message), null, reason);
 function processRunning(pid) { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; } }
 export async function cleanStaleWorkerDirectories(rootValue = workerTempRoot, { now = Date.now(), isRunning = processRunning } = {}) {
   const root = resolve(rootValue);
@@ -41,16 +43,16 @@ export async function cleanStaleWorkerDirectories(rootValue = workerTempRoot, { 
   return removed;
 }
 async function boundedBytes(stream, expected) {
-  if (!stream || !Number.isSafeInteger(expected) || expected < 16 || expected > MAX_BYTES) throw new Error("Invalid media size.");
+  if (!stream || !Number.isSafeInteger(expected) || expected < 16 || expected > MAX_BYTES) throw finishingError("Invalid media size.", "MEDIA_SIZE_INVALID");
   const reader = stream.getReader(), chunks = []; let length = 0;
   try {
     for (;;) {
       const next = await reader.read(); if (next.done) break;
       length += next.value.byteLength;
-      if (length > expected) throw new Error("Media size changed.");
+      if (length > expected) throw finishingError("Media size changed.", "MEDIA_SIZE_CHANGED");
       chunks.push(next.value);
     }
-    if (length !== expected) throw new Error("Media download was incomplete.");
+    if (length !== expected) throw finishingError("Media download was incomplete.", "MEDIA_DOWNLOAD_INCOMPLETE");
     return Buffer.concat(chunks, length);
   } finally { await reader.cancel().catch(() => {}); }
 }
@@ -61,7 +63,7 @@ async function downloadProductionMedia(verified, fetchImpl) {
   const contentType = response.headers.get("content-type")?.split(";")[0];
   const length = response.headers.get("content-length");
   if (response.status !== 200 || contentType !== verified.contentType || (length !== null && Number(length) !== verified.sizeBytes)) {
-    await response.body?.cancel(); throw new Error("The provider clip could not be verified.");
+    await response.body?.cancel(); throw finishingError("The provider clip could not be verified.", "MEDIA_RESPONSE_INVALID");
   }
   return boundedBytes(response.body, verified.sizeBytes);
 }
@@ -73,41 +75,46 @@ export async function downloadProductionAudio(output, allowedHosts, { fetchImpl 
 }
 
 export async function verifyPublishedFilm({ email, id, manifestHash, artifact, manifest }, { getBlob = get } = {}) {
+  try {
   verifiedMediaProfile(artifact);
   if (!artifact || artifact.technicalSample !== false || artifact.playable !== true || artifact.hasAudio !== true
     || artifact.manifestHash !== manifestHash || !/^[a-f0-9]{64}$/.test(artifact.sha256 || "")
     || artifact.pathname !== `production/media/${digest(email)}/${id}/${artifact.sha256}.mp4`
     || artifact.contentType !== "video/mp4" || !Number.isFinite(artifact.durationSeconds)
-    || Math.abs(artifact.durationSeconds - manifest.targetDurationSeconds) > 1) throw new Error("The assembled artifact is invalid.");
+    || Math.abs(artifact.durationSeconds - manifest.targetDurationSeconds) > 1) throw finishingError("The assembled artifact is invalid.", "STORED_ARTIFACT_INVALID");
   const stored = await getBlob(artifact.pathname, { access: "private", useCache: false });
-  if (!stored?.stream) throw new Error("The private film has not been stored.");
+  if (!stored?.stream) throw finishingError("The private film has not been stored.", "STORED_MEDIA_MISSING");
   if (stored.blob.size !== artifact.sizeBytes || stored.blob.contentType !== "video/mp4") {
-    await stored.stream.cancel(); throw new Error("The stored film changed.");
+    await stored.stream.cancel(); throw finishingError("The stored film changed.", "STORED_MEDIA_CHANGED");
   }
   const bytes = await boundedBytes(stored.stream, artifact.sizeBytes);
-  if (sha256(bytes) !== artifact.sha256) throw new Error("The private film checksum does not match.");
+  if (sha256(bytes) !== artifact.sha256) throw finishingError("The private film checksum does not match.", "STORED_CHECKSUM_MISMATCH");
   return { ...artifact, playable: true };
+  } catch (error) { throw markFinishingFailure(error, 'stored-verification'); }
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
   assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
+    let stage = 'assembly';
+    try {
     if (job.status !== "awaiting-assembly" || job.shots.length !== job.manifest.shots.length
-      || job.shots.some(shot => shot.status !== "completed") || adapter.available !== true) throw new Error("The film is not ready for assembly.");
+      || job.shots.some(shot => shot.status !== "completed") || adapter.available !== true) throw finishingError("The film is not ready for assembly.", "ASSEMBLY_NOT_READY");
     const root = resolve(tempRoot);
     await mkdir(root, { recursive: true });
     const work = await mkdtemp(join(root, "lineage-worker-"));
     try {
       await writeFile(join(work, markerName), JSON.stringify({ kind: "lineage-film-worker-v1", pid: process.pid, host: hostname(), createdAt: Date.now() }), { flag: "wx" });
       const clips = [];
+      stage = 'download';
       for (const [index, shot] of job.shots.entries()) {
-        if (!await stillOwned()) throw new Error("The worker claim expired.");
+        if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
         const bytes = await downloadProductionClip(shot.output, adapter.outputHosts, { fetchImpl });
         const path = join(work, `clip-${index}.${shot.output.contentType === "video/mp4" ? "mp4" : "webm"}`);
         await writeFile(path, bytes, { flag: "wx" });
         const clip = { shotId: shot.id, path };
         if (shot.output.audio !== undefined) {
-          if (!await stillOwned()) throw new Error("The worker claim expired.");
+          if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
           const audio = validateProviderAudio(shot.output.audio, adapter.outputHosts);
           const extension = { "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav", "audio/webm": "webm" }[audio.contentType];
           const audioBytes = await downloadProductionAudio(audio, adapter.outputHosts, { fetchImpl });
@@ -117,19 +124,22 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         clips.push(clip);
       }
       const outputPath = join(work, "film.mp4");
+      stage = 'speech-review';
       const speechReview = adapter.id==='fal' ? await reviewSpeech({manifest:job.manifest,clips,ffmpeg}) : null;
-      if(adapter.id==='fal'&&speechReview?.passed!==true)throw new Error('Film narration was not verified.');
+      if(adapter.id==='fal'&&speechReview?.passed!==true)throw finishingError('Film narration was not verified.', 'SPEECH_REVIEW_REQUIRED');
+      stage = 'assembly';
       const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
       verifiedMediaProfile(report);
       const bytes = await readFile(outputPath);
       if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
         || report.manifestHash !== job.manifestHash || !Number.isFinite(report.durationSeconds)
         || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
-        || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw new Error("Assembly verification failed.");
-      if (!await stillOwned()) throw new Error("The worker claim expired.");
+        || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw finishingError("Assembly verification failed.", "ASSEMBLY_REPORT_INVALID");
+      if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
       const pathname = `production/media/${digest(email)}/${id}/${report.sha256}.mp4`;
       // Immutable, content-addressed publication: retrying a lost response never
       // overwrites a different film. Readback verifies both new and prior writes.
+      stage = 'private-upload';
       try {
         await putBlob(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false,
           contentType: "video/mp4", cacheControlMaxAge: 60 });
@@ -147,6 +157,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       // Delete only this invocation's newly created directory under the chosen root.
       if (dirname(resolve(work)) === root && basename(work).startsWith("lineage-worker-")) await rm(work, { recursive: true, force: true });
     }
+    } catch (error) { throw markFinishingFailure(error, stage); }
   };
 }
 
