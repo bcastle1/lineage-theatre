@@ -9,6 +9,7 @@ import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
 import { captcha, CaptchaError } from "./_lib/captcha.mjs";
 import { createProductionQueue } from "./_lib/production-queue.mjs";
 import { streamProductionMedia } from "./_lib/production-media.mjs";
+import { streamSoundtrackRepairPreview } from "./_lib/soundtrack-repair-preview.mjs";
 import { isOwner } from "./_lib/access.mjs";
 import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-generation.mjs";
 import { paidFilmGenerationReview, PaidFilmReviewError } from "./_lib/paid-film-generation-review.mjs";
@@ -119,6 +120,14 @@ export function createStudioHandler(overrides={}) {
     if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionMedia")
       return streamProductionMedia({req,res,email,id:url.searchParams.get("id"),filmProduction,actor:session.user,read:readRecord,
         ...(overrides.getBlob?{getBlob:overrides.getBlob}:{}),download:url.searchParams.get("download")==="1"});
+    if(["GET","HEAD"].includes(req.method)&&url.searchParams.get("action")==="productionRepairPreview") {
+      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can review this soundtrack repair."});
+      if([...url.searchParams.keys()].some(key=>!["action","id","artifact"].includes(key))
+        ||["action","id","artifact"].some(key=>url.searchParams.getAll(key).length!==1))
+        return json(res,400,{message:"Choose the exact saved soundtrack preview."});
+      return streamSoundtrackRepairPreview({req,res,email,id:url.searchParams.get("id"),artifactSha256:url.searchParams.get("artifact"),
+        filmProduction,actor:session.user,read:readRecord,...(overrides.getBlob?{getBlob:overrides.getBlob}:{})});
+    }
     if(req.method==="GET") {
       const action=url.searchParams.get("action");
       if(action==="capabilities") return json(res,200,{...customerCapabilities(await connections({pricingSettings:await readPricingSettings(),filmService:filmProduction,
