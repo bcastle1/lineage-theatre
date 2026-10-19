@@ -419,9 +419,17 @@ export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha2
       }));
       return reviewed;
     };
-    const assembly = createWorkerAssembly({ ...dependencies, adapter: falProductionAdapter, ffmpeg, prepareClips, reviewSpeech });
+    const assemble = async input => {
+      const report = await assembleFilm(input);
+      // Publication must use exactly the video inspected in the private
+      // preview. Any encoding difference stops before the private upload.
+      if (report.sha256 !== reviewedPreviewSha256) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
+      return report;
+    };
+    const assembly = createWorkerAssembly({ ...dependencies, adapter: falProductionAdapter, ffmpeg, prepareClips, reviewSpeech, assemble });
     artifact = await assembly({ email: current.email, id: snapshot.preparedId, job: current.job.value, stillOwned: owns });
-    if (!artifact?.speechReview?.passed || selectedAudio?.length !== snapshot.sources.length || !await owns()) throw fail('REPAIR_SPEECH_UNVERIFIED');
+    if (!artifact?.speechReview?.passed || artifact.sha256 !== reviewedPreviewSha256
+      || selectedAudio?.length !== snapshot.sources.length || !await owns()) throw fail('REPAIR_SPEECH_UNVERIFIED');
     await saveReceipt('verified-artifact', { provenance, selectedAudio, artifact });
     const film = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write, now,
       verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
