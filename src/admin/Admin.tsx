@@ -1498,8 +1498,8 @@ export default function Admin({
                 <span className="admin-eyebrow">Film pricing</span>
                 <h2>Provider cost + your markup</h2>
                 <p>
-                  Use an actual provider quote when available, or your saved planning
-                  rates plus markup to set a fixed film price.
+                  Use the verified realistic-production quote plus your saved markup
+                  to set the customer's fixed film price.
                 </p>
                 <div className="admin-reference-rate">
                   <strong>
@@ -1509,21 +1509,11 @@ export default function Admin({
                   </strong>
                   <span>Current markup above the production cost basis</span>
                 </div>
-                {overview?.pricing?.referenceRate && (
-                  <p className="admin-fineprint">
-                    Reference:{" "}
-                    {money(
-                      overview.pricing.referenceRate.amountCents,
-                      overview.pricing.currency,
-                    )}{" "}
-                    per {overview.pricing.referenceRate.credits.toLocaleString()} credits.
-                  </p>
-                )}
                 <div className="admin-price-status">
                   <AlertCircle size={17} />
                   <span>
-                    Film prices can be prepared from your planning rates. Saved customer
-                    prices stay fixed. Payment and production readiness are verified separately.
+                    New prices require current provider rates and an available production worker.
+                    Saved customer prices stay fixed. Payment is verified before production.
                   </span>
                 </div>
                 <button className="text-button" onClick={() => chooseTab("pricing")}>
@@ -2213,7 +2203,7 @@ export default function Admin({
               <div>
                 <h2>Provider cost plus your markup</h2>
                 <p>
-                  Use an actual provider quote when available. Otherwise, use the planning rates below plus your saved markup to set the customer's fixed film price.
+                  A verified realistic-production quote plus your saved markup determines the customer's fixed film price.
                 </p>
               </div>
               <Percent size={24} />
@@ -2305,8 +2295,8 @@ export default function Admin({
                   </strong>
                 </div>
                 <p>
-                  An actual provider quote is preferred. When planning rates supply the cost basis,
-                  the customer still approves one fixed total. Later changes to these settings do not reprice an existing order.
+                  A current provider quote is required. The customer approves one fixed total.
+                  Later changes to these settings do not reprice an existing order.
                 </p>
               </div>
             </div>
