@@ -24,6 +24,7 @@ RUN chmod -R a+rX /opt/soundtrack \
 COPY api/_lib/ ./api/_lib/
 COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/review-film-speech.mjs scripts/transcribe-film.py ./scripts/
 COPY scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scripts/repair-paid-film-soundtrack.mjs ./scripts/
+COPY scripts/repair-name-proof.mjs scripts/compare-repair-name-pronunciations.py ./scripts/
 
 ENV LINEAGE_TTS_PYTHON=/opt/soundtrack/bin/python LINEAGE_TTS_MODEL_DIR=/opt/soundtrack/models/kokoro \
     FLUIDSYNTH_PATH=/usr/bin/fluidsynth LINEAGE_SOUNDFONT=/usr/share/sounds/sf2/FluidR3_GM.sf2 \

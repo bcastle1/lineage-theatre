@@ -13,6 +13,8 @@
 !scripts/rebuild-film-soundtrack-assets.py
 !scripts/rebuild-film-soundtrack-requirements.txt
 !scripts/repair-paid-film-soundtrack.mjs
+!scripts/repair-name-proof.mjs
+!scripts/compare-repair-name-pronunciations.py
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile.soundtrack
