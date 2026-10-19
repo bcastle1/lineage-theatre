@@ -14,7 +14,7 @@ export const automaticProductionPath = id => {
 // This durable outbox connects recorded payment to the existing, independently
 // authorized production queue. It never submits to a provider or changes money.
 export function createAutomaticProduction({ read = readRecord, write = writeRecord,
-  listBlobs = list, queue = productionQueue, now = Date.now } = {}) {
+  listBlobs = list, queue = productionQueue, now = Date.now, eager = true } = {}) {
   function eligible(order, id) {
     return order?.id === id && order.version === 1 && order.provider === "quickbooks"
       && order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured"
@@ -49,6 +49,9 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
     const old = await read(path);
     if (old) {
       if (!matches(old.value, current.order)) throw new Error("The saved production assignment changed.");
+      if (eager && old.value.state === "pending") {
+        try { return await advance(id); } catch { /* Durable retry remains pending. */ }
+      }
       return { state: old.value.state };
     }
     const ticket = { version: 1, id, email: current.actor.email, preparedId: current.order.preparedId,
@@ -59,6 +62,7 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
       if (!matches(saved?.value, current.order)) throw new Error("Production scheduling could not be confirmed.");
       return { state: saved.value.state };
     }
+    if (eager) { try { return await advance(id); } catch { /* The server sweep retries safely. */ } }
     return { state: "pending" };
   }
   async function advance(id) {
@@ -81,13 +85,21 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
     const cursorPath = "production/automatic-start-cursor.json", old = await read(cursorPath);
     // Live payment/reversal verification can take a minute. Start at most one
     // order per invocation within the shared function's 180-second budget.
-    const page = await listBlobs({ prefix: PREFIX, limit: 1, ...(old?.value.cursor ? { cursor: old.value.cursor } : {}) });
-    for (const blob of page.blobs) {
+    const page = await listBlobs({ prefix: PREFIX, limit: 100, ...(old?.value.cursor ? { cursor: old.value.cursor } : {}) });
+    let attempted = false, nextIndex = 0;
+    const offset = Number.isSafeInteger(old?.value.index) ? old.value.index : 0;
+    for (const [index, blob] of page.blobs.entries()) {
+      if (index < offset) continue;
       const id = blob.pathname.startsWith(PREFIX) ? blob.pathname.slice(PREFIX.length, -5) : "";
       if (!HASH.test(id) || blob.pathname !== automaticProductionPath(id)) { result.skipped++; continue; }
+      if ((await read(blob.pathname))?.value.state !== "pending") { result.skipped++; continue; }
+      attempted = true;
       try { result[(await advance(id)).state]++; } catch { result.pending++; }
+      nextIndex = index + 1;
+      break;
     }
-    try { await write(cursorPath, { cursor: page.hasMore ? page.cursor : null }, old?.etag); } catch { /* Next scan is safe to repeat. */ }
+    const resume = attempted && nextIndex < page.blobs.length;
+    try { await write(cursorPath, { cursor: resume ? old?.value.cursor || null : page.hasMore ? page.cursor : null, index: resume ? nextIndex : 0 }, old?.etag); } catch { /* Next scan is safe to repeat. */ }
     return result;
   }
   return { schedule, advance, run };

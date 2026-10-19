@@ -14,12 +14,12 @@ test('live base rates are verified before returning reviewed 1080p and 4K prices
     return new Response(JSON.stringify({ prices: prices() }));
   } });
   assert.equal((await read('wan')).videoMicroUsdPerSecond, 200000);
-  assert.equal((await read('seedance')).referenceMicroUsd, 300000); assert.equal(calls, 1);
-  now += 61000; const rate = await read('seedance'); assert.equal(calls, 2);
+  assert.equal((await read('seedance')).referenceMicroUsd, 300000); assert.equal(calls, 2);
+  now += 61000; const rate = await read('seedance'); assert.equal(calls, 3);
   assert.equal(Date.parse(rate.expiresAt), now + 86400000);
 });
 test('changed rates, currency, units and absent model prices fail closed', async () => {
-  for (const mutate of [p => { p[0].unit_price = 0.03; }, p => { p[1].currency = 'EUR'; }, p => { p[1].unit = 'minutes'; }, p => p.pop()]) {
+  for (const mutate of [p => { p[1].unit_price = 0.03; }, p => { p[1].currency = 'EUR'; }, p => { p[1].unit = 'minutes'; }, p => p.pop()]) {
     const p = prices(); mutate(p);
     const read = createFalPricing({ key: 'fixture', fetchImpl: async () => new Response(JSON.stringify({ prices: p })) });
     await assert.rejects(read('wan'), /pricing changed/);

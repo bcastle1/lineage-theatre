@@ -64,7 +64,7 @@ test("admin connection diagnostics still retain model, provider, merchant, and p
   assert.equal(result.connections.magiclight.provider,"fal");
   assert.match(result.connections.magiclight.reason,/Film production setup/);
   assert.match(result.connections.billing.reason,/QuickBooks/);
-  assert.match(result.connections.billing.reason,/planning estimate plus the saved administrator markup/);
+  assert.match(result.connections.billing.reason,/verified production quote plus the saved administrator markup/);
   assert.equal(result.pricing.markupBasisPoints,1250);
   assert.equal(result.magiclight,false);assert.equal(result.billing,false);
 });

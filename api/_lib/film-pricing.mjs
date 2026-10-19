@@ -1,8 +1,6 @@
 import { accessStatusForUser } from "./access.mjs";
-import { digest } from "./auth.mjs";
 import { readPricingSettings } from "./admin.mjs";
-import { buildFilmManifest, filmProduction, FilmProductionError } from "./film-production.mjs";
-import { pricingPolicy } from "./pricing.mjs";
+import { filmProduction, FilmProductionError } from "./film-production.mjs";
 
 const keyPattern = /^[A-Za-z0-9_-]{16,100}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
@@ -22,51 +20,6 @@ function markedUpAmount(costCents, settings) {
 }
 
 export function createFilmPricingService({ filmProduction: production = filmProduction, pricingSettings = readPricingSettings, now = Date.now, env = process.env } = {}) {
-  async function planningPrice(actor, body) {
-    // The same unavailable error can also signal a malformed live quote. Only
-    // an adapter that explicitly reports unavailable may use planning inputs.
-    if ((await production.readiness?.())?.available !== false || typeof production.getPrepared !== "function") throw unavailable();
-    const job = await production.getPrepared({ email: actor.email, id: body.preparedId });
-    if (!job || job.id !== body.preparedId || job.ownerHash !== digest(actor.email))
-      throw new FilmProductionError("This production does not belong to your account.", 404, "PRODUCTION_NOT_FOUND");
-    const rebuilt = buildFilmManifest(body.project);
-    if (job.manifestHash !== rebuilt.manifestHash || digest(JSON.stringify(job.manifest)) !== rebuilt.manifestHash || job.filmId !== rebuilt.manifest.filmId)
-      throw new FilmProductionError("This screenplay has changed. Prepare the current version before requesting a price.", 409, "PRODUCTION_PLAN_CHANGED");
-    if (job.status !== "prepared" || !Array.isArray(job.shots) || job.shots.length !== job.manifest.shots.length
-      || job.shots.some((shot, index) => shot.status !== "prepared" || shot.id !== job.manifest.shots[index].id))
-      throw new FilmProductionError("Production has already started for this plan. Check the existing film before making another payment.", 409, "PRODUCTION_ALREADY_STARTED");
-    const planUntil = job.expiresAt === undefined ? Infinity : typeof job.expiresAt === "string" ? Date.parse(job.expiresAt) : NaN;
-    if (!(planUntil > now())) throw new FilmProductionError("This production plan expired. Prepare the current screenplay again.", 409, "PRODUCTION_PLAN_EXPIRED");
-    const settings = await pricingSettings();
-    if (!settings || !Number.isSafeInteger(settings.planningCreditsPerClip) || settings.planningCreditsPerClip < 1 || settings.planningCreditsPerClip > 1_000_000
-      || !Number.isSafeInteger(settings.planningSecondsPerClip) || settings.planningSecondsPerClip < 1 || settings.planningSecondsPerClip > 60
-      || !Number.isSafeInteger(settings.planningRendersPerClip) || settings.planningRendersPerClip < 1 || settings.planningRendersPerClip > 20) throw unavailable();
-    // The public Pro pack ($88 / 80,000 credits, up to 280 clips) was checked
-    // 2026-09-22 at https://magiclight.ai/openclaw/pricing/. Credits per clip,
-    // seconds per clip and render count are editable planning assumptions,
-    // never claims about a supported generation contract or final film quality.
-    const clipMs = BigInt(settings.planningSecondsPerClip) * 1000n;
-    const clips = job.manifest.shots.reduce((sum, shot) => sum + (BigInt(shot.targetDurationMs) + clipMs - 1n) / clipMs, 0n);
-    const credits = clips * BigInt(settings.planningRendersPerClip) * BigInt(settings.planningCreditsPerClip);
-    let policy;
-    try { policy = pricingPolicy(env); } catch { throw unavailable(); }
-    const denominator = BigInt(policy.packCredits);
-    const cost = (2n * credits * BigInt(policy.packPriceCents) + denominator) / (2n * denominator);
-    if (cost < 1n || cost > 100_000_000n) throw unavailable();
-    markedUpAmount(Number(cost), settings);
-    const currentTime = now();
-    if (!(planUntil > currentTime)) throw new FilmProductionError("This production plan expired. Prepare the current screenplay again.", 409, "PRODUCTION_PLAN_EXPIRED");
-    return {
-      preparedId: job.id, manifestHash: job.manifestHash, filmId: job.filmId, filmTitle: job.manifest.title,
-      currency: "USD", providerCostCents: Number(cost), expiresAt: new Date(Math.min(planUntil, currentTime + 15 * 60_000)).toISOString(),
-      quoteReference: digest(JSON.stringify({ basis: "planning-rate", preparedId: job.id, manifestHash: job.manifestHash,
-        packPriceCents: policy.packPriceCents, packCredits: policy.packCredits,
-        planningCreditsPerClip: settings.planningCreditsPerClip, planningSecondsPerClip: settings.planningSecondsPerClip,
-        planningRendersPerClip: settings.planningRendersPerClip, markupBasisPoints: settings.markupBasisPoints, revision: settings.revision })),
-      environment: "production", pricingBasis: "planning-rate", pricingSettings: settings,
-      apiVerified: false, qualityVerified: false, commercialTermsVerified: false,
-    };
-  }
   async function calculate(actor, body) {
     // The shared check covers customer approval and persisted legacy admin
     // roles, while denying suspended accounts regardless of their role.
@@ -88,8 +41,7 @@ export function createFilmPricingService({ filmProduction: production = filmProd
         preparedId: body.preparedId, idempotencyKey: body.idempotencyKey,
       });
     } catch (error) {
-      if (error instanceof FilmProductionError && error.status === 503 && ["PRODUCTION_UNAVAILABLE", "PRICE_UNAVAILABLE"].includes(error.code))
-        return planningPrice(actor, body);
+      if(error instanceof FilmProductionError && error.status===503 && ["PRODUCTION_UNAVAILABLE","PRICE_UNAVAILABLE"].includes(error.code)) throw unavailable();
       throw error;
     }
     const until = typeof supplied?.expiresAt === "string" ? Date.parse(supplied.expiresAt) : NaN;

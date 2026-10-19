@@ -20,27 +20,11 @@ function fixture(actor = owner, limit = true) {
   } };
 }
 
-test("live generation is owner-only with same-origin explicit consent and no caller-selected provider input", async () => {
-  for (const actor of [null, { email: "customer@example.invalid", role: "customer", status: "active" },
-    { email: "admin@example.invalid", role: "admin", status: "active" }, { ...owner, status: "suspended" }, { ...owner, mustChangePassword: true }]) {
-    const h = fixture(actor);
-    assert.ok([401, 403].includes((await h.run()).status));
-    assert.ok([401, 403].includes((await h.run({ method: "GET", action: "magicLightLiveTest" })).status));
-    assert.equal(h.calls.length, 0);
-  }
-  const h = fixture();
-  assert.equal((await h.run({ origin: "https://another.invalid" })).status, 403);
-  for (const fields of [{}, { consent: false }, { consent: true, text: "another film" }, { consent: true, imageUrl: "https://other.invalid" },
-    { consent: true, apiKey: "private" }, { consent: true, taskId: "other" }, { consent: true, idempotencyKey: "another" }]) {
-    assert.equal((await h.run({ fields })).status, 400);
-  }
-  assert.equal(h.calls.length, 0);
-  const response = await h.run();
-  assert.equal(response.status, 200);
-  assert.deepEqual(h.calls, [{ method: "submit", args: [owner, { consent: true }] }]);
-  assert.equal(response.body.productionReady, false);
-  assert.equal(response.body.customerFulfillment, false);
-  assert.match(response.headers["Cache-Control"], /no-store/);
+test("retired MagicLight submission never dispatches a paid request",async()=>{
+ for(const actor of [null,owner,{email:"customer@example.invalid",role:"customer"}]){
+  const h=fixture(actor);assert.equal((await h.run()).status,410);assert.equal(h.calls.length,0);
+ }
+ assert.equal((await fixture().run({origin:"https://elsewhere.invalid"})).status,403);
 });
 
 test("saved live-test reads and checks cannot submit another task", async () => {
@@ -48,11 +32,11 @@ test("saved live-test reads and checks cannot submit another task", async () => 
   assert.equal((await h.run({ method: "GET", action: "magicLightLiveTest" })).status, 200);
   assert.equal((await h.run({ action: "checkMagicLightLiveTest", fields: {} })).status, 200);
   assert.deepEqual(h.calls.map(call => call.method), ["status", "check"]);
-  assert.equal((await h.run({ method: "GET", action: "submitMagicLightLiveTest" })).status, 400);
+  assert.equal((await h.run({ method: "GET", action: "submitMagicLightLiveTest" })).status, 410);
   assert.equal((await h.run({ action: "checkMagicLightLiveTest", fields: { taskId: "another" } })).status, 400);
   assert.equal(h.calls.length, 2);
   const limited = fixture(owner, false);
-  assert.equal((await limited.run()).status, 429);
+  assert.equal((await limited.run()).status, 410);
   assert.equal(limited.calls.length, 0);
 });
 

@@ -122,7 +122,7 @@ export function createStudioHandler(overrides={}) {
       const action=url.searchParams.get("action");
       if(action==="capabilities") return json(res,200,{...customerCapabilities(await connections({pricingSettings:await readPricingSettings(),filmService:filmProduction,
         ...(hosted?{checkoutConfiguration:await hosted.configuration(session.user)}:{})})),
-        ...(isOwner(session.user)&&generation.availableFor(session.user)===true?{generationAttempt:true}:{})});
+        ...{}});
       if(action==="generationAttempt") {
         if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
         const preparedId=url.searchParams.get("id");
@@ -151,6 +151,8 @@ export function createStudioHandler(overrides={}) {
     if(req.method!=="POST") return json(res,405,{message:"Method not allowed."});
     if(!sameOrigin(req)) return json(res,403,{message:"Begin this action inside Lineage Theatre."});
     const body=await readBody(req);
+    if (["requestFilmGeneration","replaceFilmGeneration"].includes(body?.action))
+      return json(res,410,{message:"This creation method has retired. Paid films now use automatic realistic production."});
     if(body?.action==="approveGeneration") {
       if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can approve this generation result."});
       if(Object.keys(body).some(key=>!["action","preparedId","artifactSha256","consent"].includes(key))

@@ -5,7 +5,7 @@ import { tmpdir, hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { get, put } from "@vercel/blob";
-import { digest } from "../api/_lib/auth.mjs";
+import { digest, readRecord, writeRecord } from "../api/_lib/auth.mjs";
 import { createFilmProductionService, validateProviderOutput, validateProviderAudio, unavailableMagicLightAdapter } from "../api/_lib/film-production.mjs";
 import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
 import { createProductionQueue } from "../api/_lib/production-queue.mjs";
@@ -14,6 +14,7 @@ import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
 import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
 import { createRemoteProductionAuthorization } from "../api/_lib/remote-production-authorization.mjs";
+import { reviewFilmSpeech } from './review-film-speech.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -89,7 +90,7 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
-  assemble = assembleFilm, ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
+  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     if (job.status !== "awaiting-assembly" || job.shots.length !== job.manifest.shots.length
       || job.shots.some(shot => shot.status !== "completed") || adapter.available !== true) throw new Error("The film is not ready for assembly.");
@@ -116,6 +117,8 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         clips.push(clip);
       }
       const outputPath = join(work, "film.mp4");
+      const speechReview = adapter.id==='fal' ? await reviewSpeech({manifest:job.manifest,clips,ffmpeg}) : null;
+      if(adapter.id==='fal'&&speechReview?.passed!==true)throw new Error('Film narration was not verified.');
       const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
       verifiedMediaProfile(report);
       const bytes = await readFile(outputPath);
@@ -131,7 +134,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         await putBlob(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false,
           contentType: "video/mp4", cacheControlMaxAge: 60 });
       } catch { /* A complete matching private readback is the only success signal. */ }
-      const artifact = { ...report, pathname };
+      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}) };
       // acceptAssembly verifies the private readback before marking completion,
       // including a lost upload response. Avoid downloading the same film twice.
       // Retain captions privately; failed caption publication cannot claim success.
@@ -181,12 +184,19 @@ async function main() {
   }
   if (!readiness.available || !process.env.BLOB_READ_WRITE_TOKEN) throw new Error("Worker is not configured: connect the documented provider and private storage before processing jobs.");
   await cleanStaleWorkerDirectories();
+  const healthPath='production/worker-health.json';
+  const heartbeat=async()=>{
+    const old=await readRecord(healthPath);
+    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,checkedAt:new Date().toISOString()},old?.etag);
+  };
+  await heartbeat();
+  const pulse=setInterval(()=>void heartbeat().catch(()=>{}),30000);pulse.unref();
   let cursor;
-  do {
+  try { do {
     const result = await worker.runBatch({ cursor, limit: 20 });
     cursor = result.cursor;
     process.stdout.write(`${JSON.stringify({ completed: result.completed, pending: result.pending, attention: result.attention, skipped: result.skipped })}\n`);
-  } while (cursor);
+  } while (cursor); } finally {clearInterval(pulse);}
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(() => { process.stderr.write("Production worker could not run. Check provider activation, private storage, and worker configuration. No automatic charge or submission retry was performed.\n"); process.exitCode = 1; });

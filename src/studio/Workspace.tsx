@@ -544,7 +544,7 @@ export default function Workspace({
           project: {
             ...film,
             selectedThemes,
-            providerId: "magiclight",
+            providerId: "lineage-theatre",
             quality: "highest",
           },
           storyConsent: true,

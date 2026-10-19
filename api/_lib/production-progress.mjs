@@ -57,10 +57,17 @@ export function productionProgressSnapshot({ job, queue, attempt, history = [], 
   const freshness = now - stamp(observedAt);
   const stale = !Number.isFinite(freshness) || freshness < 0 || freshness > STALE_MS;
   // Full-film histories cannot calibrate the separate legacy single-task pilot.
-  if (legacy || history.length < 5 || !Number.isFinite(stamp(startedAt)) || stamp(startedAt) > now) return stale ? { ...result, timing: "stale" } : result;
+  const initial = history.length < 5 && job.provider?.id === "fal" && job.provider?.model === "wan";
+  if (legacy || (!initial && history.length < 5) || !Number.isFinite(stamp(startedAt)) || stamp(startedAt) > now) return stale ? { ...result, timing: "stale" } : result;
   const elapsed = Math.max(0, (now - stamp(startedAt)) / 1000);
-  const duration = bounds(history.map(s => s.totalSeconds));
-  const render = bounds(history.map(s => s.renderSeconds));
+  // A conservative capacity estimate, not invented completion samples. Parallel
+  // batches include reference creation, rendering and local finishing checks.
+  const cast = new Set(manifestShots.flatMap(s => s.characterIds || [])).size;
+  const batches = Math.max(1, Math.ceil(shots.length / 4));
+  const referenceBatches = Math.ceil(cast / 4);
+  const initialHigh = 360 * batches + 180 * referenceBatches + 180 + Math.ceil(total / 1000 * 2);
+  const duration = initial ? { low: Math.round(initialHigh * .5), high: initialHigh, middle: initialHigh * .7 } : bounds(history.map(s => s.totalSeconds));
+  const render = initial ? { low: duration.low - 60, high: duration.high - 60, middle: duration.middle - 60 } : bounds(history.map(s => s.renderSeconds));
   // Do not extrapolate into later stages or keep moving an overdue deadline.
   const delayed = elapsed >= duration.high || stage === "creating" && elapsed >= render.high;
   let percent = result.percent;
@@ -79,9 +86,9 @@ export function productionProgressSnapshot({ job, queue, attempt, history = [], 
   }
   if (stale) return { ...result, percent, basis: percent === result.percent ? result.basis : "measured-estimate", timing: "stale" };
   if (delayed) return { ...result, percent, basis: percent === result.percent ? result.basis : "measured-estimate", timing: "delayed" };
-  return { ...result, percent, basis: percent === result.percent ? result.basis : "measured-estimate", timing: "available",
+  return { ...result, percent, basis: percent === result.percent ? result.basis : initial ? "initial-estimate" : "measured-estimate", timing: "available",
     estimate: { earliestAt: new Date(stamp(startedAt) + duration.low * 1000).toISOString(),
-      latestAt: new Date(stamp(startedAt) + duration.high * 1000).toISOString(), sampleCount: history.length } };
+      latestAt: new Date(stamp(startedAt) + duration.high * 1000).toISOString(), sampleCount: initial ? 0 : history.length, source: initial ? "initial" : "measured" } };
 }
 
 export function createProductionProgress({ read = readRecord, write = writeRecord, now = Date.now } = {}) {

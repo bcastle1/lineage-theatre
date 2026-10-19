@@ -163,8 +163,8 @@ test('reference and render stages require separate current spending approval and
     value.result = value.endpoint === FAL_MODELS.reference ? { images: [{ url: 'https://v3.fal.media/reference.png' }] } : { video: { url: 'https://v3.fal.media/film.mp4' } }; return value; } };
   const adapter = createFalProductionAdapter({ model: 'wan', client, read:async()=>null, now: () => at, normalizeReference: async url => url, fetchImpl: async () => new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }) });
   const input = { manifest, manifestHash, shot: manifest.shots[0], productionId: 'fixture-production', idempotencyKey: digest('fixture-scene'), authorizeSpend: async () => { grantChecks++; return allowed; } };
-  assert.equal((await adapter.submitShot(input)).status, 'queued'); assert.equal(submitted.length, 1);
-  allowed = false; await assert.rejects(adapter.pollShot(input), /spending is not authorized/); assert.equal(submitted.length, 1);
+  assert.equal((await adapter.submitShot(input)).status, 'processing'); assert.equal(submitted.length, 2);
+  allowed = false; await assert.rejects(adapter.pollShot(input), /spending is not authorized/); assert.equal(submitted.length, 2);
   allowed = true; await adapter.pollShot(input); await adapter.pollShot(input); const result = await adapter.pollShot(input);
   assert.equal(result.status, 'completed'); assert.equal(submitted.length, 3); assert.equal(grantChecks, 4);
   await adapter.pollShot(input); assert.equal(submitted.length, 3);

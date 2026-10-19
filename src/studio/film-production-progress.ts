@@ -5,9 +5,9 @@ export type FilmProductionProgressInput = {
 type Stage = "waiting" | "queued" | "creating" | "finishing" | "ready" | "attention";
 type Timing = "learning" | "available" | "delayed" | "stale" | "paused" | "complete";
 export type FilmProgressSnapshot = { version: 1; stage: Stage; percent: number | null;
-  basis: "confirmed-work" | "measured-estimate"; timing: Timing; asOf: string; observedAt: string | null;
+  basis: "confirmed-work" | "measured-estimate" | "initial-estimate"; timing: Timing; asOf: string; observedAt: string | null;
   completedScenes: number; totalScenes: number;
-  estimate: { earliestAt: string; latestAt: string; sampleCount: number } | null };
+  estimate: { earliestAt: string; latestAt: string; sampleCount: number; source?: "initial" | "measured" } | null };
 export type FilmProductionProgressView = { percent: number | null; label: string; stage: string; stageKey: Stage;
   explanation: string; timing: Timing; remaining: string; estimate: FilmProgressSnapshot["estimate"]; updatedAt: string | null };
 const date = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -19,7 +19,7 @@ const count = (value: unknown): value is number => Number.isSafeInteger(value) &
 export function normalizeFilmProgress(value: unknown): FilmProgressSnapshot | null {
   if (!object(value) || value.version !== 1 || !["waiting", "queued", "creating", "finishing", "ready", "attention"].includes(String(value.stage))
     || !["learning", "available", "delayed", "stale", "paused", "complete"].includes(String(value.timing))
-    || !["confirmed-work", "measured-estimate"].includes(String(value.basis)) || !date(value.asOf)
+    || !["confirmed-work", "measured-estimate", "initial-estimate"].includes(String(value.basis)) || !date(value.asOf)
     || value.observedAt !== null && !date(value.observedAt)
     || value.percent !== null && (!count(value.percent) || value.percent > 100)
     || !count(value.completedScenes) || !count(value.totalScenes) || value.completedScenes > value.totalScenes) return null;
@@ -28,8 +28,9 @@ export function normalizeFilmProgress(value: unknown): FilmProgressSnapshot | nu
     if (!object(value.estimate) || value.timing !== "available" || !["creating", "finishing"].includes(String(value.stage))
       || !date(value.estimate.earliestAt) || !date(value.estimate.latestAt)
       || Date.parse(value.estimate.latestAt) < Date.parse(value.estimate.earliestAt)
-      || !count(value.estimate.sampleCount) || value.estimate.sampleCount < 5 || value.estimate.sampleCount > 30) return null;
-    estimate = { earliestAt: value.estimate.earliestAt, latestAt: value.estimate.latestAt, sampleCount: value.estimate.sampleCount };
+      || !count(value.estimate.sampleCount) || (value.estimate.source === "initial" ? value.estimate.sampleCount !== 0 : value.estimate.sampleCount < 5 || value.estimate.sampleCount > 30)) return null;
+    estimate = { earliestAt: value.estimate.earliestAt, latestAt: value.estimate.latestAt, sampleCount: value.estimate.sampleCount,
+      ...(value.estimate.source === "initial" ? {source:"initial" as const} : {}) };
   } else if (value.timing === "available") return null;
   return { version: 1, stage: value.stage as Stage, percent: value.percent as number | null, basis: value.basis as FilmProgressSnapshot["basis"],
     timing: value.timing as Timing, asOf: value.asOf, observedAt: value.observedAt as string | null,
@@ -73,7 +74,9 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
     remaining = low === 0 ? `Up to ${high} ${high === 1 ? "minute" : "minutes"} remaining`
       : low === high ? `About ${high} ${high === 1 ? "minute" : "minutes"} remaining` : `About ${low}–${high} minutes remaining`;
   }
-  const explanation = timing === "available" ? "Estimated from recent films with the same production settings. The window updates as your film progresses."
+  const explanation = timing === "available" ? estimate?.source === "initial"
+    ? "Initial estimate based on your film's scenes and finishing work. Rendering times vary; progress updates automatically as work completes."
+    : "Estimated from recent films with the same production settings. The window updates as your film progresses."
     : timing === "delayed" ? "Your film is taking longer than the measured delivery window. Your progress is saved; we will update the estimate when it can be confirmed."
       : timing === "stale" ? "The last confirmed progress is shown. We are waiting for an update before adjusting the estimate."
         : timing === "paused" ? "The Lineage Theatre team needs to check this film. Your payment and saved version are safe; you do not need to pay again."

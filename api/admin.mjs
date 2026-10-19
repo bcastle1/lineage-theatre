@@ -45,6 +45,7 @@ export function createAdminHandler(overrides={}) {
     const url=new URL(req.url,`https://${req.headers.host}`);
     const body=req.method==="POST"?await readBody(req,32_000):null;
     const action=body?.action || url.searchParams.get("action") || "overview";
+    if(action==="submitMagicLightLiveTest") return resultError(res,410,"This production method has retired.");
     // Pending users can claim their exact owner-issued invitation, but cannot
     // read administrator data or skip a required password change.
     const session=await getSession(req,req.method==="POST" && action==="acceptInvite");

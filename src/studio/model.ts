@@ -179,7 +179,7 @@ export const newFilm = (): Film => ({
   era: "",
   style: "Cinematic",
   duration: 120,
-  providerId: "magiclight",
+  providerId: "lineage-theatre",
   sources: [],
   themes: [],
   selectedThemes: [],
@@ -273,7 +273,7 @@ export function normalizeFilm(raw: Partial<Film>): Film {
     ...(paymentReference ? { paymentReference } : {}),
     duration,
     style: raw.style || "Cinematic",
-    providerId: "magiclight",
+    providerId: "lineage-theatre",
     quality: "highest",
     factuality:
       raw.factuality ||

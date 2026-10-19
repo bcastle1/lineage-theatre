@@ -31,11 +31,7 @@ import { api, formatDuration, type User } from "../studio/model";
 import type { Notice } from "../studio/Workspace";
 import ProductionPreparation from "../studio/ProductionPreparation";
 import QuickBooksPaymentTest from "./QuickBooksPaymentTest";
-import MagicLightConnectionCheck from "./MagicLightConnectionCheck";
-import MagicLightLiveTest from "./MagicLightLiveTest";
-import MagicLightActivationCheck from "./MagicLightActivationCheck";
 import FilmGenerationOperations from "./FilmGenerationOperations";
-import FilmDelivery from "./FilmDelivery";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
@@ -1424,11 +1420,7 @@ export default function Admin({
               ))}
             </div>
             {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
-            <FilmDelivery />
             {isOwner && <ProductionPreparation operator />}
-            {isOwner && <MagicLightConnectionCheck disabled={busy || loading} />}
-            {isOwner && <MagicLightLiveTest disabled={busy || loading} />}
-            {isOwner && <MagicLightActivationCheck disabled={busy || loading} />}
             {isOwner && <FilmGenerationOperations disabled={busy || loading} />}
             <div className="admin-overview-grid">
               <section className="admin-card">
@@ -1445,7 +1437,7 @@ export default function Admin({
                 {(
                   [
                     ["Story development", "GPT-6 Astra", overview?.connections.story],
-                    ["Film production", "MagicLight", overview?.connections.magiclight],
+                    ["Film production", "Realistic film service", overview?.connections.magiclight],
                     ["Payments & refunds", "QuickBooks", overview?.connections.billing],
                   ] as const
                 ).map(([label, provider, connection]) => (
@@ -1498,7 +1490,7 @@ export default function Admin({
                   <p>
                     {overview?.quality?.verified
                       ? overview.quality.label
-                      : "Confirm MagicLight's supported settings before production. The final film also requires a verified service connection, production quote, and payment setup."}
+                      : "Confirm the realistic film service before production. The final film also requires a verified service connection, production quote, and payment setup."}
                   </p>
                 </div>
               </section>
@@ -2264,27 +2256,7 @@ export default function Admin({
                     {pricing.updatedBy ? ` by ${pricing.updatedBy}` : ""}
                   </p>
                 )}
-                <fieldset className="admin-planning-assumptions" disabled={busy || loading || !pricing}>
-                  <legend>Film price calculation</legend>
-                  <p>Use planning rates when exact production costs are unavailable. The calculated total becomes the fixed retail price after adding your saved markup.</p>
-                  <label>Credits per clip
-                    <input type="number" min="1" max="1000000" step="1" inputMode="numeric" value={planningCredits}
-                      onChange={event => setPlanningCredits(event.target.value)} required />
-                    <small>Default 286: 80,000 credits divided by up to 280 videos, rounded up. Actual usage depends on the selected generation settings.</small>
-                  </label>
-                  <label>Seconds per clip
-                    <input type="number" min="1" max="60" step="1" inputMode="numeric" value={planningSeconds}
-                      onChange={event => setPlanningSeconds(event.target.value)} required />
-                    <small>Default 6 seconds is a planning assumption, not a verified provider clip duration.</small>
-                  </label>
-                  <label>Renders per clip
-                    <input type="number" min="1" max="20" step="1" inputMode="numeric" value={planningRenders}
-                      onChange={event => setPlanningRenders(event.target.value)} required />
-                    <small>Default 1 render. Increase this to budget for repeated attempts.</small>
-                  </label>
-                  <p>Published reference checked September 22, 2026: MagicLight Pro API pack, $88 for 80,000 credits and up to 280 Hailuo-series videos. <a href="https://magiclight.ai/openclaw/pricing/" target="_blank" rel="noopener noreferrer">View provider pricing</a>.</p>
-                  <p>Final quality, narration, dialogue, music, assembly and retries may change BROCO's actual cost. The customer pays the saved, approved total; BROCO absorbs any cost difference. These assumptions do not verify provider capabilities or enable the payment connection.</p>
-                </fieldset>
+                <p>New prices use the current realistic production quote plus your saved markup. Checkout pauses if the production service is unavailable.</p>
                 {actionError && (
                   <div className="admin-inline-error" role="alert">
                     {actionError}
@@ -2313,7 +2285,7 @@ export default function Admin({
                 <Badge>Price calculation example</Badge>
                 <h3>A $10.00 production cost basis</h3>
                 <div>
-                  <span>Provider quote or planning cost</span>
+                  <span>Verified production quote</span>
                   <strong>$10.00</strong>
                 </div>
                 <div>

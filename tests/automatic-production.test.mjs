@@ -6,7 +6,7 @@ import { digest, userPath } from "../api/_lib/auth.mjs";
 const NOW = Date.parse("2026-10-08T12:00:00Z"), id = "a".repeat(64);
 const email = "customer@example.invalid", preparedId = "10000000-1111-4222-8333-444444444444";
 const filmId = "20000000-1111-4222-8333-444444444444";
-function fixture() {
+function fixture(eager = false) {
   const records = new Map(), calls = [], queueIds = new Set(); let serial = 0, fail = false;
   const seed = (path, value) => records.set(path, { value: structuredClone(value), etag: String(++serial) });
   const read = async path => structuredClone(records.get(path) || null);
@@ -22,7 +22,7 @@ function fixture() {
     customerEmail: email, preparedId, manifestHash, filmId };
   seed(userPath(email), actor); seed(`payments/orders/${id}.json`, order);
   seed(`production/jobs/${digest(email)}/${preparedId}.json`, { id: preparedId, filmId, ownerHash: digest(email), manifest, manifestHash });
-  const dependencies = { read, write, now: () => NOW,
+  const dependencies = { read, write, eager, now: () => NOW,
     listBlobs: async ({ prefix }) => ({ blobs: [...records.keys()].filter(p => p.startsWith(prefix)).slice(0, 1).map(pathname => ({ pathname })), hasMore: false }),
     queue: { enqueue: async input => { if (fail) throw Error("provider unavailable"); calls.push(input); queueIds.add(`${input.actor.email}:${input.id}`); } } };
   return { service: createAutomaticProduction(dependencies), peer: () => createAutomaticProduction(dependencies), seed, read, records, calls, queueIds, order, actor,
@@ -70,4 +70,11 @@ test("racing scheduling and workers keep the existing queue's single film identi
   const f = fixture(); await Promise.all([f.service.schedule({ id }), f.peer().schedule({ id })]);
   await Promise.all([f.service.run(), f.peer().run()]);
   assert.equal(f.queueIds.size, 1); assert.equal((await f.read(automaticProductionPath(id))).value.state, "queued");
+});
+
+test("confirmed payment immediately enters the queue; a failed dispatch keeps durable retry intent",async()=>{
+ const f=fixture(true); assert.equal((await f.service.schedule({id})).state,"queued"); assert.equal(f.calls.length,1);
+ await f.service.schedule({id});assert.equal(f.calls.length,1);
+ const g=fixture(true);g.failQueue(true);assert.equal((await g.service.schedule({id})).state,"pending");
+ g.failQueue(false);assert.equal((await g.service.run()).queued,1);
 });

@@ -144,7 +144,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       await finishTicket(state, state === "completed" ? "COMPLETED" : state === "attention" ? "REVIEW_REQUIRED" : uncertain ? "UNCERTAIN" : "PROGRESS");
       return { state };
     } catch (error) {
-      const needsReview = error instanceof FilmProductionError || ticket.value.attempts >= 10;
+      const needsReview = error instanceof FilmProductionError || error?.code==='FILM_SPEECH_REVIEW_REQUIRED' || ticket.value.attempts >= 10;
       await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE");
       return { state: needsReview ? "attention" : "pending" };
     } finally { clearIntervalImpl(timer); await renewal; }

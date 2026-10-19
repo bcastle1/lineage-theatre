@@ -425,6 +425,7 @@ export function createFilmProductionService(dependencies = {}) {
     try { profile = verifiedMediaProfile(verified); }
     catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
+    if(verified.speechReview?.passed===true)job.speechReview=verified.speechReview;
     job.status = "completed";
     job.completedAt = stamp();
     await save(productionJobPath(email, id), job, record.etag);

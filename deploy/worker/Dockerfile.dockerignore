@@ -14,6 +14,10 @@
 !scripts/check-worker-runtime.mjs
 !scripts/check-hosted-reversals.mjs
 !scripts/paid-film-delivery-worker.mjs
+!scripts/review-film-speech.mjs
+!scripts/transcribe-film.py
+!shared/
+!shared/*.json
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile

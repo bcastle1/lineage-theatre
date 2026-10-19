@@ -75,19 +75,10 @@ test("invalid actors and unsupported client fields fail before any production qu
   assert.equal(h.calls.length, 0);
 });
 
-test("legacy approved owner and administrator roles can price their saved plan without account changes", async () => {
-  for (const legacy of [{ email: OWNER_EMAIL, role: "owner" }, { email: "admin@example.invalid", role: "admin" }]) {
-    const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-    const plan = await production.prepare({ email: legacy.email, project, preparationConsent: true, idempotencyKey: "fictional-legacy-prepare-001" });
-    const before = structuredClone([...data.records]);
-    const h = fixture({ filmProduction: production });
-    const result = await h.service.price(legacy, { ...input(), preparedId: plan.id });
-    assert.equal(result.amountCents, 141);
-    assert.equal(result.pricingBasis, "planning-rate");
-    assert.equal(result.preparedId, plan.id);
-    assert.deepEqual([...data.records], before);
-    assert.equal(Object.hasOwn(legacy, "status"), false);
-  }
+test("legacy approved roles can obtain verified provider prices",async()=>{
+ for(const legacy of [{email:OWNER_EMAIL,role:"owner"},{email:"admin@example.invalid",role:"admin"}]){
+  assert.equal((await fixture().service.price(legacy,input())).amountCents,1500);
+ }
 });
 
 test("every trusted provider field must be valid before returning a numeric price", async () => {
@@ -107,108 +98,16 @@ test("every trusted provider field must be valid before returning a numeric pric
     await assert.rejects(fixture({ pricingSettings: async () => settings }).service.price(actor, input()), unavailableError);
 });
 
-test("the unavailable production adapter returns a fixed planning-rate price without creating a payment quote or order", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const before = structuredClone([...data.records]);
-  const service = fixture({ filmProduction: production }).service;
-  const result = await service.price(actor, { ...input(), preparedId: plan.id });
-  assert.deepEqual(result, { preparedId: plan.id, manifestHash: plan.manifestHash, filmId: project.id, filmTitle: project.title,
-    currency: "USD", amountCents: 141, expiresAt: new Date(NOW + 15 * 60_000).toISOString(), sandbox: false, kind: "confirmed", pricingBasis: "planning-rate", note: fixedPriceNote });
-  assert.doesNotMatch(JSON.stringify(result), /magiclight|hailuo|provider|credits|markup|renders|quickbooks|orderId|quoteReference|qualityVerified/i);
-  assert.deepEqual([...data.records], before);
-  assert.equal(data.records.size, 1);
-  assert.ok([...data.records.keys()].every(path => path.startsWith("production/jobs/")));
-});
-
-test("photo-only and older edited films receive fixed prices without screenplay review metadata", async () => {
-  for (const kind of ["photo", "older-two-scenes", "manual-one-scene"]) {
-    const saved = structuredClone(project), data = store();
-    if (kind === "photo") {
-      saved.sources[0] = { id: saved.sources[0].id, name: "fictional-photo.png", type: "image/png", text: "", note: "" };
-    } else {
-      saved.scenes = saved.scenes.slice(0, kind === "manual-one-scene" ? 1 : 2).map(({ title, narration, visual }) => ({ title, narration, visual }));
-      delete saved.characters; delete saved.assumptions; delete saved.selectedThemes; delete saved.logline;
-    }
-    const unchanged = structuredClone(saved);
-    const production = createFilmProductionService({ ...data, now: () => NOW });
-    const plan = await production.prepare({ email: actor.email, project: saved, preparationConsent: true, idempotencyKey: `fictional-${kind}-request` });
-    const beforePrice = structuredClone([...data.records]);
-    const price = await fixture({ filmProduction: production }).service.price(actor, {
-      project: saved, preparedId: plan.id, idempotencyKey: `fictional-${kind}-price`,
-    });
-    assert.equal(price.amountCents, kind === "older-two-scenes" ? 189 : 141);
-    assert.equal(price.manifestHash, plan.manifestHash);
-    assert.equal(price.kind, "confirmed");
-    assert.deepEqual(saved, unchanged);
-    assert.deepEqual([...data.records], beforePrice);
-    assert.equal(data.records.size, 1, "pricing creates no payment or generation records");
-  }
-});
-
-test("planning-rate prices use saved per-scene timing, server rate and editable clip assumptions", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const body = { ...input(), preparedId: plan.id };
-  // Each of the three scenes needs two three-second clips. Two renders per
-  // clip at 100 credits use 1,200 credits, costing $2.40 at this server rate.
-  const result = await fixture({ filmProduction: production,
-    env: { MAGICLIGHT_API_PACK_PRICE_CENTS: "200", MAGICLIGHT_API_PACK_CREDITS: "1000" },
-    settings: { ...planningSettings, planningCreditsPerClip: 100, planningSecondsPerClip: 3, planningRendersPerClip: 2 },
-  }).service.price(actor, body);
-  assert.equal(result.amountCents, 360); assert.equal(result.kind, "confirmed"); assert.equal(result.pricingBasis, "planning-rate");
-  const record = [...data.records.values()][0];
-  record.value.expiresAt = new Date(NOW + 30_000).toISOString();
-  const shortened = await fixture({ filmProduction: production }).service.price(actor, body);
-  assert.equal(shortened.expiresAt, record.value.expiresAt);
-});
-
-test("an unset pricing record uses the saved-settings service defaults for a fixed price", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const service = fixture({ filmProduction: production, pricingSettings: () => readPricingSettings(async () => null) }).service;
-  const result = await service.price(actor, { ...input(), preparedId: plan.id });
-  assert.equal(result.amountCents, 141); assert.equal(result.kind, "confirmed"); assert.equal(result.pricingBasis, "planning-rate");
-});
-
-test("planning-rate prices reject unowned, changed, started, corrupt or expired saved plans", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const service = fixture({ filmProduction: production }).service, body = { ...input(), preparedId: plan.id };
-  await assert.rejects(service.price({ ...actor, email: "other@example.invalid" }, body), error => error.code === "PRODUCTION_NOT_FOUND");
-  await assert.rejects(service.price(actor, { ...body, project: { ...project, title: "Changed film" } }), error => error.code === "PRODUCTION_PLAN_CHANGED");
-  const record = [...data.records.values()][0], original = structuredClone(record.value);
-  for (const mutate of [job => { job.status = "processing"; }, job => { job.shots[0].status = "queued"; }, job => { job.shots.pop(); }]) {
-    mutate(record.value);
-    await assert.rejects(service.price(actor, body), error => error.code === "PRODUCTION_ALREADY_STARTED");
-    record.value = structuredClone(original);
-  }
-  record.value.manifest.shots[0].targetDurationMs++;
-  await assert.rejects(service.price(actor, body), error => error.code === "PRODUCTION_PLAN_CHANGED");
-  record.value = structuredClone(original);
-  for (const expiresAt of [new Date(NOW).toISOString(), "invalid", NOW + 60_000]) {
-    record.value.expiresAt = expiresAt;
-    await assert.rejects(service.price(actor, body), error => error.code === "PRODUCTION_PLAN_EXPIRED");
-  }
-});
-
-test("invalid planning settings and rates cannot create a price or bypass the amount cap", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const body = { ...input(), preparedId: plan.id };
-  for (const patch of [{ planningCreditsPerClip: 0 }, { planningCreditsPerClip: 1_000_001 }, { planningSecondsPerClip: 0 },
-    { planningSecondsPerClip: 61 }, { planningSecondsPerClip: 1.5 }, { planningRendersPerClip: "2" }, { planningRendersPerClip: 21 },
-    { markupBasisPoints: -1 }, { revision: -1 }])
-    await assert.rejects(fixture({ filmProduction: production, pricingSettings: async () => ({ ...planningSettings, ...patch }) }).service.price(actor, body), unavailableError);
-  for (const env of [{ MAGICLIGHT_API_PACK_PRICE_CENTS: "200" },
-    { MAGICLIGHT_API_PACK_PRICE_CENTS: "100000000", MAGICLIGHT_API_PACK_CREDITS: "1" },
-    { MAGICLIGHT_API_PACK_PRICE_CENTS: "1", MAGICLIGHT_API_PACK_CREDITS: "9007199254740991" }])
-    await assert.rejects(fixture({ filmProduction: production, env }).service.price(actor, body), unavailableError);
-  let time = NOW;
-  [...data.records.values()][0].value.expiresAt = new Date(NOW + 60_000).toISOString();
-  await assert.rejects(fixture({ filmProduction: production, now: () => time,
-    pricingSettings: async () => { time += 60_000; return planningSettings; },
-  }).service.price(actor, body), error => error.code === "PRODUCTION_PLAN_EXPIRED");
+test("unavailable production never falls back to legacy planning rates or creates checkout",async()=>{
+ const data=store(),production=createFilmProductionService({...data,now:()=>NOW});
+ const plan=await production.prepare({email:actor.email,project,preparationConsent:true,idempotencyKey:"fictional-prepare-request-001"});
+ const before=structuredClone([...data.records]);
+ for(const settings of [planningSettings,{...planningSettings,planningCreditsPerClip:1}]){
+  const service=fixture({filmProduction:production,settings}).service;
+  await assert.rejects(service.price(actor,{...input(),preparedId:plan.id}),unavailableError);
+  await assert.rejects(service.quoteForPayment(project,actor,{preparedId:plan.id,idempotencyKey:input().idempotencyKey,environment:"production"}),unavailableError);
+ }
+ assert.deepEqual([...data.records],before);
 });
 
 test("a malformed live quote never silently becomes a planning-rate price", async () => {
@@ -220,27 +119,6 @@ test("a malformed live quote never silently becomes a planning-rate price", asyn
   const production = { readiness: () => ({ available: false }), getPrepared: async () => assert.fail("Must not estimate malformed provider output"),
     quoteForPayment: async () => ({ ...supplied(), providerCostCents: -1 }) };
   await assert.rejects(fixture({ filmProduction: production }).service.price(actor, input()), unavailableError);
-});
-
-test("trusted payment quotes retain planning cost snapshots without claiming provider readiness", async () => {
-  const data = store(), production = createFilmProductionService({ ...data, now: () => NOW });
-  const plan = await production.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: "fictional-prepare-request-001" });
-  const service = fixture({ filmProduction: production }).service;
-  const options = { preparedId: plan.id, idempotencyKey: input().idempotencyKey, environment: "sandbox" };
-  const before = structuredClone([...data.records]);
-  const quote = await service.quoteForPayment(project, actor, options);
-  assert.deepEqual(quote, { preparedId: plan.id, manifestHash: plan.manifestHash, filmId: project.id, filmTitle: project.title,
-    currency: "USD", providerCostCents: 94, expiresAt: new Date(NOW + 15 * 60_000).toISOString(), quoteReference: quote.quoteReference,
-    environment: "sandbox", pricingBasis: "planning-rate", apiVerified: false, qualityVerified: false, commercialTermsVerified: false, pricingRevision: 2 });
-  assert.match(quote.quoteReference, /^[a-f0-9]{64}$/);
-  assert.deepEqual(await service.quoteForPayment(project, actor, options), quote);
-  assert.equal((await service.quoteForPayment(project, actor, { ...options, environment: "production" })).environment, "production");
-  assert.deepEqual([...data.records], before);
-  for (const environment of [undefined, "unavailable", "Production"])
-    await assert.rejects(service.quoteForPayment(project, actor, { ...options, environment }), unavailableError);
-  const changed = await fixture({ filmProduction: production, settings: { ...planningSettings, planningCreditsPerClip: 300, revision: 3 } })
-    .service.quoteForPayment(project, actor, options);
-  assert.notEqual(changed.quoteReference, quote.quoteReference); assert.equal(changed.providerCostCents, 99);
 });
 
 test("trusted provider payment quotes preserve real verification flags and require a matching merchant environment", async () => {
