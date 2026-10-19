@@ -7,6 +7,7 @@ import {PaymentError} from "./payments.mjs";
 import {productionJobPath} from "./film-production.mjs";
 import {readProductionAllowance} from "./production-allowance.mjs";
 import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
+import {markProductionAuthorizationFailure} from "./production-authorization-diagnostics.mjs";
 import {normalizeHostedInvoiceUrl as safeLink} from "../../src/studio/hosted-invoice-url.mjs";
 
 export class HostedCheckoutError extends PaymentError {}
@@ -14,8 +15,8 @@ export const HOSTED_CHECKOUT_SETTINGS_PATH="settings/quickbooks-hosted.json";
 const METHOD="quickbooks-hosted-invoice",SOURCE="quickbooks-accounting";
 const hex=/^[a-f0-9]{64}$/,numeric=/^[0-9]{1,30}$/,keys=/^[A-Za-z0-9_-]{16,100}$/;
 const unavailable=()=>new HostedCheckoutError("Payment is not available yet. Your saved film and price are unchanged.",503,"HOSTED_CHECKOUT_UNAVAILABLE");
-const productionUnavailable=()=>new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"PRODUCTION_UNAVAILABLE");
-const reversalsUnavailable=()=>new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"HOSTED_REVERSALS_UNVERIFIED");
+const productionUnavailable=reason=>markProductionAuthorizationFailure(new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"PRODUCTION_UNAVAILABLE"),"authorization",reason);
+const reversalsUnavailable=reason=>markProductionAuthorizationFailure(new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"HOSTED_REVERSALS_UNVERIFIED"),"authorization",reason);
 const conflict=()=>new HostedCheckoutError("This request changed or is already being processed. Check the saved order before continuing.",409,"PAYMENT_CONFLICT",null);
 const expired=()=>new HostedCheckoutError("This price or its checkout terms changed. Prepare your price again.",409,"QUOTE_EXPIRED");
 const existingOrder=()=>new HostedCheckoutError("A payment page already exists for this saved film. Recover its saved payment or contact the administrator.",409,"ORDER_ALREADY_EXISTS");
@@ -397,12 +398,18 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     // A planning price and a cached paid badge never authorize provider expense.
     // Each short-lived grant requires the original paid price, its private plan,
     // a live exact invoice allocation and an actual capped full-film quote.
-    if(typeof email!=="string"||email!==email.trim().toLowerCase()||!hex.test(manifestHash||"")||!hex.test(referenceId||""))throw productionUnavailable();
+    let stage="request";
+    try {
+    if(typeof email!=="string"||email!==email.trim().toLowerCase()||!hex.test(manifestHash||"")||!hex.test(referenceId||""))throw productionUnavailable("REQUEST_INVALID");
+    stage="actor-read";
     const actorRecord=await read(userPath(email)),actor=actorRecord?.value;
-    if(typeof actorRecord?.etag!=="string"||actor?.email!==email)throw productionUnavailable();
+    if(typeof actorRecord?.etag!=="string"||actor?.email!==email)throw productionUnavailable("ACTOR_RECORD_INVALID");
+    stage="actor-access";
     await access(actor);
+    stage="order-read";
     const path=orderPath(referenceId),record=await read(path),value=record?.value;
-    if(!hex.test(value?.quoteId||""))throw productionUnavailable();
+    if(!hex.test(value?.quoteId||""))throw productionUnavailable("PAID_QUOTE_REFERENCE_INVALID");
+    stage="paid-quote-read";
     const paidQuotePath=quotePath(email,value.quoteId),paidQuote=await read(paidQuotePath),q=paidQuote?.value;
     const validTime=value=>typeof value==="string"&&Number.isFinite(Date.parse(value))&&Date.parse(value)<=now();
     const sameCompany=(a,b)=>bound(a)&&bound(b)&&a.environment===b.environment&&a.realmId===b.realmId;
@@ -423,61 +430,89 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       &&order.accountingPayments.reduce((sum,payment)=>sum+payment.allocatedCents,0)===order.amountCents
       &&Array.isArray(order.paymentIds)&&order.paymentIds.length===order.accountingPayments.length
       &&order.paymentIds.every((id,index)=>id===order.accountingPayments[index].id));
-    if(typeof record?.etag!=="string"||typeof paidQuote?.etag!=="string"||!captured(value))throw productionUnavailable();
+    stage="captured-order";
+    if(typeof record?.etag!=="string"||typeof paidQuote?.etag!=="string"||!captured(value))throw productionUnavailable("CAPTURED_ORDER_INVALID");
+    stage="allowance";
     const allowance=await readProductionAllowance({order:value,read,now});
+    stage="plan";
     let planPath;
-    try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable();}
+    try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable("PLAN_REFERENCE_INVALID");}
     const plan=await read(planPath),job=plan?.value;
     if(typeof plan?.etag!=="string"||!job||job.id!==preparedId||job.ownerHash!==digest(email)||job.manifestHash!==manifestHash
       ||!job.manifest||digest(JSON.stringify(job.manifest))!==manifestHash||job.filmId!==value.filmId||job.manifest.filmId!==value.filmId
       ||!Array.isArray(job.manifest.shots)||!job.manifest.shots.length||!Array.isArray(job.shots)||job.shots.length!==job.manifest.shots.length
-      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain"].includes(job.status))throw productionUnavailable();
+      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain"].includes(job.status))throw productionUnavailable("PLAN_INVALID");
+    stage="settings";
     const settingsRecord=await readSettings(),s=settingsRecord?.value;
+    stage="binding";
     const binding=await transport.binding({allowRefresh:true});
     if(typeof settingsRecord?.etag!=="string"||!complete(s)||binding.environment!==env.QUICKBOOKS_ENVIRONMENT
-      ||!sameCompany(binding,value.merchantBinding)||!sameCompany(binding,s.merchantBinding))throw productionUnavailable();
+      ||!sameCompany(binding,value.merchantBinding)||!sameCompany(binding,s.merchantBinding))throw productionUnavailable("MERCHANT_BINDING_INVALID");
     let authorizedRecord=record;
     async function recheck() {
+      stage="allowance-recheck";
       await allowance.recheck();
-      if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw productionUnavailable();
+      stage="binding-recheck";
+      if(!sameBinding(binding,await transport.binding({allowRefresh:false})))throw productionUnavailable("BINDING_CHANGED");
+      stage="records-recheck";
       const order=await read(path),quote=await read(paidQuotePath),prepared=await read(planPath),settings=await readSettings();
       if(order?.etag!==authorizedRecord.etag||!captured(order?.value)||quote?.etag!==paidQuote.etag
-        ||prepared?.etag!==plan.etag||settings?.etag!==settingsRecord.etag)throw productionUnavailable();
+        ||prepared?.etag!==plan.etag||settings?.etag!==settingsRecord.etag)throw productionUnavailable("RECORDS_CHANGED");
+      stage="actor-recheck";
       await access(actor);const account=await read(userPath(email));
-      if(account?.etag!==actorRecord.etag)throw productionUnavailable();
+      if(account?.etag!==actorRecord.etag)throw productionUnavailable("ACTOR_CHANGED");
     }
     async function verifyPaidInvoice() {
       await recheck();
+      stage="invoice-read";
       const checkedAt=now(),invoice=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice;
+      stage="invoice-validation";
       const data=invoiceData(invoice,value),payments=[];
-      for(const paymentId of data.paymentIds)payments.push(paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId));
-      if(data.balanceCents!==0||!payments.length||payments.reduce((sum,payment)=>sum+payment.allocatedCents,0)!==value.amountCents)throw productionUnavailable();
+      for(const paymentId of data.paymentIds) {
+        stage="payment-read";
+        const payment=(await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment;
+        stage="payment-validation";
+        payments.push(paymentAllocation(payment,value,paymentId));
+      }
+      if(data.balanceCents!==0||!payments.length||payments.reduce((sum,payment)=>sum+payment.allocatedCents,0)!==value.amountCents)throw productionUnavailable("INVOICE_ALLOCATION_INVALID");
       // A separate RefundReceipt or CreditMemo/Expense can leave this invoice
       // and its Payment allocation unchanged. Require a fresh completed scan
       // for recorded Accounting reversals. This does not prove bank settlement
       // or absence of unrecorded refunds outside QuickBooks.
       // https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/Payment
-      if(typeof verifyReversals!=="function")throw reversalsUnavailable();
+      stage="reversals";
+      if(typeof verifyReversals!=="function")throw reversalsUnavailable("REVERSAL_VERIFIER_UNAVAILABLE");
       const context={orderId:referenceId,environment:binding.environment,grantId:binding.grantId,realmId:binding.realmId,
         customerId:value.customerId,invoiceId:value.invoiceId,currency:value.currency,amountCents:value.amountCents,paymentIds:data.paymentIds,saleCreatedAt:value.createdAt};
       const proof=await verifyReversals(structuredClone(context)),observed=Date.parse(proof?.checkedAt),expires=Date.parse(proof?.expiresAt);
+      stage="reversal-proof";
       if(!proof||proof.version!==1||proof.outcome!=="clear"||proof.scope!==HOSTED_REVERSAL_SCOPE||!hex.test(proof.evidenceHash||"")
         ||Object.keys(context).some(field=>field==="paymentIds"?!Array.isArray(proof.paymentIds)||JSON.stringify(proof.paymentIds)!==JSON.stringify(context.paymentIds):proof[field]!==context[field])
         ||typeof proof.checkedAt!=="string"||typeof proof.expiresAt!=="string"||!Number.isFinite(observed)||!Number.isFinite(expires)
-        ||observed<checkedAt||observed>now()||expires<=now()||expires>observed+60_000)throw reversalsUnavailable();
+        ||observed<checkedAt||observed>now()||expires<=now()||expires>observed+60_000)throw reversalsUnavailable("REVERSAL_PROOF_INVALID");
       // Reconciliation can span several paginated queries. Re-read this sale
       // after the scan so an unapplied/voided invoice or Payment cannot reuse
       // the paid snapshot taken before it.
-      const finalInvoice=invoiceData((await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice,value);
-      if(finalInvoice.balanceCents!==0||JSON.stringify(finalInvoice.paymentIds)!==JSON.stringify(data.paymentIds))throw productionUnavailable();
+      stage="final-invoice-read";
+      const finalInvoiceResponse=(await response(binding,{method:"GET",path:`/invoice/${value.invoiceId}`})).Invoice;
+      stage="final-invoice-validation";
+      const finalInvoice=invoiceData(finalInvoiceResponse,value);
+      if(finalInvoice.balanceCents!==0||JSON.stringify(finalInvoice.paymentIds)!==JSON.stringify(data.paymentIds))throw productionUnavailable("FINAL_INVOICE_CHANGED");
       let finalAllocation=0;
-      for(const paymentId of finalInvoice.paymentIds)finalAllocation+=paymentAllocation((await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment,value,paymentId).allocatedCents;
-      if(finalAllocation!==value.amountCents)throw productionUnavailable();
+      for(const paymentId of finalInvoice.paymentIds) {
+        stage="final-payment-read";
+        const payment=(await response(binding,{method:"GET",path:`/payment/${paymentId}`})).Payment;
+        stage="final-payment-validation";
+        finalAllocation+=paymentAllocation(payment,value,paymentId).allocatedCents;
+      }
+      if(finalAllocation!==value.amountCents)throw productionUnavailable("FINAL_ALLOCATION_INVALID");
       await recheck();
-      if(checkedAt+60_000<=now()||expires<=now())throw productionUnavailable();
+      stage="payment-freshness";
+      if(checkedAt+60_000<=now()||expires<=now())throw productionUnavailable("PAYMENT_PROOF_EXPIRED");
       return {checkedAt,expiresAt:expires};
     }
     let verifiedAt=await verifyPaidInvoice(),fresh=value.fulfillmentQuote;
+    stage="quote-validation";
     const quoteValid=quote=>quote&&quote.preparedId===preparedId&&quote.manifestHash===manifestHash&&quote.environment===binding.environment&&quote.currency==="USD"
       &&quote.apiVerified===true&&quote.qualityVerified===true&&quote.commercialTermsVerified===true
       &&Number.isSafeInteger(quote.providerCostCents)&&quote.providerCostCents>=0&&quote.providerCostCents<=allowance.budgetCents
@@ -485,27 +520,34 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       &&(!allowance.quoteReference||quote.quoteReference===allowance.quoteReference)
       &&typeof quote.quoteReference==="string"&&quote.quoteReference.trim()&&quote.quoteReference.length<=200
       &&typeof quote.expiresAt==="string"&&Number.isFinite(Date.parse(quote.expiresAt));
-    if(fresh&&!quoteValid(fresh))throw productionUnavailable();
+    if(fresh&&!quoteValid(fresh))throw productionUnavailable("SAVED_QUOTE_INVALID");
+    stage="started-authorization";
     const started=job.status!=="prepared"||job.shots.some(shot=>shot.status!=="prepared");
     if(started&&(!fresh||job.authorization?.manifestHash!==manifestHash||job.authorization.environment!==binding.environment
-      ||job.authorization.quoteReference!==fresh.quoteReference||job.authorization.budgetCents!==fresh.maximumCostCents))throw productionUnavailable();
+      ||job.authorization.quoteReference!==fresh.quoteReference||job.authorization.budgetCents!==fresh.maximumCostCents))throw productionUnavailable("STARTED_AUTHORIZATION_MISMATCH");
     if(!fresh||Date.parse(fresh.expiresAt)<=now()) {
       // An expired full-film quote cannot be replaced after even one submission.
-      if(started)throw productionUnavailable();
+      if(started)throw productionUnavailable("STARTED_QUOTE_EXPIRED");
+      stage="quote-request";
       fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:allowance.budgetCents});
-      if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw productionUnavailable();
+      stage="quote-refresh-validation";
+      if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw productionUnavailable("FRESH_QUOTE_INVALID");
       // Payment may have been voided/refunded while the provider quote was read.
       verifiedAt=await verifyPaidInvoice();
-      if(Date.parse(fresh.expiresAt)<=now())throw productionUnavailable();
+      stage="quote-refresh-validation";
+      if(Date.parse(fresh.expiresAt)<=now())throw productionUnavailable("FRESH_QUOTE_EXPIRED");
       const fulfillmentQuote=Object.fromEntries(["preparedId","manifestHash","environment","currency","providerCostCents","maximumCostCents",
         "quoteReference","expiresAt","apiVerified","qualityVerified","commercialTermsVerified"].map(field=>[field,fresh[field]]));
+      stage="quote-save";
       authorizedRecord=await save(path,record,{...value,fulfillmentQuote});
     }
     await recheck();
+    stage="grant-freshness";
     const until=Math.min(Date.parse(fresh.expiresAt),verifiedAt.checkedAt+60_000,verifiedAt.expiresAt,now()+60_000);
-    if(until<=now())throw productionUnavailable();
+    if(until<=now())throw productionUnavailable("GRANT_EXPIRED");
     return {allowed:true,manifestHash,budgetCents:fresh.maximumCostCents,quoteReference:fresh.quoteReference,expiresAt:stamp(until),
       environment:binding.environment,fictionalOnly:binding.environment==="sandbox"};
+    }catch(error){throw markProductionAuthorizationFailure(error,stage);}
   }
   return {settings,catalog,saveSettings,configuration,adminConfiguration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
     ownsOrder:async id=>hex.test(id||"")&&(await read(orderPath(id)))?.value.checkoutMethod===METHOD,

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryCanWatch, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+import { libraryActionRequest, libraryCanWatch, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
   parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
+import type { ProductionStatus } from "./film-fulfillment";
 import "./film-library.css";
 import FilmProductionProgress from "./FilmProductionProgress";
 import LtxFilmLibrary from "./LtxFilmLibrary";
@@ -10,6 +11,11 @@ import LtxFilmLibrary from "./LtxFilmLibrary";
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "The film library could not complete this action. Please refresh.";
+function resumablePayment(detail: LibraryDetail | null) {
+  if (!detail?.manifest || !detail.entry.production.needsAttention
+    || !["prepared", "queued", "submitting", "processing", "uncertain"].includes(detail.entry.production.status)) return null;
+  return libraryGenerationOrder(detail.entry);
+}
 export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
   const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
     && payment.refundedCents === 0 && payment.receiptAvailable);
@@ -207,6 +213,42 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
+  async function resumePaidFilm() {
+    const payment = resumablePayment(detail);
+    if (!detail || !payment || lock.current || disabled || productionAvailable !== true) return;
+    const expected = detail.entry, request = ++detailSequence.current;
+    const isCurrent = () => mounted.current && request === detailSequence.current;
+    const refreshDetail = async () => verifyLibraryDetail(await api<unknown>(
+      `/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
+    const showDetail = (value: LibraryDetail) => {
+      if (!isCurrent()) return;
+      setDetail(value);
+      setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
+    };
+    lock.current = true; setBusy("Resuming your paid film…"); setError(""); setMessage("");
+    try {
+      // Revalidate the exact stored manifest and payment before resuming it.
+      const latest = await refreshDetail();
+      if (!isCurrent()) return;
+      showDetail(latest);
+      if (resumablePayment(latest)?.id !== payment.id) {
+        throw new Error("This film's status changed. Review its refreshed status before resuming production.");
+      }
+      const result = await api<ProductionStatus>("/api/studio", {
+        action: "startProduction", preparedId: expected.id, orderId: payment.id, productionConsent: true,
+      });
+      if (!result || result.id !== expected.id || result.manifestHash !== expected.manifestHash
+        || !["prepared", "queued", "submitting", "processing", "uncertain", "failed", "completed"].includes(result.status)) {
+        throw new Error("The resume result could not be verified. Refresh this film's status before trying again.");
+      }
+      const refreshed = await refreshDetail();
+      showDetail(refreshed);
+      if (isCurrent()) setMessage(libraryCanWatch(refreshed.entry)
+        ? "Your paid film is ready to watch."
+        : "Resume request completed. Follow this saved film's current production status below.");
+    } catch (cause) { if (isCurrent()) setError(errorText(cause)); }
+    finally { if (isCurrent()) { lock.current = false; setBusy(""); } }
+  }
   async function createVersion(entry: LibraryEntry) {
     if (lock.current || disabled || !detail?.manifest || detail.entry.kind !== "plan"
       || libraryKey(detail.entry) !== libraryKey(entry)) return;
@@ -216,6 +258,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
   const blocked = disabled || Boolean(busy);
+  const resumePayment = resumablePayment(detail);
   const drafts = projects.filter(project => localLibraryState(project) === view);
   const closeConfirmation = () => { if (!busy) { dialog.current?.close(); setConfirmation(null); } };
   const openConfirmation = (value: Confirmation) => { if (!blocked) { setError(""); setConfirmation(value); } };
@@ -274,7 +317,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
         <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={closeDetail}><X size={18} /></button></div>
       <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
+      {resumePayment && <p className="field-note">Resume production using this saved screenplay and its existing payment.</p>}
       <div className="action-group film-library-actions">
+        {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true}
+          onClick={() => void resumePaidFilm()}><RotateCcw size={15} aria-hidden="true" />Resume paid film</button>}
         {libraryCanWatch(detail.entry) && <>
           <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
           <a className="text-button" href={detail.entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
