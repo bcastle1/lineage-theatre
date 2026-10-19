@@ -5,6 +5,7 @@ import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
 import { falProductionAdapter } from "./fal-production.mjs";
+import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -78,6 +79,16 @@ export function buildFilmManifest(project) {
     assumptions: savedRows(project.assumptions, "Film notes", 40, ["id", "description", "reason"]),
     scenes: savedRows(project.scenes, "Film scenes", 30, ["title", "narration", "visual", "sourceIds", "characterIds", "dialogue", "dramatization"], 1),
   };
+  // Keep legacy manifest bytes identical when no photo was explicitly selected.
+  // Client-supplied checksums or private paths are never accepted as bindings.
+  screenplay.characters.forEach((character, index) => {
+    const sourceId = project.characters[index].referencePhotoId;
+    if (sourceId === undefined || sourceId === "") return;
+    if (!UUID.test(sourceId) || !character.sourceIds.includes(sourceId)
+      || !family.sources.some(source => source.id === sourceId && ["image/jpeg", "image/png", "image/webp"].includes(source.type)))
+      invalid("Choose a photo from this film's sources and link it to the character before preparing production.");
+    character.referencePhotoId = sourceId;
+  });
   const safeScreenplay = clone(screenplay);
   if (Buffer.byteLength(JSON.stringify(safeScreenplay)) > MAX_MANIFEST_BYTES) invalid("This screenplay is too large for a single production plan.");
   const weights = safeScreenplay.scenes.map(s => Math.max(1, `${s.narration} ${s.dialogue}`.trim().split(/\s+/).filter(Boolean).length));
@@ -172,6 +183,17 @@ export function createFilmProductionService(dependencies = {}) {
   const uuid = dependencies.uuid || randomUUID;
   const stamp = () => new Date(now()).toISOString();
   const progress = createProductionProgress({ read, write, now });
+  async function preparedManifest(project, email) {
+    const built = buildFilmManifest(project);
+    try {
+      const manifest = await bindProductionPhotos(built.manifest, owner(email), { read,
+        ...(dependencies.getSourceBlob ? { getBlob: dependencies.getSourceBlob } : {}) });
+      return { manifest, manifestHash: hash(manifest) };
+    } catch (error) {
+      if (error instanceof ProductionPhotoError) throw new FilmProductionError(error.message, error.status, error.code);
+      throw error;
+    }
+  }
   async function get(email, id) {
     const record = await read(productionJobPath(email, id));
     if (!record || record.value.ownerHash !== digest(owner(email))) throw new FilmProductionError("This production does not belong to your account.", 404, "PRODUCTION_NOT_FOUND");
@@ -203,7 +225,7 @@ export function createFilmProductionService(dependencies = {}) {
   async function prepare({ email, project, idempotencyKey, preparationConsent, mode = "customer" }) {
     email = owner(email); key(idempotencyKey);
     if (preparationConsent !== true) invalid("Allow your screenplay, cast, and production plan to be saved privately before preparing your film.");
-    const { manifest, manifestHash } = buildFilmManifest(project);
+    const { manifest, manifestHash } = await preparedManifest(project, email);
     // Deterministic request identity makes a lost response safe to retry.
     const seed = digest(`${email}:${idempotencyKey}`);
     const id = `${seed.slice(0, 8)}-${seed.slice(8, 12)}-${seed.slice(12, 16)}-${seed.slice(16, 20)}-${seed.slice(20, 32)}`;
@@ -230,7 +252,7 @@ export function createFilmProductionService(dependencies = {}) {
       : customerJob((await get(actor?.email, preparedId)).value);
     const record = await get(actor.email, prepared.id);
     const job = record.value;
-    if (buildFilmManifest(project).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
+    if ((await preparedManifest(project, actor.email)).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
       throw new FilmProductionError("This screenplay has changed. Prepare the current version before requesting a price.", 409, "PRODUCTION_PLAN_CHANGED");
     }
     if (job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) {

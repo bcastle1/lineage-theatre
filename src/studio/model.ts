@@ -47,6 +47,7 @@ export interface Character {
   description: string;
   basis: "documented" | "inferred" | "invented";
   sourceIds: string[];
+  referencePhotoId?: string;
 }
 export interface Assumption {
   id: string;
@@ -162,7 +163,8 @@ export function productionPreparationInput(film: Film) {
     style: film.style, factuality: film.factuality, music: film.music, logline: film.logline,
     sources: film.sources.map(({ id, name, type, text, note, extraction }) => ({ id, name, type, text: text || "", note: note || "", extraction: extraction || "" })),
     selectedThemes: film.selectedThemes.map(({ title, plot, climax, reason }) => ({ title, plot, climax, reason })),
-    characters: film.characters.map(({ id, name, role, description, basis, sourceIds }) => ({ id, name, role, description, basis, sourceIds })),
+    characters: film.characters.map(({ id, name, role, description, basis, sourceIds, referencePhotoId }) => ({ id, name, role, description, basis, sourceIds,
+      ...(referencePhotoId ? { referencePhotoId } : {}) })),
     assumptions: film.assumptions.map(({ id, description, reason }) => ({ id, description, reason })),
     scenes: film.scenes.map(({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization }) => ({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization })),
   };

@@ -230,7 +230,7 @@ async function main() {
   const healthPath='production/worker-health.json';
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
-    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,checkedAt:new Date().toISOString()},old?.etag);
+    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,referencePhotoVersion:1,checkedAt:new Date().toISOString()},old?.etag);
   };
   await heartbeat();
   const pulse=setInterval(()=>void heartbeat().catch(()=>{}),30000);pulse.unref();

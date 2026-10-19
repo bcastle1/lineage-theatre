@@ -47,8 +47,8 @@ export default function ProductionPreparation({film,operator=false,onPrepared,di
   }
   return <section className="readiness-panel" aria-label={operator?"Production test preparation":"Prepare production plan"}>
     <h3>{operator?"Prepare a production test":"Prepare your production plan"}</h3>
-    <p>{operator?"Use a fixed fictional screenplay to check private plan storage and download. This step does not send a render request or spend credits.":"Save a reviewed version of your screenplay and cast for production planning. This does not start rendering or take a payment."}</p>
-    {!operator && <label className="check-label"><input type="checkbox" checked={consent} disabled={busy||disabled} onChange={e=>setConsent(e.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access.</span></label>}
+    <p>{operator?"Use a fixed fictional screenplay to check private plan storage and download. This step does not send a render request or spend credits.":"Save a reviewed version of your screenplay, cast, and selected appearance photos for production planning. This does not start rendering or take a payment."}</p>
+    {!operator && <label className="check-label"><input type="checkbox" checked={consent} disabled={busy||disabled} onChange={e=>setConsent(e.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
     <div className="action-group">
       <button className="button secondary small" disabled={busy||disabled||(!operator&&(!consent||!film?.scenes.length))} onClick={()=>void prepare()}>{busy?<Loader2 className="spin" size={16}/>:null}{operator?"Prepare fictional test plan":"Prepare production plan"}</button>
       {prepared && <button className="text-button" disabled={busy||disabled} onClick={()=>void download()}><Download size={15}/> Download prepared plan</button>}
