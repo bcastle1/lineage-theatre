@@ -65,7 +65,7 @@ function customerCapabilities(ready) {
     production:ready.magiclight===true,
     billing:ready.billing===true,
     pricing:{currency:"USD",estimate:{status:"unavailable",amountCents:null,reason:"Your film's price will be confirmed before you approve a payment."},chargeReady:false},
-    quality:{label:ready.quality?.verified===true?"Animation quality confirmed":"Animation quality will be confirmed before production",verified:ready.quality?.verified===true},
+    quality:{label:ready.quality?.verified===true?"Film quality confirmed":"Film quality will be confirmed before production",verified:ready.quality?.verified===true},
   };
 }
 

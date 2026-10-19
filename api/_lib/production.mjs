@@ -14,7 +14,7 @@ export function productionReadiness({ env = process.env, pricingSettings={markup
     billing:false,
     pricing:pricingReadiness(env,pricingSettings),
     payment:{provider:"quickbooks",label:"QuickBooks",status:"connection-pending",available:false},
-    quality:{preference:"highest",label:"Highest available animation quality",verified:available},
+    quality:{preference:"highest",label:"Highest available realistic film quality",verified:available},
     connections:{
       magiclight:{available,provider:adapter,reason:available
         ?"Film production is configured. Each saved film still requires verified payment, supported production inputs, and a current provider budget before generation."

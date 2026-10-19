@@ -95,7 +95,7 @@ test("a reference rate never becomes a complete-film quote or a charge", () => {
   assert.equal(pricing.estimate.status, "awaiting-provider-quote");
   assert.equal(pricing.estimate.amountCents, null);
   assert.equal(pricing.estimate.providerCredits, null);
-  assert.match(pricing.estimate.reason, /Highest-quality animation and final-film settings have not been quoted/);
+  assert.match(pricing.estimate.reason, /Highest-quality imagery and final-film settings have not been quoted/);
   assert.equal(pricing.chargeReady, false);
 });
 

@@ -94,7 +94,7 @@ export function pricingReadiness(env = process.env, settings={markupBasisPoints:
       status: "awaiting-provider-quote",
       amountCents: null,
       providerCredits: null,
-      reason: "Waiting for MagicLight's credit quote for this complete film. Highest-quality animation and final-film settings have not been quoted.",
+      reason: "Waiting for MagicLight's credit quote for this complete film. Highest-quality imagery and final-film settings have not been quoted.",
     },
     chargeReady: false,
   };

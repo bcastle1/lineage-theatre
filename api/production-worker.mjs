@@ -20,11 +20,13 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
     try {
       const body = await readBody(req, 2048);
       if (body?.action === 'deliver-reviewed-film') {
-        if (Object.keys(body).sort().join(',') !== 'action,artifactSha256,orderId'
-          || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.artifactSha256 || ''))
+        if (!['action,artifactSha256,orderId', 'action,artifactSha256,orderId,previousArtifactSha256'].includes(Object.keys(body).sort().join(','))
+          || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.artifactSha256 || '')
+          || ('previousArtifactSha256' in body && !/^[a-f0-9]{64}$/.test(body.previousArtifactSha256 || '')))
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         if (!await limiter('production-worker:delivery', 10, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
-        return json(res, 200, await delivery.deliver({ orderId: body.orderId, artifactSha256: body.artifactSha256 }));
+        return json(res, 200, await delivery.deliver({ orderId: body.orderId, artifactSha256: body.artifactSha256,
+          ...('previousArtifactSha256' in body ? { previousArtifactSha256: body.previousArtifactSha256 } : {}) }));
       }
       if (!body || Object.keys(body).sort().join(',') !== 'email,manifestHash,model,orderId,preparedId,recipe'
         || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available

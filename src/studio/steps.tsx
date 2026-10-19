@@ -306,7 +306,7 @@ export function DirectionStep({
             {film.factuality === "based-on-a-true-story" && <Check size={16} />}
           </span>
           <small>
-            Recommended · cinematic animation, an ensemble cast, and clearly labeled
+            Recommended · realistic cinematic imagery, an ensemble cast, and clearly labeled
             dramatization.
           </small>
         </button>
@@ -833,7 +833,7 @@ export function CuttingStep({
                     />
                   </label>
                   <label>
-                    Visual direction & animation
+                    Visual direction & cinematography
                     <textarea
                       rows={4}
                       value={scene.visual}
@@ -1034,7 +1034,7 @@ export function CreateStep({
           <FilmIcon size={36} />
         </div>
         <div>
-          <span className="eyebrow">Your animated family film</span>
+          <span className="eyebrow">Your cinematic family film</span>
           <h3>{film.title || "A story worth keeping"}</h3>
           <p>
             {film.logline ||

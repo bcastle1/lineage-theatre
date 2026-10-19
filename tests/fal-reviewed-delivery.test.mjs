@@ -46,3 +46,36 @@ test('unreviewed, foreign, unpaid, corrupted and concurrently changed candidates
     f=>{const original=f.options.getBlob;f.options.getBlob=async path=>{f.records.get(f.candidatePath).etag='changed';return original(path);};},
   ]) { const f=fixture();mutate(f);await assert.rejects(createFalReviewedDelivery(f.options).deliver({orderId:f.orderId,artifactSha256:f.sha}));assert.equal(f.writes(),0); }
 });
+
+function replacementFixture() {
+  const f=fixture(),oldSha='e'.repeat(64),job=f.records.get(f.jobPath).value;
+  Object.assign(job,{status:'completed',media:{pathname:`previous/${oldSha}.mp4`,sha256:oldSha},
+    authorization:{kind:'owner-reviewed-fal-edit',orderId:f.orderId,artifactSha256:oldSha},
+    completedAt:'2026-10-01T00:00:00Z',editorialReview:{notes:['Original reviewed film']}});
+  f.records.get(f.candidatePath).value.replacement={previousArtifactSha256:oldSha,approvedBy:OWNER_EMAIL,
+    requestedAt:'2026-10-02T00:00:00Z',reason:'user-requested-photorealism'};
+  return {...f,old:structuredClone(job),input:{orderId:f.orderId,artifactSha256:f.sha,previousArtifactSha256:oldSha}};
+}
+test('a reviewed visual correction preserves the old playable artifact and paid manifest atomically',async()=>{
+  const f=replacementFixture(),service=createFalReviewedDelivery(f.options);
+  assert.equal((await service.deliver(f.input)).status,'completed');
+  const saved=f.records.get(f.jobPath).value;
+  assert.equal(saved.media.sha256,f.sha);
+  assert.deepEqual(saved.manifest,f.old.manifest);assert.deepEqual(saved.shots,f.old.shots);
+  assert.deepEqual(saved.editorialHistory[0].media,f.old.media);
+  assert.deepEqual(saved.editorialHistory[0].authorization,f.old.authorization);
+  assert.deepEqual(saved.editorialHistory[0].editorialReview,f.old.editorialReview);
+  assert.deepEqual(f.records.get(`payments/orders/${f.orderId}.json`).value,f.order);
+  assert.equal((await service.deliver(f.input)).status,'completed');assert.equal(f.writes(),1);
+});
+test('replacing a delivered film requires the exact previous artifact, owner request and unchanged job',async()=>{
+  for(const mutate of [
+    f=>{delete f.input.previousArtifactSha256;},
+    f=>{f.input.previousArtifactSha256='f'.repeat(64);},
+    f=>{f.records.get(f.candidatePath).value.replacement.approvedBy='other@example.invalid';},
+    f=>{f.records.get(f.candidatePath).value.replacement.reason='unknown';},
+    f=>{f.records.get(f.candidatePath).value.replacement.requestedAt='2999-01-01T00:00:00Z';},
+    f=>{f.records.get(f.jobPath).value.authorization.orderId='a'.repeat(64);},
+    f=>{const get=f.options.getBlob;f.options.getBlob=async path=>{f.records.get(f.jobPath).etag='changed';return get(path);};},
+  ]) {const f=replacementFixture();mutate(f);await assert.rejects(createFalReviewedDelivery(f.options).deliver(f.input));assert.equal(f.writes(),0);}
+});

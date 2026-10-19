@@ -1491,7 +1491,7 @@ export default function Admin({
                   <p>
                     {overview?.quality
                       ? overview.quality.preference === "highest"
-                        ? "Default preference: highest available animation and output quality."
+                        ? "Default preference: photorealistic imagery and highest available output quality."
                         : `Configured preference: ${overview.quality.preference}.`
                       : "The production quality preference could not be verified."}
                   </p>

@@ -15,8 +15,9 @@ const fail = () => { throw new Error('The reviewed film, owner, payment or priva
 // it never submits generation, invents per-shot completion, or changes a price.
 export function createFalReviewedDelivery({ read = readRecord, write = writeRecord, getBlob = get,
   checkPayment = (actor, input) => hostedCheckout.check(actor, input), now = Date.now } = {}) {
-  async function binding(orderId, artifactSha256) {
-    if (!HASH.test(orderId || '') || !HASH.test(artifactSha256 || '')) fail();
+  async function binding(orderId, artifactSha256, previousArtifactSha256) {
+    if (!HASH.test(orderId || '') || !HASH.test(artifactSha256 || '')
+      || (previousArtifactSha256 !== undefined && (!HASH.test(previousArtifactSha256) || previousArtifactSha256 === artifactSha256))) fail();
     const actor = (await read(userPath(OWNER_EMAIL)))?.value;
     if (!isOwner(actor) || actor.mustChangePassword || accessStatusForUser(actor) !== 'approved') fail();
     const comparison = (await read(`production/fal/comparisons/${orderId}.json`))?.value;
@@ -53,11 +54,21 @@ export function createFalReviewedDelivery({ read = readRecord, write = writeReco
     if (order?.customerEmail !== actor.email || order.preparedId !== job.id || order.amountCents !== comparison.customerAmountCents) fail();
     const completed = job.status === 'completed' && job.media?.sha256 === artifactSha256
       && job.authorization?.kind === authorization.kind && job.authorization?.orderId === orderId;
-    if (!completed && (job.status !== 'prepared' || !job.shots.every(shot => shot.status === 'prepared'))) fail();
-    return { actor, comparison, candidateRecord, candidate, artifact, jobRecord, job, authorization, order, completed };
+    const replacement = candidate.replacement;
+    const replacing = previousArtifactSha256 !== undefined;
+    if (replacing) {
+      if (replacement?.previousArtifactSha256 !== previousArtifactSha256 || replacement.approvedBy !== actor.email
+        || replacement.reason !== 'user-requested-photorealism' || !Number.isFinite(Date.parse(replacement.requestedAt))
+        || Date.parse(replacement.requestedAt) > Date.parse(candidate.review.reviewedAt)
+        || job.status !== 'completed' || job.authorization?.kind !== authorization.kind || job.authorization?.orderId !== orderId
+        || (!completed && job.media?.sha256 !== previousArtifactSha256)
+        || (completed && !job.editorialHistory?.some(entry => entry.media?.sha256 === previousArtifactSha256
+          && entry.replacedBy === artifactSha256 && entry.authorization?.orderId === orderId))) fail();
+    } else if (replacement || (!completed && (job.status !== 'prepared' || !job.shots.every(shot => shot.status === 'prepared')))) fail();
+    return { actor, comparison, candidateRecord, candidate, artifact, jobRecord, job, authorization, order, completed, replacing };
   }
-  async function deliver({ orderId, artifactSha256 }) {
-    const before = await binding(orderId, artifactSha256);
+  async function deliver({ orderId, artifactSha256, previousArtifactSha256 }) {
+    const before = await binding(orderId, artifactSha256, previousArtifactSha256);
     const checked = await checkPayment(before.actor, { orderId });
     if (checked?.id !== orderId || checked.preparedId !== before.job.id || checked.filmId !== before.job.filmId
       || checked.status !== 'captured' || checked.sandbox !== false || checked.refundedCents !== 0 || checked.requiresReview !== false
@@ -71,18 +82,23 @@ export function createFalReviewedDelivery({ read = readRecord, write = writeReco
       for await (const chunk of blob.stream) { size += chunk.byteLength; if (size > artifact.sizeBytes) fail(); hash.update(chunk); }
       if (size !== artifact.sizeBytes || hash.digest('hex') !== artifactSha256) fail();
     } finally { if (!blob?.stream?.locked) await blob?.stream?.cancel().catch(() => {}); }
-    const current = await binding(orderId, artifactSha256);
+    const current = await binding(orderId, artifactSha256, previousArtifactSha256);
     if (current.candidateRecord.etag !== before.candidateRecord.etag || current.jobRecord.etag !== before.jobRecord.etag) fail();
     if (!current.completed) {
       const timestamp = new Date(now()).toISOString();
       const media = Object.fromEntries(['pathname', 'sha256', 'sizeBytes', 'contentType', 'durationSeconds', 'width', 'height', 'frameRate'].map(key => [key, artifact[key]]));
       const next = { ...current.job, status: 'completed', media, authorization: current.authorization, timingDisrupted: true,
         updatedAt: timestamp, completedAt: timestamp, revision: (current.job.revision || 0) + 1,
-        editorialReview: { ...current.candidate.review, sources: current.candidate.sources, edits: current.candidate.edits || [], orderId } };
+        editorialReview: { ...current.candidate.review, sources: current.candidate.sources, edits: current.candidate.edits || [], orderId },
+        ...(current.replacing ? { editorialHistory: [...(current.job.editorialHistory || []), {
+          media: current.job.media, authorization: current.job.authorization, completedAt: current.job.completedAt,
+          editorialReview: current.job.editorialReview, replacedAt: timestamp, replacedBy: artifactSha256,
+          replacement: current.candidate.replacement,
+        }] } : {}) };
       try { await write(productionJobPath(current.actor.email, current.job.id), next, current.jobRecord.etag); }
       catch { /* Confirm an identical write whose response was lost. */ }
     }
-    const saved = await binding(orderId, artifactSha256);
+    const saved = await binding(orderId, artifactSha256, previousArtifactSha256);
     if (!saved.completed) fail();
     return { status: 'completed', preparedId: saved.job.id, artifactSha256, customerAmountCents: saved.order.amountCents };
   }

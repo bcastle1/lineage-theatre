@@ -115,6 +115,22 @@ test('approved on-screen captions remain in the manifest but are excluded from g
   assert.match(body.prompt,/Start narration within the first 0.2 seconds/);assert.match(body.prompt,/Never show, pan across, fade from/);
 });
 
+test('legacy cinematic direction produces photographic prompts without altering the paid screenplay',()=>{
+  const {manifest}=buildFilmManifest(fictionalOperatorProject());
+  manifest.shots[0].visual='Premium cinematic animation. Two relatives sit by the window.';
+  manifest.screenplay.characters[0].description='Animation maintains the same attentive eyes.';
+  const before=JSON.stringify(manifest);
+  const refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.png']));
+  for(const model of ['seedance','wan']){
+    const body=falShotInput(manifest,manifest.shots[0],model,refs);
+    assert.match(body.prompt,/Photorealistic live-action/);assert.match(body.prompt,/visible skin texture/);
+    assert.doesNotMatch(body.prompt,/Premium cinematic animation|Animation maintains|hand-drawn 2D/);
+    assert.ok(body.prompt.includes(manifest.shots[0].narration));
+  }
+  assert.equal(JSON.stringify(manifest),before);
+  assert.notEqual(FAL_RECIPE_VERSION,'lineage-cinematic-v1');
+});
+
 test('reviewed editorial replacements stay bound to the original paid shot and cannot trigger new spending',async()=>{
   const {manifest,manifestHash}=buildFilmManifest(fictionalOperatorProject()),key=digest('fixture-shot'),identity=digest(`${FAL_RECIPE_VERSION}:seedance:${key}`),replacement=digest('fixture-replacement');
   const choice={version:1,originalIdentity:identity,productionId:'fixture-production',manifestHash,model:'seedance',approvedBy:OWNER_EMAIL,promptVersion:FAL_PROMPT_VERSION,replacementIdentity:replacement,requestId:'fixture-replacement-id'};

@@ -43,3 +43,10 @@ test('reviewed delivery uses the worker credential, exact artifact binding and s
   assert.equal((await invoke(f,{body:{...body,paid:true}})).statusCode,400);assert.equal(delivered,0);
   assert.equal((await invoke(f,{body})).body.status,'completed');assert.equal(delivered,1);assert.equal(f.calls(),0);
 });
+
+test('reviewed replacement forwards the exact previous digest and rejects invalid replacement fields',async()=>{
+  const body={action:'deliver-reviewed-film',orderId:input.orderId,artifactSha256:'d'.repeat(64),previousArtifactSha256:'e'.repeat(64)};
+  let calls=0;const f=fixture({delivery:{deliver:async value=>{calls++;const {action,...expected}=body;assert.deepEqual(value,expected);return {status:'completed'};}}});
+  assert.equal((await invoke(f,{body:{...body,previousArtifactSha256:null}})).statusCode,400);assert.equal(calls,0);
+  assert.equal((await invoke(f,{body})).statusCode,200);assert.equal(calls,1);
+});
