@@ -1,0 +1,23 @@
+# Build from the existing reviewed worker image, preferably its immutable digest:
+# docker build --build-arg WORKER_IMAGE=<existing-worker-image> \
+#   -f deploy/worker/Dockerfile.speech-diagnostic -t lineage-speech-diagnostic .
+# This operator image is not the production worker. Run it with --read-only,
+# a bounded /tmp tmpfs, --cpus=2, --memory=3g and --pids-limit=128.
+# Pass --model medium.en with the diagnostic's owner/job arguments at runtime.
+ARG WORKER_IMAGE
+FROM ${WORKER_IMAGE}
+
+USER root
+WORKDIR /app
+# Download the library's official medium.en checkpoint at build time only.
+# The inherited small.en cache remains available for comparisons.
+RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 HF_HOME=/opt/whisper \
+    /opt/speech/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('medium.en', device='cpu', compute_type='int8', cpu_threads=2, num_workers=1)" \
+    && chmod -R a+rX /opt/whisper
+COPY --chown=node:node scripts/diagnose-film-speech.mjs scripts/transcribe-film.py ./scripts/
+
+ENV HF_HOME=/opt/whisper HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2
+USER node
+ENTRYPOINT ["node", "scripts/diagnose-film-speech.mjs"]
+CMD []

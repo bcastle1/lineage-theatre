@@ -3,6 +3,7 @@
 // payment, queue, publication, or persistent record writes are performed.
 // --include-first-difference exposes bounded script tokens on the operator's
 // private console only. Do not use that option in a service or public log.
+// --model medium.en opts into a separately cached diagnostic recognizer.
 import { spawn } from 'node:child_process';
 import { mkdtemp, open, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,6 +20,7 @@ import { normalizeSpeech, speechEdit } from './review-film-speech.mjs';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_CLIP_BYTES = 250 * 1024 * 1024;
+const RECOGNITION_MODELS = new Set(['small.en', 'medium.en']);
 const diagnosticReasons = new Set(['ARGUMENTS_INVALID', 'ACCOUNT_UNAVAILABLE', 'JOB_UNAVAILABLE', 'JOB_NOT_READY',
   'PAYMENT_UNVERIFIED', 'RECORDS_CHANGED', 'SCENE_LIMIT_EXCEEDED', 'DIAGNOSTIC_TIME_LIMIT',
   'MEDIA_DOWNLOAD_FAILED', 'SPEECH_RECOGNITION_FAILED', 'TRANSCRIPT_INVALID', 'LOCAL_STORAGE_FAILED', 'DIAGNOSTIC_FAILED']);
@@ -47,15 +49,17 @@ function argumentsForRun(args) {
       continue;
     }
     const value = args[++index];
-    if (!['--email', '--id', '--max-scenes'].includes(key) || values.has(key) || !value) fail('ARGUMENTS_INVALID');
+    if (!['--email', '--id', '--max-scenes', '--model'].includes(key) || values.has(key) || !value) fail('ARGUMENTS_INVALID');
     values.set(key, value);
   }
   const email = values.get('--email'), id = values.get('--id');
   const maxScenes = values.has('--max-scenes') ? Number(values.get('--max-scenes')) : 6;
+  const model = values.get('--model') || 'small.en';
   if (typeof email !== 'string' || email !== email.trim().toLowerCase() || email.length > 254
     || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(email) || !UUID.test(id || '')
-    || !Number.isSafeInteger(maxScenes) || maxScenes < 1 || maxScenes > 30) fail('ARGUMENTS_INVALID');
-  return { email, id, maxScenes, includeFirstDifference };
+    || !Number.isSafeInteger(maxScenes) || maxScenes < 1 || maxScenes > 30
+    || !RECOGNITION_MODELS.has(model)) fail('ARGUMENTS_INVALID');
+  return { email, id, maxScenes, includeFirstDifference, model };
 }
 
 async function downloadExistingClip(output, path) {
@@ -87,15 +91,16 @@ async function downloadExistingClip(output, path) {
   }
 }
 
-function transcribe(path, contextSilence) {
+function transcribe(path, contextSilence, model) {
   const timeout = remaining(300_000);
   return new Promise((resolveTranscript, reject) => {
     const child = spawn(process.env.PYTHON_PATH || 'python3', [fileURLToPath(new URL('./transcribe-film.py', import.meta.url)),
-      path, ...(contextSilence ? ['--context-silence'] : [])], {
+      path, '--model', model, ...(contextSilence ? ['--context-silence'] : [])], {
       shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
       // Local cached recognition only; do not pass Blob, fal or Accounting secrets.
       env: { PATH: process.env.PATH || '', HF_HOME: process.env.HF_HOME || '/opt/whisper',
-        HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1' },
+        HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONDONTWRITEBYTECODE: '1',
+        OMP_NUM_THREADS: '2', OPENBLAS_NUM_THREADS: '2', MKL_NUM_THREADS: '2', NUMEXPR_NUM_THREADS: '2' },
     });
     const stdout = [];
     let bytes = 0, settled = false;
@@ -165,12 +170,12 @@ function compareSpeech(shot, transcript) {
     return { matched: false, reason: speechReasons.has(reason) ? reason : 'SPEECH_REVIEW_REQUIRED', trailingAudioEditRequired: false };
   }
 }
-async function inspectScene(shot, path, sceneIndex, includeFirstDifference) {
-  const normal = await transcribe(path, false), first = compareSpeech(shot, normal);
+async function inspectScene(shot, path, sceneIndex, includeFirstDifference, model) {
+  const normal = await transcribe(path, false, model), first = compareSpeech(shot, normal);
   if (first.matched) return { sceneIndex, reason: 'NONE', normalMatched: true, contextMatched: null,
     mismatchCategory: 'none', trailingAudioEditRequired: first.trailingAudioEditRequired,
     ...(includeFirstDifference ? { firstDifferences: { normal: firstDifference(shot, normal), context: null } } : {}) };
-  const context = await transcribe(path, true), second = compareSpeech(shot, context);
+  const context = await transcribe(path, true, model), second = compareSpeech(shot, context);
   const expected = tokensForShot(shot), normalTokens = tokensForTranscript(normal), contextTokens = tokensForTranscript(context);
   const mismatchCategory = second.matched ? 'context-recovered'
     : numeralCandidate(expected, normalTokens) || numeralCandidate(expected, contextTokens) ? 'possible-numeral-format'
@@ -181,7 +186,7 @@ async function inspectScene(shot, path, sceneIndex, includeFirstDifference) {
 }
 
 async function main() {
-  const { email, id, maxScenes, includeFirstDifference } = argumentsForRun(process.argv.slice(2));
+  const { email, id, maxScenes, includeFirstDifference, model } = argumentsForRun(process.argv.slice(2));
   const snapshots = new Map();
   const read = async path => {
     remaining(1);
@@ -217,7 +222,7 @@ async function main() {
       const path = join(work, `scene-${index + 1}.${shot.output?.contentType === 'video/webm' ? 'webm' : 'mp4'}`);
       try {
         await downloadExistingClip(shot.output, path);
-        results.push(await inspectScene(job.manifest.shots[index], path, index + 1, includeFirstDifference));
+        results.push(await inspectScene(job.manifest.shots[index], path, index + 1, includeFirstDifference, model));
       } catch (error) {
         if (error?.diagnosticReason === 'DIAGNOSTIC_TIME_LIMIT') throw error;
         results.push({ sceneIndex: index + 1, reason: safeFailure(error), normalMatched: null, contextMatched: null,
@@ -239,7 +244,7 @@ async function main() {
     }
   }
   const passed = results.every(result => result.reason === 'NONE');
-  process.stdout.write(`${JSON.stringify({ status: passed ? 'speech-comparison-passed' : 'review-required', scenesChecked: results.length, results })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: passed ? 'speech-comparison-passed' : 'review-required', recognitionModel: model, scenesChecked: results.length, results })}\n`);
   process.exitCode = passed ? 0 : 1;
 }
 

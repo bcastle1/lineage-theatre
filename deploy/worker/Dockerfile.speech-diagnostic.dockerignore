@@ -1,0 +1,9 @@
+# The diagnostic build needs only its two scripts; credentials and media stay out.
+**
+!scripts/
+!scripts/diagnose-film-speech.mjs
+!scripts/transcribe-film.py
+!deploy/
+!deploy/worker/
+!deploy/worker/Dockerfile.speech-diagnostic
+!deploy/worker/Dockerfile.speech-diagnostic.dockerignore
