@@ -30,8 +30,15 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
   const reviews=[];
   for(const clip of clips){
     const shot=manifest.shots.find(s=>s.id===clip.shotId);if(!shot)throw failure();
-    const transcript=transcribe?await transcribe(clip.path):JSON.parse(await run(python,[fileURLToPath(new URL('./transcribe-film.py',import.meta.url)),clip.path]));
-    const edit=speechEdit(shot,transcript);
+    const readTranscript=async context=>transcribe?transcribe(clip.path,{contextSilence:context}):JSON.parse(await run(python,[fileURLToPath(new URL('./transcribe-film.py',import.meta.url)),clip.path,...(context?['--context-silence']:[])]));
+    let transcript=await readTranscript(false),edit,contextSilence=false;
+    try { edit=speechEdit(shot,transcript); }
+    catch(error){
+      if(error.code!=='FILM_SPEECH_REVIEW_REQUIRED')throw error;
+      // One local decoding pass with context silence may recover a clipped
+      // recognition boundary. Never prompt the recognizer with expected words.
+      transcript=await readTranscript(true);edit=speechEdit(shot,transcript);contextSilence=true;
+    }
     if(edit){
       const output=join(clip.path.replace(/[^\\/]+$/,''),`${clip.shotId}-reviewed.wav`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-nostdin','-n','-i',clip.path,'-map','0:a:0','-af',
@@ -39,7 +46,7 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
         '-c:a','pcm_s16le',output]);
       clip.audioPath=output;
     }
-    reviews.push({shotId:shot.id,scriptMatched:true,...(edit?{edit}:{})});
+    reviews.push({shotId:shot.id,scriptMatched:true,contextSilence,...(edit?{edit}:{})});
   }
   return {version:1,method:'local-speech-transcription',passed:true,shots:reviews};
 }

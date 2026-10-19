@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {speechEdit} from '../scripts/review-film-speech.mjs';
+import {speechEdit,reviewFilmSpeech} from '../scripts/review-film-speech.mjs';
 import {productionProgressSnapshot} from '../api/_lib/production-progress.mjs';
 import {localVideoHandler,aiVideoHandler} from '../api/_lib/local-video-handler.mjs';
 import {createFalProductionAdapter, FAL_RECIPE_VERSION} from '../api/_lib/fal-production.mjs';
@@ -17,6 +17,15 @@ test('speech verification rejects missing, changed and truncated narration; trim
   {duration:5,words:[...words.slice(0,2),{...words[2],end:5}]},
   {duration:5,words:[...words,{word:'extra',start:1.55,end:2}]}])
   assert.throws(()=>speechEdit(shot,transcript),{code:'FILM_SPEECH_REVIEW_REQUIRED'});
+});
+
+test('a local context-silence pass can recover a boundary word without relaxing exact speech verification',async()=>{
+ const shot={id:'one',narration:'They tend the garden together.',dialogue:'',targetDurationMs:5000};
+ const words=shot.narration.split(' ').map((word,i)=>({word,start:i*.3,end:(i+1)*.3}));
+ const contexts=[];
+ const report=await reviewFilmSpeech({manifest:{shots:[shot]},clips:[{shotId:'one',path:'synthetic.mp4'}],transcribe:async(path,{contextSilence})=>{contexts.push(contextSilence);return {duration:5,words:contextSilence?words:words.slice(1)};}});
+ assert.deepEqual(contexts,[false,true]);assert.equal(report.passed,true);assert.equal(report.shots[0].contextSilence,true);
+ await assert.rejects(reviewFilmSpeech({manifest:{shots:[shot]},clips:[{shotId:'one',path:'synthetic.mp4'}],transcribe:async()=>({duration:5,words:words.slice(1)})}),{code:'FILM_SPEECH_REVIEW_REQUIRED'});
 });
 
 test('new realistic films receive an explicitly initial estimate that cannot drift or pretend completion',()=>{
