@@ -74,7 +74,7 @@ export function paymentProductionSummary(order: FilmOrder | null, film: LibraryE
   if (!film) return "Payment received. We are checking your saved film's production status.";
   if (libraryCanWatch(film)) return "Your finished film is ready to watch and download.";
   if (film.production.needsAttention || ["failed", "uncertain"].includes(film.production.status)) return "Your payment is confirmed. The studio needs to resolve a production issue before your film can continue. You do not need to pay again.";
-  if (film.production.status === "queued") return "Your payment is confirmed and your film is queued for production.";
+  if (film.production.status === "queued") return film.production.message || "Your payment is confirmed and your film is queued for production.";
   if (["processing", "submitting", "verifying", "completed"].includes(film.production.status)) return "Your payment is confirmed and your film is in production. Follow its progress below.";
   return available === false ? "Your payment is confirmed, but film production is currently unavailable and your film has not started. The studio must resolve this before a delivery time can be estimated. You do not need to pay again."
     : "Your payment is confirmed. Your saved film is waiting for production to start; its delivery estimate will appear when production timing is available.";

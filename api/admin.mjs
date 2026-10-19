@@ -187,7 +187,8 @@ export function createAdminHandler(overrides={}) {
         return resultError(res,400,"Select one saved payment order to check.");
       if(!(await limitAction(`hosted-reversal-check:${actor.email}`,1,60_000))) return resultError(res,429,"Please wait before checking recorded reversals again.");
       const result=await checkHostedReversals({orderId:body.orderId});
-      await audit(actor.email,"payment.reversals.checked",body.orderId,{code:result.code,recordedReversalsVerified:result.recordedReversalsVerified});
+      await audit(actor.email,"payment.reversals.checked",body.orderId,{code:result.code,recordedReversalsVerified:result.recordedReversalsVerified,
+        ...(result.reason?{reason:result.reason}:{}),accountingReads:result.totals.accountingReads});
       return json(res,200,result);
     }
     if(action==="saveReceiptSettings") {

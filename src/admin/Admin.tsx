@@ -1179,13 +1179,15 @@ export default function Admin({
   async function paymentRecordAction(order: Order, action: "paymentDiagnostics" | "accountingExport" | "reconcilePayment" | "checkHostedReversals") {
     if (actionLock.current) return;
     actionLock.current = true; setBusy(true);
+    const diagnosticController = action === "checkHostedReversals" ? new AbortController() : null;
+    const diagnosticTimeout = diagnosticController ? window.setTimeout(() => diagnosticController.abort(), 65_000) : null;
     try {
       if (action === "checkHostedReversals") {
-        const result = await api<{ recordedReversalsVerified: boolean; scope: string; code: string; productionReady: false }>("/api/admin", { action, orderId: order.id });
+        const result = await api<{ recordedReversalsVerified: boolean; scope: string; code: string; reason?: string; productionReady: false }>("/api/admin", { action, orderId: order.id }, { signal: diagnosticController!.signal });
         if (typeof result.recordedReversalsVerified !== "boolean" || result.scope !== "quickbooks-accounting-recorded-reversals"
           || result.productionReady !== false || !/^[A-Z_]+$/.test(result.code)) throw new Error("The recorded-reversal check returned an unexpected result.");
         notify(result.recordedReversalsVerified ? "The supported QuickBooks records passed the reversal check. Bank settlement and film production are verified separately."
-          : `Recorded reversals could not be verified (${result.code}). Review the order in QuickBooks.`, "info");
+          : `Recorded reversals could not be verified (${result.code}${typeof result.reason === "string" && /^[A-Z_]{1,80}$/.test(result.reason) ? `: ${result.reason}` : ""}). Review the order in QuickBooks.`, "info");
       } else if (action === "reconcilePayment") {
         const result = await api<{ requiresReview: boolean }>("/api/admin", { action, orderId: order.id });
         notify(result.requiresReview ? "This order still needs review. No payment or refund was repeated." : "Saved payment status checked.", "info");
@@ -1198,8 +1200,8 @@ export default function Admin({
         document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
         notify(action === "paymentDiagnostics" ? "Payment support details downloaded." : "Accounting review exported. Nothing was posted to your books.", "info");
       }
-    } catch (e) { notify(errorText(e), "error"); }
-    finally { actionLock.current = false; setBusy(false); }
+    } catch (e) { notify(diagnosticController?.signal.aborted ? "The recorded-reversal check did not respond in time. Your last confirmed status is unchanged. Refresh before trying again." : errorText(e), "error"); }
+    finally { if (diagnosticTimeout !== null) window.clearTimeout(diagnosticTimeout); actionLock.current = false; setBusy(false); }
   }
   const markupPercent = /^\d+(\.\d{0,2})?$/.test(markup) ? Number(markup) : NaN;
   const validMarkup =

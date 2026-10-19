@@ -34,7 +34,7 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
     const actor = (await read(userPath(order.customerEmail)))?.value;
     if (!actor || actor.email !== order.customerEmail || actor.mustChangePassword || accessStatusForUser(actor) !== "approved") return null;
     const job = (await read(`production/jobs/${digest(actor.email)}/${order.preparedId}.json`))?.value;
-    if (!job || job.id !== order.preparedId || job.ownerHash !== digest(actor.email)
+    if (!job || job.id !== order.preparedId || job.mode !== "customer" || job.status === "failed" || job.ownerHash !== digest(actor.email)
       || job.filmId !== order.filmId || job.manifestHash !== order.manifestHash
       || !job.manifest || digest(JSON.stringify(job.manifest)) !== order.manifestHash) return null;
     return { order, actor };
@@ -70,9 +70,24 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
     if (!old || old.value.state !== "pending") return { state: "skipped" };
     const current = await context(id);
     if (!current || !matches(old.value, current.order)) return { state: "skipped" };
-    // enqueue rechecks live payment/reversals, provider readiness and the exact
-    // paid manifest. Its create-only queue identity prevents duplicate work.
-    await queue.enqueue({ actor: current.actor, id: current.order.preparedId, orderId: id });
+    // Persist the reference-only queue entry as soon as captured payment and
+    // saved consent are confirmed. The worker performs fresh live reversal,
+    // provider readiness and spend-budget checks before any paid submission.
+    try {
+      const enqueue = queue.enqueueAutomatic || queue.enqueue;
+      await enqueue.call(queue, { actor: current.actor, id: current.order.preparedId, orderId: id });
+    } catch {
+      const attemptedAt = new Date(now()).toISOString();
+      const retry = { ...old.value, attempts: (Number.isSafeInteger(old.value.attempts) ? old.value.attempts : 0) + 1,
+        lastAttemptAt: attemptedAt, lastFailureCode: "HANDOFF_RETRY" };
+      try { await write(path, retry, old.etag); }
+      catch {
+        const saved = await read(path);
+        if (!matches(saved?.value, current.order) || !["pending", "queued"].includes(saved.value.state)) throw new Error("Production handoff status could not be saved.");
+        if (saved.value.state === "queued") return { state: "queued" };
+      }
+      return { state: "pending" };
+    }
     try { await write(path, { ...old.value, state: "queued", queuedAt: new Date(now()).toISOString() }, old.etag); }
     catch {
       const saved = await read(path);
@@ -83,8 +98,8 @@ export function createAutomaticProduction({ read = readRecord, write = writeReco
   async function run() {
     const result = { queued: 0, pending: 0, skipped: 0 };
     const cursorPath = "production/automatic-start-cursor.json", old = await read(cursorPath);
-    // Live payment/reversal verification can take a minute. Start at most one
-    // order per invocation within the shared function's 180-second budget.
+    // Keep each sweep bounded and resume its saved position. Enqueue only saves
+    // references; the production worker performs live authorization before spend.
     const page = await listBlobs({ prefix: PREFIX, limit: 100, ...(old?.value.cursor ? { cursor: old.value.cursor } : {}) });
     let attempted = false, nextIndex = 0;
     const offset = Number.isSafeInteger(old?.value.index) ? old.value.index : 0;

@@ -6,6 +6,7 @@ import { productionJobPath } from "./film-production.mjs";
 import { metadataPath, mediaPath, MAX_FILM_BYTES } from "./archive.mjs";
 import { requireFinishedFilmPayment, validateStoredProductionMedia } from "./production-media.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
+import { productionQueueMessage } from "./production-queue.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -121,6 +122,16 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
       const queue = (await read(`production/queue/${digest(actor.email)}/${id}.json`))?.value;
       const ticket = queue?.email === actor.email && queue.id === id && queue.manifestHash === value.manifestHash ? queue : null;
       payments = await paymentSummaries(actor.email, value);
+      let automaticPending = false;
+      if (!ticket && value.status === "prepared") {
+        const paid = payments.find(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview && payment.refundedCents === 0);
+        if (paid) {
+          const automatic = (await read(`production/automatic-starts/${paid.id}.json`))?.value;
+          automaticPending = automatic?.version === 1 && automatic.id === paid.id && automatic.email === actor.email
+            && automatic.preparedId === id && automatic.manifestHash === value.manifestHash && automatic.state === "pending";
+        }
+      }
+      const queued = ticket || (automaticPending ? { state: "pending" } : null);
       if (value.status === "completed") {
         try {
           validateStoredProductionMedia(value, actor.email);
@@ -128,10 +139,13 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
           mediaReady = true;
         } catch { /* Playback remains unavailable until the existing delivery checks pass. */ }
       }
-      production = { status: value.status === "prepared" && ticket?.state === "pending" ? "queued" : value.status === "awaiting-assembly" ? "processing" : value.status,
+      production = { status: value.status === "awaiting-assembly" ? "processing" : value.status,
         completedShots: value.shots.filter(shot => shot.status === "completed").length, shotCount: value.shots.length, mediaReady,
         needsAttention: ticket?.state === "attention" || value.status === "uncertain" || value.status === "failed" || value.status === "completed" && !mediaReady };
-      production.progress = await progress.snapshot({ job: value, email: actor.email, queue: ticket, mediaReady, needsAttention: production.needsAttention });
+      production.progress = await progress.snapshot({ job: value, email: actor.email, queue: queued, mediaReady, needsAttention: production.needsAttention });
+      const health = production.progress.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
+      Object.assign(production, productionQueueMessage({ progress: production.progress, ticket, automaticPending, health, now: now() }));
+      if (production.progress.stage === "queued") production.status = "queued";
       if (production.progress.stage === "attention") production.needsAttention = true;
       if (value.status === "prepared" && ["creating", "finishing"].includes(production.progress.stage)) production.status = "processing";
     } else {

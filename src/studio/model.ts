@@ -305,9 +305,10 @@ export const steps = [
 export class ApiError extends Error {
   constructor(message: string, readonly code?: string, readonly status?: number) { super(message); }
 }
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
   const res = await fetch(path, {
     credentials: "same-origin",
+    signal: options?.signal,
     ...(body
       ? {
           method: "POST",

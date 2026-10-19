@@ -9,7 +9,7 @@ export type LibraryPayment = {
 export type LibraryEntry = {
   kind: "plan" | "upload"; id: string; filmId: string; title: string; durationSeconds: number;
   createdAt: string; updatedAt: string; libraryState: LibraryView; revision: number;
-  production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean; progress?: unknown };
+  production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean; workerReady?: boolean; message?: string; progress?: unknown };
   payments: LibraryPayment[]; manifestHash?: string; mediaUrl?: string; downloadUrl?: string; origin?: "studio-delivery";
 };
 export type LibraryPage = { entries: LibraryEntry[]; cursor?: string };
@@ -56,6 +56,8 @@ export function normalizeLibraryEntry(value: unknown): LibraryEntry {
     || !count(value.production.completedShots) || !count(value.production.shotCount)
     || value.production.completedShots > value.production.shotCount
     || typeof value.production.mediaReady !== "boolean" || typeof value.production.needsAttention !== "boolean"
+    || value.production.workerReady !== undefined && typeof value.production.workerReady !== "boolean"
+    || value.production.message !== undefined && !text(value.production.message, 500)
     || !Array.isArray(value.payments) || value.payments.length > 100
     || (value.kind === "plan" && !digest(value.manifestHash))) throw invalid();
   const payments = value.payments.map(payment => {
@@ -71,6 +73,8 @@ export function normalizeLibraryEntry(value: unknown): LibraryEntry {
     libraryState: value.libraryState as LibraryView, revision: value.revision,
     production: { status: String(value.production.status), completedShots: value.production.completedShots,
       shotCount: value.production.shotCount, mediaReady: value.production.mediaReady, needsAttention: value.production.needsAttention,
+      ...(value.production.workerReady !== undefined ? { workerReady: value.production.workerReady } : {}),
+      ...(value.production.message !== undefined ? { message: value.production.message as string } : {}),
       ...(value.production.progress !== undefined ? { progress: value.production.progress } : {}) }, payments,
     ...(value.kind === "plan" ? { manifestHash: value.manifestHash as string } : ["studio-delivery", "magiclight-delivery"].includes(String(value.origin)) ? { origin: "studio-delivery" as const } : {}) };
   if (value.mediaUrl !== undefined || value.downloadUrl !== undefined || entry.production.mediaReady) {

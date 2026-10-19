@@ -23,7 +23,7 @@ test("recorded reversal diagnostic is owner-only, same-origin and restricted to 
   assert.equal(calls.length,0);
   const response=await h.run("checkHostedReversals",{orderId:id});
   assert.equal(response.status,200);assert.equal(response.body.productionReady,false);assert.deepEqual(calls,[{orderId:id}]);
-  assert.deepEqual(h.events,[[OWNER_EMAIL,"payment.reversals.checked",id,{code:"RECORDED_REVERSALS_VERIFIED",recordedReversalsVerified:true}]]);
+  assert.deepEqual(h.events,[[OWNER_EMAIL,"payment.reversals.checked",id,{code:"RECORDED_REVERSALS_VERIFIED",recordedReversalsVerified:true,accountingReads:12}]]);
   assert.equal(h.writes,0);
 });
 test("recorded reversal scans are rate limited before reading private records or Accounting",async()=>{

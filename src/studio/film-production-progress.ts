@@ -1,6 +1,6 @@
 export type FilmProductionProgressInput = {
   paid: boolean; ready: boolean; available?: boolean; status?: string | null; completedShots?: number; shotCount?: number;
-  reportedPercent?: number | null; progress?: unknown; needsAttention?: boolean; now?: number;
+  reportedPercent?: number | null; progress?: unknown; needsAttention?: boolean; workerReady?: boolean; message?: string | null; now?: number;
 };
 type Stage = "waiting" | "queued" | "creating" | "finishing" | "ready" | "attention";
 type Timing = "learning" | "available" | "delayed" | "stale" | "paused" | "complete";
@@ -74,14 +74,17 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
     remaining = low === 0 ? `Up to ${high} ${high === 1 ? "minute" : "minutes"} remaining`
       : low === high ? `About ${high} ${high === 1 ? "minute" : "minutes"} remaining` : `About ${low}–${high} minutes remaining`;
   }
-  const explanation = timing === "available" ? estimate?.source === "initial"
+  const statusMessage = ["waiting", "queued", "attention"].includes(stageKey) ? input.message : null;
+  const explanation = statusMessage || (stageKey === "queued" && input.workerReady === false
+    ? "Your film is queued. We are waiting for the production service to confirm it is available before rendering starts. Your payment is saved; you do not need to pay again."
+    : timing === "available" ? estimate?.source === "initial"
     ? "Initial estimate based on your film's scenes and finishing work. Rendering times vary; progress updates automatically as work completes."
     : "Estimated from recent films with the same production settings. The window updates as your film progresses."
     : timing === "delayed" ? "Your film is taking longer than the measured delivery window. Your progress is saved; we will update the estimate when it can be confirmed."
       : timing === "stale" ? "The last confirmed progress is shown. We are waiting for an update before adjusting the estimate."
         : timing === "paused" ? "The Lineage Theatre team needs to check this film. Your payment and saved version are safe; you do not need to pay again."
           : timing === "complete" ? "Your finished film is available to watch and download in your library."
-            : "Progress follows confirmed production stages. A delivery window appears when enough measured timing is available.";
-  return { percent, label: stageKey === "ready" ? "Production complete" : "Estimated progress", stageKey, stage: input.paid ? titles[stageKey] : "Waiting for payment confirmation",
+          : "Progress follows confirmed production stages. A delivery window appears when enough measured timing is available.");
+  return { percent, label: stageKey === "ready" ? "Production complete" : stageKey === "queued" ? "Production queue" : "Estimated progress", stageKey, stage: input.paid ? titles[stageKey] : "Waiting for payment confirmation",
     explanation, timing, remaining, estimate, updatedAt: snapshot?.observedAt ?? null };
 }
