@@ -18,6 +18,7 @@ import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } fro
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
 import { assembleFilm } from './assemble-film.mjs';
+import { createRepairCastNameResolver } from './repair-name-proof.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 const KIND = 'lineage-paid-soundtrack-repair-v1';
@@ -136,10 +137,11 @@ function repairTranscriber(root, { python = process.env.PYTHON_PATH || 'python3'
   };
 }
 
-async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices, provenance, ffmpeg }, dependencies) {
+async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices, provenance, ffmpeg, constructionRoot = root }, dependencies) {
   const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
   const speechReview = await reviewFilmSpeech({ manifest: snapshot.originalJob.manifest, clips, ffmpeg,
-    transcribe: repairTranscriber(root, { now }) });
+    transcribe: repairTranscriber(root, { now }), resolveCastNames: createRepairCastNameResolver({ manifest: snapshot.originalJob.manifest,
+      manifestHash: snapshot.manifestHash, voices, provenance, constructionRoot, receiptRoot: root }) });
   if (speechReview?.passed !== true) throw fail('REPAIR_SPEECH_UNVERIFIED');
   const selectedAudio = [];
   for (const [index, clip] of clips.entries()) {
@@ -153,7 +155,7 @@ async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, vo
   if (fresh.queue.etag !== snapshot.queueEtag) throw fail('REPAIR_QUEUE_CHANGED');
   const build = { kind: KIND, version: 1, state: 'preview-ready', snapshotSha256, orderId: snapshot.orderId,
     preparedId: snapshot.preparedId, manifestHash: snapshot.manifestHash, createdAt: new Date(now()).toISOString(),
-    voices, provenance, sources: snapshot.sources, selectedAudio, speechReview, preview, recognitionModel: 'medium.en' };
+    voices, provenance, constructionRoot, sources: snapshot.sources, selectedAudio, speechReview, preview, recognitionModel: 'medium.en' };
   const bytes = Buffer.from(JSON.stringify(build, null, 2)), buildPath = join(root, 'build.json');
   await writeFile(buildPath, bytes, { flag: 'wx', mode: 0o600 });
   return { state: 'preview-ready', buildPath, buildSha256: digest(bytes), previewPath: preview.outputPath,
@@ -253,7 +255,8 @@ export async function reviewConstructedFilmSoundtrack({ snapshotPath, snapshotSh
     await copyFile(join(originalRoot, source.filename), path); await copyFile(audio.path, audioPath);
     clips.push({ shotId: source.shotId, path, audioPath });
   }
-  return finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices: constructed.voices, provenance: constructed.provenance, ffmpeg }, dependencies);
+  return finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices: constructed.voices, provenance: constructed.provenance,
+    constructionRoot: originalRoot, ffmpeg }, dependencies);
 }
 
 // An authenticated draft preview is separate from delivered paid-film media.
@@ -407,7 +410,9 @@ export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha2
       // This is the ordinary recognizer on the selected replacement track.
       // A synthesis receipt never substitutes for its real script comparison.
       const reviewed = await reviewFilmSpeech({ ...input,
-        transcribe: repairTranscriber(dirname(input.clips[0].path), { now, receiptRoot: buildRoot }) });
+        transcribe: repairTranscriber(dirname(input.clips[0].path), { now, receiptRoot: buildRoot }),
+        resolveCastNames: createRepairCastNameResolver({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
+          voices: build.voices, provenance, constructionRoot: build.constructionRoot, receiptRoot: buildRoot }) });
       selectedAudio = await Promise.all(input.clips.map(async clip => {
         const audio = await localFile(clip.audioPath, dirname(clip.path));
         const visual = await localFile(clip.path, dirname(clip.path));
