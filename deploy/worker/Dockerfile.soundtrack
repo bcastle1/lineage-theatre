@@ -1,0 +1,34 @@
+# Operator repair image. Pin WORKER_IMAGE to the reviewed diagnostic image digest
+# with the existing medium.en recognizer cached. This is not a scheduled worker.
+# Build: docker build --build-arg WORKER_IMAGE=<reviewed-image-digest> \
+#   -f deploy/worker/Dockerfile.soundtrack -t lineage-soundtrack-repair .
+# Runtime: retain --read-only, bounded /tmp tmpfs, --cpus=2, --memory=3g,
+# --pids-limit=128, dropped capabilities, and no-new-privileges.
+ARG WORKER_IMAGE
+FROM ${WORKER_IMAGE}
+
+USER root
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends fluidsynth fluid-soundfont-gm=3.1-5.3 espeak-ng libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/soundtrack
+COPY scripts/rebuild-film-soundtrack-requirements.txt /opt/soundtrack/requirements-source.txt
+RUN /opt/soundtrack/bin/pip install --no-cache-dir -r /opt/soundtrack/requirements-source.txt \
+    && /opt/soundtrack/bin/pip freeze > /opt/soundtrack/requirements-resolved.txt
+# Compatible with the host's legacy Docker builder; no Dockerfile heredoc.
+COPY scripts/rebuild-film-soundtrack-assets.py /opt/soundtrack/cache-assets.py
+RUN /opt/soundtrack/bin/python /opt/soundtrack/cache-assets.py /opt/soundtrack
+RUN chmod -R a+rX /opt/soundtrack \
+    && dpkg-query -W fluidsynth fluid-soundfont-gm > /opt/soundtrack/score-packages.txt
+COPY api/_lib/ ./api/_lib/
+COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/review-film-speech.mjs scripts/transcribe-film.py ./scripts/
+COPY scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scripts/repair-paid-film-soundtrack.mjs ./scripts/
+
+ENV LINEAGE_TTS_PYTHON=/opt/soundtrack/bin/python LINEAGE_TTS_MODEL_DIR=/opt/soundtrack/models/kokoro \
+    FLUIDSYNTH_PATH=/usr/bin/fluidsynth LINEAGE_SOUNDFONT=/usr/share/sounds/sf2/FluidR3_GM.sf2 \
+    HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2 NUMEXPR_NUM_THREADS=2
+USER node
+ENTRYPOINT ["node", "scripts/repair-paid-film-soundtrack.mjs"]
+CMD []

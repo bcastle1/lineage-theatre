@@ -1,0 +1,11 @@
+# Small CPU runtime. Avoid misaki[en], which adds an unused transformer stack.
+kokoro-onnx==0.6.1
+misaki==0.9.4
+numpy==2.2.6
+onnxruntime==1.22.1
+soundfile==0.13.1
+spacy==3.8.7
+phonemizer==3.4.0
+espeakng-loader==0.2.4
+num2words==0.5.14
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
