@@ -59,6 +59,20 @@ checksum-verified model assets at build time. Runtime synthesis is offline, uses
 two ONNX threads, and receives no service credentials. Run under the existing
 CPU/memory/PID/read-only filesystem bounds.
 
+Phonemizer copies its native eSpeak library into a temporary directory and loads
+that copy. Supply `TMPDIR` pointing to a private, writable directory on the
+operator's existing application work mount where shared-library mappings are
+permitted (for example, `/repair/runtime-tmp`, mode 0700, owned by runtime UID
+1000). Keep the general `/tmp` mount `noexec` and retain the container protections.
+The builder forwards only this temporary-directory setting and its other fixed
+runtime settings to the speech process; it does not forward service credentials.
+
+Failures retain fixed reason codes and a sanitized diagnostic with the stage,
+error category, optional known missing module, scene/turn indices, and bounded
+duration measurements. No raw exception, traceback, source text, or path is
+included. Exported `soundtrackFailureDiagnostic` lets the operator CLI apply the
+same allowlist before displaying a diagnostic.
+
 Construction always reports `constructed-needs-review`. Review every turn and
 the final mix, including names, numbers, dialogue, audible clarity, and visible
 speaking. This module does not approve or deliver a film.

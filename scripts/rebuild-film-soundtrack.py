@@ -24,10 +24,36 @@ MODEL_HASHES = {
 REASONS = {'INPUT_INVALID', 'MODEL_UNAVAILABLE', 'VOICE_MAPPING_REQUIRED', 'PRONUNCIATION_UNSUPPORTED',
            'SPEECH_INVALID', 'SCENE_DURATION_EXCEEDED', 'SCORE_FAILED', 'TIME_LIMIT', 'OUTPUT_INVALID', 'RUNTIME_FAILED'}
 DEADLINE = time.monotonic() + 18 * 60
+DIAGNOSTIC = {'stage': 'input'}
+KNOWN_MODULES = {'numpy', 'onnxruntime', 'soundfile', 'spacy', 'kokoro_onnx', 'misaki', 'phonemizer',
+                 'espeakng_loader', 'num2words', 'regex', 'addict', 'en_core_web_sm', 'dlinfo', 'click'}
 
 
 class SoundtrackError(Exception):
     pass
+
+
+def stage(name, scene_index=None, turn_index=None, **measurements):
+    DIAGNOSTIC.clear()
+    DIAGNOSTIC['stage'] = name
+    if scene_index is not None:
+        DIAGNOSTIC['sceneIndex'] = scene_index + 1
+    if turn_index is not None:
+        DIAGNOSTIC['turnIndex'] = turn_index + 1
+    DIAGNOSTIC.update(measurements)
+
+
+def failure_diagnostic(failure):
+    # Never serialize exception messages, tracebacks, paths, or input text.
+    categories = ((SoundtrackError, 'validation'), (ModuleNotFoundError, 'dependency_missing'),
+                  (ImportError, 'import_error'), (PermissionError, 'permission_denied'),
+                  (FileNotFoundError, 'file_missing'), (MemoryError, 'memory_limit'),
+                  (AttributeError, 'attribute_missing'), (TypeError, 'invalid_type'),
+                  (ValueError, 'invalid_value'), (OSError, 'os_error'), (RuntimeError, 'runtime_error'))
+    result = {**DIAGNOSTIC, 'category': next((label for kind, label in categories if isinstance(failure, kind)), 'other')}
+    if isinstance(failure, ModuleNotFoundError) and failure.name in KNOWN_MODULES:
+        result['module'] = failure.name
+    return result
 
 
 def require(condition, reason):
@@ -123,13 +149,20 @@ def original_score(path, seconds):
 
 def construct(request):
     sys.addaudithook(offline)
+    stage('import-numpy')
     import numpy as np
+    stage('import-onnxruntime')
     import onnxruntime as ort
+    stage('import-soundfile')
     import soundfile as sf
+    stage('import-spacy')
     import spacy
+    stage('import-kokoro')
     from kokoro_onnx import Kokoro
+    stage('import-misaki')
     from misaki import en, espeak
 
+    stage('validate-input')
     plan = request.get('plan', {})
     require(plan.get('version') == 1 and plan.get('recipe') == 'local-authored-soundtrack-v1'
             and re.fullmatch(r'[a-f0-9]{64}', plan.get('manifestHash', ''))
@@ -138,6 +171,7 @@ def construct(request):
             and plan.get('speed') == 1, 'INPUT_INVALID')
     directory = Path(request['directory']).resolve(strict=True)
     require(directory.is_dir() and not any(directory.iterdir()), 'OUTPUT_INVALID')
+    stage('verify-assets')
     model_dir = Path(request['modelDirectory']).resolve(strict=True)
     for filename, expected in MODEL_HASHES.items():
         require(sha(model_dir / filename) == expected, 'MODEL_UNAVAILABLE')
@@ -145,12 +179,15 @@ def construct(request):
     options = ort.SessionOptions()
     options.intra_op_num_threads, options.inter_op_num_threads = 2, 1
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    stage('load-onnx')
     session = ort.InferenceSession(str(model_dir / 'kokoro-v1.0.onnx'), sess_options=options, providers=['CPUExecutionProvider'])
+    stage('load-kokoro')
     engine = Kokoro.from_session(session, str(model_dir / 'voices-v1.0.bin'))
     g2p = {}
     rate = 24000
     scene_results = []
     for scene_index, scene in enumerate(plan['scenes']):
+        stage('prepare-scene', scene_index)
         remaining()
         duration = scene['durationMs'] / 1000
         require(isinstance(scene.get('turns'), list) and len(scene['turns']) <= 20 and 1 <= duration <= 30, 'INPUT_INVALID')
@@ -158,6 +195,7 @@ def construct(request):
         speech = np.zeros(samples_count, dtype=np.float32)
         cursor, turns = round(.12 * rate), []
         for turn_index, turn in enumerate(scene['turns']):
+            stage('prepare-turn', scene_index, turn_index)
             remaining()
             voice, exact_text = turn['voice'], turn['text']
             require(voice in engine.voices and re.fullmatch(r'(?:af|am|bf|bm)_[a-z]{2,24}', voice), 'VOICE_MAPPING_REQUIRED')
@@ -165,11 +203,17 @@ def construct(request):
                     and hashlib.sha256(exact_text.encode()).hexdigest() == turn['textSha256'], 'INPUT_INVALID')
             british = voice.startswith('b')
             if british not in g2p:
-                g2p[british] = en.G2P(british=british, trf=False, fallback=espeak.EspeakFallback(british=british))
+                stage('load-espeak', scene_index, turn_index)
+                fallback = espeak.EspeakFallback(british=british)
+                stage('load-pronunciation', scene_index, turn_index)
+                g2p[british] = en.G2P(british=british, trf=False, fallback=fallback)
+            stage('pronounce-turn', scene_index, turn_index)
             phonemes, _ = g2p[british](exact_text, preprocess=False)
             require(phonemes.strip() and all(char in engine.tokenizer.vocab or char.isspace() for char in phonemes), 'PRONUNCIATION_UNSUPPORTED')
             phonemes = ''.join(char if char in engine.tokenizer.vocab else ' ' for char in phonemes)
+            stage('synthesize-turn', scene_index, turn_index)
             samples, sample_rate = engine.create(phonemes, voice=voice, speed=1, is_phonemes=True)
+            stage('validate-speech', scene_index, turn_index)
             samples = np.asarray(samples, dtype=np.float32).reshape(-1)
             require(sample_rate == rate and len(samples) > 0 and np.isfinite(samples).all(), 'SPEECH_INVALID')
             peak = float(np.max(np.abs(samples)))
@@ -178,7 +222,11 @@ def construct(request):
             gain = min(.80 / peak, .12 / float(np.sqrt(np.mean(active * active))))
             samples *= gain
             end = cursor + len(samples)
+            stage('fit-turn', scene_index, turn_index, generatedMs=round(len(samples) * 1000 / rate),
+                  availableMs=max(0, round((samples_count - round(.20 * rate) - cursor) * 1000 / rate)),
+                  overrunMs=max(0, round((end - samples_count + round(.20 * rate)) * 1000 / rate)))
             require(end <= samples_count - round(.20 * rate), 'SCENE_DURATION_EXCEEDED')
+            stage('write-turn', scene_index, turn_index)
             path = directory / f'scene-{scene_index + 1:02d}-turn-{turn_index + 1:02d}.wav'
             sf.write(path, samples, rate, subtype='PCM_16')
             # Place the same quantized samples that the reviewer receives.
@@ -190,24 +238,29 @@ def construct(request):
                           'startSeconds': cursor / rate, 'endSeconds': end / rate, 'durationSeconds': len(samples) / rate,
                           'gain': gain, 'audio': descriptor(path, directory)})
             cursor = end + round(.18 * rate)
+        stage('write-speech', scene_index)
         speech_path = directory / f'scene-{scene_index + 1:02d}-speech.wav'
         sf.write(speech_path, speech, rate, subtype='PCM_16')
         scene_results.append({'shotId': scene['shotId'], 'sceneIndex': scene_index + 1, 'durationMs': scene['durationMs'],
                               'narrationSha256': scene['narrationSha256'], 'dialogueSha256': scene['dialogueSha256'],
                               'turns': turns, 'speech': descriptor(speech_path, directory)})
     # Release model memory before rendering the instrumental score and final mix.
+    stage('release-model')
     engine.voices.close()
     del engine, session, g2p
     gc.collect()
     score_info = None
     score_path = directory / 'original-score.wav'
     if plan.get('musicRequested'):
+        stage('prepare-score')
         font = Path(request['soundfont']).resolve(strict=True)
         require(font.is_file() and font.stat().st_size <= 200 * 1024 * 1024, 'SCORE_FAILED')
         midi_path, raw_score = directory / 'original-score.mid', directory / 'score-render.wav'
         original_score(midi_path, plan['durationMs'] / 1000)
+        stage('render-score')
         run([request['fluidsynth'], '-ni', '-C', '0', '-R', '1', '-g', '0.4', '-r', '48000',
              '-T', 'wav', '-O', 's16', '-F', str(raw_score), str(font), str(midi_path)], 'SCORE_FAILED')
+        stage('normalize-score')
         music, music_rate = sf.read(raw_score, dtype='float32', always_2d=True)
         count = plan['durationMs'] * 48
         require(music_rate == 48000 and music.shape[1] == 2 and len(music) >= count and np.isfinite(music).all(), 'SCORE_FAILED')
@@ -231,12 +284,14 @@ def construct(request):
     for scene, receipt in zip(plan['scenes'], scene_results):
         remaining()
         index = receipt['sceneIndex']
+        stage('resample-speech', index - 1)
         speech_48 = directory / f'scene-{index:02d}-speech-48k.wav'
         run([request['ffmpeg'], '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i',
              str(directory / receipt['speech']['file']), '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', str(speech_48)], 'SPEECH_INVALID')
         speech, speech_rate = sf.read(speech_48, dtype='float32')
         count = scene['durationMs'] * 48
         require(speech_rate == 48000 and len(speech) == count and np.isfinite(speech).all(), 'SPEECH_INVALID')
+        stage('mix-scene', index - 1)
         mixed = np.repeat(speech[:, None], 2, axis=1)
         if score_info:
             with sf.SoundFile(score_path) as score:
@@ -260,6 +315,7 @@ def construct(request):
         receipt.update({'speech': descriptor(speech_48, directory), 'mix': descriptor(mix_path, directory),
                         'mixGain': final_gain, 'musicDuringSpeechGain': .30 if score_info else 0,
                         'originalProviderAudioIncluded': False})
+    stage('write-provenance')
     return {'status': 'constructed', 'version': 1, 'recipe': plan['recipe'], 'manifestHash': plan['manifestHash'],
             'durationMs': plan['durationMs'], 'engine': 'kokoro-82m-v1.0-cpu', 'modelHashes': MODEL_HASHES,
             'voiceAssignments': {'narrator': plan['narratorVoice'], 'characters': plan['characterVoices']},
@@ -279,5 +335,5 @@ if __name__ == '__main__':
         print(json.dumps(result, separators=(',', ':')))
     except Exception as failure:
         reason = str(failure) if isinstance(failure, SoundtrackError) and str(failure) in REASONS else 'RUNTIME_FAILED'
-        print(json.dumps({'status': 'failed', 'reason': reason}))
+        print(json.dumps({'status': 'failed', 'reason': reason, 'diagnostic': failure_diagnostic(failure)}))
         sys.exit(1)
