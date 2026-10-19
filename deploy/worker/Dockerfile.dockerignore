@@ -16,6 +16,13 @@
 !scripts/paid-film-delivery-worker.mjs
 !scripts/review-film-speech.mjs
 !scripts/transcribe-film.py
+!scripts/automatic-film-soundtrack.mjs
+!scripts/rebuild-film-soundtrack.mjs
+!scripts/rebuild-film-soundtrack.py
+!scripts/rebuild-film-soundtrack-assets.py
+!scripts/rebuild-film-soundtrack-requirements.txt
+!scripts/repair-name-proof.mjs
+!scripts/compare-repair-name-pronunciations.py
 !shared/
 !shared/*.json
 !deploy/
