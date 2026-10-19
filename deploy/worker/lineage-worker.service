@@ -10,7 +10,9 @@ Type=oneshot
 # image pin and secret file on the host; neither belongs in the source bundle.
 EnvironmentFile=/etc/lineage-worker/host.conf
 ExecStartPre=/usr/bin/test -s /etc/lineage-worker/runtime.env
-ExecStart=/usr/bin/docker run --rm --init --name lineage-production-worker --label app=lineage-production-worker --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 3g --memory-swap 3g --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 --env-file /etc/lineage-worker/runtime.env ${LINEAGE_WORKER_IMAGE} --once
+# Only native library copies use this private executable 32 MiB temporary mount.
+# Film media remains in the separate noexec /tmp mount.
+ExecStart=/usr/bin/docker run --rm --init --name lineage-production-worker --label app=lineage-production-worker --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --cpus 2 --memory 3g --memory-swap 3g --pids-limit 256 --tmpfs /tmp:rw,noexec,nosuid,nodev,size=1g,mode=1777 --tmpfs /run/lineage-native:rw,exec,nosuid,nodev,size=32m,uid=1000,gid=1000,mode=0700 --env-file /etc/lineage-worker/runtime.env -e TMPDIR=/run/lineage-native -e LINEAGE_WORKER_TEMP_ROOT=/tmp/lineage-production-worker ${LINEAGE_WORKER_IMAGE} --once
 # A successful oneshot has already removed its container; stopping an absent
 # container must not convert that completed pass into a failed service.
 ExecStop=-/usr/bin/docker stop --timeout 120 lineage-production-worker

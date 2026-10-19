@@ -1,5 +1,6 @@
 """Build-time cache of fixed public soundtrack assets; never used at runtime."""
 import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 from urllib.request import urlopen
@@ -31,7 +32,7 @@ def cache_pronunciations(destination):
 def cache(destination):
     base_directory = Path(destination).resolve(strict=True)
     root = base_directory / 'models/kokoro'
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     base = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/'
     expected = {
         'kokoro-v1.0.onnx': ('beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a', 400_000_000),
@@ -39,17 +40,25 @@ def cache(destination):
     }
     for name, (wanted, maximum) in expected.items():
         hasher, total = hashlib.sha256(), 0
-        with urlopen(base + name, timeout=180) as response, (root / name).open('xb') as output:
+        target = root / name
+        if target.is_symlink():
+            raise RuntimeError('The public model asset is not a regular cache file')
+        existing = target.exists()
+        # Operator images may inherit these same pinned files from a normal
+        # worker. Reuse only after hashing every byte under the original bound.
+        source = target.open('rb') if existing else urlopen(base + name, timeout=180)
+        with source as response, (nullcontext(None) if existing else target.open('xb')) as output:
             while block := response.read(1024 * 1024):
                 total += len(block)
                 if total > maximum:
                     raise RuntimeError('The public model asset exceeds its bound')
-                output.write(block)
+                if output is not None:
+                    output.write(block)
                 hasher.update(block)
         if hasher.hexdigest() != wanted:
             raise RuntimeError('The public model asset checksum changed')
     licenses = base_directory / 'licenses'
-    licenses.mkdir()
+    licenses.mkdir(exist_ok=True)
     for name, url in {
         'Kokoro-82M-LICENSE': 'https://raw.githubusercontent.com/hexgrad/kokoro/main/LICENSE',
         'kokoro-onnx-LICENSE': 'https://raw.githubusercontent.com/thewh1teagle/kokoro-onnx/main/LICENSE',

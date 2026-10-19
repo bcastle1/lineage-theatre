@@ -15,11 +15,12 @@ import { assembleFilm } from "./assemble-film.mjs";
 import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
 import { createRemoteProductionAuthorization } from "../api/_lib/remote-production-authorization.mjs";
 import { reviewFilmSpeech } from './review-film-speech.mjs';
-import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
+import { finishingFailure, markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
+import { createAutomaticSoundtrackFallback } from './automatic-film-soundtrack.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
-const workerTempRoot = join(tmpdir(), "lineage-production-worker");
+const workerTempRoot = process.env.LINEAGE_WORKER_TEMP_ROOT || join(tmpdir(), "lineage-production-worker");
 const markerName = ".lineage-worker.json";
 const finishingError = (message, reason) => markFinishingFailure(new Error(message), null, reason);
 function processRunning(pid) { try { process.kill(pid, 0); return true; } catch (error) { return error.code !== "ESRCH"; } }
@@ -94,7 +95,7 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
-  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, prepareClips,
+  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, prepareClips, soundtrackFallback,
   ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
@@ -127,13 +128,35 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       const outputPath = join(work, "film.mp4");
       stage = 'speech-review';
       // Only an explicitly configured operator repair supplies this hook. The
-      // ordinary worker leaves downloaded footage and soundtracks unchanged.
+      // ordinary worker reviews native audio before considering local fallback.
       if (prepareClips !== undefined) {
         if (typeof prepareClips !== 'function' || !await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
         await prepareClips({ email, id, job, clips, work, ffmpeg, stillOwned });
         if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
       }
-      const speechReview = adapter.id==='fal' ? await reviewSpeech({manifest:job.manifest,clips,ffmpeg}) : null;
+      let speechReview = null;
+      if (adapter.id === 'fal') {
+        const nativeClips = clips.map(clip => ({ ...clip }));
+        try {
+          speechReview = await reviewSpeech({ manifest: job.manifest, clips: nativeClips, ffmpeg });
+          for (const [index, clip] of nativeClips.entries()) if (clip.audioPath) clips[index].audioPath = clip.audioPath;
+        }
+        catch (error) {
+          // The operator repair has its own reviewed soundtrack path. Normal
+          // fallback is confined to a completed paid film with mismatched speech.
+          if (prepareClips !== undefined || typeof soundtrackFallback !== 'function'
+            || finishingFailure(error)?.reason !== 'SPEECH_SCRIPT_MISMATCH') throw error;
+          // Earlier scenes may have produced reviewed native-audio files before
+          // a later mismatch. Remove only those exact outputs from this run so
+          // authored review can use its normal exclusive output filenames.
+          for (const [index, clip] of nativeClips.entries()) {
+            const generated = resolve(work, `${clip.shotId}-reviewed.wav`);
+            if (clip.audioPath !== clips[index].audioPath && typeof clip.audioPath === 'string'
+              && resolve(clip.audioPath) === generated && dirname(generated) === resolve(work)) await rm(generated, { force: true });
+          }
+          speechReview = await soundtrackFallback({ email, id, job, clips, work, ffmpeg, stillOwned });
+        }
+      }
       if(adapter.id==='fal'&&speechReview?.passed!==true)throw finishingError('Film narration was not verified.', 'SPEECH_REVIEW_REQUIRED');
       stage = 'assembly';
       const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
@@ -186,7 +209,8 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
     authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
     verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
   const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
-  const assemble = createWorkerAssembly({ ...dependencies, adapter });
+  const soundtrackFallback = dependencies.soundtrackFallback ?? createAutomaticSoundtrackFallback({ ...dependencies, read, write });
+  const assemble = createWorkerAssembly({ ...dependencies, adapter, soundtrackFallback });
   return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
 }
 

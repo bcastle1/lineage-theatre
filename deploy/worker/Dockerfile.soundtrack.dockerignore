@@ -15,6 +15,7 @@
 !scripts/repair-paid-film-soundtrack.mjs
 !scripts/repair-name-proof.mjs
 !scripts/compare-repair-name-pronunciations.py
+!scripts/automatic-film-soundtrack.mjs
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile.soundtrack
