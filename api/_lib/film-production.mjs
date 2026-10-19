@@ -297,7 +297,13 @@ export function createFilmProductionService(dependencies = {}) {
     await requireProductionContext(job, actor, email);
     if (["completed", "failed", "awaiting-assembly"].includes(job.status)) return customerJob(job);
     if (job.lease && job.lease.expiresAt > now()) return customerJob(job);
-    const shot = job.shots.find(s => s.status !== "completed");
+    const inflight = job.shots.filter(s => ['queued', 'processing', 'submitting', 'uncertain'].includes(s.status));
+    const concurrent = Number.isSafeInteger(adapter.maxConcurrentShots) && adapter.maxConcurrentShots > 1
+      ? Math.min(4, adapter.maxConcurrentShots) : 1;
+    const shot = concurrent === 1 ? job.shots.find(s => s.status !== 'completed')
+      : inflight.find(s => ['submitting', 'uncertain'].includes(s.status))
+        || (inflight.length < concurrent && job.shots.find(s => s.status === 'prepared'))
+        || [...inflight].sort((a,b) => Date.parse(a.lastCheckedAt || a.submittedAt) - Date.parse(b.lastCheckedAt || b.submittedAt))[0];
     if (!shot) return customerJob(job);
     const previousStatus = shot.status;
     let grant = job.authorization;
@@ -386,6 +392,8 @@ export function createFilmProductionService(dependencies = {}) {
       catch { current.status = "uncertain"; }
     }
     job.lastCheckedAt = stamp();
+    current.lastCheckedAt = job.lastCheckedAt;
+    if (result?.reviewedReuse === true) job.timingDisrupted = true;
     if (current.status === "completed") current.completedAt ||= stamp();
     if (["uncertain", "failed"].includes(current.status)) job.timingDisrupted = true;
     delete job.lease;

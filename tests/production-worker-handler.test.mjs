@@ -36,3 +36,10 @@ test('remote authorization uses a fixed origin, no redirects and bounded respons
   for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
     await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
 });
+test('reviewed delivery uses the worker credential, exact artifact binding and separate service even while generation is unqualified',async()=>{
+  let delivered=0;const f=fixture({adapter:{...adapter,available:false},delivery:{deliver:async value=>{delivered++;assert.deepEqual(value,{orderId:input.orderId,artifactSha256:'d'.repeat(64)});return {status:'completed'};}}});
+  const body={action:'deliver-reviewed-film',orderId:input.orderId,artifactSha256:'d'.repeat(64)};
+  assert.equal((await invoke(f,{body,headers:{}})).statusCode,401);assert.equal(delivered,0);
+  assert.equal((await invoke(f,{body:{...body,paid:true}})).statusCode,400);assert.equal(delivered,0);
+  assert.equal((await invoke(f,{body})).body.status,'completed');assert.equal(delivered,1);assert.equal(f.calls(),0);
+});

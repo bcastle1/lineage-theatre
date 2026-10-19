@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { digest } from '../api/_lib/auth.mjs';
+import { digest, userPath } from '../api/_lib/auth.mjs';
+import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { createFalClient, FAL_MODELS, falRequestUrl, falMediaUrl } from '../api/_lib/fal-client.mjs';
-import { createFalProductionAdapter, falPlan, falShotInput, FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { createFalProductionAdapter, falPlan, falShotInput, FAL_RECIPE_VERSION, FAL_PROMPT_VERSION } from '../api/_lib/fal-production.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 
 // All qualification, prices, requests and media here are synthetic test data.
@@ -105,6 +106,26 @@ test('both providers preserve exact speech, references, 1080p and rounded edit h
   }
 });
 
+test('approved on-screen captions remain in the manifest but are excluded from generated lettering',()=>{
+  const {manifest}=buildFilmManifest(fictionalOperatorProject());
+  manifest.shots[0].visual+=' Caption: “Fictional place • 1832.”';
+  const refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.png']));
+  const body=falShotInput(manifest,manifest.shots[0],'seedance',refs);
+  assert.ok(!body.prompt.includes('Fictional place'));assert.ok(manifest.shots[0].visual.includes('Fictional place'));
+  assert.match(body.prompt,/Start narration within the first 0.2 seconds/);assert.match(body.prompt,/Never show, pan across, fade from/);
+});
+
+test('reviewed editorial replacements stay bound to the original paid shot and cannot trigger new spending',async()=>{
+  const {manifest,manifestHash}=buildFilmManifest(fictionalOperatorProject()),key=digest('fixture-shot'),identity=digest(`${FAL_RECIPE_VERSION}:seedance:${key}`),replacement=digest('fixture-replacement');
+  const choice={version:1,originalIdentity:identity,productionId:'fixture-production',manifestHash,model:'seedance',approvedBy:OWNER_EMAIL,promptVersion:FAL_PROMPT_VERSION,replacementIdentity:replacement,requestId:'fixture-replacement-id'};
+  const read=async path=>({value:path===userPath(OWNER_EMAIL)?{email:OWNER_EMAIL,role:'owner'}:choice});
+  const client={get:async id=>id===replacement?{state:'completed',endpoint:FAL_MODELS.seedance,requestId:choice.requestId,result:{video:{url:'https://v3.fal.media/reviewed.mp4'}}}:null,submit:()=>assert.fail('No new spending'),poll:()=>assert.fail('A completed choice does not need polling')};
+  const adapter=createFalProductionAdapter({model:'seedance',client,read,fetchImpl:async()=>new Response(null,{headers:{'content-type':'video/mp4','content-length':'100'}})});
+  const input={manifest,manifestHash,shot:manifest.shots[0],productionId:choice.productionId,idempotencyKey:key};
+  assert.equal((await adapter.reconcileShot(input)).status,'completed');
+  choice.manifestHash='c'.repeat(64);await assert.rejects(adapter.reconcileShot(input));
+});
+
 test('unsupported plans and missing quality evidence cannot enable production', async () => {
   const { manifest } = buildFilmManifest(fictionalOperatorProject());
   assert.equal(createFalProductionAdapter({ key: 'fixture-key', qualification: null }).available, false);
@@ -124,13 +145,13 @@ test('reference and render stages require separate current spending approval and
     submitted.push(request); const value = { state: 'queued', requestId: `fixture-${submitted.length}`, ...request }; operations.set(request.identity, value); return value;
   }, poll: async id => { const value = operations.get(id); value.state = 'completed';
     value.result = value.endpoint === FAL_MODELS.reference ? { images: [{ url: 'https://v3.fal.media/reference.png' }] } : { video: { url: 'https://v3.fal.media/film.mp4' } }; return value; } };
-  const adapter = createFalProductionAdapter({ model: 'wan', client, now: () => at, normalizeReference: async url => url, fetchImpl: async () => new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }) });
+  const adapter = createFalProductionAdapter({ model: 'wan', client, read:async()=>null, now: () => at, normalizeReference: async url => url, fetchImpl: async () => new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }) });
   const input = { manifest, manifestHash, shot: manifest.shots[0], productionId: 'fixture-production', idempotencyKey: digest('fixture-scene'), authorizeSpend: async () => { grantChecks++; return allowed; } };
   assert.equal((await adapter.submitShot(input)).status, 'queued'); assert.equal(submitted.length, 1);
   allowed = false; await assert.rejects(adapter.pollShot(input), /spending is not authorized/); assert.equal(submitted.length, 1);
   allowed = true; await adapter.pollShot(input); await adapter.pollShot(input); const result = await adapter.pollShot(input);
   assert.equal(result.status, 'completed'); assert.equal(submitted.length, 3); assert.equal(grantChecks, 4);
   await adapter.pollShot(input); assert.equal(submitted.length, 3);
-  const peer = createFalProductionAdapter({ model: 'seedance', client, now: () => at });
+  const peer = createFalProductionAdapter({ model: 'seedance', client, read:async()=>null, now: () => at });
   await peer.submitShot(input); assert.equal(submitted.filter(r => r.endpoint === FAL_MODELS.reference).length, 2);
 });

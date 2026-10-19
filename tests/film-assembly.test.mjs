@@ -100,6 +100,15 @@ test("real FFmpeg verifies native profiles and separate reviewed audio", { skip:
       assert.equal(report.hasAudio, true); assert.ok(Math.abs(report.durationSeconds - 2) < 0.05);
     });
 
+    await t.test("an unspecified source SAR becomes explicit square pixels while declared anamorphic footage is rejected", async () => {
+      const omitted=join(root,'omitted-sar.mp4'),anamorphic=join(root,'anamorphic.mp4');
+      for(const [path,sar] of [[omitted,'0'],[anamorphic,'2/1']])
+        await run(['-v','error','-n','-i',silent1080,'-vf',`setsar=${sar}`,'-c:v','libx264','-preset','ultrafast',path]);
+      const report=await assembleFilm({...inputFor([{path:omitted,audioPath:audio}]),ffmpeg,outputPath:join(root,'square-pixels.mp4')});
+      assert.equal(report.width,1920);assert.equal(report.height,1080);assert.equal(report.frameRate,24);
+      await assert.rejects(assembleFilm({...inputFor([{path:anamorphic,audioPath:audio}]),ffmpeg,outputPath:join(root,'rejected-anamorphic.mp4')}),/square-pixel/);
+    });
+
     await t.test("mixed aspect ratios require a framing review", async () => {
       await assert.rejects(assembleFilm({ ...inputFor([{ path: silent1080, audioPath: audio }, { path: square, audioPath: audio }]), ffmpeg, outputPath: join(root, "invalid-aspect.mp4") }), /aspect ratios differ/);
     });

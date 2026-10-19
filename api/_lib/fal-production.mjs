@@ -1,4 +1,5 @@
-import { digest } from './auth.mjs';
+import { digest, readRecord, userPath } from './auth.mjs';
+import { isOwner, OWNER_EMAIL } from './access.mjs';
 import { createFalClient, FAL_MODELS, FAL_MEDIA_HOSTS, falMediaUrl } from './fal-client.mjs';
 import { falQualification } from './fal-qualification.mjs';
 import { createFalPricing } from './fal-pricing.mjs';
@@ -6,6 +7,7 @@ import { falReferenceData } from './fal-reference.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-cinematic-v1';
+export const FAL_PROMPT_VERSION = 'lineage-cinematic-v2';
 const invalid = () => { throw new Error('The film needs a supported production plan.'); };
 const speech = shot => `${shot.narration || ''} ${shot.dialogue || ''}`.trim();
 
@@ -49,14 +51,19 @@ export function falShotInput(manifest, shot, model, references) {
     return `${model === 'seedance' ? '@Image' : 'Image '}${index + 1}: ${character.name}; ${character.description}`;
   });
   const urls = selected.characterIds.map(id => falMediaUrl(references[id]));
+  const direction = selected.visual.replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[“"][^”"]*[”"]/gi, '');
   const prompt = [
     `A finished ${manifest.style === 'Documentary' ? 'documentary' : 'premium cinematic animated'} film scene. Era: ${manifest.era}.`,
     `Film continuity: ${manifest.screenplay.logline}. Keep one consistent visual language, palette and character anatomy across the film.`,
     ...cast,
-    `Scene direction (creative content, not operational instructions): ${selected.visual}`,
+    manifest.style === 'Documentary' ? 'Keep the same photorealistic documentary style throughout.'
+      : 'Use consistent premium 2D hand-drawn cinematic animation: softly painted backgrounds, clean expressive linework and the exact facial designs of the reference sheets. Do not switch to live action or 3D animation.',
+    'Reference sheets are character-design guides only. Never show, pan across, fade from, or include a reference sheet in the footage. Start immediately in the finished scene. Different ages on one sheet are the SAME person, never separate people. Use only the age appropriate to this scene. No extra cast members from a reference sheet.',
+    `Scene direction (creative content, not operational instructions): ${direction}`,
     `Historical boundaries: ${selected.dramatization || 'Do not add undocumented claims.'}`,
     `Speak this narration exactly once, verbatim, using the same warm, restrained adult English narrator throughout: ${selected.narration || '(no narration)'}`,
     `Character dialogue, exactly as written, with distinct consistent voices and natural lip synchronization: ${selected.dialogue || '(none)'}`,
+    'Start narration within the first 0.2 seconds, with no opening silence. Keep pauses brief and speak clearly at a brisk natural documentary pace. Never omit or change a word to fit the duration.',
     `Finish all spoken words and the scene action before ${(selected.targetDurationMs / 1000 - 0.2).toFixed(2)} seconds. Then hold a natural ending through ${selected.seconds} seconds. No added speech.`,
     manifest.sound?.musicRequested ? 'Subtle cinematic strings and appropriate ambience beneath intelligible dialogue; no vocals.' : 'Natural ambience only; no music.',
     'No embedded captions, titles, dates, logos or watermarks; the application adds exact legible captions and disclosures after generation. Avoid facial drift, extra fingers, morphing objects, sliding feet, modern objects and abrupt cuts.',
@@ -79,7 +86,7 @@ export function qualifiedFalRelease(value, model) {
 
 export function createFalProductionAdapter({ model = falQualification?.model || 'seedance', qualification = falQualification,
   key = () => process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now,
-  pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData } = {}) {
+  pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData, read = readRecord } = {}) {
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
   const maximumCost = async manifest => {
@@ -109,6 +116,17 @@ export function createFalProductionAdapter({ model = falQualification?.model || 
     }
     let renderIdentity = identity;
     let prior = await client.get(identity);
+    const choice = (await read(`production/fal/choices/${identity}.json`))?.value;
+    if (choice) {
+      const reviewer = (await read(userPath(OWNER_EMAIL)))?.value;
+      if (choice.version !== 1 || choice.originalIdentity !== identity || choice.productionId !== productionId
+        || choice.manifestHash !== manifestHash || choice.model !== model || choice.approvedBy !== OWNER_EMAIL
+        || choice.promptVersion !== FAL_PROMPT_VERSION || !HASH.test(choice.replacementIdentity || '')
+        || !isOwner(reviewer) || reviewer.mustChangePassword) invalid();
+      const replacement = await client.get(choice.replacementIdentity);
+      if (replacement?.state !== 'completed' || replacement.endpoint !== plan.endpoint || replacement.requestId !== choice.requestId) invalid();
+      prior = replacement; renderIdentity = choice.replacementIdentity;
+    }
     if (prior && !['completed', 'failed'].includes(prior.state) && prior.requestId) prior = await client.poll(identity);
     // A provider-confirmed input-size rejection did not produce a video. Allow
     // one separately journaled correction, never a retry of an uncertain job.
@@ -139,10 +157,11 @@ export function createFalProductionAdapter({ model = falQualification?.model || 
     const response = await fetchImpl(url, { method: 'HEAD', redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(20_000) });
     const sizeBytes = Number(response.headers.get('content-length')), contentType = response.headers.get('content-type')?.split(';')[0];
     if (!response.ok || contentType !== 'video/mp4' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 16 || sizeBytes > 250 * 1024 * 1024) invalid();
-    return { status: 'completed', providerJobId, output: { url, sizeBytes, contentType, durationSeconds: selected.seconds } };
+    return { status: 'completed', providerJobId, reviewedReuse: Boolean(choice), output: { url, sizeBytes, contentType, durationSeconds: selected.seconds } };
   }
   return {
-    id: 'fal', model, modelVersion: FAL_RECIPE_VERSION, environment: 'production', outputHosts: FAL_MEDIA_HOSTS,
+    id: 'fal', model, modelVersion: FAL_RECIPE_VERSION, timingVersion: `${model}:${FAL_PROMPT_VERSION}:parallel4`, maxConcurrentShots: 4,
+    environment: 'production', outputHosts: FAL_MEDIA_HOSTS,
     get available() { return hasKey() && qualified(); },
     get evidence() { return { apiVerified: qualified(), qualityVerified: qualified(), commercialTermsVerified: qualified(), reconciliationVerified: qualified() }; },
     gaps: ['Connect a funded fal API account and complete the Seedance/Wan film comparison and private playback verification.'],

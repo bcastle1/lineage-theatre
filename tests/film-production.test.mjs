@@ -33,6 +33,18 @@ function adapter(overrides = {}) {
 const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, environment: "production", budgetCents: 300, expiresAt: new Date(at + 600_000).toISOString(), fictionalOnly: false });
 const prepare = (service, overrides = {}) => service.prepare({ email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, ...overrides });
 
+test('parallel-capable providers admit distinct authorized scenes before polling, without duplicating a shot', async()=>{
+  const data=store(),submitted=[],polled=[];let clock=at;
+  const service=createFilmProductionService({...data,now:()=>clock,authorize:grant,
+    adapter:adapter({maxConcurrentShots:4,submitShot:async({shot})=>{submitted.push(shot.id);return {status:'queued',providerJobId:`fixture-${shot.id}`};},
+      pollShot:async({shot,providerJobId})=>{polled.push(shot.id);return {status:'processing',providerJobId};}})});
+  const job=await prepare(service);
+  for(let n=0;n<job.shotCount;n++){clock+=1000;await service.advance({email,id:job.id});}
+  assert.equal(new Set(submitted).size,job.shotCount);assert.equal(polled.length,0);
+  for(let n=0;n<job.shotCount;n++){clock+=1000;await service.advance({email,id:job.id});}
+  assert.equal(submitted.length,job.shotCount);assert.deepEqual(polled,submitted);
+});
+
 test("manifest preserves reviewed screenplay, hashes evidence, sets exact target timing and excludes client provider flags", () => {
   assert.equal(buildFilmManifest(fictionalOperatorProject()).manifestHash, "18e3e118024fbae9006336b9de74187777bcf8126ac83ee7929d74eee16ee46f", "previously prepared valid films keep their exact manifest hash");
   const project = fictionalOperatorProject(); project.apiVerified = true; project.providerKey = "must-not-save"; project.outputUrl = "https://untrusted.invalid";
