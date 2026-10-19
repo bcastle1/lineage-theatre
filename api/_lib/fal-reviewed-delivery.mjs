@@ -15,16 +15,16 @@ const fail = () => { throw new Error('The reviewed film, owner, payment or priva
 // it never submits generation, invents per-shot completion, or changes a price.
 export function createFalReviewedDelivery({ read = readRecord, write = writeRecord, getBlob = get,
   checkPayment = (actor, input) => hostedCheckout.check(actor, input), now = Date.now } = {}) {
-  async function binding(orderId, artifactSha256, previousArtifactSha256) {
-    if (!HASH.test(orderId || '') || !HASH.test(artifactSha256 || '')
+  async function binding(orderId, artifactSha256, previousArtifactSha256, model) {
+    if (!['seedance', 'wan'].includes(model) || !HASH.test(orderId || '') || !HASH.test(artifactSha256 || '')
       || (previousArtifactSha256 !== undefined && (!HASH.test(previousArtifactSha256) || previousArtifactSha256 === artifactSha256))) fail();
     const actor = (await read(userPath(OWNER_EMAIL)))?.value;
     if (!isOwner(actor) || actor.mustChangePassword || accessStatusForUser(actor) !== 'approved') fail();
     const comparison = (await read(`production/fal/comparisons/${orderId}.json`))?.value;
-    const candidateRecord = await read(`production/fal/candidates/${orderId}/seedance.json`);
+    const candidateRecord = await read(`production/fal/candidates/${orderId}/${model}.json`);
     const candidate = candidateRecord?.value, artifact = candidate?.artifact;
     if (!comparison || comparison.approvedBy !== actor.email || comparison.customerEmail !== actor.email
-      || candidate?.version !== 1 || candidate.orderId !== orderId || candidate.model !== 'seedance'
+      || candidate?.version !== 1 || candidate.orderId !== orderId || candidate.model !== model
       || candidate.manifestHash !== comparison.manifestHash || candidate.review?.approvedBy !== actor.email
       || candidate.review?.artifactSha256 !== artifactSha256 || candidate.review?.visual !== true
       || candidate.review?.speech !== true || candidate.review?.privatePlayback !== true
@@ -67,8 +67,8 @@ export function createFalReviewedDelivery({ read = readRecord, write = writeReco
     } else if (replacement || (!completed && (job.status !== 'prepared' || !job.shots.every(shot => shot.status === 'prepared')))) fail();
     return { actor, comparison, candidateRecord, candidate, artifact, jobRecord, job, authorization, order, completed, replacing };
   }
-  async function deliver({ orderId, artifactSha256, previousArtifactSha256 }) {
-    const before = await binding(orderId, artifactSha256, previousArtifactSha256);
+  async function deliver({ orderId, artifactSha256, previousArtifactSha256, model = 'seedance' }) {
+    const before = await binding(orderId, artifactSha256, previousArtifactSha256, model);
     const checked = await checkPayment(before.actor, { orderId });
     if (checked?.id !== orderId || checked.preparedId !== before.job.id || checked.filmId !== before.job.filmId
       || checked.status !== 'captured' || checked.sandbox !== false || checked.refundedCents !== 0 || checked.requiresReview !== false
@@ -82,7 +82,7 @@ export function createFalReviewedDelivery({ read = readRecord, write = writeReco
       for await (const chunk of blob.stream) { size += chunk.byteLength; if (size > artifact.sizeBytes) fail(); hash.update(chunk); }
       if (size !== artifact.sizeBytes || hash.digest('hex') !== artifactSha256) fail();
     } finally { if (!blob?.stream?.locked) await blob?.stream?.cancel().catch(() => {}); }
-    const current = await binding(orderId, artifactSha256, previousArtifactSha256);
+    const current = await binding(orderId, artifactSha256, previousArtifactSha256, model);
     if (current.candidateRecord.etag !== before.candidateRecord.etag || current.jobRecord.etag !== before.jobRecord.etag) fail();
     if (!current.completed) {
       const timestamp = new Date(now()).toISOString();
@@ -98,7 +98,7 @@ export function createFalReviewedDelivery({ read = readRecord, write = writeReco
       try { await write(productionJobPath(current.actor.email, current.job.id), next, current.jobRecord.etag); }
       catch { /* Confirm an identical write whose response was lost. */ }
     }
-    const saved = await binding(orderId, artifactSha256, previousArtifactSha256);
+    const saved = await binding(orderId, artifactSha256, previousArtifactSha256, model);
     if (!saved.completed) fail();
     return { status: 'completed', preparedId: saved.job.id, artifactSha256, customerAmountCents: saved.order.amountCents };
   }

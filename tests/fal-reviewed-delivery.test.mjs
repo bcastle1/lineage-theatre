@@ -79,3 +79,14 @@ test('replacing a delivered film requires the exact previous artifact, owner req
     f=>{const get=f.options.getBlob;f.options.getBlob=async path=>{f.records.get(f.jobPath).etag='changed';return get(path);};},
   ]) {const f=replacementFixture();mutate(f);await assert.rejects(createFalReviewedDelivery(f.options).deliver(f.input));assert.equal(f.writes(),0);}
 });
+
+test('Wan delivery reads only the exact Wan candidate and preserves the previous delivered film',async()=>{
+  const f=replacementFixture(),wanPath=f.candidatePath.replace('/seedance.json','/wan.json');
+  const candidate=structuredClone(f.records.get(f.candidatePath));candidate.value.model='wan';f.records.set(wanPath,candidate);
+  // An unrelated Seedance candidate cannot authorize or supply the Wan delivery.
+  f.records.get(f.candidatePath).value.review.privatePlayback=false;
+  const service=createFalReviewedDelivery(f.options);
+  await assert.rejects(service.deliver({...f.input,model:'unknown'}));
+  assert.equal((await service.deliver({...f.input,model:'wan'})).status,'completed');
+  assert.equal(f.records.get(f.jobPath).value.editorialHistory[0].media.sha256,f.input.previousArtifactSha256);
+});

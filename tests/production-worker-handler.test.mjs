@@ -50,3 +50,10 @@ test('reviewed replacement forwards the exact previous digest and rejects invali
   assert.equal((await invoke(f,{body:{...body,previousArtifactSha256:null}})).statusCode,400);assert.equal(calls,0);
   assert.equal((await invoke(f,{body})).statusCode,200);assert.equal(calls,1);
 });
+
+test('reviewed delivery accepts an explicit supported candidate model but rejects unknown models',async()=>{
+  const body={action:'deliver-reviewed-film',orderId:input.orderId,artifactSha256:'d'.repeat(64),model:'wan'};
+  let calls=0;const f=fixture({delivery:{deliver:async value=>{calls++;assert.equal(value.model,'wan');return {status:'completed'};}}});
+  assert.equal((await invoke(f,{body:{...body,model:'unknown'}})).statusCode,400);assert.equal(calls,0);
+  assert.equal((await invoke(f,{body})).statusCode,200);assert.equal(calls,1);
+});
