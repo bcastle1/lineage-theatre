@@ -24,17 +24,22 @@ export async function recoverFilmPayment(request: Request, reference: FilmPaymen
 
 // Only a fresh server record explicitly proving that no invoice POST was
 // attempted can authorize this retry. It keeps every saved request identity.
-export async function retryFilmPayment({ request, order, reference, checkoutProof }: {
+export async function retryFilmPayment({ request, order, reference, checkoutProof, productionConsent = false }: {
   request: Request; order: FilmOrder; reference: FilmPaymentReference; checkoutProof: string;
+  productionConsent?: boolean;
 }): Promise<FilmOrder> {
   const current = orderForReference(order, reference);
   if (current.retryAllowed !== true || current.status !== "uncertain" || current.checkoutMethod !== "quickbooks-hosted-invoice") {
     throw new Error("This order cannot be retried. Check payment status or contact the administrator.");
   }
   if (!/^[a-f0-9]{64}$/.test(checkoutProof)) throw new Error("Complete the payment security check before continuing.");
+  if (!current.sandbox && productionConsent !== true) {
+    throw new Error("Confirm automatic production of this saved film before retrying its payment page.");
+  }
   try {
     return orderForReference(await request("/api/studio", { action: "checkout", quoteId: reference.quoteId,
-      idempotencyKey: reference.checkoutKey, checkoutProof, consent: true }), reference, current);
+      idempotencyKey: reference.checkoutKey, checkoutProof, consent: true,
+      ...(productionConsent ? { productionConsent: true } : {}) }), reference, current);
   } catch (cause) {
     if (cause && typeof cause === "object" && "code" in cause && cause.code === "QUOTE_EXPIRED") {
       throw new Error("The saved price or checkout terms changed. Contact the administrator before continuing with this order.");
@@ -56,6 +61,9 @@ export async function commitFilmPayment({ request, quote, reference, checkoutPro
     throw new Error("Your film price expired or changed before payment. Request a new price.");
   }
   if (!/^[a-f0-9]{64}$/.test(checkoutProof)) throw new Error("Complete the payment security check before continuing.");
+  if (!quote.sandbox && productionConsent !== true) {
+    throw new Error("Confirm automatic production of this saved film before creating its payment page. No invoice has been requested.");
+  }
   persist(reference);
   const verifyAmount = (order: FilmOrder) => {
     if (order.amountCents !== quote.amountCents || order.sandbox !== quote.sandbox || order.filmId !== quote.filmId

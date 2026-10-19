@@ -84,7 +84,7 @@ async function fixture(options = {}) {
     return { ...context, version: 1, outcome: "clear", scope: HOSTED_REVERSAL_SCOPE, evidenceHash: digest("fictional-reversal-evidence"),
       checkedAt: new Date(time).toISOString(), expiresAt: new Date(time + 60_000).toISOString(), ...options.reversalEvidence };
   };
-  const dependencies = { read, write, now: () => time, env, transport, receiptDelivery: { deliver: async () => {} },
+  const dependencies = { read, write, now: () => time, env, transport, receiptDelivery: { deliver: async () => {} }, productionAutomation: { schedule: async () => {} },
     ...(options.useRecordedReversalVerifier ? {} : { verifyReversals: options.missingReversalVerifier ? null : verifyReversals }),
     pricingSettings: async () => ({ revision: 1, markupBasisPoints: 5000 }),
     quoteProvider: async () => ({ preparedId: plan.id, manifestHash: plan.manifestHash, filmId: plan.filmId, filmTitle: "Fictional film",
@@ -94,7 +94,7 @@ async function fixture(options = {}) {
   };
   const hosted = createHostedCheckoutService(dependencies);
   const q = await hosted.quote(actor, { project: {}, preparedId: plan.id, idempotencyKey: "fictional-hosted-quote" });
-  const order = await hosted.checkout(actor, { quoteId: q.id, idempotencyKey: "fictional-hosted-checkout", consent: true });
+  const order = await hosted.checkout(actor, { quoteId: q.id, idempotencyKey: "fictional-hosted-checkout", consent: true, productionConsent: true });
   invoice.Balance = 0; invoice.LinkedTxn = [{ TxnId: "40", TxnType: "Payment" }];
   assert.equal((await hosted.check(actor, { orderId: order.id })).status, "captured");
   const orderPath = `payments/orders/${order.id}.json`, quotePath = `payments/hosted-quotes/${digest(email)}/${q.id}.json`;
