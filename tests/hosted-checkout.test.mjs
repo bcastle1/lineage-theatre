@@ -45,7 +45,7 @@ function fixture(options={}) {
       quotes.push({project,actor,request});return {preparedId:PREPARED,manifestHash:manifest,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",providerCostCents:1000,
         pricingBasis:"planning-rate",pricingRevision:0,quoteReference:"fictional-reference",environment:binding.environment,expiresAt:new Date(time+300_000).toISOString(),...options.quoteOverrides};}};
   const service=createHostedCheckoutService(dependencies),makeQuote=(actor=OWNER,key=KEY)=>service.quote(actor,{project:{title:"Private source material"},preparedId:PREPARED,idempotencyKey:key});
-  const checkout=async(actor=OWNER)=>{const q=await makeQuote(actor);return service.checkout(actor,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true});};
+  const checkout=async(actor=OWNER)=>{const q=await makeQuote(actor);return service.checkout(actor,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});};
   return {service,records,requests,bindings,quotes,read,write,seed,makeQuote,checkout,peer:()=>createHostedCheckoutService(dependencies),advance:n=>time+=n,setBinding:b=>binding=b,setDispatch:d=>dispatch=d,
     invoice:()=>invoice,editInvoice:changes=>invoice={...invoice,...changes},setManifest:value=>manifest=value,editCustomer:changes=>customer={...customer,...changes}};
 }
@@ -106,7 +106,7 @@ test("hosted checkout creates exactly one minimal customer and fixed invoice wit
 });
 
 test("concurrent hosted checkouts across service instances produce one invoice and customer",async()=>{
-  const h=fixture(),q=await h.makeQuote(),body={quoteId:q.id,idempotencyKey:CHECKOUT,consent:true};
+  const h=fixture(),q=await h.makeQuote(),body={quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true};
   const outcomes=await Promise.allSettled([h.service.checkout(OWNER,body),h.peer().checkout(OWNER,body),h.service.checkout(OWNER,{...body,idempotencyKey:"another-checkout-key-123"})]);
   assert.ok(outcomes.some(r=>r.status==="fulfilled"&&r.value.status==="awaiting-payment"));assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,1);assert.equal(mutationRequests(h).filter(r=>r.path==="/customer").length,1);
 });
@@ -306,8 +306,8 @@ test("durable claim failure occurs before any customer/invoice mutation",async()
 });
 
 test("stale grant, terms, legacy production identity and direct-card collision prevent new invoices",async()=>{
-  const h=fixture(),q=await h.makeQuote();h.setBinding({...BINDING,grantId:"b".repeat(64)});await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true}));assert.equal(h.requests.length,0);
-  const terms=fixture(),tq=await terms.makeQuote();terms.seed(HOSTED_CHECKOUT_SETTINGS_PATH,{...settings,revision:2,deliveryTerms:"Different terms"});await error(terms.service.checkout(OWNER,{quoteId:tq.id,idempotencyKey:CHECKOUT,consent:true}),"QUOTE_EXPIRED");assert.equal(terms.requests.length,0);
+  const h=fixture(),q=await h.makeQuote();h.setBinding({...BINDING,grantId:"b".repeat(64)});await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}));assert.equal(h.requests.length,0);
+  const terms=fixture(),tq=await terms.makeQuote();terms.seed(HOSTED_CHECKOUT_SETTINGS_PATH,{...settings,revision:2,deliveryTerms:"Different terms"});await error(terms.service.checkout(OWNER,{quoteId:tq.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}),"QUOTE_EXPIRED");assert.equal(terms.requests.length,0);
   for(const legacy of [true,false]) {const collision=fixture();collision.seed(`payments/orders/${legacy?digest(`${OWNER.email}:${MANIFEST}`):digest(`${OWNER.email}:production:${MANIFEST}`)}.json`,{customerEmail:OWNER.email,manifestHash:MANIFEST,merchantBinding:BINDING,status:"captured"});await error(collision.makeQuote(),"PAYMENT_CONFLICT");assert.equal(collision.requests.length,0);}
 });
 
@@ -356,13 +356,13 @@ test("oversized/malformed provider replies are not persisted and cause no repeat
 
 test("different quote or checkout identity for the same saved film cannot persist a mismatched order reference",async()=>{
   const h=fixture(),q=await h.makeQuote(),o=await h.checkout();await error(h.makeQuote(OWNER,"another-quote-request-123"),"ORDER_ALREADY_EXISTS");
-  await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:"another-checkout-key-123",consent:true}),"ORDER_ALREADY_EXISTS");
+  await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:"another-checkout-key-123",consent:true,productionConsent:true}),"ORDER_ALREADY_EXISTS");
   assert.equal(mutationRequests(h).length,2);assert.equal(h.records.get(`payments/orders/${o.id}.json`).value.version,1);assert.equal(h.records.get(`payments/orders/${o.id}.json`).value.provider,"quickbooks");
 });
 
 test("same-company reconnect revalidates cached customer and safely reuses it for a different film",async()=>{
   const h=fixture();await h.checkout();const fresh={...BINDING,grantId:"b".repeat(64)};h.setBinding(fresh);h.seed(HOSTED_CHECKOUT_SETTINGS_PATH,{...settings,revision:2,merchantBinding:fresh});
-  h.setManifest(digest("another-film"));const q=await h.makeQuote(OWNER,"another-quote-request-123");const order=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true});
+  h.setManifest(digest("another-film"));const q=await h.makeQuote(OWNER,"another-quote-request-123");const order=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});
   assert.equal(order.status,"awaiting-payment");assert.equal(mutationRequests(h).filter(r=>r.path==="/customer").length,1);assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,2);assert.ok(h.requests.some(r=>r.path==="/customer/20"));
   const map=[...h.records.entries()].find(([path])=>path.startsWith("payments/hosted-customers/"))[1].value;assert.equal(map.merchantBinding.grantId,fresh.grantId);
 });
@@ -370,7 +370,7 @@ test("same-company reconnect revalidates cached customer and safely reuses it fo
 test("changed or deactivated cached customer blocks the next invoice without creating a duplicate customer",async()=>{
   for(const changed of [{Active:false},{PrimaryEmailAddr:{Address:OTHER.email}},{DisplayName:"Another customer"}]) {
     const h=fixture();await h.checkout();h.editCustomer(changed);h.setManifest(digest("another-film"));const q=await h.makeQuote(OWNER,"another-quote-request-123");
-    const order=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true});assert.equal(order.status,"uncertain");assert.equal(order.retryAllowed,true);assert.equal(mutationRequests(h).length,2);
+    const order=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});assert.equal(order.status,"uncertain");assert.equal(order.retryAllowed,true);assert.equal(mutationRequests(h).length,2);
   }
 });
 
@@ -378,19 +378,19 @@ test("two films racing the first customer creation can resume only the order wit
   const h=fixture(),q1=await h.makeQuote();h.setManifest(digest("second-film"));const q2=await h.makeQuote(OWNER,"second-quote-request-123");let release,started;
   const waiting=new Promise(resolve=>started=resolve),blocked=new Promise(resolve=>release=resolve);let first=true;
   h.setDispatch(async op=>{if(op.path==="/customer"&&first){first=false;started();await blocked;}});
-  const a=h.service.checkout(OWNER,{quoteId:q1.id,idempotencyKey:CHECKOUT,consent:true});await waiting;
-  const b=await h.peer().checkout(OWNER,{quoteId:q2.id,idempotencyKey:CHECKOUT,consent:true});assert.equal(b.status,"uncertain");assert.equal(b.retryAllowed,true);release();assert.equal((await a).status,"awaiting-payment");
-  const retried=await h.service.checkout(OWNER,{quoteId:q2.id,idempotencyKey:CHECKOUT,consent:true});assert.equal(retried.status,"awaiting-payment");assert.equal(retried.retryAllowed,false);assert.equal(retried.id,b.id);
+  const a=h.service.checkout(OWNER,{quoteId:q1.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});await waiting;
+  const b=await h.peer().checkout(OWNER,{quoteId:q2.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});assert.equal(b.status,"uncertain");assert.equal(b.retryAllowed,true);release();assert.equal((await a).status,"awaiting-payment");
+  const retried=await h.service.checkout(OWNER,{quoteId:q2.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});assert.equal(retried.status,"awaiting-payment");assert.equal(retried.retryAllowed,false);assert.equal(retried.id,b.id);
   assert.equal(mutationRequests(h).filter(r=>r.path==="/customer").length,1);assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,2);
 });
 
 test("safe pre-invoice retry keeps original expiry, settings, grant and consent requirements",async()=>{
   for(const change of ["expired","settings","grant","consent"]) {
     const h=fixture();let fail=true;h.setDispatch(op=>{if(op.path==="/item/2"&&fail){fail=false;throw Error("temporary read failure");}});
-    const q=await h.makeQuote(),first=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true});assert.equal(first.retryAllowed,true);
+    const q=await h.makeQuote(),first=await h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});assert.equal(first.retryAllowed,true);
     if(change==="expired")h.advance(300_001);if(change==="settings")h.seed(HOSTED_CHECKOUT_SETTINGS_PATH,{...settings,revision:2});if(change==="grant")h.setBinding({...BINDING,grantId:"b".repeat(64)});
     if(["expired","settings"].includes(change))assert.equal((await h.service.order(OWNER,first.id)).retryAllowed,false);
-    await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:change!=="consent"}));assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,0);
+    await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:change!=="consent",productionConsent:true}));assert.equal(mutationRequests(h).filter(r=>r.path==="/invoice").length,0);
   }
 });
 
@@ -447,7 +447,10 @@ test("automatic production requires recorded checkout consent and confirmed paym
   assert.equal((await h.service.check(CUSTOMER,{orderId:order.id})).status,"captured");
   assert.deepEqual(scheduled,[{id:order.id}]);assert.equal(mutationRequests(h).length,2);
   const legacy=fixture({productionAutomation:{schedule:async()=>assert.fail("Legacy consent must not be expanded")}});
-  const old=await legacy.checkout();legacy.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  const old=await legacy.checkout(),oldPath=`payments/orders/${old.id}.json`,oldRecord=(await legacy.read(oldPath)).value;
+  // This saved order predates required automatic-production consent.
+  delete oldRecord.productionConsent;delete oldRecord.productionConsentAt;legacy.seed(oldPath,oldRecord);
+  legacy.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
   assert.equal((await legacy.service.check(OWNER,{orderId:old.id})).status,"captured");
 });
 

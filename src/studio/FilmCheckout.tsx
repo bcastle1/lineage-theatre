@@ -28,6 +28,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const payment = normalizePaymentReference(film.paymentReference);
   const [configuration, setConfiguration] = useState<CheckoutConfiguration | null>(null);
   const [quote, setQuote] = useState<FilmQuote | null>(null);
+  const [checkoutProductionReady, setCheckoutProductionReady] = useState(false);
   const [price, setPrice] = useState<FilmPrice | null>(null);
   const [preparationConsent, setPreparationConsent] = useState(false);
   const [savedOrder, setOrder] = useState<FilmOrder | null>(null);
@@ -36,6 +37,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const [paidPlan, setPaidPlan] = useState<PaidFilmPlan | null>(null);
   const [inputHash, setInputHash] = useState("");
   const [consent, setConsent] = useState(false);
+  const [retryProductionConsent, setRetryProductionConsent] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -65,6 +67,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setConsent(false); }, [productionAvailable]);
+  useEffect(() => { setRetryProductionConsent(false); }, [paymentReference?.orderId, order?.retryAllowed]);
 
   useEffect(() => {
     let active = true; setInputHash(""); setConsent(false);
@@ -160,7 +163,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   async function requestQuote() {
     if (!prepared || !currentPlan || paymentReference) return;
     await work("Checking your film price…", async () => {
-      setQuote(null); setConsent(false);
+      setQuote(null); setConsent(false); setCheckoutProductionReady(false);
       const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio", { action: "prepareCheckout" }));
       setConfiguration(latestConfiguration);
       if (!latestConfiguration.available) {
@@ -184,7 +187,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         quoteRequest.current = null;
         throw new Error("Your film price could not be verified against the saved plan. No payment has been requested.");
       }
-      setQuote(result); setConsent(false); setNow(Date.now()); checkoutKey.current = crypto.randomUUID();
+      setQuote(result); setCheckoutProductionReady(true); setConsent(false); setNow(Date.now()); checkoutKey.current = crypto.randomUUID();
       if(price&&result.amountCents!==price.amountCents)setMessage("The pricing settings changed. Review the updated total below before approving payment.");
     });
   }
@@ -243,6 +246,9 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   }
   async function submitPayment() {
     if (!quote || !quoteCurrent || !consent || paymentReference || !configuration?.available) return;
+    if (!quote.sandbox && !checkoutProductionReady) {
+      setError("Check production availability before continuing. No invoice has been requested."); return;
+    }
     await work("Preparing your secure payment page…", async () => {
       // Reserve the tab during the click so browser popup protection does not
       // block navigation after the asynchronous security and invoice requests.
@@ -253,11 +259,25 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         action: "checkoutCheck", quoteId: quote.id, captchaToken: await captchaToken("checkout"),
       });
       if (!/^[a-f0-9]{64}$/.test(proof.checkoutProof || "")) throw new Error("The security check could not be confirmed. No invoice has been requested.");
+      if (!quote.sandbox) {
+        try {
+          if (!quoteRequest.current || quoteRequest.current.hash !== quote.manifestHash) throw new Error();
+          // Reusing the exact quote key checks the current worker and provider
+          // budget without creating an invoice or changing the accepted total.
+          const fresh = normalizeFilmQuote(await api("/api/studio", { action: "quote", project: JSON.parse(input),
+            preparedId: quote.preparedId, idempotencyKey: quoteRequest.current.key }));
+          if (!fresh || (["id", "orderId", "preparedId", "manifestHash", "filmId", "amountCents", "currency", "sandbox", "method", "deliveryTerms", "refundTerms"] as const)
+            .some(key => fresh[key] !== quote[key]) || Date.parse(fresh.expiresAt) <= Date.now()) throw new Error();
+        } catch {
+          setCheckoutProductionReady(false); setConsent(false);
+          throw new Error("Production availability or your saved price could not be confirmed. No invoice has been requested. Select Check production availability, review the terms, and try again.");
+        }
+      }
       const reference = { preparedId: quote.preparedId, manifestHash: quote.manifestHash, quoteId: quote.id, orderId: quote.orderId, checkoutKey: checkoutKey.current, submittedAt: new Date().toISOString(), sandbox: quote.sandbox };
       // Save recovery before requesting one invoice. An uncertain response
       // can only recover this order, never create a replacement invoice.
       const result = await commitFilmPayment({ request: api, quote, reference, checkoutProof: proof.checkoutProof,
-        productionConsent: productionAvailable && quote.method === "quickbooks-hosted-invoice" && !quote.sandbox, persist: saved => {
+        productionConsent: quote.method === "quickbooks-hosted-invoice" && !quote.sandbox, persist: saved => {
         persistPaymentReference(saved);
         attemptedPayment.current = saved;
       } });
@@ -282,6 +302,9 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   }
   async function retryPaymentPage() {
     if (!paymentReference || !order || order.retryAllowed !== true) return;
+    if (!order.sandbox && !retryProductionConsent) {
+      setError("Confirm automatic production of this saved film before retrying its payment page."); return;
+    }
     const savedReference = paymentReference, savedOrder = order;
     await work("Retrying your saved payment page…", async () => {
       const paymentWindow = reservePaymentWindow();
@@ -293,7 +316,8 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       // Hide the retry immediately. Only the next verified server record may
       // authorize another attempt if this response is lost or unreadable.
       setOrder({ ...savedOrder, retryAllowed: false });
-      presentPaymentPage(await retryFilmPayment({ request: api, order: savedOrder, reference: savedReference, checkoutProof: proof.checkoutProof }), paymentWindow);
+      presentPaymentPage(await retryFilmPayment({ request: api, order: savedOrder, reference: savedReference,
+        checkoutProof: proof.checkoutProof, productionConsent: !savedOrder.sandbox && retryProductionConsent }), paymentWindow);
       } finally { paymentWindow.close(); }
     });
   }
@@ -332,19 +356,23 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       <p>{quote.filmTitle} · {prepared?.durationSeconds} seconds target</p>
       <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
-      <p className="field-note">{productionAvailable && !quote.sandbox
+      <p className="field-note">{!quote.sandbox
         ? "Your saved film enters production automatically after QuickBooks confirms payment. You can close the browser; progress stays in your Film library."
-        : "A payment does not start film production. Your administrator will confirm production availability."}</p>
+        : "A test payment does not start production of this film."}</p>
+      {!quote.sandbox && !checkoutProductionReady && <div className="feedback" role="status">
+        <p>Production availability must be confirmed before a payment page can be created. Your saved film and price remain available.</p>
+        <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void requestQuote()}><RefreshCw size={15} />Check production availability</button>
+      </div>}
       <h4>Delivery</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.deliveryTerms}</p>
       <h4>Refund policy</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.refundTerms}</p>
       {!quoteCurrent && <p className="feedback">This price has expired or the plan has changed. Request a new price before paying.</p>}
-      <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent} onChange={event => setConsent(event.target.checked)} />
-        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks.${productionAvailable ? " Start this saved version automatically when my payment is confirmed." : ""}`}</span>
+      <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !quote.sandbox && !checkoutProductionReady} onChange={event => setConsent(event.target.checked)} />
+        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks. Start this saved version automatically when my payment is confirmed.`}</span>
       </label>
       {configuration?.available && quoteCurrent && <>
         <p className="field-note">Your secure payment page opens in another tab. Enter your payment details there, then return here to check payment status. Your finished film unlocks only after payment is confirmed.</p>
         <CaptchaNotice />
-        <button className="button primary" disabled={Boolean(busy) || !consent} onClick={() => void submitPayment()}>
+        <button className="button primary" disabled={Boolean(busy) || !consent || !quote.sandbox && !checkoutProductionReady} onClick={() => void submitPayment()}>
           <CreditCard size={16} />{quote.sandbox ? "Prepare test payment page" : "Prepare secure payment page"}
         </button>
       </>}
@@ -402,10 +430,13 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         {order?.status === "captured" && <p>{paymentStatusMessage(order)}</p>}
         {hostedOrder && order?.invoiceNumber && <p className="field-note">Invoice {order.invoiceNumber}</p>}
         {hostedOrder && order?.status === "captured" && <p className="field-note">This confirms a payment applied to the invoice in QuickBooks. It does not verify bank settlement or later refunds.</p>}
-        {order?.retryAllowed === true && <><p className="field-note">Retrying uses this saved price and the terms you accepted. It prepares the payment page; you complete payment separately on QuickBooks.</p><CaptchaNotice /></>}
+        {order?.retryAllowed === true && <><p className="field-note">Retrying uses this saved price and the terms you accepted. It prepares the payment page; you complete payment separately on QuickBooks.</p>
+          {!order.sandbox && <label className="check-label"><input type="checkbox" checked={retryProductionConsent} disabled={Boolean(busy)} onChange={event => setRetryProductionConsent(event.target.checked)} />
+            <span>Prepare this saved film's payment page and start this saved version automatically when QuickBooks confirms my payment.</span>
+          </label>}<CaptchaNotice /></>}
         <p className="field-note">Order reference: <span className="film-order-reference">{paymentReference.orderId}</span></p>
         <div className="action-group">
-          {order?.retryAllowed === true && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void retryPaymentPage()}><RefreshCw size={15} />Retry preparing this payment page</button>}
+          {order?.retryAllowed === true && <button className="button secondary small" disabled={Boolean(busy) || !order.sandbox && !retryProductionConsent} onClick={() => void retryPaymentPage()}><RefreshCw size={15} />Retry preparing this payment page</button>}
           {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <button className="button primary small" onClick={() => { const handle = reservePaymentWindow(); presentPaymentPage(order, handle); handle.close(); }}><ExternalLink size={15} />Open secure payment page</button>}
           <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { const latest = await readOrder(paymentReference); setMessage(`Status checked. ${paymentStatusMessage(latest)}`); })}><RefreshCw size={15} />Check payment status</button>
           {order?.receiptAvailable && <button className="text-button" disabled={Boolean(busy)} onClick={() => void downloadReceipt()}><Download size={15} />Download receipt</button>}

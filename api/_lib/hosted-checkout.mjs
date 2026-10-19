@@ -308,11 +308,15 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       if(existing.value.quoteId!==q.id||existing.value.preparedId!==q.preparedId||existing.value.checkoutKeyHash!==digest(body.idempotencyKey))throw existingOrder();
       if(existing.value.status!=="uncertain"||existing.value.invoiceAttemptedAt)return presentOrder(existing.value);
     }
+    if(binding.environment==="production"&&body.productionConsent!==true)throw new HostedCheckoutError("Confirm that this saved film should be produced automatically after payment before opening checkout.",400,"PRODUCTION_CONSENT_REQUIRED");
     if(Date.parse(q.expiresAt)<=now()||q.checkoutSettings.revision!==s.revision)throw expired();
+    const previousConsentAt=existing?.value.productionConsentAt;
+    const productionConsent=body.productionConsent===true?{productionConsent:true,productionConsentAt:
+      existing?.value.productionConsent===true&&typeof previousConsentAt==="string"&&Number.isFinite(Date.parse(previousConsentAt))&&Date.parse(previousConsentAt)<=now()?previousConsentAt:stamp(now())}:{};
     let record;
-    try {record=existing?await save(path,existing,{...existing.value,status:"submitting"}):await save(path,null,{...q,id,version:1,provider:"quickbooks",quoteId:q.id,checkoutMethod:METHOD,status:"submitting",refundedCents:0,providerChargeId:null,capturedAt:null,
+    try {record=existing?await save(path,existing,{...existing.value,status:"submitting",...(binding.environment==="production"?productionConsent:{})}):await save(path,null,{...q,id,version:1,provider:"quickbooks",quoteId:q.id,checkoutMethod:METHOD,status:"submitting",refundedCents:0,providerChargeId:null,capturedAt:null,
       invoiceId:null,invoiceUrl:null,invoiceNumber:null,invoiceRequestId:uuid(`invoice:${id}`),checkoutKeyHash:digest(body.idempotencyKey),consentAt:stamp(now()),createdAt:stamp(now()),
-      ...(body.productionConsent===true?{productionConsent:true,productionConsentAt:stamp(now())}:{})});}
+      ...productionConsent});}
     catch(error) {const winner=await read(path);if(winner?.value.checkoutMethod===METHOD&&winner.value.customerEmail===email&&winner.value.quoteId===q.id&&winner.value.preparedId===q.preparedId&&winner.value.checkoutKeyHash===digest(body.idempotencyKey)&&sameBinding(winner.value.merchantBinding,binding))return presentOrder(winner.value);throw error;}
     try {
       const customerId=await customer(actor,binding);record=await save(path,record,{...record.value,customerId});
