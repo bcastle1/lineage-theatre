@@ -25,7 +25,7 @@ async function run(binary, args, onStderrLine, cwd) {
     child.on("close", code => { clearTimeout(timer); if (pendingLine && onStderrLine) onStderrLine(pendingLine); code === 0 ? resolveRun({ stdout, stderr }) : reject(new Error(`Media operation failed (${code}). ${stderr.slice(-3000)}`)); });
   });
 }
-async function mediaInfo(ffmpeg, path) {
+async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
   // Decode the whole file, so a container header alone cannot count as playable.
   let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, previousTime, videoCodec, audioCodec;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:v:0", "-vf", "showinfo", "-fps_mode", "passthrough", "-f", "null", "-", "-progress", "pipe:1"], line => {
@@ -45,7 +45,12 @@ async function mediaInfo(ffmpeg, path) {
       const next = { width: Number(frame[3]), height: Number(frame[4]) };
       const timestamp = /\bpts_time:([\d.eE+-]+)/.exec(line);
       const time = timestamp ? Number(timestamp[1]) : NaN;
-      if (Number(frame[1]) !== Number(frame[2]) || Number(frame[2]) === 0 || frame[5] !== "P"
+      // Some generated H.264 inputs omit SAR (0/1). Treat only that explicit
+      // unspecified value as square during source assembly; setsar=1 writes
+      // unambiguous output metadata. Declared non-square pixels still fail.
+      const square = Number(frame[1]) === Number(frame[2]) && Number(frame[2]) > 0;
+      const unspecified = allowUnspecifiedSar && frame[1] === '0' && frame[2] === '1';
+      if ((!square && !unspecified) || frame[5] !== "P"
         || !Number.isFinite(time) || !rate || (previousTime !== undefined && Math.abs(time - previousTime - rate.denominator / rate.numerator) > 0.002)
         || (profile && (next.width !== profile.width || next.height !== profile.height))) invalidProfile = true;
       profile = next;
@@ -168,7 +173,7 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     if (!clip || typeof clip.path !== "string" || ![".mp4", ".webm"].includes(extname(clip.path).toLowerCase())) throw new Error(`Missing local video clip for ${shot.id}.`);
     const path = resolve(clip.path), size = (await stat(path)).size;
     if (path === output || size < 16 || size > 250 * 1024 * 1024) throw new Error("A clip is too large or conflicts with the output file.");
-    const info = await mediaInfo(ffmpeg, path), seconds = shot.targetDurationMs / 1000;
+    const info = await mediaInfo(ffmpeg, path, { allowUnspecifiedSar: true }), seconds = shot.targetDurationMs / 1000;
     if (!Number.isFinite(seconds) || seconds <= 0 || info.durationSeconds < seconds - 0.05 || info.decodedDurationSeconds < seconds - 0.1) throw new Error(`Clip ${shot.id} is shorter than its reviewed timeline.`);
     let audioPath = info.hasAudio ? path : null;
     if (clip.audioPath !== undefined) {

@@ -13,6 +13,7 @@ import { createPaymentsService } from "../api/_lib/payments.mjs";
 import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
 import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
+import { createRemoteProductionAuthorization } from "../api/_lib/remote-production-authorization.mjs";
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -154,7 +155,9 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
   let film;
   const productionQuote = input => film.quoteForProductionBudget(input);
   const hosted = dependencies.hostedCheckout || createHostedCheckoutService({ ...dependencies, read, write, productionQuote });
-  const authorizer = paymentService || createPaymentsService({ ...dependencies, read, write, hostedCheckout: hosted, productionQuote });
+  const authorizer = paymentService || (process.env.LINEAGE_WORKER_SECRET
+    ? createRemoteProductionAuthorization({ adapter })
+    : createPaymentsService({ ...dependencies, read, write, hostedCheckout: hosted, productionQuote }));
   film = createFilmProductionService({ ...dependencies, adapter,
     readRecordImpl: read,
     writeRecordImpl: write,

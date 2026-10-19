@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createProductionWorkerHandler } from '../api/production-worker.mjs';
+import { createRemoteProductionAuthorization } from '../api/_lib/remote-production-authorization.mjs';
+
+const secret='a'.repeat(64), at=1792372000000;
+const input={email:'family@example.invalid',preparedId:'11111111-1111-4111-8111-111111111111',manifestHash:'b'.repeat(64),orderId:'c'.repeat(64)};
+const adapter={model:'wan',modelVersion:'fixture-recipe',available:true};
+function fixture(change={}){
+  let calls=0;
+  const handler=createProductionWorkerHandler({env:{LINEAGE_WORKER_SECRET:secret},adapter,now:()=>at,
+    read:async()=>({value:{state:'pending',email:input.email,id:input.preparedId,orderId:input.orderId,manifestHash:input.manifestHash,lease:{expiresAt:at+10000}}}),
+    limiter:async()=>true,paymentService:{authorizeProduction:async value=>{calls++;assert.deepEqual(value,input);return {allowed:true,manifestHash:input.manifestHash};}},...change});
+  return {handler,calls:()=>calls};
+}
+async function invoke(f,change={}){const res={setHeader(){},end(body){this.body=JSON.parse(body);}};
+  await f.handler({method:'POST',headers:{authorization:`Bearer ${secret}`},body:{...input,model:adapter.model,recipe:adapter.modelVersion},...change},res);return res;}
+test('media worker receives a grant only after the existing live payment authorizer runs',async()=>{
+  const f=fixture(),r=await invoke(f);assert.equal(r.statusCode,200);assert.equal(r.body.allowed,true);assert.equal(f.calls(),1);
+});
+test('wrong secret, provider recipe, absent lease and unexpected fields cannot issue worker grants',async()=>{
+  for(const change of [{headers:{}},{headers:{authorization:'Bearer wrong'}},{method:'GET'},
+    {body:{...input,model:'seedance',recipe:adapter.modelVersion}},
+    {body:{...input,model:adapter.model,recipe:adapter.modelVersion,paid:true}}]){
+    const f=fixture();assert.notEqual((await invoke(f,change)).statusCode,200);assert.equal(f.calls(),0);
+  }
+  for(const ticket of [null,{state:'pending',lease:{expiresAt:at-1}},{state:'completed'}]){
+    const f=fixture({read:async()=>({value:ticket})});assert.equal((await invoke(f)).statusCode,409);assert.equal(f.calls(),0);
+  }
+});
+test('remote authorization uses a fixed origin, no redirects and bounded response bytes',async()=>{
+  const service=createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async(url,options)=>{
+    assert.equal(url,'https://lineagetheater.com/api/production-worker');assert.equal(options.redirect,'error');
+    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion});return new Response('{"allowed":true}');
+  }});assert.equal((await service.authorizeProduction(input)).allowed,true);
+  for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
+    await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
+});

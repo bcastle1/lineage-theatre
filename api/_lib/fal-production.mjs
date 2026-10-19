@@ -1,6 +1,8 @@
 import { digest } from './auth.mjs';
 import { createFalClient, FAL_MODELS, FAL_MEDIA_HOSTS, falMediaUrl } from './fal-client.mjs';
 import { falQualification } from './fal-qualification.mjs';
+import { createFalPricing } from './fal-pricing.mjs';
+import { falReferenceData } from './fal-reference.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-cinematic-v1';
@@ -72,26 +74,29 @@ export function qualifiedFalRelease(value, model) {
     && HASH.test(value.deliveredMediaSha256 || '') && value.review?.visual === true && value.review?.speech === true
     && value.review?.continuity === true && value.review?.privatePlayback === true && value.commercialUse === true
     && Array.isArray(value.requestIds) && value.requestIds.length >= 1 && value.requestIds.every(id => /^[\w-]{8,100}$/.test(id))
-    && Number.isFinite(Date.parse(value.reviewedAt)) && Number.isFinite(Date.parse(value.rates?.expiresAt))
-    && Number.isSafeInteger(value.rates?.videoMicroUsdPerSecond) && value.rates.videoMicroUsdPerSecond > 0
-    && Number.isSafeInteger(value.rates?.referenceMicroUsd) && value.rates.referenceMicroUsd > 0);
+    && Number.isFinite(Date.parse(value.reviewedAt)));
 }
 
 export function createFalProductionAdapter({ model = falQualification?.model || 'seedance', qualification = falQualification,
-  key = () => process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now } = {}) {
+  key = () => process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now,
+  pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData } = {}) {
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
-  const maximumCost = manifest => {
+  const maximumCost = async manifest => {
     const plan = falPlan(manifest, model);
-    if (!qualified() || Date.parse(qualification.rates.expiresAt) <= now()) invalid();
-    return Math.ceil((plan.generatedSeconds * qualification.rates.videoMicroUsdPerSecond
-      + plan.referenceCount * qualification.rates.referenceMicroUsd) / 10_000);
+    if (!qualified()) invalid();
+    const rates = await pricing(model);
+    if (!Number.isSafeInteger(rates.videoMicroUsdPerSecond) || rates.videoMicroUsdPerSecond <= 0
+      || !Number.isSafeInteger(rates.referenceMicroUsd) || rates.referenceMicroUsd <= 0
+      || !Number.isFinite(Date.parse(rates.expiresAt)) || Date.parse(rates.expiresAt) <= now()) invalid();
+    return { rates, cents: Math.ceil((plan.generatedSeconds * rates.videoMicroUsdPerSecond
+      + plan.referenceCount * rates.referenceMicroUsd) / 10_000) };
   };
   async function step(input) {
     const { manifest, manifestHash, shot, idempotencyKey, productionId, authorizeSpend } = input;
     if (!HASH.test(manifestHash || '') || digest(JSON.stringify(manifest)) !== manifestHash || !HASH.test(idempotencyKey || '') || !productionId) invalid();
-    const plan = falPlan(manifest, model), references = {};
-    if (!plan.shots.some(candidate => candidate.id === shot?.id)) invalid();
+    const plan = falPlan(manifest, model), references = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
+    if (!selected) invalid();
     const identity = digest(`${FAL_RECIPE_VERSION}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
     if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
     async function operation(operationId, endpoint, body) {
@@ -102,6 +107,18 @@ export function createFalProductionAdapter({ model = falQualification?.model || 
       } else if (!['completed', 'failed'].includes(saved.state) && saved.requestId) saved = await client.poll(operationId);
       return saved;
     }
+    let renderIdentity = identity;
+    let prior = await client.get(identity);
+    if (prior && !['completed', 'failed'].includes(prior.state) && prior.requestId) prior = await client.poll(identity);
+    // A provider-confirmed input-size rejection did not produce a video. Allow
+    // one separately journaled correction, never a retry of an uncertain job.
+    if (model === 'wan' && prior?.state === 'failed' && prior.failureCode === 'FAL_REFERENCE_TOO_LARGE') {
+      renderIdentity = digest(`${identity}:reference-jpeg-v1`);
+      prior = await client.get(renderIdentity);
+      if (prior && !['completed', 'failed'].includes(prior.state) && prior.requestId) prior = await client.poll(renderIdentity);
+    }
+    let result = prior;
+    if (!result) {
     // References are shared by every shot and by the two comparison candidates.
     // One operation per worker pass keeps the queue resumable and observable.
     for (const character of plan.characters) {
@@ -112,7 +129,9 @@ export function createFalProductionAdapter({ model = falQualification?.model || 
       references[character.id] = falMediaUrl(result.result.images[0].url);
     }
     const request = falShotInput(manifest, shot, model, references);
-    const result = await operation(identity, plan.endpoint, request);
+    if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url => normalizeReference(url, { fetchImpl })));
+    result = await operation(renderIdentity, plan.endpoint, request);
+    }
     if (result.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(result.state) ? 'uncertain' : result.state };
     const url = falMediaUrl(result.result?.video?.url);
     // The media worker later fully decodes and hashes the body. Here a bounded
@@ -120,17 +139,20 @@ export function createFalProductionAdapter({ model = falQualification?.model || 
     const response = await fetchImpl(url, { method: 'HEAD', redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(20_000) });
     const sizeBytes = Number(response.headers.get('content-length')), contentType = response.headers.get('content-type')?.split(';')[0];
     if (!response.ok || contentType !== 'video/mp4' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 16 || sizeBytes > 250 * 1024 * 1024) invalid();
-    return { status: 'completed', providerJobId, output: { url, sizeBytes, contentType, durationSeconds: Number(request.duration) } };
+    return { status: 'completed', providerJobId, output: { url, sizeBytes, contentType, durationSeconds: selected.seconds } };
   }
   return {
     id: 'fal', model, modelVersion: FAL_RECIPE_VERSION, environment: 'production', outputHosts: FAL_MEDIA_HOSTS,
-    get available() { return hasKey() && qualified() && Date.parse(qualification.rates.expiresAt) > now(); },
+    get available() { return hasKey() && qualified(); },
     get evidence() { return { apiVerified: qualified(), qualityVerified: qualified(), commercialTermsVerified: qualified(), reconciliationVerified: qualified() }; },
     gaps: ['Connect a funded fal API account and complete the Seedance/Wan film comparison and private playback verification.'],
-    validateManifest: async manifest => ({ ready: true, maximumCostCents: maximumCost(manifest) }),
-    quote: async ({ manifest, manifestHash }) => ({ manifestHash, currency: 'USD', providerCostCents: maximumCost(manifest),
-      quoteReference: digest(`${FAL_RECIPE_VERSION}:${model}:${manifestHash}:${JSON.stringify(qualification.rates)}`),
-      expiresAt: qualification.rates.expiresAt }),
+    validateManifest: async manifest => ({ ready: true, maximumCostCents: (await maximumCost(manifest)).cents }),
+    quote: async ({ manifest, manifestHash }) => {
+      const { rates, cents } = await maximumCost(manifest);
+      return { manifestHash, currency: 'USD', providerCostCents: cents,
+        quoteReference: digest(`${FAL_RECIPE_VERSION}:${model}:${manifestHash}:${rates.videoMicroUsdPerSecond}:${rates.referenceMicroUsd}`),
+        expiresAt: rates.expiresAt };
+    },
     submitShot: step, pollShot: step, reconcileShot: step,
   };
 }

@@ -55,13 +55,21 @@ export const falRequestPath = identity => {
 // claim is retained for provider reconciliation; polling cannot create work.
 export function createFalClient({ key = () => process.env.FAL_KEY, read = readRecord, write = writeRecord,
   fetchImpl = fetch, now = Date.now } = {}) {
-  async function request(url, method, body) {
+  async function request(url, method, body, terminal = false) {
     const secret = typeof key === 'function' ? key() : key;
     if (!secret || typeof secret !== 'string') throw failure('FAL_KEY_REQUIRED');
     const response = await fetchImpl(url, { method, redirect: 'error', credentials: 'omit', cache: 'no-store',
       headers: { Authorization: `Key ${secret}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(30_000) });
-    if (!response.ok) { await response.body?.cancel(); throw failure(`FAL_HTTP_${response.status}`); }
+    if (!response.ok) {
+      if (terminal && response.status === 422) {
+        const body = await boundedJson(response);
+        const errors = Array.isArray(body.detail) ? body.detail : [];
+        throw failure(errors.length && errors.every(error => error.type === 'file_too_large')
+          ? 'FAL_REFERENCE_TOO_LARGE' : 'FAL_RENDER_FAILED');
+      }
+      await response.body?.cancel(); throw failure(`FAL_HTTP_${response.status}`);
+    }
     return boundedJson(response);
   }
   async function submit({ identity, endpoint, input }) {
@@ -113,8 +121,13 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
     if (status.status === 'COMPLETED') {
       if (status.error || status.error_type) next.state = 'failed';
       else {
-        const result = await request(falRequestUrl(job.responseUrl, job.endpoint, job.requestId, 'result'), 'GET');
-        next = { ...next, state: 'completed', result };
+        try {
+          const result = await request(falRequestUrl(job.responseUrl, job.endpoint, job.requestId, 'result'), 'GET', undefined, true);
+          next = { ...next, state: 'completed', result };
+        } catch (error) {
+          if (!['FAL_REFERENCE_TOO_LARGE', 'FAL_RENDER_FAILED'].includes(error.code)) throw error;
+          next = { ...next, state: 'failed', failureCode: error.code };
+        }
       }
     } else if (status.status === 'IN_QUEUE') next.state = 'queued';
     else if (status.status === 'IN_PROGRESS') next.state = 'processing';

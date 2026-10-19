@@ -82,6 +82,17 @@ test('polling checks terminal provider errors and caches completed results', asy
   }
 });
 
+test('a terminal size rejection is recorded without resubmitting or retaining untrusted details', async () => {
+  const data=storage();let posts=0;
+  const client=createFalClient({...data,key:'fixture',fetchImpl:async(url,options)=>{
+    if(options.method==='POST'){posts++;return json(receipt);}
+    return url.endsWith('/status')?json({status:'COMPLETED'}):new Response(JSON.stringify({detail:[{type:'file_too_large',input:'private-reference',msg:'untrusted'}]}),{status:422});
+  }});
+  await client.submit(submit);const result=await client.poll(submit.identity);
+  assert.equal(result.state,'failed');assert.equal(result.failureCode,'FAL_REFERENCE_TOO_LARGE');assert.ok(!JSON.stringify(result).includes('private-reference'));
+  await client.poll(submit.identity);assert.equal(posts,1);
+});
+
 test('both providers preserve exact speech, references, 1080p and rounded edit handles', () => {
   const { manifest } = buildFilmManifest(fictionalOperatorProject());
   for (const model of ['seedance', 'wan']) {
@@ -100,7 +111,7 @@ test('unsupported plans and missing quality evidence cannot enable production', 
   for (const change of [m => { m.shots[0].targetDurationMs = 31000; }, m => { m.shots[0].characterIds = ['missing']; }, m => { m.shots[0].narration = 'word '.repeat(500); }, m => { m.shots[1].startMs++; }]) {
     const changed = structuredClone(manifest); change(changed); assert.throws(() => falPlan(changed, 'seedance'));
   }
-  const q = qualification('wan'), adapter = createFalProductionAdapter({ model: 'wan', key: 'fixture-key', qualification: q, now: () => at });
+  const q = qualification('wan'), adapter = createFalProductionAdapter({ model: 'wan', key: 'fixture-key', qualification: q, now: () => at, pricing: async () => q.rates });
   assert.equal(adapter.available, true);
   assert.equal((await adapter.validateManifest(manifest)).maximumCostCents,
     Math.ceil((falPlan(manifest, 'wan').generatedSeconds * 1200000 + 2 * 300000) / 10000));
@@ -113,7 +124,7 @@ test('reference and render stages require separate current spending approval and
     submitted.push(request); const value = { state: 'queued', requestId: `fixture-${submitted.length}`, ...request }; operations.set(request.identity, value); return value;
   }, poll: async id => { const value = operations.get(id); value.state = 'completed';
     value.result = value.endpoint === FAL_MODELS.reference ? { images: [{ url: 'https://v3.fal.media/reference.png' }] } : { video: { url: 'https://v3.fal.media/film.mp4' } }; return value; } };
-  const adapter = createFalProductionAdapter({ model: 'wan', client, now: () => at, fetchImpl: async () => new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }) });
+  const adapter = createFalProductionAdapter({ model: 'wan', client, now: () => at, normalizeReference: async url => url, fetchImpl: async () => new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }) });
   const input = { manifest, manifestHash, shot: manifest.shots[0], productionId: 'fixture-production', idempotencyKey: digest('fixture-scene'), authorizeSpend: async () => { grantChecks++; return allowed; } };
   assert.equal((await adapter.submitShot(input)).status, 'queued'); assert.equal(submitted.length, 1);
   allowed = false; await assert.rejects(adapter.pollShot(input), /spending is not authorized/); assert.equal(submitted.length, 1);

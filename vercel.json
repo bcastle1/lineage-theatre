@@ -19,6 +19,8 @@
     }
   ],
   "functions": {
+    "api/production-worker.mjs": { "maxDuration": 180 },
+    "api/fal-review.mjs": { "maxDuration": 300 },
     "api/patrick-quickbooks.mjs": { "maxDuration": 60 },
     "api/film-delivery.mjs": { "maxDuration": 300 },
     "api/media.mjs": { "maxDuration": 300 },
