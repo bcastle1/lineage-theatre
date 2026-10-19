@@ -34,6 +34,10 @@ function bounds(values) {
 export function productionProgressSnapshot({ job, queue, attempt, history = [], mediaReady = false, needsAttention = false, now = Date.now() }) {
   let status = job.status;
   let observedAt = job.lastCheckedAt || job.updatedAt;
+  if (status === "completed") {
+    observedAt = Number.isFinite(stamp(job.completedAt)) ? job.completedAt
+      : Number.isFinite(stamp(job.updatedAt)) ? job.updatedAt : observedAt;
+  }
   let startedAt = job.productionStartedAt;
   let legacy = false;
   if (status === "prepared" && attempt) {
