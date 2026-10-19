@@ -13,6 +13,7 @@ import { isOwner } from "./_lib/access.mjs";
 import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-generation.mjs";
 import { paidFilmGenerationReview, PaidFilmReviewError } from "./_lib/paid-film-generation-review.mjs";
 import { localVideoHandler, aiVideoHandler } from "./_lib/local-video-handler.mjs";
+import { productionAuthorizationDiagnostic } from "./_lib/production-authorization-diagnostics.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
@@ -95,7 +96,7 @@ export function createStudioHandler(overrides={}) {
   if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="1") return (overrides.localVideoHandler||localVideoHandler)(req,res);
   if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="ltx") return (overrides.aiVideoHandler||aiVideoHandler)(req,res);
   const {getSession,readRecord,limitAction,connections,readPricingSettings,generateStory,filmProduction,payments}=dependencies;
-  let storyRequest=false;
+  let storyRequest=false,productionStartRequest=false;
   try {
     const session=await getSession(req);
     if(!session||session.user.mustChangePassword) return json(res,401,{message:"Sign in and set your password to use the studio."});
@@ -216,6 +217,7 @@ export function createStudioHandler(overrides={}) {
       return json(res,201,await filmProduction.prepare({email,project:body.project,idempotencyKey:body.idempotencyKey,preparationConsent:true}));
     }
     if(body?.action==="startProduction") {
+      productionStartRequest=true;
       if(Object.keys(body).some(key=>!["action","preparedId","orderId","productionConsent"].includes(key))
         ||typeof body.preparedId!=="string"||!/^[A-Za-z0-9_-]{16,100}$/.test(body.preparedId)
         ||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
@@ -245,6 +247,7 @@ export function createStudioHandler(overrides={}) {
     }
     return json(res,400,{message:"Unknown studio action."});
   } catch(e) {
+    if(productionStartRequest)console.warn("PRODUCTION_START_UNAVAILABLE",productionAuthorizationDiagnostic(e));
     // A rejected proof says nothing about an earlier request for this order.
     if(e instanceof CaptchaError) return json(res,e.status,{code:e.code,message:e.message,charged:null});
     if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});

@@ -4,6 +4,7 @@ import { payments } from './_lib/payments.mjs';
 import { falProductionAdapter } from './_lib/fal-production.mjs';
 import { productionQueuePath } from './_lib/production-queue.mjs';
 import { falReviewedDelivery } from './_lib/fal-reviewed-delivery.mjs';
+import { productionAuthorizationDiagnostic } from './_lib/production-authorization-diagnostics.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -42,7 +43,10 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       if (!await limiter('production-worker:authorize', 120, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
       const { email, preparedId, manifestHash, orderId } = body;
       return json(res, 200, await paymentService.authorizeProduction({ email, preparedId, manifestHash, orderId }));
-    } catch { return json(res, 503, { code: 'PRODUCTION_AUTHORIZATION_UNAVAILABLE' }); }
+    } catch (error) {
+      console.warn('PRODUCTION_AUTHORIZATION_UNAVAILABLE', productionAuthorizationDiagnostic(error));
+      return json(res, 503, { code: 'PRODUCTION_AUTHORIZATION_UNAVAILABLE' });
+    }
   };
 }
 export default createProductionWorkerHandler();
