@@ -23,14 +23,15 @@ pin() {
 }
 action=${1:-}; source_dir=${2:-}; rev=${3:-}; context=; replacement=; backup=; restore_timer=0; changed=0; startup_requested=0
 cleanup() {
-  local result=$? rollback
+  local result=$? rollback current_hash
   trap - EXIT INT TERM
   if (( result != 0 && startup_requested )); then
     printf 'Worker startup was requested; new image pin retained. Inspect service/timer before recovery.\n' >&2
   fi
   if (( result != 0 && changed )); then
     # Only pre-start failures may roll back. Keep the durable backup intact.
-    if [[ $(pin 2>/dev/null || true) == "$image" && -f $backup ]]; then
+    current_hash=$(sha256sum "$CONF"); current_hash=${current_hash%% *}
+    if [[ $(pin 2>/dev/null || true) == "$image" && $current_hash == "$next_hash" && -f $backup ]]; then
       if rollback=$(mktemp /etc/lineage-worker/.photo-rollback.XXXXXXXX) && cp -- "$backup" "$rollback" \
         && chmod 0600 "$rollback" && mv -fT "$rollback" "$CONF"; then
         printf 'Restored previous image pin.\n' >&2
@@ -117,6 +118,7 @@ elif [[ $action == activate ]]; then
   replacement=$(mktemp /etc/lineage-worker/.photo-next.XXXXXXXX)
   sed "s/^LINEAGE_WORKER_IMAGE=.*/LINEAGE_WORKER_IMAGE=$image/" "$CONF" > "$replacement"
   chmod 0600 "$replacement"
+  next_hash=$(sha256sum "$replacement"); next_hash=${next_hash%% *}
   final=$(sha256sum "$CONF"); final=${final%% *}
   [[ $final == "$before" ]] || die 'Host configuration changed before activation.'
   mv -fT "$replacement" "$CONF"; replacement=; changed=1
