@@ -39,7 +39,13 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
     window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", refresh);
     return () => { active = false; watcher.stop(); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [orderId, reload]);
-  const paid = confirmedFilmPayment(order), ready = Boolean(paid && film && libraryCanWatch(film));
+  const paid = order?.id === orderId && confirmedFilmPayment(order);
+  const ready = Boolean(paid && film && film.id === order?.preparedId && libraryCanWatch(film));
+  useEffect(() => {
+    if (!visible || !ready || !order) return;
+    const destination = libraryFilmLink(order.preparedId);
+    if (window.location.hash !== destination) window.location.hash = destination;
+  }, [visible, ready, orderId, order?.preparedId]);
   function openPayment() {
     if (!order?.invoiceUrl || order.status !== "awaiting-payment" || order.requiresReview || opening) return;
     setOpening(true);
@@ -62,7 +68,8 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
         : order?.status === "awaiting-payment" ? <p>Complete your secure payment in the QuickBooks tab. Keep this Lineage Theatre tab open. We check in the background and return the payment tab here after confirmation, where your film status appears. If your browser prevents the automatic return, come back to this tab.</p>
           : order ? <p>{paymentStatusMessage(order)}</p> : <p>We verify your saved order before confirming a purchase. Opening this page does not charge you.</p>}
       {paid && film && <FilmProductionProgress paid ready={ready} available={productionAvailable} status={film.production.status}
-        completedShots={film.production.completedShots} shotCount={film.production.shotCount} progress={film.production.progress} needsAttention={film.production.needsAttention} />}
+        completedShots={film.production.completedShots} shotCount={film.production.shotCount} progress={film.production.progress} needsAttention={film.production.needsAttention}
+        workerReady={film.production.workerReady} message={film.production.message} />}
       {order?.invoiceNumber && <p className="field-note">Invoice {order.invoiceNumber} · Confirmation is checked with QuickBooks.</p>}
       {error && <p className="feedback error" role="alert">{error}</p>}
       <div className="action-group">

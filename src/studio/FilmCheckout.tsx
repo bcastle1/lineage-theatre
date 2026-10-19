@@ -124,7 +124,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       if (document.visibilityState !== "visible") { timer = setTimeout(() => void refresh(), 30_000); return; }
       reading = true;
       try {
-        const value = await api<ProductionStatus>(`/api/studio?action=productionStatus&id=${encodeURIComponent(reference.preparedId)}`);
+        const value = await api<ProductionStatus>(`/api/studio?action=productionStatus&id=${encodeURIComponent(reference.preparedId)}&orderId=${encodeURIComponent(reference.orderId)}`);
         if (!active) return;
         if (value.id !== reference.preparedId || value.manifestHash !== reference.manifestHash
           || !["prepared", "queued", "submitting", "processing", "uncertain", "failed", "completed"].includes(value.status)) return;
@@ -136,7 +136,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     const returned = () => void refresh();
     window.addEventListener("focus", returned); document.addEventListener("visibilitychange", returned);
     return () => { active = false; if (timer) clearTimeout(timer); window.removeEventListener("focus", returned); document.removeEventListener("visibilitychange", returned); };
-  }, [paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, readyToWatch]);
+  }, [paymentReference?.orderId, paymentReference?.preparedId, paymentReference?.manifestHash, order?.receiptAvailable, readyToWatch]);
   useEffect(() => {
     setDelivery(null);
     if (!paymentReference || order?.status !== "captured" || production?.status !== "completed") return;
@@ -301,7 +301,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     if (!paymentReference || (start && !canStartProduction)) return;
     const expectedContext = reviewContext;
     await work(start ? "Starting your film…" : "Checking film production…", async () => {
-      const result = await api<ProductionStatus>(start ? "/api/studio" : `/api/studio?action=productionStatus&id=${encodeURIComponent(paymentReference.preparedId)}`,
+      const result = await api<ProductionStatus>(start ? "/api/studio" : `/api/studio?action=productionStatus&id=${encodeURIComponent(paymentReference.preparedId)}&orderId=${encodeURIComponent(paymentReference.orderId)}`,
         start ? paidFilmStartRequest({ plan: paidPlan, reference: paymentReference, order, filmId: film.id, productionAvailable }) : undefined);
       if (result.id !== paymentReference.preparedId || result.manifestHash !== paymentReference.manifestHash
         || !["prepared", "queued", "submitting", "processing", "uncertain", "failed", "completed"].includes(result.status)) {
@@ -355,7 +355,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
         <li data-complete={progress.ready}><span>2. Film creation</span><h4>{progress.production}</h4></li>
         <li data-complete={progress.ready}><span>3. Watch & download</span><h4>{progress.watch}</h4></li>
       </ol>
-      <FilmProductionProgress paid={progress.paid} ready={progress.ready} available={productionAvailable} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} />
+      <FilmProductionProgress paid={progress.paid} ready={progress.ready} available={productionAvailable} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} workerReady={production?.workerReady} message={production?.message} />
       {order && <p>{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
       {order?.status !== "captured" && <p>{order ? paymentStatusMessage(order) : "A payment request has been recorded. Check its result before taking any further action."}</p>}
       {order?.status === "awaiting-payment" && <p className="field-note">We check your payment automatically when you return from QuickBooks. You can also check its status below.</p>}

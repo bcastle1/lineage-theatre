@@ -26,7 +26,8 @@ export function LibraryFilmStatus({ entry, productionAvailable, generationAttemp
       {paid && entry.kind === "plan" && <p className="field-note">Your payment covers this saved version. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
     </>}
     {entry.kind === "plan" && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} available={productionAvailable} status={entry.production.status}
-      completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention} />}
+      completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention}
+      workerReady={entry.production.workerReady} message={entry.production.message} />}
   </div>;
 }
 function downloadPlan(detail: LibraryDetail) {
@@ -75,6 +76,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const detailPanel = useRef<HTMLElement>(null);
   const dialog = useRef<HTMLDialogElement>(null), lock = useRef(false), mounted = useRef(false), sequence = useRef(0);
   const detailSequence = useRef(0);
+  const automaticallyOpenedPlayer = useRef("");
   const pageCursors = useRef(new Set<string>());
   const linkedFilm = parseLibraryFilmLink(libraryHash)?.id;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; detailSequence.current++; }; }, []);
@@ -130,6 +132,16 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     if (detail) { detailPanel.current?.focus({ preventScroll: true }); detailPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }
   }, [detail?.entry.kind, detail?.entry.id]);
   useEffect(() => {
+    if (!detail) { automaticallyOpenedPlayer.current = ""; return; }
+    const key = `detail:${libraryKey(detail.entry)}`;
+    if (!libraryCanWatch(detail.entry) || automaticallyOpenedPlayer.current === key) return;
+    // Reveal the verified film when it arrives, including after a payment
+    // redirect or a status refresh. A customer can then close it normally.
+    automaticallyOpenedPlayer.current = key;
+    setPlaying(key);
+    detailPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [detail]);
+  useEffect(() => {
     if (!detail || disabled || busy || playing || confirmation) return;
     let cancelled = false, checking = false;
     const expected = detail.entry;
@@ -140,6 +152,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         const value = await verifyLibraryDetail(await api<unknown>(`/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
         if (!cancelled) {
           setDetail(value);
+          setError("");
           setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
         }
       } catch { if (!cancelled) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); }

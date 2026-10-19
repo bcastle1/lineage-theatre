@@ -135,7 +135,7 @@ export function createStudioHandler(overrides={}) {
         return json(res,200,await generation.status(session.user,{preparedId}));
       }
       if(action==="checkoutConfiguration") return json(res,200,hosted?await hosted.configuration(session.user):await payments.checkoutConfiguration(session.user));
-      if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id")}));
+      if(action==="productionStatus") return json(res,200,await queue.status({email,id:url.searchParams.get("id"),orderId:url.searchParams.get("orderId")}));
       if(action==="manifest") return json(res,200,await filmProduction.manifest({email,id:url.searchParams.get("id")}));
       if(["order","receipt"].includes(action)) {
         const id=url.searchParams.get("id");

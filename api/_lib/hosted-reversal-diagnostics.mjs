@@ -1,6 +1,6 @@
 import {readRecord} from "./auth.mjs";
 import {createQuickBooksAccountingTransport,createQuickBooksService} from "./quickbooks.mjs";
-import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
+import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE,hostedReversalReason} from "./hosted-reversals.mjs";
 
 const HEX=/^[a-f0-9]{64}$/,ID=/^[0-9]{1,30}$/;
 const ENTITIES=new Set(["RefundReceipt","CreditMemo","Purchase","JournalEntry","Deposit","Payment"]);
@@ -37,7 +37,8 @@ function paidOrder(record,orderId,now) {
 // and its audit records. Accounting requests are restricted to verifier queries.
 export async function checkHostedReversals({orderId,read=readRecord,transport,now=Date.now,env=process.env}={}) {
   const totals={accountingReads:0,paymentCount:0,amountCents:0};
-  const result=(verified,code)=>({recordedReversalsVerified:verified,productionReady:false,scope:HOSTED_REVERSAL_SCOPE,code,totals:{...totals}});
+  const result=(verified,code,reason)=>({recordedReversalsVerified:verified,productionReady:false,scope:HOSTED_REVERSAL_SCOPE,code,
+    ...(hostedReversalReason(reason)?{reason:hostedReversalReason(reason)}:{}),totals:{...totals}});
   const end=now()+50_000,controller=new AbortController();
   let expired=false;
   const remaining=()=>{const value=end-now();if(expired||value<=0)fail("CHECK_TIMED_OUT");return value;};
@@ -83,6 +84,6 @@ export async function checkHostedReversals({orderId,read=readRecord,transport,no
     if(proof.outcome!=="clear"||proof.scope!==HOSTED_REVERSAL_SCOPE||Date.parse(proof.expiresAt)<=now())fail("HOSTED_REVERSALS_UNVERIFIED");
     return result(true,"RECORDED_REVERSALS_VERIFIED");
   }catch(error) {
-    return result(false,expired||now()>=end?"CHECK_TIMED_OUT":CODES.has(error?.code)?error.code:"RECORDED_REVERSAL_CHECK_FAILED");
+    return result(false,expired||now()>=end?"CHECK_TIMED_OUT":CODES.has(error?.code)?error.code:"RECORDED_REVERSAL_CHECK_FAILED",error?.reason);
   }finally {controller.abort();}
 }

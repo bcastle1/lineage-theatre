@@ -21,7 +21,7 @@ function fixture(eager = false) {
     productionConsentAt: new Date(NOW).toISOString(), capturedAt: new Date(NOW).toISOString(), refundedCents: 0,
     customerEmail: email, preparedId, manifestHash, filmId };
   seed(userPath(email), actor); seed(`payments/orders/${id}.json`, order);
-  seed(`production/jobs/${digest(email)}/${preparedId}.json`, { id: preparedId, filmId, ownerHash: digest(email), manifest, manifestHash });
+  seed(`production/jobs/${digest(email)}/${preparedId}.json`, { id: preparedId, filmId, mode: "customer", status: "prepared", ownerHash: digest(email), manifest, manifestHash });
   const dependencies = { read, write, eager, now: () => NOW,
     listBlobs: async ({ prefix }) => ({ blobs: [...records.keys()].filter(p => p.startsWith(prefix)).slice(0, 1).map(pathname => ({ pathname })), hasMore: false }),
     queue: { enqueue: async input => { if (fail) throw Error("provider unavailable"); calls.push(input); queueIds.add(`${input.actor.email}:${input.id}`); } } };

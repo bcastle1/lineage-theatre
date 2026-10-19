@@ -5,8 +5,11 @@ import { accessStatusForUser } from "./access.mjs";
 import { filmProduction, productionJobPath, FilmProductionError } from "./film-production.mjs";
 import { payments } from "./payments.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
+import { FAL_RECIPE_VERSION } from "./fal-production.mjs";
 
 const prefix = "production/queue/";
+const automaticPrefix = "production/automatic-starts/";
+const HEX = /^[a-f0-9]{64}$/;
 const conflict = error => /precondition|already exists|etag|if.?match/i.test(`${error?.name} ${error?.message}`);
 export function productionQueuePath(email, id) {
   // Reuse the film service's owner/reference validation.
@@ -19,6 +22,23 @@ function approved(actor, email = actor?.email) {
     || typeof actor.email !== "string" || actor.email !== actor.email.toLowerCase().trim() || actor.email !== email)
     throw new FilmProductionError("Sign in with an approved account to produce this film.", 403, "PRODUCTION_ACCESS_REQUIRED");
   return actor;
+}
+
+// A queue ticket stays pending while shots are rendering. Only the confirmed
+// progress stage can tell the customer that production is still waiting to start.
+export function productionQueueMessage({ progress, ticket, automaticPending = false, health, now = Date.now() }) {
+  if (progress?.stage !== "queued") return {};
+  if (automaticPending) return {
+    message: "Your paid film is scheduled. The studio is saving its place in the production queue and will retry automatically. You do not need to pay again.",
+  };
+  const checkedAt = typeof health?.checkedAt === "string" ? Date.parse(health.checkedAt) : NaN;
+  const workerReady = health?.version === 1 && health.ready === true && health.model === "wan"
+    && health.recipe === FAL_RECIPE_VERSION && Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt <= 180_000;
+  return { workerReady, message: !workerReady
+    ? "Your film is queued. The studio is waiting for the production worker to confirm it is available. Your payment is saved; you do not need to pay again."
+    : ticket?.lastResult === "RETRYABLE_FAILURE"
+      ? "Your film is queued while the studio retries a required production check. Your payment is saved; you do not need to pay again."
+      : "Your film is queued. The studio will start rendering automatically after confirming your payment and saved film plan." };
 }
 
 // Queue entries contain references only; screenplay and media remain in the
@@ -69,16 +89,70 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     }
     return status({ email: actor.email, id });
   }
-  async function status({ email, id }) {
+  // Payment confirmation must make a durable queue entry before slow live
+  // refund scans and provider pricing. This method accepts only the exact
+  // captured, production QuickBooks order with saved consent; runTicket still
+  // obtains fresh payment/reversal/account/provider authorization before spend.
+  async function enqueueAutomatic({ actor, id, orderId }) {
+    approved(actor);
+    if (!HEX.test(orderId || "")) throw blocked();
+    const path = productionQueuePath(actor.email, id);
+    await currentAccount(actor.email);
+    const job = await film.getPrepared({ email: actor.email, id });
+    const order = (await read(`payments/orders/${orderId}.json`))?.value;
+    const paidAt = typeof order?.capturedAt === "string" ? Date.parse(order.capturedAt) : NaN;
+    const consentAt = typeof order?.productionConsentAt === "string" ? Date.parse(order.productionConsentAt) : NaN;
+    if (order?.id !== orderId || order.version !== 1 || order.provider !== "quickbooks"
+      || order.checkoutMethod !== "quickbooks-hosted-invoice" || order.status !== "captured"
+      || order.sandbox === true || order.merchantBinding?.environment !== "production"
+      || order.confirmationSource !== "quickbooks-accounting" || order.productionConsent !== true
+      || !Number.isFinite(paidAt) || paidAt > now() || !Number.isFinite(consentAt) || consentAt > now()
+      || order.customerEmail !== actor.email || order.preparedId !== id || order.filmId !== job.filmId
+      || order.manifestHash !== job.manifestHash || job.id !== id || job.mode !== "customer" || job.status === "failed"
+      || job.ownerHash !== digest(actor.email) || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash
+      || (order.refundedCents ?? 0) !== 0 || order.refundOperation
+      || order.refunds && (!Array.isArray(order.refunds) || order.refunds.length > 0)) throw blocked();
+    const old = await read(path);
+    if (old) {
+      if (old.value.email !== actor.email || old.value.id !== id || old.value.orderId !== orderId
+        || old.value.manifestHash !== job.manifestHash)
+        throw new FilmProductionError("This film already has a different production request.", 409, "PRODUCTION_CONFLICT");
+      return status({ email: actor.email, id, orderId });
+    }
+    await currentAccount(actor.email);
+    const value = { version: 1, email: actor.email, id, orderId, manifestHash: job.manifestHash,
+      state: "pending", attempts: 0, nextAttemptAt: now(), createdAt: new Date(now()).toISOString() };
+    try { await write(path, value); }
+    catch (error) {
+      const saved = await read(path);
+      if (!saved || saved.value.email !== actor.email || saved.value.id !== id || saved.value.orderId !== orderId
+        || saved.value.manifestHash !== job.manifestHash) {
+        if (!conflict(error)) throw error;
+        throw new FilmProductionError("The production queue could not confirm this request. Check the saved film status.", 503, "PRODUCTION_QUEUE_UNCONFIRMED");
+      }
+    }
+    return status({ email: actor.email, id, orderId });
+  }
+  async function status({ email, id, orderId }) {
     const job = await film.status({ email, id });
     const ticket = await read(productionQueuePath(email, id));
     const validTicket = ticket?.value.email === email && ticket.value.id === id && ticket.value.manifestHash === job.manifestHash ? ticket.value : null;
     const saved = await film.getPrepared({ email, id });
-    const snapshot = await progress.snapshot({ job: saved, email, queue: validTicket });
+    const reference = HEX.test(orderId || "") ? orderId : HEX.test(validTicket?.orderId || "") ? validTicket.orderId : null;
+    const automatic = reference ? (await read(`${automaticPrefix}${reference}.json`))?.value : null;
+    const validAutomatic = automatic?.version === 1 && automatic.id === reference && automatic.email === email
+      && automatic.preparedId === id && automatic.manifestHash === job.manifestHash
+      && ["pending", "queued"].includes(automatic.state) ? automatic : null;
+    const automaticPending = !validTicket && saved.status === "prepared" && validAutomatic?.state === "pending";
+    const queued = validTicket || (automaticPending ? { state: "pending" } : null);
+    const snapshot = await progress.snapshot({ job: saved, email, queue: queued });
+    const health = snapshot.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
+    const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health, now: now() });
     return { ...job, progress: snapshot,
       ...(job.status === "prepared" && ["creating", "finishing"].includes(snapshot.stage) ? { status: "processing", preparationOnly: false } : {}),
       ...(snapshot.stage === "attention" ? { needsAttention: true } : {}),
-      ...(job.status === "prepared" && validTicket?.state === "pending" ? { status: "queued", preparationOnly: false } : {}),
+      ...(snapshot.stage === "queued" ? { status: "queued", preparationOnly: false } : {}),
+      ...queueMessage,
       ...(validTicket?.state === "attention" ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
   }
   async function claim(path) {
@@ -159,7 +233,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     }
     return { ...counts, cursor: page.hasMore ? page.cursor : undefined };
   }
-  return { enqueue, status, runTicket, runBatch };
+  return { enqueue, enqueueAutomatic, status, runTicket, runBatch };
 }
 
 export const productionQueue = createProductionQueue();
