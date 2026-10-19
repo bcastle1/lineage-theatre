@@ -31,8 +31,11 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
   const reviews=[];
   for(const clip of clips){
     const shot=manifest.shots.find(s=>s.id===clip.shotId);if(!shot)throw failure('SPEECH_SHOT_INVALID');
+    // Review the same track that assembly will deliver, including a separately
+    // provided soundtrack. Never validate embedded audio then publish another.
+    const audioPath=clip.audioPath||clip.path;
     const readTranscript=async context=>{
-      try{return transcribe?await transcribe(clip.path,{contextSilence:context}):JSON.parse(await run(python,[fileURLToPath(new URL('./transcribe-film.py',import.meta.url)),clip.path,...(context?['--context-silence']:[])]));}
+      try{return transcribe?await transcribe(audioPath,{contextSilence:context}):JSON.parse(await run(python,[fileURLToPath(new URL('./transcribe-film.py',import.meta.url)),audioPath,...(context?['--context-silence']:[])]));}
       catch(error){throw markFinishingFailure(error,'speech-review','SPEECH_RECOGNITION_FAILED');}
     };
     let transcript=await readTranscript(false),edit,contextSilence=false;
@@ -45,7 +48,7 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
     }
     if(edit){
       const output=join(clip.path.replace(/[^\\/]+$/,''),`${clip.shotId}-reviewed.wav`);
-      await run(ffmpeg,['-hide_banner','-loglevel','error','-nostdin','-n','-i',clip.path,'-map','0:a:0','-af',
+      await run(ffmpeg,['-hide_banner','-loglevel','error','-nostdin','-n','-i',audioPath,'-map','0:a:0','-af',
         `atrim=duration=${edit.cut},afade=t=out:st=${edit.fadeStart}:d=${edit.fadeDuration},apad,atrim=duration=${Math.max(transcript.duration,shot.targetDurationMs/1000)}`,
         '-c:a','pcm_s16le',output],'SPEECH_AUDIO_EDIT_FAILED');
       clip.audioPath=output;

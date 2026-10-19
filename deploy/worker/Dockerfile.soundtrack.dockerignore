@@ -1,0 +1,19 @@
+# Positive allowlist: no credentials, private media, receipts, or Git metadata.
+**
+!api/
+!api/_lib/
+!api/_lib/*.mjs
+!scripts/
+!scripts/production-worker.mjs
+!scripts/assemble-film.mjs
+!scripts/review-film-speech.mjs
+!scripts/transcribe-film.py
+!scripts/rebuild-film-soundtrack.mjs
+!scripts/rebuild-film-soundtrack.py
+!scripts/rebuild-film-soundtrack-assets.py
+!scripts/rebuild-film-soundtrack-requirements.txt
+!scripts/repair-paid-film-soundtrack.mjs
+!deploy/
+!deploy/worker/
+!deploy/worker/Dockerfile.soundtrack
+!deploy/worker/Dockerfile.soundtrack.dockerignore

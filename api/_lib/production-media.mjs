@@ -102,7 +102,8 @@ function sendError(req, res, error) {
 
 // The caller must obtain email from its authenticated session. No URL or path
 // from the request is passed to Blob; getPrepared scopes the job to that user.
-export async function streamProductionMedia({ req, res, email, id, filmProduction, actor, read = readRecord, now = Date.now, getBlob = get, download = false }) {
+export async function streamProductionMedia({ req, res, email, id, filmProduction, actor, read = readRecord, now = Date.now, getBlob = get, download = false,
+  resolveStoredMedia = validateStoredProductionMedia }) {
   let upstream;
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("Vary", "Cookie");
@@ -116,7 +117,9 @@ export async function streamProductionMedia({ req, res, email, id, filmProductio
     if (typeof id !== "string" || !UUID.test(id)) throw new ProductionMediaError("Choose a valid production reference.", 400);
     const job = await filmProduction.getPrepared({ email: owner, id });
     if (job?.id !== id) throw notFound();
-    const media = validateStoredProductionMedia(job, owner);
+    // A separate owner-only review route supplies its own immutable preview
+    // validator. Ordinary delivery always requires a completed job.
+    const media = await resolveStoredMedia(job, owner);
     await requireFinishedFilmPayment({ job, email: owner, actor, read, now });
     const etag = `"sha256-${media.sha256}"`;
     let range;

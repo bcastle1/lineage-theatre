@@ -94,7 +94,8 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
-  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
+  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, prepareClips,
+  ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
     try {
@@ -125,6 +126,13 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       }
       const outputPath = join(work, "film.mp4");
       stage = 'speech-review';
+      // Only an explicitly configured operator repair supplies this hook. The
+      // ordinary worker leaves downloaded footage and soundtracks unchanged.
+      if (prepareClips !== undefined) {
+        if (typeof prepareClips !== 'function' || !await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
+        await prepareClips({ email, id, job, clips, work, ffmpeg, stillOwned });
+        if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
+      }
       const speechReview = adapter.id==='fal' ? await reviewSpeech({manifest:job.manifest,clips,ffmpeg}) : null;
       if(adapter.id==='fal'&&speechReview?.passed!==true)throw finishingError('Film narration was not verified.', 'SPEECH_REVIEW_REQUIRED');
       stage = 'assembly';
