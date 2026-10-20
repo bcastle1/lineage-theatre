@@ -9,7 +9,7 @@ const url = source => `data:text/javascript;base64,${Buffer.from(source).toStrin
 const contract = url((await compile('../src/studio/checkout-contract.ts')).replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(new URL('../src/studio/hosted-invoice-url.mjs', import.meta.url).href)));
 const library = url(await compile('../src/studio/film-library.ts'));
 const { initialWorkspaceView } = await import(library);
-const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary, paidFilmPlaybackLink } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library))));
+const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary, paidFilmPlaybackLink, paymentViewReentered } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library))));
 const { reservePaymentWindow, paymentReturnLink, paymentReturnOrder, rememberPaymentWindow, completePaymentWindow, releasePaymentWindows } = await import(url((await compile('../src/studio/payment-window.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract))));
 const id = 'b'.repeat(64), stamp = '2026-10-08T12:00:00Z';
 const invoiceUrl = 'https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture';
@@ -66,6 +66,41 @@ test('background payment checks outlast two minutes and notify once only after v
   for(let i=0;i<6;i++){clock+=30000;callback();await settle();}
   assert.equal(checks,7);assert.equal(paid,0);assert.equal(current.status,'awaiting-payment');
   captured=true;clock+=30000;callback();await settle();assert.equal(paid,1);
+  clock+=30000;callback();await settle();assert.equal(paid,1);watcher.stop();
+});
+test('payment view restarts its binding only on explicit same-order re-entry',()=>{
+  const blocked={...order('uncertain'),charged:null,requiresReview:true,receiptAvailable:false,invoiceUrl:null,invoiceNumber:null,
+    retryAllowed:false,checkoutBlock:'production-funding',checkoutRestartAllowed:true};
+  assert.equal(paymentViewReentered({orderId:id,visible:false},{orderId:id,visible:true},blocked),true);
+  for(const [previous,current] of [
+    [{orderId:id,visible:true},{orderId:id,visible:true}],
+    [{orderId:id,visible:true},{orderId:id,visible:false}],
+    [{orderId:id,visible:false},{orderId:id,visible:false}],
+    [{orderId:id,visible:false},{orderId:'d'.repeat(64),visible:true}],
+    [{orderId:null,visible:false},{orderId:null,visible:true}],
+  ]) assert.equal(paymentViewReentered(previous,current,blocked),false);
+  for(const saved of [null,order(),order('awaiting-payment'),{...blocked,id:'d'.repeat(64)}])
+    assert.equal(paymentViewReentered({orderId:id,visible:false},{orderId:id,visible:true},saved),false);
+});
+test('re-entering reads a renewed paid cycle while active-view polling rejects changed bindings',async()=>{
+  let clock=0,callback,visible=true,paid=0,errors=0,latest,readback;
+  const blocked={...order('uncertain'),charged:null,requiresReview:true,receiptAvailable:false,invoiceUrl:null,invoiceNumber:null,
+    retryAllowed:false,checkoutBlock:'production-funding',checkoutRestartAllowed:true};
+  readback=blocked;
+  const start=()=>watchPaymentConfirmation({id,request:async()=>readback,now:()=>clock,setTimer:fn=>(callback=fn,1),clearTimer:()=>{},
+    isVisible:()=>visible,onPaid:()=>paid++,onOrder:value=>latest=value,onError:()=>errors++});
+  let watcher=start();await settle();
+  const renewed={...order(),quoteId:'e'.repeat(64),amountCents:400,retryAllowed:false};
+  readback=renewed;clock+=30000;callback();await settle();
+  assert.equal(errors,1);assert.equal(paid,0);assert.deepEqual(latest,blocked);
+  visible=false;clock+=30000;callback();await settle();
+  const previous={orderId:id,visible};visible=true;
+  assert.equal(paymentViewReentered(previous,{orderId:id,visible},latest),true);
+  watcher.stop();watcher=start();await settle();
+  assert.equal(paid,1);assert.deepEqual(latest,renewed);
+  const saved=film(),finished={...saved,payments:[renewed],production:{...saved.production,status:'completed',mediaReady:true},
+    mediaUrl:`/api/studio?action=productionMedia&id=${saved.id}`,downloadUrl:`/api/studio?action=productionMedia&id=${saved.id}&download=1`};
+  assert.equal(paidFilmPlaybackLink(latest,await readPaymentFilm(async()=>({entry:finished}),latest)),`#library?film=${saved.id}`);
   clock+=30000;callback();await settle();assert.equal(paid,1);watcher.stop();
 });
 test('logout cancels late responses and session failures stop polling', async()=>{

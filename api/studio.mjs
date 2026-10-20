@@ -214,13 +214,14 @@ export function createStudioHandler(overrides={}) {
       return json(res,200,await humanCheck.prepareCheckout(email,body.quoteId,body.captchaToken));
     }
     if(body?.action==="checkPayment") {
-      if(Object.keys(body).some(key=>!["action","orderId"].includes(key))
-        ||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
+      if(Object.keys(body).some(key=>!["action","orderId","expectedQuoteId"].includes(key))
+        ||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId)
+        ||body.expectedQuoteId!==undefined&&(typeof body.expectedQuoteId!=="string"||!/^[a-f0-9]{64}$/.test(body.expectedQuoteId)))
         return json(res,400,{message:"Choose the saved payment before checking its status."});
       if(!(await limitAction(`payment-status:${email}`,60,3600_000)))
         return json(res,429,{message:"Please wait before checking payment status again."});
       return json(res,200,hosted&&await hosted.ownsOrder(body.orderId)
-        ?await hosted.check(session.user,{orderId:body.orderId}):await payments.order(session.user,body.orderId));
+        ?await hosted.check(session.user,{orderId:body.orderId,...(body.expectedQuoteId!==undefined?{expectedQuoteId:body.expectedQuoteId}:{})}):await payments.order(session.user,body.orderId));
     }
     if(body?.action==="prepare") {
       if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});

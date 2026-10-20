@@ -3,7 +3,7 @@ import { CheckCircle2, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { api } from "./model";
 import { paymentStatusMessage, type FilmOrder } from "./checkout-contract";
 import { libraryFilmLink, type LibraryEntry } from "./film-library";
-import { confirmedFilmPayment, paidFilmPlaybackLink, paymentProductionSummary, readPaymentFilm, watchPaymentConfirmation } from "./payment-confirmation";
+import { confirmedFilmPayment, paidFilmPlaybackLink, paymentProductionSummary, paymentViewReentered, readPaymentFilm, watchPaymentConfirmation } from "./payment-confirmation";
 import { completePaymentWindow, rememberPaymentWindow, reservePaymentWindow } from "./payment-window";
 import FilmProductionProgress from "./FilmProductionProgress";
 import "./payment-confirmation.css";
@@ -16,7 +16,16 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
   const [opening, setOpening] = useState(false);
   const latest = useRef({ visible, onPaid }); latest.current = { visible, onPaid };
   const heading = useRef<HTMLHeadingElement>(null);
+  const previousView = useRef({ orderId, visible });
+  const reentered = paymentViewReentered(previousView.current, { orderId, visible }, order);
   useEffect(() => { setOrder(null); setFilm(null); }, [orderId]);
+  useEffect(() => {
+    previousView.current = { orderId, visible };
+    if (!reentered) return;
+    // A server-fenced unused checkout can reuse the order ID with a fresh
+    // quote. Bind that current cycle on explicit navigation back to this view.
+    setOrder(null); setFilm(null); setReload(value => value + 1);
+  }, [orderId, visible, reentered]);
   useEffect(() => { if (visible) { heading.current?.focus({ preventScroll: true }); heading.current?.scrollIntoView({ block: "start" }); } }, [visible, orderId]);
   useEffect(() => {
     setError(""); setChecking(true);
@@ -43,9 +52,9 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
   const playbackLink = paid ? paidFilmPlaybackLink(order, film) : null;
   const ready = Boolean(playbackLink);
   useEffect(() => {
-    if (!visible || !playbackLink) return;
+    if (!visible || reentered || !playbackLink) return;
     if (window.location.hash !== playbackLink) window.location.hash = playbackLink;
-  }, [visible, playbackLink]);
+  }, [visible, reentered, playbackLink]);
   function openPayment() {
     if (!order?.invoiceUrl || order.status !== "awaiting-payment" || order.requiresReview || opening) return;
     setOpening(true);
@@ -60,8 +69,8 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
     {!orderId ? <p role="alert">This payment link is incomplete. Open your film library to find your saved order.</p> : <>
       <div className="payment-confirmation-status" role="status">
         {paid ? <CheckCircle2 size={26} aria-hidden="true" /> : checking ? <Loader2 size={26} className="spin" aria-hidden="true" /> : <RefreshCw size={26} aria-hidden="true" />}
-        <div><h2>{paid ? order?.sandbox ? "Test payment confirmed" : "Payment received" : checking ? "Checking your payment" : order?.status === "awaiting-payment" ? "Waiting for payment confirmation" : "Payment needs review"}</h2>
-          {order && <p>{order.filmTitle} · {(order.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" })}{paid ? order.sandbox ? " test payment" : " paid to BROCOTech" : " invoice total"}</p>}
+        <div><h2>{paid ? order?.sandbox ? "Test payment confirmed" : "Payment received" : checking ? "Checking your payment" : order?.checkoutBlock === "production-funding" ? "Payment page not created" : order?.status === "awaiting-payment" ? "Waiting for payment confirmation" : "Payment needs review"}</h2>
+          {order && <p>{order.filmTitle} · {(order.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" })}{paid ? order.sandbox ? " test payment" : " paid to BROCOTech" : order.checkoutBlock === "production-funding" ? " quoted total" : " invoice total"}</p>}
         </div>
       </div>
       {paid ? <p className="payment-confirmation-summary">{paymentProductionSummary(order, film, productionAvailable)}</p>

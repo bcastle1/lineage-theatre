@@ -47,6 +47,8 @@ import { initialWorkspaceView, localLibraryPatch, localLibraryState, verifyLibra
 import PaymentConfirmation from "./PaymentConfirmation";
 import { paymentReturnOrder, paymentReturnLink, releasePaymentWindows } from "./payment-window";
 import { createDerivedFilmDraft, persistCreatedDraft } from "./derived-film";
+import { orderForReference } from "./checkout-payment";
+import type { FilmOrder } from "./checkout-contract";
 const Admin = lazy(() => import("../admin/Admin"));
 const AccountSecurity = lazy(() => import("../AccountSecurity"));
 
@@ -186,6 +188,30 @@ export default function Workspace({
     }
     setProjects(next);
     setSaved("Saved in this browser");
+  }
+  function clearExpiredPaymentReference(reference: FilmPaymentReference, verified: FilmOrder) {
+    const order = orderForReference(verified, reference);
+    const sameReference = (value: unknown) => {
+      const saved = normalizePaymentReference(value);
+      return saved && (Object.keys(reference) as (keyof FilmPaymentReference)[]).every(key => saved[key] === reference[key]);
+    };
+    if (order.checkoutRestartAllowed !== true || order.checkoutBlock !== "production-funding" || order.filmId !== film.id
+      || !sameReference(film.paymentReference)) throw new Error("The saved payment request changed. Refresh its status before continuing.");
+    const stored = JSON.parse(localStorage.getItem(storageKey) || "null") as unknown;
+    if (!Array.isArray(stored) || !sameReference(stored.find(project => project?.id === film.id)?.paymentReference))
+      throw new Error("The browser's saved payment request changed. Reload before continuing.");
+    const next = projects.map(project => {
+      if (project.id !== film.id) return project;
+      const { paymentReference: _closedReference, ...draft } = project;
+      return { ...draft, updatedAt: new Date().toISOString() };
+    });
+    const serialized = JSON.stringify(next);
+    try {
+      localStorage.setItem(storageKey, serialized);
+      if (localStorage.getItem(storageKey) !== serialized) throw new Error();
+    } catch { throw new Error("The closed payment request could not be updated in this browser. Reload before continuing."); }
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    setProjects(next); setSaved("Saved in this browser");
   }
   const changeScene = (id: string, patch: Partial<Scene>) =>
     setProjects((current) =>
@@ -860,6 +886,7 @@ export default function Workspace({
                       checkFilm={checkFilm}
                       resultUrl={resultUrl}
                       persistPaymentReference={persistPaymentReference}
+                      clearExpiredPaymentReference={clearExpiredPaymentReference}
                       onNewFilmCheckout={priceCurrentDraftAsNewFilm}
                       onCheckoutBusy={setBusy}
                       brief={brief}

@@ -15,7 +15,8 @@ export function filmReadyToWatch(entry: LibraryEntry | null, reference: FilmPaym
 
 export function filmFulfillmentProgress(order: FilmOrder | null, production: ProductionStatus | null, productionAvailable: boolean, ready: boolean) {
   const paid = order?.status === "captured" && order.charged === true && order.receiptAvailable && !order.requiresReview && order.refundedCents === 0;
-  const payment = paid ? order.sandbox ? "Test payment recorded" : "Payment received" : order?.requiresReview ? "Needs review" : "Awaiting confirmation";
+  const payment = paid ? order.sandbox ? "Test payment recorded" : "Payment received"
+    : order?.checkoutBlock === "production-funding" ? "No invoice submitted" : order?.requiresReview ? "Needs review" : "Awaiting confirmation";
   if (!paid) return { payment, paid: false, production: "Waiting for payment", watch: "Not ready yet", ready: false };
   if (ready) return { payment, paid: true, production: "Completed", watch: "Ready to watch", ready: true };
   const creation = !production ? "Checking status" : production.needsAttention || ["failed", "uncertain"].includes(production.status)

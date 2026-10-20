@@ -3,7 +3,7 @@ import { CreditCard, Download, ExternalLink, Loader2, Play, RefreshCw, ShieldChe
 import { api, ApiError, normalizePaymentReference, productionInputHash, productionPreparationInput, type Film, type FilmPaymentReference, type PreparedProduction } from "./model";
 import {prepareFilmPrice,type FilmPrice} from "./film-pricing";
 import { canStartFilmProduction, normalizeCheckoutConfiguration, normalizeFilmOrder, normalizeFilmQuote, normalizeFilmReceipt, paymentStatusMessage, quoteMatchesConfiguration, type CheckoutConfiguration, type FilmOrder, type FilmQuote } from "./checkout-contract";
-import { checkFilmPayment, commitFilmPayment, retryFilmPayment } from "./checkout-payment";
+import { checkFilmPayment, commitFilmPayment, restartableFilmPayment, retryFilmPayment } from "./checkout-payment";
 import { createFilmReceiptData, createFilmReceiptHtml } from "./payment-receipt";
 import { captchaToken } from "../lib/captcha";
 import { reservePaymentWindow, rememberPaymentWindow, paymentReturnLink } from "./payment-window";
@@ -18,9 +18,10 @@ import { confirmedFilmPayment, paidFilmPlaybackLink } from "./payment-confirmati
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
 
-export default function FilmCheckout({ film, productionAvailable, productionProvider, generationAttemptAllowed = false, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
+export default function FilmCheckout({ film, productionAvailable, productionProvider, generationAttemptAllowed = false, persistPaymentReference, clearExpiredPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
   film: Film; productionAvailable: boolean; productionProvider?: "kling"; generationAttemptAllowed?: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
+  clearExpiredPaymentReference: (reference: FilmPaymentReference, order: FilmOrder) => void;
   onNewFilmCheckout: () => void;
   onPrepared: (prepared: PreparedProduction) => void;
   onBusyChange: (message: string) => void;
@@ -170,10 +171,21 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
     }
     finally { lock.current = false; setBusy(""); onBusyChange(""); }
   }
-  async function requestQuote() {
-    if (!prepared || !currentPlan || paymentReference) return;
+  async function requestQuote(restartExpired = false) {
+    if (restartExpired ? !paymentReference || order?.checkoutBlock !== "production-funding" || order.retryAllowed
+      : !prepared || !currentPlan || paymentReference) return;
     await work("Checking your film price…", async () => {
+      if (restartExpired && paymentReference && order) {
+        const closed = await restartableFilmPayment(api, paymentReference, order);
+        clearExpiredPaymentReference(paymentReference, closed);
+        attemptedPayment.current = null; quoteRequest.current = null; checkoutKey.current = crypto.randomUUID();
+        setOrder(null); setProduction(null); setDelivery(null); setPaidPlan(null); setPrice(null); setRetryProductionConsent(false);
+      }
       setQuote(null); setConsent(false); setCheckoutProductionReady(false);
+      if (!prepared || !currentPlan || planRefreshRequired) {
+        setMessage("The expired unused payment request is closed. Prepare a price for your current saved film before continuing.");
+        return;
+      }
       const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio", { action: "prepareCheckout" }));
       setConfiguration(latestConfiguration);
       if (!latestConfiguration.available) {
@@ -462,6 +474,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
           </label>}<CaptchaNotice /></>}
         <p className="field-note">Order reference: <span className="film-order-reference">{paymentReference.orderId}</span></p>
         <div className="action-group">
+          {order?.checkoutBlock === "production-funding" && !order.retryAllowed && <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void requestQuote(true)}><RefreshCw size={15} />Refresh film price</button>}
           {order?.retryAllowed === true && <button className="button secondary small" disabled={Boolean(busy) || !order.sandbox && !retryProductionConsent} onClick={() => void retryPaymentPage()}><RefreshCw size={15} />Retry preparing this payment page</button>}
           {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <button className="button primary small" onClick={() => { const handle = reservePaymentWindow(); presentPaymentPage(order, handle); handle.close(); }}><ExternalLink size={15} />Open secure payment page</button>}
           <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void work("Checking payment status…", async () => { const latest = await readOrder(paymentReference); setMessage(`Status checked. ${paymentStatusMessage(latest)}`); })}><RefreshCw size={15} />Check payment status</button>
