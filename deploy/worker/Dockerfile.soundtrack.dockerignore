@@ -16,6 +16,9 @@
 !scripts/repair-name-proof.mjs
 !scripts/compare-repair-name-pronunciations.py
 !scripts/automatic-film-soundtrack.mjs
+!scripts/authored-soundtrack-casting.mjs
+!scripts/approve-film-soundtrack-casting.mjs
+!scripts/inspect-film-soundtrack-fit.mjs
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile.soundtrack

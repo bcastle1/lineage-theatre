@@ -13,6 +13,7 @@ import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs
 import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, validateBoundarySilence } from './rebuild-film-soundtrack.mjs';
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
+import { readSoundtrackCasting } from './authored-soundtrack-casting.mjs';
 
 const RECIPE = 'automatic-stock-soundtrack-v1';
 const HASH = /^[a-f0-9]{64}$/;
@@ -64,6 +65,13 @@ export function standardFilmVoices(manifest, manifestHash) {
   }
   soundtrackPlan({ manifest, manifestHash, ...voices });
   return voices;
+}
+
+export function nextSoundtrackAttempt(savedAttempts, inheritedAttempts = 0) {
+  const consumed = savedAttempts ?? inheritedAttempts;
+  requireValue(Number.isSafeInteger(inheritedAttempts) && inheritedAttempts >= 0 && inheritedAttempts <= 2
+    && Number.isSafeInteger(consumed) && consumed >= inheritedAttempts && consumed < 2, 'SOUNDTRACK_ATTEMPTS_EXHAUSTED');
+  return consumed + 1;
 }
 
 export function constructionFiles(provenance, plan) {
@@ -177,11 +185,15 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
         && Array.isArray(job.shots) && job.shots.length === job.manifest.shots.length && job.shots.length === clips.length
         && job.shots.every((shot, index) => shot.status === 'completed' && shot.id === job.manifest.shots[index].id));
       const jobHash = jsonHash(job), jobPath = productionJobPath(email, id);
+      const defaultVoices = standardFilmVoices(job.manifest, job.manifestHash);
+      const casting = await readSoundtrackCasting({ job, defaultVoices, read });
       const guard = async () => {
         requireValue(await stillOwned(), 'SOUNDTRACK_CLAIM_EXPIRED');
         const current = await read(jobPath), account = (await read(userPath(email)))?.value;
         requireValue(current?.value && jsonHash(current.value) === jobHash && account?.email === email
           && !account.mustChangePassword && accessStatusForUser(account) === 'approved', 'SOUNDTRACK_CONTEXT_CHANGED');
+        const activeCasting = await readSoundtrackCasting({ job: current.value, defaultVoices, read });
+        requireValue(jsonHash(activeCasting) === jsonHash(casting), 'SOUNDTRACK_CONTEXT_CHANGED');
         await requireFinishedFilmPayment({ job: current.value, email, actor: account, read, now });
         requireValue(await stillOwned(), 'SOUNDTRACK_CLAIM_EXPIRED');
       };
@@ -194,7 +206,8 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
         originalPaths.set(shot.id, path);
         sources.push({ shotId: shot.id, sha256: hash(await readFile(path)), sizeBytes: info.size });
       }
-      const voices = standardFilmVoices(job.manifest, job.manifestHash);
+      const voices = casting?.voices || defaultVoices;
+      if (casting) requireValue(jsonHash(sources) === jsonHash(casting.sources), 'SOUNDTRACK_SOURCE_CHANGED');
       const plan = soundtrackPlan({ manifest: job.manifest, manifestHash: job.manifestHash, ...voices });
       // Sources are already present and are never copied. Reserve bounded room
       // for all PCM stems, score/render transients, reviewed audio and final MP4.
@@ -203,14 +216,16 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
       requireValue(Number.isFinite(space.bavail * space.bsize) && space.bavail * space.bsize >= requiredSpace,
         'SOUNDTRACK_SCRATCH_UNAVAILABLE');
       const binding = { version: 1, recipe: RECIPE, ownerHash: job.ownerHash, id, manifestHash: job.manifestHash,
-        sources, sourceOutputsSha256: jsonHash(job.shots.map(shot => ({ id: shot.id, output: shot.output }))), voices };
+        sources, sourceOutputsSha256: jsonHash(job.shots.map(shot => ({ id: shot.id, output: shot.output }))), voices,
+        ...(casting ? { castingApproval: { approvalSha256: casting.approvalSha256, priorBindingHash: casting.priorBindingHash,
+          priorReceiptSha256: casting.priorReceiptSha256, priorAttempts: casting.priorAttempts } } : {}) };
       const bindingHash = jsonHash(binding), prefix = `production/soundtracks/${job.ownerHash}/${id}/${bindingHash}`;
       const receiptPath = `${prefix}/construction.json`, directory = join(resolve(work), 'soundtrack');
       const mediaPath = descriptor => `${prefix}/media/${descriptor.sha256}.${descriptor.file.split('.').at(-1)}`;
       const validateSaved = record => {
         requireValue(record?.etag && record.value?.kind === RECIPE && record.value.bindingHash === bindingHash
           && jsonHash(record.value.binding) === bindingHash && Number.isSafeInteger(record.value.attempts)
-          && record.value.attempts >= 1 && record.value.attempts <= 2
+          && record.value.attempts >= (casting?.priorAttempts || 0) + 1 && record.value.attempts <= 2
           && ['building', 'failed', 'constructed', 'reviewed'].includes(record.value.state));
         return record;
       };
@@ -229,9 +244,9 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
         }
         await writeFile(join(directory, 'provenance.json'), JSON.stringify(provenance), { flag: 'wx', mode: 0o600 });
       } else {
-        requireValue(!saved || saved.value.attempts < 2, 'SOUNDTRACK_ATTEMPTS_EXHAUSTED');
+        const attempts = nextSoundtrackAttempt(saved?.value.attempts, casting?.priorAttempts || 0);
         const attemptId = randomUUID(), state = { kind: RECIPE, bindingHash, binding, state: 'building',
-          attempts: (saved?.value.attempts || 0) + 1, attemptId, updatedAt: new Date(now()).toISOString() };
+          attempts, attemptId, updatedAt: new Date(now()).toISOString() };
         await guard();
         try { await write(receiptPath, state, saved?.etag); }
         catch { /* A readback must prove this exact claim before any synthesis. */ }
