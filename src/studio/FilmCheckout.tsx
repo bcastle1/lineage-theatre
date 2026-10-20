@@ -32,6 +32,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
   const [checkoutProductionReady, setCheckoutProductionReady] = useState(false);
   const [price, setPrice] = useState<FilmPrice | null>(null);
   const [preparationConsent, setPreparationConsent] = useState(false);
+  const [planRefreshRequired, setPlanRefreshRequired] = useState(false);
   const [savedOrder, setOrder] = useState<FilmOrder | null>(null);
   const [productionStatus, setProduction] = useState<ProductionStatus | null>(null);
   const [delivery, setDelivery] = useState<LibraryEntry | null>(null);
@@ -45,7 +46,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
   const [now, setNow] = useState(Date.now());
   const lock = useRef(false);
   const quoteRequest = useRef<{ hash: string; key: string } | null>(null);
-  const preparationRequest = useRef<{input:string;key:string;priceKey:string}|null>(null);
+  const preparationRequest = useRef<{input:string;key:string;priceKey:string;renewFrom?:string}|null>(null);
   const checkoutKey = useRef(crypto.randomUUID());
   const attemptedPayment = useRef<FilmPaymentReference | null>(null);
   const mounted = useRef(false);
@@ -70,6 +71,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { setConsent(false); }, [productionAvailable]);
   useEffect(() => { setRetryProductionConsent(false); }, [paymentReference?.orderId, order?.retryAllowed]);
+  useEffect(() => { setPlanRefreshRequired(false); }, [input, prepared?.id]);
 
   useEffect(() => {
     let active = true; setInputHash(""); setConsent(false);
@@ -200,16 +202,28 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
     });
   }
   async function requestPrice() {
-    if(paymentReference||(!currentPlan&&!preparationConsent))return;
+    if(paymentReference||((!currentPlan||planRefreshRequired)&&!preparationConsent))return;
     await work("Preparing your pricing…",async()=>{
       setQuote(null);setPrice(null);setConsent(false);
       quoteRequest.current = null;
-      if(preparationRequest.current?.input!==input)preparationRequest.current={input,
-        key:currentPlan&&prepared?prepared.requestId:crypto.randomUUID(),priceKey:crypto.randomUUID()};
+      if(preparationRequest.current?.input!==input||(planRefreshRequired&&preparationRequest.current?.renewFrom!==prepared?.id))
+        preparationRequest.current={input,key:currentPlan&&prepared&&!planRefreshRequired?prepared.requestId:crypto.randomUUID(),
+          priceKey:crypto.randomUUID(),...(planRefreshRequired&&prepared?{renewFrom:prepared.id}:{})};
       if(price&&Date.parse(price.expiresAt)<=Date.now())preparationRequest.current.priceKey=crypto.randomUUID();
-      const result=await prepareFilmPrice({request:api,input,filmId:film.id,existing:prepared,
-        preparationKey:preparationRequest.current.key,priceKey:preparationRequest.current.priceKey,
-        preparationConsent,persist:onPrepared});
+      let result;
+      try {
+        result=await prepareFilmPrice({request:api,input,filmId:film.id,existing:prepared,
+          preparationKey:preparationRequest.current.key,priceKey:preparationRequest.current.priceKey,
+          preparationConsent,persist:onPrepared,renewSavedPlan:planRefreshRequired,paymentReference:paymentReference||undefined});
+      } catch(cause) {
+        if(cause instanceof ApiError&&cause.code==="PRODUCTION_PLAN_CHANGED"&&!planRefreshRequired&&currentPlan&&prepared?.status==="prepared") {
+          setPlanRefreshRequired(true);setPreparationConsent(false);
+          setMessage("Production settings have changed since this plan was saved. Confirm below to save a current plan and check its price. The earlier version remains in your library.");
+          return;
+        }
+        throw cause;
+      }
+      setPlanRefreshRequired(false);
       setPrice(result.price);setNow(Date.now());
       setMessage("Your production plan is saved and your film price is ready.");
     });
@@ -351,8 +365,8 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
     <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Your film price and payment"}</h3>
     {!paymentReference && <>
       <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
-      {!currentPlan&&<label className="check-label"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
-      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length || (!currentPlan&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (price ? "Refresh my pricing" : "Prepare my pricing")}</button>
+      {(!currentPlan||planRefreshRequired)&&<label className="check-label"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
+      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length || ((!currentPlan||planRefreshRequired)&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (planRefreshRequired ? "Refresh production plan" : price ? "Refresh my pricing" : "Prepare my pricing")}</button>
     </>}
     {prepared&&!paymentReference&&<p className="field-note">{!inputHash?"Checking your draft against its saved plan…":currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
     {price&&!paymentReference&&!quote&&<div className="film-price-review" role="status">

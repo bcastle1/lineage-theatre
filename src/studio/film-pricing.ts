@@ -1,4 +1,5 @@
-import {normalizeProductionPreparation,productionInputHash,type PreparedProduction} from "./model";
+import {normalizeProductionPreparation,productionInputHash,type PreparedProduction,type FilmPaymentReference} from "./model";
+import {normalizeLibraryEntry} from "./film-library";
 
 export type FilmPrice = {
   preparedId:string;manifestHash:string;filmId:string;filmTitle:string;currency:"USD";
@@ -20,17 +21,34 @@ export function normalizeFilmPrice(value:unknown):FilmPrice|null {
 
 // Preparation and pricing never depend on card entry. Persist the saved plan
 // before requesting a price so a pricing failure cannot lose that preparation.
-export async function prepareFilmPrice({request,input,filmId,existing,preparationKey,priceKey,preparationConsent,persist,now=Date.now}:{
+export async function prepareFilmPrice({request,input,filmId,existing,preparationKey,priceKey,preparationConsent,persist,now=Date.now,renewSavedPlan=false,paymentReference}:{
   request:Request;input:string;filmId:string;existing?:PreparedProduction;preparationKey:string;priceKey:string;
   preparationConsent:boolean;persist:(value:PreparedProduction)=>void;now?:()=>number;
+  renewSavedPlan?:boolean;paymentReference?:FilmPaymentReference;
 }):Promise<{prepared:PreparedProduction;price:FilmPrice}> {
   const inputHash=await productionInputHash(input);
   let prepared=existing?.inputHash===inputHash?existing:undefined;
+  if(renewSavedPlan) {
+    if(paymentReference||!prepared||prepared.status!=="prepared"||preparationKey===prepared.requestId)
+      throw new Error("Keep the existing film and payment reference. This plan cannot be refreshed here.");
+    if(!preparationConsent)throw new Error("Allow a new production plan to be saved before refreshing pricing.");
+    const result=await request(`/api/library?action=detail&kind=plan&id=${encodeURIComponent(prepared.id)}`) as {entry?:unknown};
+    const entry=normalizeLibraryEntry(result?.entry);
+    if(entry.kind!=="plan"||entry.id!==prepared.id||entry.manifestHash!==prepared.manifestHash||entry.filmId!==filmId
+      ||entry.libraryState!=="active"||entry.payments.length!==0||entry.production.status!=="prepared"
+      ||entry.production.completedShots!==0||entry.production.mediaReady||entry.production.needsAttention)
+      throw new Error("This saved plan has a payment or production activity. Open its existing film in the library before continuing.");
+    // Explicit renewal creates a separate immutable preparation. A lost reply
+    // retries the caller's same new key; no invoice or production is started.
+    prepared=undefined;
+  }
   if(!prepared) {
     if(!preparationConsent)throw new Error("Allow your production plan to be saved before preparing pricing.");
     const result=await request("/api/studio",{action:"prepare",project:JSON.parse(input),preparationConsent:true,idempotencyKey:preparationKey});
     prepared=normalizeProductionPreparation({...result as object,inputHash,requestId:preparationKey});
     if(!prepared)throw new Error("The saved production reference could not be verified. Retry this preparation request.");
+    if(renewSavedPlan&&(prepared.id===existing?.id||prepared.manifestHash===existing?.manifestHash||prepared.status!=="prepared"))
+      throw new Error("The refreshed production plan could not be verified. Keep the earlier plan and retry this preparation request.");
     persist(prepared);
   }
   const price=normalizeFilmPrice(await request("/api/studio",{action:"price",project:JSON.parse(input),preparedId:prepared.id,idempotencyKey:priceKey}));

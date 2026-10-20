@@ -158,7 +158,7 @@ export function validateProviderOutput(output, allowedHosts = []) {
 
 function customerJob(job) {
   const status = job.status === "awaiting-assembly" ? "processing" : job.status;
-  return { id: job.id, filmId: job.filmId, manifestHash: job.manifestHash, status, sceneCount: job.manifest.shots.length, shotCount: job.shots.length,
+  return { id: job.id, filmId: job.filmId, manifestHash: job.manifestHash, status, sceneCount: job.manifest.screenplay.scenes.length, shotCount: job.shots.length,
     durationSeconds: job.manifest.targetDurationSeconds, completedShots: job.shots.filter(s => s.status === "completed").length,
     createdAt: job.createdAt, updatedAt: job.updatedAt, preparationOnly: job.status === "prepared",
     ...(job.media ? { mediaReady: true } : {}),

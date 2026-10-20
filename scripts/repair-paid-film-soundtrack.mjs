@@ -141,6 +141,7 @@ function repairTranscriber(root, { python = process.env.PYTHON_PATH || 'python3'
 async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices, provenance, ffmpeg, constructionRoot = root }, dependencies) {
   const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
   const speechReview = await reviewFilmSpeech({ manifest: snapshot.originalJob.manifest, clips, ffmpeg,
+    speakerAliases: voices.speakerAliases,
     transcribe: repairTranscriber(root, { now }), resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest,
       manifestHash: snapshot.manifestHash, voices, provenance, constructionRoot, receiptRoot: root }) });
   if (speechReview?.passed !== true) throw fail('REPAIR_SPEECH_UNVERIFIED');
@@ -411,6 +412,7 @@ export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha2
       // This is the ordinary recognizer on the selected replacement track.
       // A synthesis receipt never substitutes for its real script comparison.
       const reviewed = await reviewFilmSpeech({ ...input,
+        speakerAliases: build.voices.speakerAliases,
         transcribe: repairTranscriber(dirname(input.clips[0].path), { now, receiptRoot: buildRoot }),
         resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
           voices: build.voices, provenance, constructionRoot: build.constructionRoot, receiptRoot: buildRoot }) });

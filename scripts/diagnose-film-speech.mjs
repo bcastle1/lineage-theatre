@@ -15,7 +15,7 @@ import { productionJobPath, validateProviderOutput } from '../api/_lib/film-prod
 import { FAL_MEDIA_HOSTS } from '../api/_lib/fal-client.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
-import { normalizeSpeech, speechEdit } from './review-film-speech.mjs';
+import { normalizeSpeech, speechEdit, intendedSpeechTokens } from './review-film-speech.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -57,7 +57,7 @@ function argumentsForRun(args) {
   const model = values.get('--model') || 'small.en';
   if (typeof email !== 'string' || email !== email.trim().toLowerCase() || email.length > 254
     || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(email) || !UUID.test(id || '')
-    || !Number.isSafeInteger(maxScenes) || maxScenes < 1 || maxScenes > 30
+    || !Number.isSafeInteger(maxScenes) || maxScenes < 1 || maxScenes > 200
     || !RECOGNITION_MODELS.has(model)) fail('ARGUMENTS_INVALID');
   return { email, id, maxScenes, includeFirstDifference, model };
 }
@@ -134,9 +134,8 @@ function transcribe(path, contextSilence, model) {
 }
 
 const tokensForTranscript = transcript => transcript.words.flatMap(word => normalizeSpeech(word.word));
-const tokensForShot = shot => normalizeSpeech(`${shot.narration || ''} ${(shot.dialogue || '').replace(/(?:^|\n)[A-Z][A-Z\s'-]*:\s*/g, ' ')}`);
-function firstDifference(shot, transcript) {
-  const expected = tokensForShot(shot);
+function firstDifference(shot, transcript, manifest) {
+  const expected = intendedSpeechTokens(shot, { manifest });
   const actual = transcript.words.flatMap(word => {
     const confidence = [word.probability, word.confidence].find(value => Number.isFinite(value) && value >= 0 && value <= 1);
     return normalizeSpeech(word.word).map(token => ({ token, confidence }));
@@ -161,28 +160,28 @@ function numeralCandidate(expected, actual) {
   // or modified based on this classification.
   return digits(left) && words(right) || digits(right) && words(left);
 }
-function compareSpeech(shot, transcript) {
+function compareSpeech(shot, transcript, manifest) {
   try {
-    const edit = speechEdit(shot, transcript);
+    const edit = speechEdit(shot, transcript, { manifest });
     return { matched: true, reason: 'NONE', trailingAudioEditRequired: Boolean(edit) };
   } catch (error) {
     const reason = finishingFailure(error, 'speech-review')?.reason;
     return { matched: false, reason: speechReasons.has(reason) ? reason : 'SPEECH_REVIEW_REQUIRED', trailingAudioEditRequired: false };
   }
 }
-async function inspectScene(shot, path, sceneIndex, includeFirstDifference, model) {
-  const normal = await transcribe(path, false, model), first = compareSpeech(shot, normal);
+async function inspectScene(shot, path, sceneIndex, includeFirstDifference, model, manifest) {
+  const normal = await transcribe(path, false, model), first = compareSpeech(shot, normal, manifest);
   if (first.matched) return { sceneIndex, reason: 'NONE', normalMatched: true, contextMatched: null,
     mismatchCategory: 'none', trailingAudioEditRequired: first.trailingAudioEditRequired,
-    ...(includeFirstDifference ? { firstDifferences: { normal: firstDifference(shot, normal), context: null } } : {}) };
-  const context = await transcribe(path, true, model), second = compareSpeech(shot, context);
-  const expected = tokensForShot(shot), normalTokens = tokensForTranscript(normal), contextTokens = tokensForTranscript(context);
+    ...(includeFirstDifference ? { firstDifferences: { normal: firstDifference(shot, normal, manifest), context: null } } : {}) };
+  const context = await transcribe(path, true, model), second = compareSpeech(shot, context, manifest);
+  const expected = intendedSpeechTokens(shot, { manifest }), normalTokens = tokensForTranscript(normal), contextTokens = tokensForTranscript(context);
   const mismatchCategory = second.matched ? 'context-recovered'
     : numeralCandidate(expected, normalTokens) || numeralCandidate(expected, contextTokens) ? 'possible-numeral-format'
     : JSON.stringify(normalTokens) !== JSON.stringify(contextTokens) ? 'recognizer-disagreement' : 'unclassified';
   return { sceneIndex, reason: second.matched ? 'NONE' : second.reason, normalMatched: false, contextMatched: second.matched,
     mismatchCategory, trailingAudioEditRequired: second.trailingAudioEditRequired,
-    ...(includeFirstDifference ? { firstDifferences: { normal: firstDifference(shot, normal), context: firstDifference(shot, context) } } : {}) };
+    ...(includeFirstDifference ? { firstDifferences: { normal: firstDifference(shot, normal, manifest), context: firstDifference(shot, context, manifest) } } : {}) };
 }
 
 async function main() {
@@ -222,7 +221,7 @@ async function main() {
       const path = join(work, `scene-${index + 1}.${shot.output?.contentType === 'video/webm' ? 'webm' : 'mp4'}`);
       try {
         await downloadExistingClip(shot.output, path);
-        results.push(await inspectScene(job.manifest.shots[index], path, index + 1, includeFirstDifference, model));
+        results.push(await inspectScene(job.manifest.shots[index], path, index + 1, includeFirstDifference, model, job.manifest));
       } catch (error) {
         if (error?.diagnosticReason === 'DIAGNOSTIC_TIME_LIMIT') throw error;
         results.push({ sceneIndex: index + 1, reason: safeFailure(error), normalMatched: null, contextMatched: null,

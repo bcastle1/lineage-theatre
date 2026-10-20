@@ -26,6 +26,7 @@ COPY api/_lib/ ./api/_lib/
 COPY src/studio/hosted-invoice-url.mjs ./src/studio/
 COPY shared/ ./shared/
 COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/check-worker-runtime.mjs scripts/check-hosted-reversals.mjs scripts/paid-film-delivery-worker.mjs scripts/review-film-speech.mjs scripts/transcribe-film.py ./scripts/
+COPY scripts/test-kling-production.mjs ./scripts/
 COPY scripts/automatic-film-soundtrack.mjs scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scripts/repair-name-proof.mjs scripts/compare-repair-name-pronunciations.py ./scripts/
 
 ENV NODE_ENV=production FFMPEG_PATH=/usr/bin/ffmpeg PYTHON_PATH=/opt/speech/bin/python HF_HOME=/opt/whisper HF_HUB_OFFLINE=1

@@ -7,6 +7,30 @@ import {markFinishingFailure,finishingFailure} from '../api/_lib/film-finishing-
 
 const failure=reason=>markFinishingFailure(Object.assign(new Error('The generated narration needs a production review. Your payment is saved.'),{code:'FILM_SPEECH_REVIEW_REQUIRED'}),'speech-review',reason);
 export const normalizeSpeech=value=>String(value).normalize('NFKC').toLowerCase().replace(/[’‘]/g,"'").replace(/[^a-z0-9]+/g,' ').trim().split(/\s+/).filter(Boolean);
+// Speaker labels are metadata only when they identify one saved cast member
+// in this scene (or the narrator). Preserve arbitrary colon-bearing prose.
+export function intendedSpeechTokens(shot,{manifest,speakerAliases={}}={}){
+  const label=value=>String(value).normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();
+  const cast=Array.isArray(manifest?.screenplay?.characters)?manifest.screenplay.characters:[];
+  const labels=new Map([['narrator',new Set([null])]]);
+  const add=(name,id)=>{if(typeof name!=='string'||!name.trim())return;const key=label(name);if(!labels.has(key))labels.set(key,new Set());labels.get(key).add(id);};
+  for(const character of cast){add(character.id,character.id);add(character.name,character.id);}
+  for(const character of cast){
+    const first=label(character.name).split(' ')[0];
+    if(/^[a-z][a-z'-]{1,63}$/.test(first)&&!labels.has(first)
+      &&cast.filter(other=>label(other.name).split(' ')[0]===first).length===1)add(first,character.id);
+  }
+  for(const [name,id] of Object.entries(speakerAliases||{}))if(cast.some(character=>character.id===id))add(name,id);
+  const present=new Set(Array.isArray(shot.characterIds)?shot.characterIds:[]);
+  const dialogue=String(shot.dialogue||'').split(/\r?\n/).map(line=>{
+    const match=/^\s*([^:\r\n]{1,120}):\s*(.*)$/.exec(line);
+    const speakers=match?labels.get(label(match[1])):null;
+    if(speakers?.size!==1)return line;
+    const speaker=[...speakers][0];
+    return speaker===null||present.has(speaker)?match[2]:line;
+  }).join('\n');
+  return normalizeSpeech(`${shot.narration||''} ${dialogue}`);
+}
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const smallCardinals='zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
 const tensCardinals=new Map('twenty thirty forty fifty sixty seventy eighty ninety'.split(' ').map((word,index)=>[word,(index+2)*10]));
@@ -58,8 +82,8 @@ function repairMatches(expected,actual,proof){
   }
   return exactGap(expected.length,actual.length);
 }
-export function speechEdit(shot,transcript,{repairProof}={}){
-  const intended=normalizeSpeech(`${shot.narration||''} ${(shot.dialogue||'').replace(/(?:^|\n)[A-Z][A-Z\s'-]*:\s*/g,' ')}`);
+export function speechEdit(shot,transcript,{repairProof,manifest,speakerAliases}={}){
+  const intended=intendedSpeechTokens(shot,{manifest,speakerAliases});
   const actual=(transcript.words||[]).flatMap(word=>normalizeSpeech(word.word).map(token=>({token,start:word.start,end:word.end})));
   if(!Number.isFinite(transcript.duration)||transcript.duration<shot.targetDurationMs/1000-.05)throw failure('SPEECH_DURATION_INVALID');
   if(!intended.length){if(actual.length)throw failure('SPEECH_UNEXPECTED');return null;}
@@ -83,7 +107,7 @@ function run(binary,args,reason='SPEECH_RECOGNITION_FAILED'){return new Promise(
   child.stderr.resume();child.once('error',()=>{clearTimeout(timer);reject(failure(reason));});
   child.once('close',code=>{clearTimeout(timer);code===0?resolve(output):reject(failure(reason));});
 });}
-export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences}){
+export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences,speakerAliases}){
   const reviews=[];
   for(const clip of clips){
     const shot=manifest.shots.find(s=>s.id===clip.shotId);if(!shot)throw failure('SPEECH_SHOT_INVALID');
@@ -96,13 +120,13 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
     };
     let transcript=await readTranscript(false),edit,contextSilence=false,repairProof;
     const normalTranscript=transcript;
-    try { edit=speechEdit(shot,transcript); }
+    try { edit=speechEdit(shot,transcript,{manifest,speakerAliases}); }
     catch(error){
       if(error.code!=='FILM_SPEECH_REVIEW_REQUIRED')throw error;
       // One local decoding pass with context silence may recover a clipped
       // recognition boundary. Never prompt the recognizer with expected words.
       transcript=await readTranscript(true);contextSilence=true;
-      try{edit=speechEdit(shot,transcript);}
+      try{edit=speechEdit(shot,transcript,{manifest,speakerAliases});}
       catch(contextError){
         if(finishingFailure(error)?.reason!=='SPEECH_SCRIPT_MISMATCH'
           ||finishingFailure(contextError)?.reason!=='SPEECH_SCRIPT_MISMATCH'||typeof resolveSpeechDifferences!=='function')throw contextError;
@@ -116,7 +140,7 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
           ||repairProof.normalTranscriptSha256!==hash(JSON.stringify(normalTranscript))
           ||repairProof.contextTranscriptSha256!==hash(JSON.stringify(transcript))||!Array.isArray(repairProof.spans)
           ||!repairProof.spans.length||repairProof.spans.length>64)throw contextError;
-        edit=speechEdit(shot,transcript,{repairProof});
+        edit=speechEdit(shot,transcript,{repairProof,manifest,speakerAliases});
       }
     }
     if(edit){
