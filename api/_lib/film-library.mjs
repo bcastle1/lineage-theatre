@@ -7,6 +7,7 @@ import { metadataPath, mediaPath, MAX_FILM_BYTES } from "./archive.mjs";
 import { requireFinishedFilmPayment, validateStoredProductionMedia } from "./production-media.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
 import { productionQueueMessage } from "./production-queue.mjs";
+import { readPaidFilmCorrection, correctionCoverage } from "./paid-film-correction.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -117,11 +118,15 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
   async function entry(actor, kind, id, supplied) {
     const value = supplied || await resource(actor, kind, id);
     const metadata = await state(actor.email, kind, id);
-    let production, payments = [], mediaReady = false;
+    let production, payments = [], mediaReady = false, coverage;
     if (kind === "plan") {
       const queue = (await read(`production/queue/${digest(actor.email)}/${id}.json`))?.value;
       const ticket = queue?.email === actor.email && queue.id === id && queue.manifestHash === value.manifestHash ? queue : null;
       payments = await paymentSummaries(actor.email, value);
+      try {
+        const context = await readPaidFilmCorrection({ email: actor.email, job: value, read, now });
+        if (context) coverage = correctionCoverage(context);
+      } catch { /* Unverified or revoked correction coverage never substitutes for payment. */ }
       let automaticPending = false;
       if (!ticket && value.status === "prepared") {
         const paid = payments.find(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview && payment.refundedCents === 0);
@@ -158,6 +163,7 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
     return { kind, id, filmId: kind === "plan" ? value.filmId : id, title: kind === "plan" ? value.manifest.title : value.title,
       durationSeconds: kind === "plan" ? value.manifest.targetDurationSeconds : value.duration,
       createdAt: value.createdAt, updatedAt: value.updatedAt, libraryState: metadata.libraryState, revision: metadata.revision, production, payments,
+      ...(coverage ? { coverage } : {}),
       ...(kind === "plan" ? { manifestHash: value.manifestHash } : value.delivery?.provider === "magiclight" ? { origin: "studio-delivery" } : {}),
       ...(mediaReady ? { mediaUrl, downloadUrl: `${mediaUrl}&download=1` } : {}) };
   }

@@ -484,7 +484,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       processorDisclosure:"Payment recorded by QuickBooks. Processor capture and bank settlement have not been verified.",capturedAt:v.capturedAt,description:"Lineage Theatre film production",status:v.status,sandbox:sandbox(v),checkoutMethod:METHOD,confirmationSource:SOURCE,
       notice:sandbox(v)?"Sandbox accounting receipt. No live payment is represented.":"Payment recorded by QuickBooks. Film delivery and any refund are tracked separately; processor capture and settlement are not verified."};
   }
-  async function authorizeProduction({email,orderId:referenceId,manifestHash,preparedId}={}) {
+  async function authorizeBoundSale({email,orderId:referenceId,manifestHash,preparedId}={}, {saleOnly=false}={}) {
     // A planning price and a cached paid badge never authorize provider expense.
     // Each short-lived grant requires the original paid price, its private plan,
     // a live exact invoice allocation and an actual capped full-film quote.
@@ -523,7 +523,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     stage="captured-order";
     if(typeof record?.etag!=="string"||typeof paidQuote?.etag!=="string"||!captured(value))throw productionUnavailable("CAPTURED_ORDER_INVALID");
     stage="allowance";
-    const allowance=await readProductionAllowance({order:value,read,now});
+    const allowance=saleOnly?{recheck:async()=>{}}:await readProductionAllowance({order:value,read,now});
     stage="plan";
     let planPath;
     try {planPath=productionJobPath(email,preparedId);}catch{throw productionUnavailable("PLAN_REFERENCE_INVALID");}
@@ -533,7 +533,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(typeof plan?.etag!=="string"||!job||job.id!==preparedId||job.ownerHash!==digest(email)||job.manifestHash!==manifestHash
       ||!job.manifest||digest(JSON.stringify(job.manifest))!==manifestHash||job.filmId!==value.filmId||job.manifest.filmId!==value.filmId
       ||!Array.isArray(job.manifest.shots)||!job.manifest.shots.length||!Array.isArray(job.shots)||job.shots.length!==job.manifest.shots.length
-      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!["prepared","processing","uncertain","awaiting-assembly"].includes(job.status)
+      ||job.shots.some((shot,index)=>shot.id!==job.manifest.shots[index].id)||!(saleOnly?["prepared","processing","uncertain","awaiting-assembly","completed","failed"]:["prepared","processing","uncertain","awaiting-assembly"]).includes(job.status)
       ||job.status==="awaiting-assembly"&&job.shots.some(shot=>shot.status!=="completed"))throw productionUnavailable("PLAN_INVALID");
     stage="settings";
     const settingsRecord=await readSettings(),s=settingsRecord?.value;
@@ -605,6 +605,10 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       return {checkedAt,expiresAt:expires};
     }
     let verifiedAt=await verifyPaidInvoice(),fresh=value.fulfillmentQuote;
+    // A merchant correction reuses only the verified original sale. Its target
+    // plan and budget live in a separate immutable authorization; this branch
+    // never refreshes or writes the original order's fulfillment quote.
+    if(saleOnly)return {order:structuredClone(value),expiresAt:stamp(Math.min(verifiedAt.checkedAt+60_000,verifiedAt.expiresAt)),recheck};
     stage="quote-validation";
     const quoteValid=quote=>quote&&quote.preparedId===preparedId&&quote.manifestHash===manifestHash&&quote.environment===binding.environment&&quote.currency==="USD"
       &&quote.apiVerified===true&&quote.qualityVerified===true&&quote.commercialTermsVerified===true
@@ -644,6 +648,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   }
   return {settings,catalog,saveSettings,configuration,adminConfiguration,quote,checkout,check,receipt,adminDiagnostics,order:async(actor,id)=>presentOrder((await readOrder(actor,id)).value),
     ownsOrder:async id=>hex.test(id||"")&&(await read(orderPath(id)))?.value.checkoutMethod===METHOD,
-    authorizeProduction};
+    authorizeProduction:input=>authorizeBoundSale(input),
+    verifyPaidSale:input=>authorizeBoundSale(input,{saleOnly:true})};
 }
 export const hostedCheckout=createHostedCheckoutService();

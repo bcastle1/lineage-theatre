@@ -14,6 +14,8 @@ import { checkHostedReversals } from "./_lib/hosted-reversal-diagnostics.mjs";
 import { createMagicLightLiveTestService, MagicLightLiveTestError } from "./_lib/magiclight-live-test.mjs";
 import { createMagicLightTestMediaService } from "./_lib/magiclight-live-test-media.mjs";
 import { createMagicLightActivationStatus } from "./_lib/magiclight-activation-status.mjs";
+import { paidFilmCorrections, PaidFilmCorrectionError } from "./_lib/paid-film-correction.mjs";
+import { productionQueue } from "./_lib/production-queue.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
 const isManagedOrder=order=>order.version===1&&/^[a-f0-9]{64}$/.test(order.id||"")
@@ -181,6 +183,26 @@ export function createAdminHandler(overrides={}) {
       await audit(actor.email,"production.connection.checked","magiclight",{code:result.code,authentication:result.authentication});
       return json(res,200,result);
     }
+    if(action==="createProductionCorrection") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can authorize a corrected film against an original payment.");
+      const allowed=["action","originalOrderId","preparedId","manifestHash","maximumCostCents","reason","confirmed"];
+      if(Object.keys(body).some(key=>!allowed.includes(key)) || body.confirmed!==true
+        || !/^[a-f0-9]{64}$/.test(body.originalOrderId||"") || !/^[a-f0-9]{64}$/.test(body.manifestHash||"")
+        || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId||"")
+        || !Number.isSafeInteger(body.maximumCostCents) || body.maximumCostCents<=0 || body.maximumCostCents>1980
+        || typeof body.reason!=="string" || body.reason.trim().length<10 || body.reason.length>500)
+        return resultError(res,400,"Choose the original payment, exact corrected plan, and a production budget up to $19.80, then confirm the correction.");
+      if(!(await limitAction(`paid-film-correction:${actor.email}`,6,60_000)))
+        return resultError(res,429,"Please wait before checking this correction request again.");
+      const {action:ignored,...input}=body;
+      const correction=await (overrides.paidFilmCorrections||paidFilmCorrections).approve({actor,...input});
+      const production=await (overrides.productionQueue||productionQueue).enqueue({actor,id:correction.preparedId,orderId:correction.correctionId});
+      await audit(actor.email,"production.correction.queued",correction.correctionId,{
+        originalOrderId:correction.originalOrderId,preparedId:correction.preparedId,manifestHash:correction.manifestHash,
+        maximumCostCents:correction.maximumCostCents,customerChargeCents:0,
+      });
+      return json(res,200,{correction,production});
+    }
     if(action==="checkHostedReversals") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can check recorded reversals.");
       if(Object.keys(body).some(key=>!["action","orderId"].includes(key))||typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId))
@@ -301,6 +323,7 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof PaidFilmCorrectionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
     if(error instanceof MagicLightLiveTestError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof ReceiptDeliveryError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof SourceAgreementError) return json(res,error.status,{code:error.code,message:error.message});

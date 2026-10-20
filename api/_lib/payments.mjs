@@ -320,6 +320,16 @@ export function createPaymentsService(overrides={}) {
   }
   async function authorizeProduction({email,orderId,manifestHash,preparedId}) {
     const record=await read(orderPath(id(orderId))),value=record?.value;
+    if(!record) {
+      const correctionModule=await import("./paid-film-correction.mjs");
+      if(await read(correctionModule.productionCorrectionPath(orderId))) {
+        const hosted=overrides.hostedCheckout||(await import("./hosted-checkout.mjs")).createHostedCheckoutService({read,write,now,
+          ...(overrides.verifyReversals?{verifyReversals:overrides.verifyReversals}:{})});
+        return correctionModule.createPaidFilmCorrections({read,write,now,verifyPaidSale:input=>hosted.verifyPaidSale(input),
+          ...(overrides.correctionQuoteProvider?{quoteProvider:overrides.correctionQuoteProvider}:{})})
+          .authorizeProduction({email,orderId,manifestHash,preparedId});
+      }
+    }
     if(value?.checkoutMethod==="quickbooks-hosted-invoice") {
       // The queue and worker share this dispatcher. Hosted invoices need their
       // own exact Accounting allocation checks, never direct-card readiness.

@@ -6,6 +6,7 @@ import { isOwner } from "./access.mjs";
 import { buildFilmManifest, fictionalOperatorProject } from "./film-production.mjs";
 import { planKlingShots } from "./kling-film-plan.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
+import { readPaidFilmCorrection } from "./paid-film-correction.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -53,6 +54,17 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
   }
   if (job.mode !== "customer" || job.authorization?.environment !== "production"
     || job.authorization.manifestHash !== job.manifestHash) throw paymentRequired();
+  if (job.authorization.correctionId) {
+    try {
+      const context = await readPaidFilmCorrection({ email, job, correctionId: job.authorization.correctionId, read, now });
+      if (!context || job.authorization.originalOrderId !== context.grant.originalOrderId
+        || job.authorization.quoteReference !== context.grant.quote.quoteReference
+        || job.authorization.budgetCents !== context.grant.quote.maximumCostCents
+        || job.provider?.id !== "fal" || job.provider.model !== "kling" || job.provider.recipe !== context.grant.recipe) throw paymentRequired();
+      await context.recheck();
+      return;
+    } catch { throw paymentRequired(); }
+  }
   // Match the persisted identity used by both checkout services. Older live
   // processor orders used the unscoped identity; only a confirmed live record
   // may qualify there. No browser-supplied order ID or payment flag is read.
