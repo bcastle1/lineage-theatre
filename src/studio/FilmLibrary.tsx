@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryCanWatch, libraryFilmLink, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+import { libraryActionRequest, libraryCanWatch, libraryCoveredDraft, libraryFilmLink, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
   parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
 import type { ProductionStatus } from "./film-fulfillment";
 import "./film-library.css";
@@ -310,7 +310,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
                 <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(isPlaying ? "" : key)}>{isPlaying ? "Close player" : "Watch film"}</button>
                 <a className="text-button" href={entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
               </>}
-              {local && <button type="button" className="text-button" disabled={blocked} onClick={() => onOpenDraft(local.id)}>Open browser draft</button>}
+              {local && !entry.coverage && <button type="button" className="text-button" disabled={blocked} onClick={() => onOpenDraft(local.id)}>Open browser draft</button>}
               {view === "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive</button>}
               {view !== "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
               {view !== "trash" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
@@ -350,17 +350,21 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       <h2 id="browser-drafts-heading">Browser drafts</h2><p>These editable drafts and original source files are stored on this browser. They are not a backup of your account's saved versions.</p>
     </div></div>
       {!drafts.length && <p className="film-library-empty">No browser drafts in this view.</p>}
-      <div className="library-list">{drafts.map(draft => <article className="library-item film-library-item" key={draft.id}>
+      <div className="library-list">{drafts.map(draft => {
+        const covered = libraryCoveredDraft(detail ? [detail.entry, ...entries] : entries, draft);
+        return <article className="library-item film-library-item" key={draft.id}>
         <div className="library-art"><FilmIcon size={24} aria-hidden="true" /></div><div className="film-library-content"><h3>{draft.title || "Untitled family film"}</h3>
           <p>Saved in this browser · {draft.sources.length} sources · {new Date(draft.updatedAt).toLocaleDateString()}</p>
-          <p>{draft.paymentReference ? "A payment reference is saved. Use the account version above for confirmed payment and production status." : draft.scenes.length ? "Script draft ready to review." : "Story in development."}</p>
+          <p>{covered ? "This saved corrected version is covered by the original payment. Open its film status to follow production."
+            : draft.paymentReference ? "A payment reference is saved. Use the account version above for confirmed payment and production status." : draft.scenes.length ? "Script draft ready to review." : "Story in development."}</p>
           <div className="action-group film-library-actions">
-            {view === "active" && <><button type="button" className="button secondary small" disabled={blocked} onClick={() => onOpenDraft(draft.id)}>Continue draft</button>
+            {view === "active" && <>{covered ? <a className="button secondary small" href={libraryFilmLink(covered.id)}>View corrected film status</a>
+              : <button type="button" className="button secondary small" disabled={blocked} onClick={() => onOpenDraft(draft.id)}>Continue draft</button>}
               <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}>Archive draft</button></>}
             {view !== "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "restore" })}>Restore draft</button>}
             {view !== "trash" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "trash" })}>Move draft to trash</button>}
           </div></div>
-      </article>)}</div>
+      </article>; })}</div>
     </section>
     {confirmation && <dialog ref={dialog} className="film-library-dialog" aria-labelledby="library-confirm-title" aria-describedby="library-confirm-description"
       onCancel={event => { if (busy) event.preventDefault(); else setConfirmation(null); }}>

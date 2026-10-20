@@ -51,6 +51,12 @@ export function libraryGenerationOrder(entry: LibraryEntry): LibraryPayment | nu
     && payment.refundedCents === 0 && payment.receiptAvailable);
   return paid.length === 1 ? paid[0] : null;
 }
+export function libraryCoveredDraft(entries: LibraryEntry[], film: Film): LibraryEntry | null {
+  const prepared = film.productionPreparation;
+  if (!prepared) return null;
+  return entries.find(entry => entry.kind === "plan" && entry.coverage && entry.filmId === film.id
+    && entry.id === prepared.id && entry.manifestHash === prepared.manifestHash) || null;
+}
 export function normalizeLibraryEntry(value: unknown): LibraryEntry {
   if (!object(value) || !["plan", "upload"].includes(String(value.kind)) || !uuid(value.id)
     || !text(value.filmId, 100) || !value.filmId || !text(value.title, 300)

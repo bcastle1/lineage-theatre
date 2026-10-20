@@ -142,15 +142,56 @@ const assTime = ms => {
   return `${Math.floor(cs / 360000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
 };
 const assText = text => text.replaceAll('\\', '＼').replaceAll('{', '｛').replaceAll('}', '｝').replace(/[\r\n\u0000-\u001f]/g, ' ');
+function savedOverlays(visual) {
+  if (typeof visual !== 'string' || visual.length > 20_000) return [];
+  const labels = /\b(opening title|small location title|location title|on-screen text|title card|end card|caption|title|overlay identifies examples from (?:his|her|their) career)(?:\s*:\s*|\s+(?=["“]))/gi;
+  const result = [];
+  let quotedUntil = 0;
+  for (const match of visual.matchAll(labels)) {
+    if (match.index < quotedUntil) continue;
+    const rest = visual.slice(match.index + match[0].length);
+    let text;
+    if (rest[0] === '"' || rest[0] === '“') {
+      const end = rest.indexOf(rest[0] === '"' ? '"' : '”', 1);
+      quotedUntil = end < 0 ? visual.length : match.index + match[0].length + end + 1;
+      if (end < 2 || end > 161) continue;
+      text = rest.slice(1, end);
+    } else {
+      // Unquoted directions require a colon and one bounded sentence. Keep
+      // written punctuation; never infer text from surrounding visual prose.
+      if (!match[0].includes(':')) continue;
+      const nextLabel = new RegExp(labels.source, 'i').exec(rest), newline = rest.search(/[\r\n]/);
+      const bounded = rest.slice(0, Math.min(nextLabel?.index ?? rest.length, newline < 0 ? rest.length : newline));
+      let end = bounded.length;
+      for (const stop of bounded.matchAll(/[.!?](?=\s|$)/g)) {
+        if (stop[0] === '.' && /\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|Prof|Rev|Mt|[A-Z])\.$/.test(bounded.slice(0, stop.index + 1))) continue;
+        end = stop.index + 1; break;
+      }
+      text = bounded.slice(0, end).trim();
+    }
+    if (!text || text.length > 160 || /[\r\n]/.test(text) || text.startsWith('Based on a true story.')) continue;
+    const label = match[1].toLowerCase();
+    result.push({ text, style: label === 'opening title' ? 'Opening' : label === 'end card' ? 'EndCard'
+      : ['title', 'title card'].includes(label) ? 'Title' : 'Location' });
+  }
+  return result;
+}
 export function filmOverlayAss(manifest) {
   const events = [];
   for (const shot of manifest.shots) {
-    // Only explicit, quoted on-screen text is extracted from the saved visual
-    // direction. Dates and places are never inferred from surrounding prose.
-    const captions = [...String(shot.visual || '').matchAll(/\b(?:caption|on-screen text|title card)\s*:?\s*["“]([^"”\n]{1,160})["”]/gi)];
-    for (const match of captions) {
-      if (match[1].startsWith('Based on a true story.')) continue;
-      events.push(`Dialogue: 0,${assTime(shot.startMs)},${assTime(shot.startMs + shot.targetDurationMs)},Location,,0,0,0,,${assText(match[1])}`);
+    const captions = savedOverlays(shot.visual), seen = new Set();
+    const part = shot.scenePart ?? 1, parts = shot.sceneParts ?? 1;
+    if (captions.length && (!Number.isSafeInteger(part) || !Number.isSafeInteger(parts) || part < 1 || part > parts || parts > 200))
+      throw new Error('The saved title direction has an invalid scene-part timeline.');
+    for (const caption of captions) {
+      // Split production cuts retain the original scene direction. Ordinary
+      // titles appear once; the end card occupies the last four seconds.
+      if ((caption.style === 'EndCard' ? part !== parts : part !== 1) || seen.has(caption.text)) continue;
+      seen.add(caption.text);
+      const end = shot.startMs + shot.targetDurationMs;
+      const start = caption.style === 'EndCard' ? Math.max(shot.startMs, end - 4000) : shot.startMs;
+      const marginV = caption.style === 'Location' && captions.some(item => item.style === 'Title') ? 170 : 0;
+      events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},${caption.style},,0,0,${marginV},,${assText(caption.text)}`);
     }
   }
   if (manifest.factuality === 'based-on-a-true-story') {
@@ -158,7 +199,7 @@ export function filmOverlayAss(manifest) {
     events.push(`Dialogue: 1,${assTime(last.startMs)},${assTime(last.startMs + last.targetDurationMs)},Disclosure,,0,0,0,,${DISCLOSURE}`);
   }
   if (!events.length) return null;
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Location,DejaVu Sans,38,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,7,80,80,70,1\nStyle: Disclosure,DejaVu Sans,34,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,3,12,0,2,180,180,70,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join('\n')}\n`;
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Location,DejaVu Sans,38,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,7,80,80,70,1\nStyle: Opening,DejaVu Sans,64,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,12,0,5,180,180,70,1\nStyle: Title,DejaVu Sans,42,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,8,180,180,70,1\nStyle: EndCard,DejaVu Sans,52,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,12,0,5,180,180,70,1\nStyle: Disclosure,DejaVu Sans,34,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,3,12,0,2,180,180,70,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join('\n')}\n`;
 }
 export async function assembleFilm({ manifest, manifestHash, clips, outputPath, ffmpeg = "ffmpeg", technicalSample = false }) {
   if (typeof technicalSample !== "boolean") throw new Error("The technical sample marker must be explicit.");
