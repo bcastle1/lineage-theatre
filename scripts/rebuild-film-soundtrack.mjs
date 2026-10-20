@@ -9,6 +9,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const VOICE = /^(?:af|am|bf|bm)_[a-z]{2,24}$/;
+// Up to 600 turn receipts include both original and selected PCM provenance.
+export const SOUNDTRACK_MAX_OUTPUT_BYTES = 2_000_000;
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const label = value => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
 const error = (reason, diagnostic) => {
@@ -121,7 +123,7 @@ export function soundtrackPlan({ manifest, manifestHash, narratorVoice = 'am_mic
     narratorVoice, characterVoices: { ...characterVoices }, speed: 1, scenes };
 }
 
-function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirectory, soundfont }) {
+function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirectory, soundfont, inspectFit = false }) {
   return new Promise((resolveBuild, reject) => {
     const child = spawn(python, [fileURLToPath(new URL('./rebuild-film-soundtrack.py', import.meta.url))], {
       shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
@@ -134,7 +136,7 @@ function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirector
       if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); reject(error(reason, diagnostic));
     };
     const timer = setTimeout(() => stop('TIME_LIMIT'), 20 * 60_000);
-    child.stdout.on('data', chunk => { size += chunk.length; if (size > 200_000) stop('OUTPUT_INVALID'); else chunks.push(chunk); });
+    child.stdout.on('data', chunk => { size += chunk.length; if (size > SOUNDTRACK_MAX_OUTPUT_BYTES) stop('OUTPUT_INVALID'); else chunks.push(chunk); });
     child.once('error', () => stop('RUNTIME_FAILED'));
     child.stdin.on('error', () => stop('RUNTIME_FAILED'));
     child.once('close', code => {
@@ -142,12 +144,83 @@ function buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirector
       try {
         const output = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         if (code !== 0) { stop(reasonCodes.has(output?.reason) ? output.reason : 'RUNTIME_FAILED', output?.diagnostic); return; }
-        requireValue(output?.status === 'constructed' && output.manifestHash === plan.manifestHash, 'OUTPUT_INVALID');
+        requireValue(output?.status === (inspectFit ? 'inspected' : 'constructed') && output.manifestHash === plan.manifestHash, 'OUTPUT_INVALID');
         settled = true; clearTimeout(timer); resolveBuild(output);
       } catch { stop('OUTPUT_INVALID'); }
     });
-    child.stdin.end(JSON.stringify({ plan, directory, ffmpeg, fluidsynth, modelDirectory, soundfont }));
+    child.stdin.end(JSON.stringify({ plan, directory, ffmpeg, fluidsynth, modelDirectory, soundfont, inspectFit }));
   });
+}
+
+// Measure the exact offline synthesis without writing audio or consuming a
+// durable construction attempt. Only bounded timing metrics leave this API.
+export async function inspectFilmSoundtrackFit({ manifest, manifestHash, narratorVoice = 'am_michael', characterVoices = {}, speakerAliases = {}, music,
+  python = process.env.LINEAGE_TTS_PYTHON || '/opt/soundtrack/bin/python',
+  modelDirectory = process.env.LINEAGE_TTS_MODEL_DIR || '/opt/soundtrack/models/kokoro' } = {}) {
+  const plan = soundtrackPlan({ manifest, manifestHash, narratorVoice, characterVoices, speakerAliases, music });
+  const result = await buildLocal(plan, undefined, { python, modelDirectory, inspectFit: true });
+  requireValue(result.version === 1 && result.kind === 'soundtrack-fit-inspection-v1' && result.durationMs === plan.durationMs
+    && result.speed === 1 && result.providerGenerationCalls === 0 && typeof result.fits === 'boolean'
+    && Array.isArray(result.scenes) && result.scenes.length === plan.scenes.length, 'OUTPUT_INVALID');
+  const fields = ['generatedMs', 'retainedMs', 'trimStartMs', 'trimEndMs', 'availableMs', 'overrunMs'];
+  const scenes = result.scenes.map((scene, index) => {
+    requireValue(scene.sceneIndex === index + 1 && scene.durationMs === plan.scenes[index].durationMs
+      && Array.isArray(scene.turns) && scene.turns.length === plan.scenes[index].turns.length, 'OUTPUT_INVALID');
+    const turns = scene.turns.map((turn, turnIndex) => {
+      requireValue(turn.turnIndex === turnIndex + 1 && typeof turn.fits === 'boolean'
+        && fields.every(key => Number.isSafeInteger(turn[key]) && turn[key] >= 0 && turn[key] <= 120_000), 'OUTPUT_INVALID');
+      return { turnIndex: turn.turnIndex, ...Object.fromEntries(fields.map(key => [key, turn[key]])), fits: turn.fits };
+    });
+    requireValue(scene.fits === turns.every(turn => turn.fits), 'OUTPUT_INVALID');
+    return { sceneIndex: scene.sceneIndex, durationMs: scene.durationMs, fits: scene.fits, turns };
+  });
+  requireValue(result.fits === scenes.every(scene => scene.fits), 'OUTPUT_INVALID');
+  return { version: 1, kind: 'soundtrack-fit-inspection-v1', manifestHash, durationMs: plan.durationMs,
+    speed: 1, providerGenerationCalls: 0, fits: result.fits, scenes };
+}
+
+export function validateBoundarySilence(turn) {
+  if (turn.boundarySilence === undefined && turn.originalAudio === undefined) return false;
+  const b = turn.boundarySilence;
+  requireValue(plain(b) && b.version === 1 && b.method === 'pcm16-edge-silence-v1' && b.threshold === 1 / 32768
+    && b.guardMs === 50 && b.sampleRate === 24000 && plain(turn.originalAudio)
+    && ['sourceSamples', 'retainedSamples', 'trimStartSamples', 'trimEndSamples'].every(key => Number.isSafeInteger(b[key]) && b[key] >= 0 && b[key] <= 2_880_000)
+    && b.retainedSamples > 0 && b.sourceSamples === b.retainedSamples + b.trimStartSamples + b.trimEndSamples
+    && HASH.test(b.sourcePcmSha256 || '') && HASH.test(b.selectedPcmSha256 || '')
+    && Math.abs(turn.durationSeconds - b.retainedSamples / 24000) < .000001
+    && Math.abs(turn.endSeconds - turn.startSeconds - turn.durationSeconds) < .000001, 'OUTPUT_INVALID');
+  return true;
+}
+
+// WAV headers may contain extra chunks; compare the exact mono PCM16 samples,
+// not file offsets. A retained turn must be an unchanged contiguous source span.
+export function verifyBoundarySilencePcm(turn, original, selected) {
+  requireValue(validateBoundarySilence(turn), 'OUTPUT_INVALID');
+  const pcm = bytes => {
+    requireValue(Buffer.isBuffer(bytes) && bytes.length >= 44 && bytes.toString('ascii', 0, 4) === 'RIFF'
+      && bytes.toString('ascii', 8, 12) === 'WAVE', 'OUTPUT_INVALID');
+    let validFormat = false, data;
+    for (let offset = 12; offset + 8 <= bytes.length;) {
+      const kind = bytes.toString('ascii', offset, offset + 4), length = bytes.readUInt32LE(offset + 4), start = offset + 8;
+      requireValue(start + length <= bytes.length, 'OUTPUT_INVALID');
+      if (kind === 'fmt ') { requireValue(length >= 16 && !validFormat && bytes.readUInt16LE(start) === 1
+        && bytes.readUInt16LE(start + 2) === 1 && bytes.readUInt32LE(start + 4) === 24000
+        && bytes.readUInt16LE(start + 14) === 16, 'OUTPUT_INVALID'); validFormat = true; }
+      if (kind === 'data') { requireValue(!data && length % 2 === 0, 'OUTPUT_INVALID'); data = bytes.subarray(start, start + length); }
+      offset = start + length + length % 2;
+    }
+    requireValue(validFormat && data, 'OUTPUT_INVALID'); return data;
+  };
+  const source = pcm(original), retained = pcm(selected), b = turn.boundarySilence;
+  requireValue(source.length === b.sourceSamples * 2 && retained.length === b.retainedSamples * 2
+    && hash(source) === b.sourcePcmSha256 && hash(retained) === b.selectedPcmSha256
+    && source.subarray(b.trimStartSamples * 2, source.length - b.trimEndSamples * 2).equals(retained), 'OUTPUT_INVALID');
+  let first = 0, last = b.sourceSamples;
+  while (first < last && Math.abs(source.readInt16LE(first * 2)) <= 1) first++;
+  while (last > first && Math.abs(source.readInt16LE((last - 1) * 2)) <= 1) last--;
+  requireValue(first < last && b.trimStartSamples === Math.max(0, first - 1200)
+    && b.trimEndSamples === b.sourceSamples - Math.min(b.sourceSamples, last + 1200), 'OUTPUT_INVALID');
+  return true;
 }
 
 export async function rebuildFilmSoundtrack({ manifest, manifestHash, clips, workDir,
@@ -187,7 +260,11 @@ export async function rebuildFilmSoundtrack({ manifest, manifestHash, clips, wor
       requireValue(turn.textSha256 === intended.textSha256 && turn.voice === intended.voice && turn.speakerId === intended.speakerId
         && Number.isFinite(turn.startSeconds) && Number.isFinite(turn.endSeconds) && turn.startSeconds >= previousEnd
         && turn.endSeconds > turn.startSeconds && turn.endSeconds <= expected.durationMs / 1000 - 0.19, 'OUTPUT_INVALID');
-      await verifyFile(turn.audio);
+      const audioPath = await verifyFile(turn.audio);
+      if (validateBoundarySilence(turn)) {
+        const originalPath = await verifyFile(turn.originalAudio);
+        verifyBoundarySilencePcm(turn, await readFile(originalPath), await readFile(audioPath));
+      }
       previousEnd = turn.endSeconds;
     }
     repaired.push({ ...clips.find(clip => clip.shotId === expected.shotId), audioPath });
