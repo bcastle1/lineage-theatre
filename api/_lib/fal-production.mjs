@@ -18,7 +18,7 @@ export class FalProductionPlanError extends Error {
   constructor(message, code = 'FILM_PROMPT_TOO_LONG') { super(message); this.status = 422; this.code = code; }
 }
 
-export function falPlan(manifest, model) {
+function productionPlan(manifest, model, validatePrompts = true) {
   if (!['kling', 'seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
     || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > (model === 'kling' ? 200 : 30)
     || !Array.isArray(manifest.screenplay?.characters) || manifest.screenplay.characters.length > 16) invalid();
@@ -46,10 +46,18 @@ export function falPlan(manifest, model) {
     if (!character.sourceIds.includes(character.referencePhotoId)
       || !manifest.sources?.some(source => source.id === character.referencePhotoId && ['image/jpeg', 'image/png', 'image/webp'].includes(source.type))) invalid();
   }
-  if (model === 'kling') for (const shot of shots) klingPrompt(manifest, shot, characters);
+  if (model === 'kling' && validatePrompts) for (const shot of shots) klingPrompt(manifest, shot, characters);
   return { model, endpoint: FAL_MODELS[model], shots, characters,
     generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length };
 }
+
+export function falPlan(manifest, model) { return productionPlan(manifest, model); }
+
+// Count the transmitted UTF-8 representation as well as the decoded text.
+// Leave headroom below the provider's 2,500 limit without assuming whether its
+// validator counts characters, bytes, or JSON escapes. Never truncate a field.
+const klingPromptBytes = prompt => Math.max(Buffer.byteLength(prompt, 'utf8'), Buffer.byteLength(JSON.stringify(prompt), 'utf8'));
+const klingPromptFits = prompt => klingPromptBytes(prompt) < 2400;
 
 function klingPrompt(manifest, shot, characters) {
   const cast = shot.characterIds.map((id, index) => {
@@ -71,9 +79,9 @@ function klingPrompt(manifest, shot, characters) {
     manifest.sound?.musicRequested ? 'Subtle instrumental strings and ambience under clear speech; no vocals.' : 'Natural ambience; no music.',
     'No captions, titles, logos or watermarks. No facial drift, extra fingers, modern props or abrupt cuts.',
   ].join('\n');
-  // Preserve the original request bytes for every previously supported shot,
-  // including an in-flight canary. Only overflowing plans use terse directions.
-  if (prompt.length <= 2500) return prompt;
+  // Preserve existing prompt bytes whenever they also fit the conservative
+  // transport limit, including the original fictional production canary.
+  if (klingPromptFits(prompt)) return prompt;
   const compact = [
     ...shot.characterIds.map((id, index) => {
       const character = characters.find(value => value.id === id);
@@ -89,13 +97,29 @@ function klingPrompt(manifest, shot, characters) {
     manifest.sound?.musicRequested ? 'Soft instrumental score under speech.' : 'Ambience; no music.',
     'No text, reference sheets, facial drift or modern props.',
   ].join('\n');
+  if (klingPromptFits(compact)) return compact;
+  const concise = [
+    ...shot.characterIds.map((id, index) => {
+      const character = characters.find(value => value.id === id);
+      return `@Image${index + 1} ${character.name}:${realisticCreativeText(character.description)}`;
+    }),
+    `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'};${manifest.era}.`,
+    manifest.screenplay.logline,
+    direction,
+    shot.dramatization || 'No undocumented claims.',
+    `Narrator:${shot.narration || '(none)'}`,
+    `Dialogue:${shot.dialogue || '(none)'}`,
+    `Verbatim once;fixed voices;lipsync;<${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s;hold${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Low instrumental.' : 'Ambience; no music.',
+    'No text/sheets/drift.',
+  ].join('\n');
   // Every saved creative field is still complete; no summarization, script
   // rewriting, identity truncation or silent source changes are allowed.
-  if (compact.length > 2500) {
+  if (!klingPromptFits(concise)) {
     const index = manifest.shots.findIndex(value => value.id === shot.id) + 1;
-    throw new FalProductionPlanError(`Scene ${index} exceeds Kling's 2,500-character scene limit by ${compact.length - 2500} characters. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.`);
+    throw new FalProductionPlanError(`Scene ${index} exceeds the safe Kling prompt limit by ${klingPromptBytes(concise) - 2399} UTF-8 bytes. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.`);
   }
-  return compact;
+  return concise;
 }
 
 export function characterReferenceInput(manifest, character) {
@@ -140,6 +164,14 @@ export function falShotInput(manifest, shot, model, references) {
   return model === 'seedance'
     ? { ...common, task: 'reference', duration: String(selected.seconds), image_urls: urls, generate_audio: true, bitrate_mode: 'high', codec: 'H264' }
     : { ...common, duration: selected.seconds, reference_image_urls: urls, audio: true, enable_thinking: true, enable_prompt_expansion: false, enable_safety_checker: true };
+}
+
+// Recovery callers must bind a separately authorized operation identity; this
+// only constructs the normal Kling input and never retries or submits a job.
+// References use the same selected-photo/generated-reference validation as the
+// adapter, and must undergo its normal Kling image normalization before submit.
+export function falRecoveryShotInput(manifest, shot, references) {
+  return falShotInput(manifest, shot, 'kling', references);
 }
 
 export function qualifiedFalRelease(value, model) {
@@ -188,7 +220,10 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
   async function step(input) {
     const { manifest, manifestHash, shot, idempotencyKey, productionId, authorizeSpend } = input;
     if (!HASH.test(manifestHash || '') || digest(JSON.stringify(manifest)) !== manifestHash || !HASH.test(idempotencyKey || '') || !productionId) invalid();
-    const plan = falPlan(manifest, model), references = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
+    // Reconcile durable requests using their original provider identity even
+    // when a newer prompt preflight would reject a fresh submission. The full
+    // prompt validation runs in falShotInput before any new video submission.
+    const plan = productionPlan(manifest, model, false), references = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
     if (!selected) invalid();
     const identity = digest(`${recipe}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
     if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
@@ -240,6 +275,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
       }
       return { providerJobId, status: pending ? 'processing' : 'uncertain' };
     }
+    // A fresh video may also require paid reference images. Validate its whole
+    // prompt plan before either kind of new provider operation can be created.
+    falPlan(manifest, model);
     // References are shared by every shot in this exact production manifest.
     // Up to four independently journaled references can render together. A
     // new submission still requires its own fresh payment/budget authorization.
