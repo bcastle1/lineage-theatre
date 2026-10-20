@@ -76,6 +76,13 @@ def descriptor(path, directory):
     return {'file': str(path.relative_to(directory)), 'sha256': sha(path), 'sizeBytes': path.stat().st_size}
 
 
+def leading_speech_samples(rate):
+    # Shared inspection/construction placement. Edge guards remain inside the
+    # retained turn; the separate 200 ms scene-end guard is unchanged.
+    require(rate == 24000, 'SPEECH_INVALID')
+    return round(rate * .06)
+
+
 def boundary_silence_bounds(samples, rate):
     """Remove only contiguous PCM16 edge silence, retaining a 50 ms guard.
 
@@ -213,7 +220,7 @@ def construct(request):
         require(isinstance(scene.get('turns'), list) and len(scene['turns']) <= 20 and 1 <= duration <= 30, 'INPUT_INVALID')
         samples_count = round(duration * rate)
         speech = np.zeros(samples_count, dtype=np.float32)
-        cursor, turns, fit_turns = round(.12 * rate), [], []
+        cursor, turns, fit_turns = leading_speech_samples(rate), [], []
         for turn_index, turn in enumerate(scene['turns']):
             stage('prepare-turn', scene_index, turn_index)
             remaining()

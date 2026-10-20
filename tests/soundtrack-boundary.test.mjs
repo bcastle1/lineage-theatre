@@ -18,7 +18,7 @@ function fixture() {
   const source = pcm([...Array(2400).fill(1), 20, ...Array(2000).fill(0), -20, ...Array(3600).fill(-1)]);
   const start = 1200, end = 2400, selected = source.subarray(start * 2, source.length - end * 2);
   const turn = { originalAudio: { file: 'original.wav' }, durationSeconds: selected.length / 48000,
-    startSeconds: .12, endSeconds: .12 + selected.length / 48000,
+    startSeconds: .06, endSeconds: .06 + selected.length / 48000,
     boundarySilence: { version: 1, method: 'pcm16-edge-silence-v1', threshold: 1 / 32768, guardMs: 50, sampleRate: 24000,
       sourceSamples: source.length / 2, retainedSamples: selected.length / 2, trimStartSamples: start, trimEndSamples: end,
       sourcePcmSha256: hash(source), selectedPcmSha256: hash(selected) } };
@@ -76,6 +76,8 @@ a,b=m.boundary_silence_bounds(x,24000)
 assert (a,b)==(1200,len(x)-2400)
 assert x[a:b][1200:3202]==x[2400:4402]
 assert m.boundary_silence_bounds([.1,0,-.1],24000)==(0,3)
+assert m.leading_speech_samples(24000)==1440
+assert m.leading_speech_samples(24000)/24000>=.06
 try:m.boundary_silence_bounds([0]*3000,24000);raise AssertionError('silent accepted')
 except m.SoundtrackError:pass
 print(json.dumps({'guarded':True,'interiorUnchanged':True}))`;
