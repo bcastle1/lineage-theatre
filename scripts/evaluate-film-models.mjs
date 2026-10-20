@@ -6,6 +6,7 @@ import { open, readFile, mkdir, lstat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
 import { digest, readRecord, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL, isOwner, accessStatusForUser } from '../api/_lib/access.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
@@ -26,6 +27,8 @@ const SEEDANCE_PRICING = Object.freeze({ basePerThousandTokens: 0.0214,
 const MAXIMUM_APPROVED_COST_CENTS = 2000;
 const REVIEWED_KLING_REJECTION_ID = '01a15695-178d-7d90-838c-6be342ac18c3';
 const REVIEWED_KLING_PROMPT_REJECTION_ID = '01a156a6-105b-7ae3-a3af-c84dba6fc6c7';
+const REVIEWED_KLING_SIZE_REJECTION_ID = '01a1571a-9148-7071-bab5-7d35e4c73d2b';
+const REVIEWED_SEEDANCE_ID = '01a15695-13a9-70c1-8014-1866d269b27c';
 const HASH = /^[a-f0-9]{64}$/, UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const requireValue = (condition, code) => { if (!condition) fail(code); };
@@ -578,6 +581,265 @@ async function submitKlingPromptRecovery(args, directory) {
     emit({ model: 'kling', status: 'prompt-recovery-uncertain-no-resubmission' });
   }
 }
+// One final, separately claimed recovery of the exact image-size rejection.
+// This path cannot recover its own request and never resets an earlier claim.
+const DIMENSION_PREFIX = 'kling-dimension-recovery';
+function reviewedDimensionBilling(evidence) {
+  const expected = [
+    { requestId: REVIEWED_SEEDANCE_ID, model: 'seedance', billedUsd: 13.701054 },
+    { requestId: REVIEWED_KLING_PROMPT_REJECTION_ID, model: 'kling', billedUsd: 0 },
+    { requestId: REVIEWED_KLING_SIZE_REJECTION_ID, model: 'kling', billedUsd: 0 },
+  ];
+  requireValue(evidence?.source === 'Authenticated fal request-level billing UI' && evidence.accountUsername === 'bcastle1'
+    && evidence.comparisonLimitUsd === 20 && jsonHash(evidence.charges) === jsonHash(expected)
+    && Number.isFinite(Date.parse(evidence.recordedAt)) && Date.parse(evidence.recordedAt) <= Date.now()
+    && evidence.unverifiedFirstKlingReserveUsd === 1.8 && evidence.nextKlingReserveUsd === 1.8
+    && evidence.conservativeTotalCentsRoundedUp === 1731 && evidence.conservativeTotalUsd === 17.301054,
+  'REVIEWED_BILLING_EVIDENCE_REQUIRED');
+  for (const name of ['kling-validation-zero-charges-dom.txt', 'kling-validation-zero-charges-amounts.png']) {
+    const rows = evidence.evidenceFiles?.filter(row => row.name === name);
+    requireValue(rows?.length === 1 && HASH.test(rows[0].sha256 || ''), 'BILLING_EVIDENCE_HASH_REQUIRED');
+  }
+  return evidence;
+}
+async function referenceBytes(url) {
+  if (url.startsWith('data:image/jpeg;base64,')) {
+    const encoded = url.slice('data:image/jpeg;base64,'.length);
+    requireValue(/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) && encoded.length < 3_000_000, 'REFERENCE_DATA_INVALID');
+    return Buffer.from(encoded, 'base64');
+  }
+  const response = await fetch(falMediaUrl(url), { redirect: 'error', credentials: 'omit', cache: 'no-store',
+    signal: AbortSignal.timeout(20_000) });
+  requireValue(response.ok && response.body && ['image/jpeg', 'image/png', 'image/webp'].includes(
+    response.headers.get('content-type')?.split(';')[0]), 'REFERENCE_FETCH_INVALID');
+  const reader = response.body.getReader(), parts = []; let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      size += value.byteLength; requireValue(size <= 52_428_800, 'REFERENCE_TOO_LARGE'); parts.push(value);
+    }
+    return Buffer.concat(parts);
+  } finally { await reader.cancel().catch(() => {}); }
+}
+async function referenceDimensions(bytes, enforceMinimum = true) {
+  const metadata = await sharp(bytes, { limitInputPixels: 40_000_000, failOn: 'warning' }).metadata();
+  requireValue(['jpeg', 'png', 'webp'].includes(metadata.format) && (metadata.pages || 1) === 1
+    && Number.isSafeInteger(metadata.width) && Number.isSafeInteger(metadata.height)
+    && metadata.width > 0 && metadata.height > 0 && bytes.length <= 52_428_800, 'REFERENCE_METADATA_INVALID');
+  const dimensions = { width: metadata.width, height: metadata.height, format: metadata.format,
+    sizeBytes: bytes.length, sha256: digest(bytes) };
+  if (enforceMinimum) requireValue(dimensions.width >= 300 && dimensions.height >= 300
+    && dimensions.width / dimensions.height >= 0.4 && dimensions.width / dimensions.height <= 2.5,
+  'KLING_REFERENCE_DIMENSIONS_INVALID');
+  return dimensions;
+}
+async function dimensionRecoveryContext(plan, planSha256, directory, billingEvidence) {
+  reviewedDimensionBilling(billingEvidence);
+  const { amendment, amendmentSha256 } = await loadKlingPromptAmendment(directory, planSha256);
+  const previousContext = await promptRecoveryContext(plan, planSha256, directory, amendment.inputProof.review.prompt);
+  requireUnchangedPromptAmendment(plan, amendment, previousContext);
+  requireUnchangedAmendmentPrices(amendment, previousContext);
+  const claim = await localJson(join(directory, 'kling-prompt-recovery-claim.json'));
+  const receipt = await localJson(join(directory, 'kling-prompt-recovery-receipt.json'));
+  requireValue(claim.planSha256 === planSha256 && claim.amendmentSha256 === amendmentSha256
+    && claim.endpoint === ENDPOINTS.kling && claim.originalRequestId === REVIEWED_KLING_PROMPT_REJECTION_ID
+    && claim.inputSha256 === amendment.inputProof.sha256 && claim.rejectionSha256 === amendment.rejectionSha256
+    && receipt.planSha256 === planSha256 && receipt.amendmentSha256 === amendmentSha256
+    && receipt.endpoint === ENDPOINTS.kling && receipt.requestId === REVIEWED_KLING_SIZE_REJECTION_ID
+    && receipt.originalRequestId === claim.originalRequestId && receipt.inputSha256 === claim.inputSha256
+    && receipt.claimedAt === claim.claimedAt && receipt.rejectionSha256 === claim.rejectionSha256
+    && receipt.renewalSha256 === claim.renewalSha256 && receipt.state === 'queued', 'SIZE_REJECTION_CHAIN_REQUIRED');
+  const renewal = await loadKlingPromptRenewal(directory, plan, planSha256, amendment, amendmentSha256, claim.renewalSha256);
+  const terminal = await localJson(join(directory, 'kling-prompt-recovery-terminal.json'), true);
+  requireValue(!terminal || terminal.planSha256 === planSha256 && terminal.requestId === receipt.requestId
+    && terminal.state === 'failed' && !terminal.output, 'PRIOR_KLING_OUTPUT_EXISTS');
+  const seedance = await localJson(join(directory, 'seedance-receipt.json'));
+  requireValue(seedance.requestId === REVIEWED_SEEDANCE_ID, 'BILLED_SEEDANCE_CHANGED');
+  const current = await source(plan.source.preparedId, plan.sourceSelection);
+  requireValue(jsonHash(current.binding) === jsonHash(plan.source), 'SOURCE_CHANGED');
+  const selected = current.references.map((reference, index) => ({ reference, index }))
+    .filter(({ reference }) => reference.kind === 'selected-photo');
+  requireValue(selected.length === 1 && current.references.length === 2 && plan.selection.durationSeconds === 12,
+    'REVIEWED_REFERENCE_SELECTION_REQUIRED');
+  const { reference, index } = selected[0];
+  requireValue(reference.url === previousContext.payload.image_urls[index], 'PHOTO_INPUT_CHANGED');
+  const status = await request(falRequestUrl(receipt.statusUrl, ENDPOINTS.kling, receipt.requestId, 'status'));
+  requireValue(status.status === 'COMPLETED' && status.request_id === receipt.requestId, 'TERMINAL_REJECTION_REQUIRED');
+  const response = await fetch(falRequestUrl(receipt.responseUrl, ENDPOINTS.kling, receipt.requestId, 'result'), {
+    redirect: 'error', credentials: 'omit', cache: 'no-store', headers: { Authorization: `Key ${process.env.FAL_KEY}` },
+    signal: AbortSignal.timeout(30_000) });
+  if (response.status !== 422) { await response.body?.cancel(); fail('EXACT_IMAGE_SIZE_REJECTION_REQUIRED'); }
+  const body = await boundedJson(response), detail = body?.detail?.[0];
+  requireValue(Object.keys(body).join(',') === 'detail' && body.detail.length === 1
+    && detail?.type === 'image_too_small' && detail.msg === 'Image dimensions are too small. Minimum dimensions are 300x300 pixels.'
+    && jsonHash(detail.loc) === jsonHash(['body']) && detail.url === 'https://docs.fal.ai/errors#image_too_small'
+    && Object.keys(detail).sort().join(',') === 'ctx,input,loc,msg,type,url' && detail.input === reference.url
+    && detail.ctx && Object.keys(detail.ctx).sort().join(',') === 'area,height,min_area,min_height,min_width,width'
+    && detail.ctx.min_height === 300 && detail.ctx.min_width === 300
+    && ['min_area', 'height', 'width', 'area'].every(name => detail.ctx[name] === null),
+  'EXACT_IMAGE_SIZE_REJECTION_REQUIRED');
+  const original = await referenceBytes(reference.url), before = await referenceDimensions(original, false);
+  requireValue(before.width === 202 && before.height === 280 && before.format === 'jpeg'
+    && before.sha256 === reference.photo.normalizedSha256, 'REVIEWED_SMALL_PHOTO_CHANGED');
+  // Width-only enlargement preserves the entire original portrait. Sharp rounds
+  // 280 * 300 / 202 to 416; there is no crop, generative fill or face alteration.
+  const enlarged = await sharp(original, { limitInputPixels: 40_000_000, failOn: 'warning' })
+    .resize({ width: 300, kernel: 'lanczos3' }).jpeg({ quality: 90, chromaSubsampling: '4:4:4' }).toBuffer();
+  const after = await referenceDimensions(enlarged);
+  requireValue(after.width === 300 && after.height === 416, 'RESIZED_PHOTO_DIMENSIONS_CHANGED');
+  const references = [];
+  for (let i = 0; i < current.references.length; i++) {
+    const item = current.references[i], dimensions = i === index ? after : await referenceDimensions(await referenceBytes(item.url));
+    references.push({ characterId: item.characterId, kind: item.kind, ...dimensions });
+  }
+  const transform = { version: 'kling-selected-photo-min300-jpeg90-v1', sourceId: reference.photo.sourceId,
+    sourceSha256: reference.photo.sha256, normalizedSha256: reference.photo.normalizedSha256,
+    before, after, resize: { width: 300, kernel: 'lanczos3' }, jpeg: { quality: 90, chromaSubsampling: '4:4:4' },
+    sharpVersion: sharp.versions.sharp, vipsVersion: sharp.versions.vips };
+  const imageUrls = [...previousContext.payload.image_urls];
+  imageUrls[index] = `data:image/jpeg;base64,${enlarged.toString('base64')}`;
+  const payload = { ...previousContext.payload, image_urls: imageUrls };
+  const proof = inputProof({ kling: payload }, current).kling;
+  proof.review.image_urls[index] = { transport: 'base64-data-uri', ...transform };
+  const perAttemptReserveCents = Math.ceil(12 * plan.rates.kling.maximumMicroUsdPerSecond / 10000);
+  const worstCaseCostCents = Math.ceil((13_701_054_000 + 2 * perAttemptReserveCents * 10_000_000) / 10_000_000);
+  requireValue(perAttemptReserveCents === 180 && worstCaseCostCents === 1731
+    && worstCaseCostCents <= plan.maximumCostCents && plan.maximumCostCents <= MAXIMUM_APPROVED_COST_CENTS, 'BUDGET_CHANGED');
+  return { payload, proof, transform, references, live: previousContext.live, amendmentSha256, billingEvidence,
+    billingEvidenceSha256: jsonHash(billingEvidence), worstCaseCostCents, perAttemptReserveCents,
+    rejection: { endpoint: ENDPOINTS.kling, requestId: receipt.requestId, httpStatus: 422,
+      providerBodySha256: jsonHash(body), type: detail.type, inputSha256: digest(detail.input) },
+    ledgerSha256: jsonHash({ priorLedgerSha256: previousContext.ledgerSha256, claim, receipt, renewal }) };
+}
+async function requireUnclaimedDimensionRecovery(directory) {
+  for (const suffix of ['claim', 'response', 'receipt', 'uncertain', 'terminal'])
+    requireValue(!await localJson(join(directory, `${DIMENSION_PREFIX}-${suffix}.json`), true), 'FINAL_RECOVERY_ALREADY_STARTED');
+}
+async function prepareKlingDimensionRecovery(args, directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  const { amendmentSha256 } = await loadKlingPromptAmendment(directory, planSha256);
+  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-amendment-sha256'] === amendmentSha256
+    && args['billing-evidence'], 'EXACT_DIMENSION_PREPARATION_APPROVAL_REQUIRED');
+  await requireUnclaimedDimensionRecovery(directory);
+  const evidence = reviewedDimensionBilling(await localJson(resolve(args['billing-evidence'])));
+  requireValue(Date.now() - Date.parse(evidence.recordedAt) <= 3600_000, 'FRESH_BILLING_EVIDENCE_REQUIRED');
+  const context = await dimensionRecoveryContext(plan, planSha256, directory, evidence), createdAt = stamp();
+  const { payload, ...review } = context;
+  const amendment = { version: 1, kind: 'reviewed-kling-final-dimension-recovery', planSha256,
+    endpoint: ENDPOINTS.kling, originalRequestId: REVIEWED_KLING_SIZE_REJECTION_ID, createdAt,
+    expiresAt: new Date(Date.parse(createdAt) + 3600_000).toISOString(), sourceSha256: jsonHash(plan.source),
+    maximumCostCents: plan.maximumCostCents, noFurtherRecovery: true, ...review };
+  const dimensionSha256 = jsonHash(amendment);
+  await saveExclusive(join(directory, 'kling-dimension-amendment.json'), { dimensionSha256, amendment });
+  emit({ status: 'kling-final-dimension-amendment-prepared', dimensionSha256, expiresAt: amendment.expiresAt,
+    inputSha256: context.proof.sha256, transform: context.transform, references: context.references,
+    worstCaseCostCents: context.worstCaseCostCents, providerSubmissions: 0, noFurtherRecovery: true });
+}
+async function loadKlingDimensionAmendment(directory, plan, planSha256) {
+  const saved = await localJson(join(directory, 'kling-dimension-amendment.json')), amendment = saved.amendment;
+  requireValue(HASH.test(saved.dimensionSha256 || '') && saved.dimensionSha256 === jsonHash(amendment)
+    && amendment?.version === 1 && amendment.kind === 'reviewed-kling-final-dimension-recovery'
+    && amendment.planSha256 === planSha256 && amendment.sourceSha256 === jsonHash(plan.source)
+    && amendment.endpoint === ENDPOINTS.kling && amendment.originalRequestId === REVIEWED_KLING_SIZE_REJECTION_ID
+    && amendment.noFurtherRecovery === true && amendment.maximumCostCents === plan.maximumCostCents
+    && Date.parse(amendment.expiresAt) - Date.parse(amendment.createdAt) === 3600_000
+    && Date.parse(amendment.createdAt) <= Date.now() && HASH.test(amendment.proof?.sha256 || ''), 'DIMENSION_AMENDMENT_INVALID');
+  reviewedDimensionBilling(amendment.billingEvidence);
+  return saved;
+}
+async function submitKlingDimensionRecovery(args, directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  const { amendment, dimensionSha256 } = await loadKlingDimensionAmendment(directory, plan, planSha256);
+  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-dimension-sha256'] === dimensionSha256,
+    'EXACT_DIMENSION_APPROVAL_REQUIRED');
+  const claimPath = join(directory, `${DIMENSION_PREFIX}-claim.json`), existing = await localJson(claimPath, true);
+  if (existing) {
+    requireValue(existing.planSha256 === planSha256 && existing.dimensionSha256 === dimensionSha256, 'FINAL_CLAIM_CONFLICT');
+    emit({ model: 'kling', status: 'final-dimension-recovery-already-claimed-no-resubmission' }); return;
+  }
+  await requireUnclaimedDimensionRecovery(directory);
+  requireValue(Date.parse(amendment.expiresAt) > Date.now(), 'CURRENT_DIMENSION_APPROVAL_REQUIRED');
+  const context = await dimensionRecoveryContext(plan, planSha256, directory, amendment.billingEvidence);
+  for (const field of ['proof', 'transform', 'references', 'amendmentSha256', 'billingEvidenceSha256',
+    'worstCaseCostCents', 'perAttemptReserveCents', 'rejection', 'ledgerSha256'])
+    requireValue(jsonHash(context[field]) === jsonHash(amendment[field]), 'DIMENSION_AMENDMENT_CHANGED');
+  requireValue(jsonHash(context.live.prices) === jsonHash(amendment.live.prices)
+    && Date.parse(amendment.expiresAt) > Date.now(), 'DIMENSION_PRICE_OR_EXPIRY_CHANGED');
+  const claim = { version: 1, evaluationId: plan.evaluationId, planSha256, dimensionSha256, model: 'kling',
+    endpoint: ENDPOINTS.kling, recovery: 'reviewed-final-dimensions', originalRequestId: REVIEWED_KLING_SIZE_REJECTION_ID,
+    inputSha256: context.proof.sha256, rejectionSha256: jsonHash(context.rejection),
+    billingEvidenceSha256: context.billingEvidenceSha256, worstCaseCostCents: context.worstCaseCostCents,
+    claimedAt: stamp(), state: 'submission-claimed', noFurtherRecovery: true, pricing: context.live };
+  await saveExclusive(claimPath, claim);
+  try {
+    const response = await request(`https://queue.fal.run/${ENDPOINTS.kling}`, 'POST', context.payload);
+    await saveExclusive(join(directory, `${DIMENSION_PREFIX}-response.json`), { planSha256, dimensionSha256, receivedAt: stamp(),
+      requestId: response.request_id, statusUrl: response.status_url, responseUrl: response.response_url });
+    requireValue(![REVIEWED_SEEDANCE_ID, REVIEWED_KLING_REJECTION_ID, REVIEWED_KLING_PROMPT_REJECTION_ID,
+      REVIEWED_KLING_SIZE_REJECTION_ID].includes(response.request_id), 'RECOVERY_REQUEST_ID_REUSED');
+    const receipt = { ...claim, state: 'queued', requestId: response.request_id, receivedAt: stamp(),
+      statusUrl: falRequestUrl(response.status_url, ENDPOINTS.kling, response.request_id, 'status'),
+      responseUrl: falRequestUrl(response.response_url, ENDPOINTS.kling, response.request_id, 'result') };
+    await saveExclusive(join(directory, `${DIMENSION_PREFIX}-receipt.json`), receipt);
+    emit({ model: 'kling', status: 'final-dimension-recovery-queued', requestId: receipt.requestId, dimensionSha256,
+      worstCaseCostCents: context.worstCaseCostCents, noFurtherRecovery: true });
+  } catch (error) {
+    await saveExclusive(join(directory, `${DIMENSION_PREFIX}-uncertain.json`), { planSha256, dimensionSha256, state: 'uncertain',
+      at: stamp(), code: /^[A-Z][A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'SUBMISSION_RECEIPT_UNCONFIRMED' }).catch(() => {});
+    emit({ model: 'kling', status: 'final-dimension-recovery-uncertain-no-resubmission' });
+  }
+}
+async function pollKlingDimensionRecovery(directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  const { amendment, dimensionSha256 } = await loadKlingDimensionAmendment(directory, plan, planSha256);
+  const claim = await localJson(join(directory, `${DIMENSION_PREFIX}-claim.json`));
+  const receipt = await localJson(join(directory, `${DIMENSION_PREFIX}-receipt.json`));
+  for (const record of [claim, receipt]) requireValue(record.planSha256 === planSha256 && record.dimensionSha256 === dimensionSha256
+    && record.endpoint === ENDPOINTS.kling && record.originalRequestId === REVIEWED_KLING_SIZE_REJECTION_ID
+    && record.inputSha256 === amendment.proof.sha256 && record.noFurtherRecovery === true, 'FINAL_RECEIPT_CONFLICT');
+  requireValue(receipt.claimedAt === claim.claimedAt && receipt.state === 'queued'
+    && ![REVIEWED_SEEDANCE_ID, REVIEWED_KLING_REJECTION_ID, REVIEWED_KLING_PROMPT_REJECTION_ID,
+      REVIEWED_KLING_SIZE_REJECTION_ID].includes(receipt.requestId), 'FINAL_RECEIPT_CONFLICT');
+  const terminalPath = join(directory, `${DIMENSION_PREFIX}-terminal.json`), terminal = await localJson(terminalPath, true);
+  if (terminal) {
+    requireValue(terminal.planSha256 === planSha256 && terminal.dimensionSha256 === dimensionSha256
+      && terminal.endpoint === ENDPOINTS.kling && terminal.requestId === receipt.requestId
+      && ['completed', 'failed'].includes(terminal.state) && Number.isFinite(Date.parse(terminal.firstTerminalObservedAt)),
+    'FINAL_TERMINAL_INVALID');
+    emit(terminal); return;
+  }
+  const status = await request(falRequestUrl(receipt.statusUrl, ENDPOINTS.kling, receipt.requestId, 'status'));
+  requireValue(!status.request_id || status.request_id === receipt.requestId, 'PROVIDER_ID_CHANGED');
+  let output, failure, state = status.status === 'IN_QUEUE' ? 'queued' : status.status === 'IN_PROGRESS' ? 'processing' : 'uncertain';
+  if (status.status === 'COMPLETED') {
+    const response = await fetch(falRequestUrl(receipt.responseUrl, ENDPOINTS.kling, receipt.requestId, 'result'), {
+      redirect: 'error', credentials: 'omit', cache: 'no-store', headers: { Authorization: `Key ${process.env.FAL_KEY}` },
+      signal: AbortSignal.timeout(30_000) });
+    const result = await boundedJson(response);
+    if (response.status === 422 || status.error || status.error_type) {
+      state = 'failed'; failure = { httpStatus: response.status, providerBodySha256: jsonHash(result),
+        errorTypes: Array.isArray(result.detail) ? result.detail.map(item => String(item.type || '').slice(0,100)) : [] };
+    } else {
+      requireValue(response.ok, `PROVIDER_HTTP_${response.status}`);
+      const url = falMediaUrl(result.video?.url), head = await fetch(url, { method: 'HEAD', redirect: 'error', credentials: 'omit',
+        signal: AbortSignal.timeout(20_000) });
+      const sizeBytes = Number(head.headers.get('content-length')), contentType = head.headers.get('content-type')?.split(';')[0];
+      requireValue(head.ok && contentType === 'video/mp4' && Number.isSafeInteger(sizeBytes)
+        && sizeBytes >= 16 && sizeBytes <= 250 * 1024 * 1024, 'MEDIA_METADATA_INVALID');
+      state = 'completed'; output = { url, sizeBytes, contentType, requestedDurationSeconds: 12,
+        fullDecodeVerified: false, speechReviewed: false, visualReviewed: false };
+    }
+  }
+  const snapshot = { planSha256, dimensionSha256, model: 'kling', endpoint: ENDPOINTS.kling, requestId: receipt.requestId,
+    state, checkedAt: stamp(), noFurtherRecovery: true, ...(output ? { output } : {}), ...(failure ? { failure } : {}) };
+  if (['completed', 'failed'].includes(state)) {
+    snapshot.firstTerminalObservedAt = snapshot.checkedAt;
+    try { await saveExclusive(terminalPath, snapshot); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; return pollKlingDimensionRecovery(directory); }
+  }
+  await saveExclusive(join(directory, `${DIMENSION_PREFIX}-status-${Date.now()}-${randomUUID()}.json`), snapshot);
+  emit(snapshot);
+}
 async function poll(directory) {
   const { plan, planSha256 } = await loadPlan(directory);
   for (const [model, endpoint] of Object.entries(ENDPOINTS)) {
@@ -645,13 +907,17 @@ async function poll(directory) {
 }
 async function main() {
   const [action, ...values] = process.argv.slice(2), args = {};
-  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'prepare-kling-prompt-recovery', 'prepare-kling-prompt-renewal', 'submit-kling-prompt-recovery', 'poll'].includes(action)
+  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'prepare-kling-prompt-recovery', 'prepare-kling-prompt-renewal', 'submit-kling-prompt-recovery',
+    'prepare-kling-dimension-recovery', 'submit-kling-dimension-recovery', 'poll-kling-dimension-recovery', 'poll'].includes(action)
     && values.length % 2 === 0, 'COMMAND_INVALID');
   const allowed = { prepare: ['directory', 'prepared-id', 'config', 'maximum-cost-cents'],
     submit: ['directory', 'approve-plan-sha256'], 'retry-rejected-kling': ['directory', 'approve-plan-sha256'],
     'prepare-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'prompt-file'],
     'prepare-kling-prompt-renewal': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256'],
-    'submit-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256', 'approve-renewal-sha256'], poll: ['directory'] }[action];
+    'submit-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256', 'approve-renewal-sha256'],
+    'prepare-kling-dimension-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256', 'billing-evidence'],
+    'submit-kling-dimension-recovery': ['directory', 'approve-plan-sha256', 'approve-dimension-sha256'],
+    'poll-kling-dimension-recovery': ['directory'], poll: ['directory'] }[action];
   for (let i = 0; i < values.length; i += 2) {
     const name = values[i].replace(/^--/, '');
     requireValue(values[i].startsWith('--') && allowed.includes(name) && !(name in args) && values[i + 1], 'ARGUMENT_INVALID'); args[name] = values[i + 1];
@@ -665,6 +931,9 @@ async function main() {
   else if (action === 'prepare-kling-prompt-recovery') await prepareKlingPromptRecovery(args, directory);
   else if (action === 'prepare-kling-prompt-renewal') await prepareKlingPromptRenewal(args, directory);
   else if (action === 'submit-kling-prompt-recovery') await submitKlingPromptRecovery(args, directory);
+  else if (action === 'prepare-kling-dimension-recovery') await prepareKlingDimensionRecovery(args, directory);
+  else if (action === 'submit-kling-dimension-recovery') await submitKlingDimensionRecovery(args, directory);
+  else if (action === 'poll-kling-dimension-recovery') await pollKlingDimensionRecovery(directory);
   else await poll(directory);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
