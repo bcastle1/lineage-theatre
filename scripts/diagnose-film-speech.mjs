@@ -203,7 +203,7 @@ async function main() {
     || !HASH.test(job.manifestHash || '') || !plain(job.manifest) || digest(JSON.stringify(job.manifest)) !== job.manifestHash
     || job.filmId !== job.manifest.filmId) fail('JOB_UNAVAILABLE');
   if (job.status !== 'awaiting-assembly' || !Array.isArray(job.shots) || !Array.isArray(job.manifest.shots)
-    || job.shots.length < 1 || job.shots.length > 30 || job.shots.length !== job.manifest.shots.length
+    || job.shots.length < 1 || job.shots.length > 200 || job.shots.length !== job.manifest.shots.length
     || new Set(job.shots.map(shot => shot.id)).size !== job.shots.length
     || job.shots.some((shot, index) => shot.status !== 'completed' || shot.id !== job.manifest.shots[index].id)
     || job.manifest.shots.some(shot => !Number.isSafeInteger(shot.targetDurationMs) || shot.targetDurationMs < 1_000 || shot.targetDurationMs > 30_000

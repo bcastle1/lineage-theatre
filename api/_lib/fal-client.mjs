@@ -1,6 +1,8 @@
 import { digest, readRecord, writeRecord } from './auth.mjs';
 
 export const FAL_MODELS = Object.freeze({
+  kling: 'fal-ai/kling-video/o3/pro/reference-to-video',
+  // Historical endpoint identifiers remain readable for reconciliation only.
   seedance: 'bytedance/seedance-2.5/us/reference-to-video',
   wan: 'alibaba/wan-3.0/reference-to-video',
   reference: 'fal-ai/nano-banana-pro',
@@ -80,6 +82,7 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
       if (existing.value.endpoint !== endpoint || existing.value.inputHash !== inputHash) throw failure('FAL_IDEMPOTENCY_CONFLICT');
       return existing.value;
     }
+    if (![FAL_MODELS.kling, FAL_MODELS.reference].includes(endpoint)) throw failure('FAL_LEGACY_SUBMISSION_DISABLED');
     if (!(typeof key === 'function' ? key() : key)) throw failure('FAL_KEY_REQUIRED');
     const claim = { version: 1, identity, endpoint, inputHash, state: 'submitting', createdAt: new Date(now()).toISOString() };
     try { await write(path, claim); }
@@ -113,6 +116,7 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
   async function poll(identity) {
     const path = falRequestPath(identity), record = await read(path), job = record?.value;
     if (!job) throw failure('FAL_REQUEST_MISSING');
+    if (!Object.values(FAL_MODELS).includes(job.endpoint)) throw failure('FAL_MODEL_INVALID');
     if (['completed', 'failed'].includes(job.state)) return job;
     if (!job.requestId) return { ...job, state: 'uncertain' };
     const status = await request(falRequestUrl(job.statusUrl, job.endpoint, job.requestId, 'status'), 'GET');

@@ -4,7 +4,8 @@ import { isOwner } from "./access.mjs";
 import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
-import { falProductionAdapter } from "./fal-production.mjs";
+import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-production.mjs";
+import { planKlingShots } from "./kling-film-plan.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -24,6 +25,7 @@ export class FilmProductionError extends Error {
 }
 const unavailable = () => new FilmProductionError("Film production is not available yet. You can continue preparing your screenplay.", 503, "PRODUCTION_UNAVAILABLE");
 const authorizationRequired = () => new FilmProductionError("Production authorization needs confirmation before this film can begin.", 409, "PRODUCTION_AUTHORIZATION_REQUIRED");
+const authorizationExpired = () => new FilmProductionError("Production authorization expired before submission. The studio will refresh it automatically.", 409, "PRODUCTION_GRANT_EXPIRED");
 const invalid = message => { throw new FilmProductionError(message); };
 const clone = value => structuredClone(value);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -186,7 +188,8 @@ export function createFilmProductionService(dependencies = {}) {
   async function preparedManifest(project, email) {
     const built = buildFilmManifest(project);
     try {
-      const manifest = await bindProductionPhotos(built.manifest, owner(email), { read,
+      const planned = adapter.model === "kling" ? planKlingShots(built.manifest) : built.manifest;
+      const manifest = await bindProductionPhotos(planned, owner(email), { read,
         ...(dependencies.getSourceBlob ? { getBlob: dependencies.getSourceBlob } : {}) });
       return { manifest, manifestHash: hash(manifest) };
     } catch (error) {
@@ -215,7 +218,10 @@ export function createFilmProductionService(dependencies = {}) {
     await requireOperator(actor, email);
     // Mode and a fictionalOnly flag cannot make an arbitrary family project a
     // sandbox test. Verify the saved content against the fixed server sample.
-    const fixed = buildFilmManifest(fictionalOperatorProject());
+    const built = buildFilmManifest(fictionalOperatorProject());
+    const savedModel = job.provider?.model || adapter.model;
+    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest) : built.manifest;
+    const fixed = { manifest: fixedManifest, manifestHash: hash(fixedManifest) };
     if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
         || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
         || !Array.isArray(job.shots) || job.shots.length !== fixed.manifest.shots.length
@@ -310,23 +316,36 @@ export function createFilmProductionService(dependencies = {}) {
   // One external operation per invocation. A scheduler/owner can resume safely.
   // No request-supplied payment, quality, or provider-ready flags are accepted.
   async function advance({ email, id, authorizationReference, actor }) {
-    checkAdapter(adapter);
     email = owner(email);
     let record = await get(email, id);
     let job = clone(record.value);
+    let runAdapter = adapter;
     if (job.provider && (job.provider.id !== adapter.id || job.provider.model !== (adapter.model || null)
-      || job.provider.recipe !== (adapter.modelVersion || null))) throw unavailable();
+      || job.provider.recipe !== (adapter.modelVersion || null))) {
+      // Existing provider requests may be polled with their exact old binding.
+      // The legacy adapter refuses any new render/reference submissions.
+      if (adapter.id !== "fal" || adapter.model !== "kling" || job.provider.id !== "fal"
+        || !["wan", "seedance"].includes(job.provider.model))
+        throw new FilmProductionError("This film has a different saved production provider and needs review.", 409, "PRODUCTION_PROVIDER_MISMATCH");
+      try { runAdapter = (dependencies.adapterForSavedProvider || falAdapterForSavedProvider)(job.provider); }
+      catch { throw new FilmProductionError("This film's saved provider could not be reconciled.", 409, "PRODUCTION_PROVIDER_MISMATCH"); }
+    } else checkAdapter(adapter);
     await requireProductionContext(job, actor, email);
     if (["completed", "failed", "awaiting-assembly"].includes(job.status)) return customerJob(job);
     if (job.lease && job.lease.expiresAt > now()) return customerJob(job);
     const inflight = job.shots.filter(s => ['queued', 'processing', 'submitting', 'uncertain'].includes(s.status));
-    const concurrent = Number.isSafeInteger(adapter.maxConcurrentShots) && adapter.maxConcurrentShots > 1
-      ? Math.min(4, adapter.maxConcurrentShots) : 1;
+    const legacyRun = runAdapter !== adapter;
+    const concurrent = Number.isSafeInteger(runAdapter.maxConcurrentShots) && runAdapter.maxConcurrentShots > 1
+      ? Math.min(4, runAdapter.maxConcurrentShots) : 1;
     const shot = concurrent === 1 ? job.shots.find(s => s.status !== 'completed')
       : inflight.find(s => ['submitting', 'uncertain'].includes(s.status))
-        || (inflight.length < concurrent && job.shots.find(s => s.status === 'prepared'))
+        || (!legacyRun && inflight.length < concurrent && job.shots.find(s => s.status === 'prepared'))
         || [...inflight].sort((a,b) => Date.parse(a.lastCheckedAt || a.submittedAt) - Date.parse(b.lastCheckedAt || b.submittedAt))[0];
-    if (!shot) return customerJob(job);
+    if (!shot) {
+      if (legacyRun && job.shots.some(s => s.status === "prepared")) throw new FilmProductionError("This earlier production has unstarted scenes that need review before conversion to Kling.", 409, "PRODUCTION_PROVIDER_MISMATCH");
+      return customerJob(job);
+    }
+    if (legacyRun && shot.status === "prepared") throw new FilmProductionError("Earlier production cannot submit a new non-Kling scene.", 409, "PRODUCTION_PROVIDER_MISMATCH");
     const previousStatus = shot.status;
     let grant = job.authorization;
     if (previousStatus === "prepared") {
@@ -337,7 +356,7 @@ export function createFilmProductionService(dependencies = {}) {
         || (job.mode !== "operator-test" && grant.fictionalOnly === true)) throw authorizationRequired();
       const validation = await adapter.validateManifest(clone(job.manifest));
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
-      if (Date.parse(grant.expiresAt) <= now()) throw authorizationRequired();
+      if (Date.parse(grant.expiresAt) <= now()) throw authorizationExpired();
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
       job.provider ||= { id: adapter.id, model: adapter.model || null, recipe: adapter.modelVersion || null };
     }
@@ -376,12 +395,13 @@ export function createFilmProductionService(dependencies = {}) {
         try { await save(productionJobPath(email, id), restored, pending.etag); }
         catch (error) { if (!conflict(error)) throw error; }
       }
-      throw authorizationRequired();
+      throw authorizationExpired();
     }
     const request = { productionId: id, manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
       // A provider pipeline may need reference images before the scene render.
       // Each new paid operation obtains a current grant; status GETs do not.
       authorizeSpend: async () => {
+        if (legacyRun) return false;
         const current = Date.parse(grant.expiresAt) > now() ? grant
           : await authorize({ email, id, manifestHash: job.manifestHash, mode: job.mode, authorizationReference });
         return current?.allowed === true && current.manifestHash === job.manifestHash && current.environment === adapter.environment
@@ -393,9 +413,9 @@ export function createFilmProductionService(dependencies = {}) {
     if (previousStatus === "prepared" && Date.parse(grant.expiresAt) <= now()) await releaseUnsubmittedClaim();
     let result;
     try {
-      if (previousStatus === "prepared") result = await adapter.submitShot(request);
-      else if (["submitting", "uncertain"].includes(previousStatus)) result = await adapter.reconcileShot(request);
-      else result = await adapter.pollShot(request);
+      if (previousStatus === "prepared") result = await runAdapter.submitShot(request);
+      else if (["submitting", "uncertain"].includes(previousStatus)) result = await runAdapter.reconcileShot(request);
+      else result = await runAdapter.pollShot(request);
     } catch { result = { status: "uncertain" }; }
     record = await get(email, id);
     job = clone(record.value);
@@ -410,7 +430,7 @@ export function createFilmProductionService(dependencies = {}) {
     }
     if (["queued", "processing", "completed"].includes(current.status) && !current.providerJobId) current.status = "uncertain";
     if (current.status === "completed") {
-      try { current.output = validateProviderOutput(result.output, adapter.outputHosts); }
+      try { current.output = validateProviderOutput(result.output, runAdapter.outputHosts); }
       catch { current.status = "uncertain"; }
     }
     job.lastCheckedAt = stamp();
@@ -462,7 +482,8 @@ export function createFilmProductionService(dependencies = {}) {
     readiness: () => {
       let available = false;
       try { checkAdapter(adapter); available = true; } catch { /* Keep undocumented providers disabled. */ }
-      return { available, preparationAvailable: true, adapter: adapter.id, environment: adapter.environment, gaps: available ? [] : [...(adapter.gaps || MAGICLIGHT_GAPS)] };
+      return { available, preparationAvailable: true, adapter: adapter.id, productionProvider: adapter.model === "kling" ? "kling" : null,
+        environment: adapter.environment, gaps: available ? [] : [...(adapter.gaps || MAGICLIGHT_GAPS)] };
     },
   };
 }

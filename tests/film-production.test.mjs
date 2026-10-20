@@ -242,7 +242,7 @@ test("authorization expiring during manifest validation leaves the unsubmitted p
     adapter: adapter({ validateManifest: async () => { if (slow) time += 1000; return { ready: true, maximumCostCents: 300 }; },
       submitShot: async () => { submissions++; return { status: "queued", providerJobId: "resumed-clip" }; } }) });
   const job = await prepare(service), before = await service.getPrepared({ email, id: job.id });
-  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
+  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_GRANT_EXPIRED");
   assert.equal(submissions, 0);
   assert.deepEqual(await service.getPrepared({ email, id: job.id }), before);
   slow = false;
@@ -260,7 +260,7 @@ test("authorization expiring during the saved claim restores only unsubmitted wo
     authorize: async args => ({ ...await grant(args), expiresAt: new Date(time + 1000).toISOString() }),
     adapter: adapter({ submitShot: async request => { submitted.push(request); return { status: "queued", providerJobId: "resumed-clip" }; } }) });
   const job = await prepare(service), before = await service.getPrepared({ email, id: job.id });
-  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
+  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_GRANT_EXPIRED");
   const restored = await service.getPrepared({ email, id: job.id });
   assert.equal(submitted.length, 0); assert.equal(restored.status, "prepared");
   assert.deepEqual(restored.shots, before.shots); assert.equal(restored.lease, undefined); assert.equal(restored.authorization, undefined);
@@ -286,7 +286,7 @@ test("expiry cleanup cannot overwrite a replacement claim or turn it into a subm
     authorize: async args => ({ ...await grant(args), expiresAt: new Date(time + 1000).toISOString() }),
     adapter: adapter({ submitShot: async () => { submissions++; }, reconcileShot: async () => { reconciliations++; return { status: "uncertain" }; } }) });
   const job = await prepare(service);
-  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
+  await assert.rejects(service.advance({ email, id: job.id }), error => error.code === "PRODUCTION_GRANT_EXPIRED");
   const saved = await service.getPrepared({ email, id: job.id });
   assert.equal(saved.shots[0].status, "submitting"); assert.equal(saved.lease.token, "replacement-claim");
   assert.equal(submissions, 0);

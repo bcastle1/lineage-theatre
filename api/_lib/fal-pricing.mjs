@@ -1,16 +1,17 @@
 import { FAL_MODELS } from './fal-client.mjs';
 
-// Resolution multipliers are reviewed against the exact endpoint contracts.
-// The API lists base rates; treating those as 1080p prices underquotes the film.
+// Verify the live native-audio video price and base still-image price. The
+// selected 4K reference costs twice its listed base image rate.
 const reviewed = {
-  seedance: { base: 0.0214, unit: '1000 tokens', microUsd: 1200000 },
-  wan: { base: 0.05, unit: 'seconds', microUsd: 200000 },
+  // O3 Pro native audio is $0.14/second. Keep the reviewed $0.15 ceiling;
+  // never interpret the audio-off price as the cost of the selected request.
+  kling: { base: 0.14, unit: 'seconds', microUsd: 150000 },
   reference: { base: 0.15, unit: 'images', microUsd: 300000 },
 };
-export function createFalPricing({ key = () => process.env.FAL_KEY, fetchImpl = fetch, now = Date.now } = {}) {
+export function createFalPricing({ key = () => process.env.FAL_KLING_KEY, fetchImpl = fetch, now = Date.now } = {}) {
   let cached;
   return async model => {
-    if (!['seedance', 'wan'].includes(model)) throw new Error('Unsupported production model.');
+    if (model !== 'kling') throw new Error('Only Kling is available for new production.');
     if (!cached || cached.model !== model || now() >= cached.until) {
       const secret = typeof key === 'function' ? key() : key;
       if (!secret) throw new Error('Provider pricing is not configured.');
@@ -31,6 +32,6 @@ export function createFalPricing({ key = () => process.env.FAL_KEY, fetchImpl = 
       cached = { model, until: now() + 60000 };
     }
     return { videoMicroUsdPerSecond: reviewed[model].microUsd, referenceMicroUsd: reviewed.reference.microUsd,
-      pricingVersion: '1080p-4k-20261018', expiresAt: new Date(now() + 24 * 3600000).toISOString() };
+      pricingVersion: 'kling-o3-native-audio-4k-reference-20261020', expiresAt: new Date(now() + 24 * 3600000).toISOString() };
   };
 }

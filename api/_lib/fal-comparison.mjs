@@ -1,6 +1,6 @@
-import { digest, readRecord, writeRecord, userPath } from './auth.mjs';
+import { digest, readRecord, userPath } from './auth.mjs';
 import { isOwner } from './access.mjs';
-import { createFalProductionAdapter, falPlan, FAL_RECIPE_VERSION } from './fal-production.mjs';
+import { createFalProductionAdapter, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from './fal-production.mjs';
 
 const fail = () => { throw new Error('The paid-film comparison authorization could not be verified.'); };
 export const comparisonPath = orderId => {
@@ -8,10 +8,9 @@ export const comparisonPath = orderId => {
   return `production/fal/comparisons/${orderId}.json`;
 };
 
-// Merchant-funded acceptance renders use the SAME shot request identities that
-// normal paid production will read. Selecting a candidate never renders it again.
-// This ledger does not change a customer payment or assert provider qualification.
-export function createFalComparison({ read = readRecord, write = writeRecord,
+// Historical comparison ledgers permit reconciliation of their original tasks.
+// They can no longer authorize any new provider operation.
+export function createFalComparison({ read = readRecord,
   adapterFactory = model => createFalProductionAdapter({ model }), now = Date.now } = {}) {
   async function context(orderId, actorEmail) {
     const owner = await read(userPath(actorEmail));
@@ -34,32 +33,12 @@ export function createFalComparison({ read = readRecord, write = writeRecord,
       && value.funding === 'merchant' && value.maximumCostCents <= 10000 && value.maximumCostCents > 0
       && Number.isFinite(Date.parse(value.expiresAt)) && Date.parse(value.expiresAt) > now();
   }
-  async function begin({ orderId, actorEmail, maximumCostCents, rates }) {
+  async function begin({ orderId, actorEmail }) {
     comparisonPath(orderId);
     const ctx = await context(orderId, actorEmail), existing = await read(comparisonPath(orderId));
     if (existing) { if (!matches(existing.value, ctx, actorEmail)) fail(); return existing.value; }
-    if (ctx.job.status !== 'prepared' || ctx.job.shots.some(s => s.status !== 'prepared')
-      || !Number.isSafeInteger(maximumCostCents) || maximumCostCents < 1 || maximumCostCents > 10000
-      || !rates || now() - Date.parse(rates.checkedAt) > 3600000 || Date.parse(rates.checkedAt) > now()
-      || !Number.isFinite(Date.parse(rates.checkedAt))) fail();
-    let cost = 0;
-    for (const model of ['seedance', 'wan']) {
-      if (!Number.isSafeInteger(rates[model]) || rates[model] <= 0) fail();
-      cost += falPlan(ctx.job.manifest, model).generatedSeconds * rates[model];
-    }
-    if (!Number.isSafeInteger(rates.reference) || rates.reference <= 0) fail();
-    cost += falPlan(ctx.job.manifest, 'seedance').referenceCount * rates.reference;
-    const estimatedCostCents = Math.ceil(cost / 10000);
-    if (estimatedCostCents > maximumCostCents) fail();
-    const value = { version: 1, recipe: FAL_RECIPE_VERSION, orderId, preparedId: ctx.job.id,
-      manifestHash: ctx.job.manifestHash, customerEmail: ctx.order.customerEmail,
-      customerAmountCents: ctx.order.amountCents, funding: 'merchant', approvedBy: actorEmail,
-      shotKeysHash: digest(JSON.stringify(ctx.job.shots.map(s => [s.id, s.requestKey]))),
-      models: ['seedance', 'wan'], maximumCostCents, estimatedCostCents, rates,
-      approvedAt: new Date(now()).toISOString(), expiresAt: new Date(now() + 7 * 86400000).toISOString() };
-    await write(comparisonPath(orderId), value);
-    if (!matches((await read(comparisonPath(orderId)))?.value, ctx, actorEmail)) fail();
-    return value;
+    // Legacy comparison records remain readable; new movies use Kling only.
+    throw new Error('New multi-provider comparisons are disabled. Production uses Kling.');
   }
   async function pass({ orderId, actorEmail }) {
     const ctx = await context(orderId, actorEmail);
@@ -71,14 +50,12 @@ export function createFalComparison({ read = readRecord, write = writeRecord,
     for (const model of ['seedance', 'wan']) {
       const adapter = adapterFactory(model);
       for (const shot of ctx.job.manifest.shots) {
+        const current = await context(orderId, actorEmail);
+        if (!matches((await read(comparisonPath(orderId)))?.value, current, actorEmail)) fail();
         const saved = ctx.job.shots.find(s => s.id === shot.id);
         const result = await adapter.reconcileShot({ manifest: ctx.job.manifest, manifestHash: ctx.job.manifestHash,
           shot, productionId: ctx.job.id, idempotencyKey: saved.requestKey,
-          authorizeSpend: async () => {
-            const current = await context(orderId, actorEmail), approvalNow = (await read(comparisonPath(orderId)))?.value;
-            return matches(approvalNow, current, actorEmail) && current.job.status === 'prepared'
-              && current.job.shots.every(s => s.status === 'prepared');
-          } });
+          authorizeSpend: async () => false });
         results.push({ model, shotId: shot.id, ...result });
       }
     }

@@ -9,7 +9,7 @@ const url = source => `data:text/javascript;base64,${Buffer.from(source).toStrin
 const contract = url((await compile('../src/studio/checkout-contract.ts')).replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(new URL('../src/studio/hosted-invoice-url.mjs', import.meta.url).href)));
 const library = url(await compile('../src/studio/film-library.ts'));
 const { initialWorkspaceView } = await import(library);
-const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library))));
+const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary, paidFilmPlaybackLink } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library))));
 const { reservePaymentWindow, paymentReturnLink, paymentReturnOrder, rememberPaymentWindow, completePaymentWindow, releasePaymentWindows } = await import(url((await compile('../src/studio/payment-window.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract))));
 const id = 'b'.repeat(64), stamp = '2026-10-08T12:00:00Z';
 const invoiceUrl = 'https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture';
@@ -38,10 +38,25 @@ test('return reconciles only the saved invoice and rejects changed payment bindi
 });
 test('confirmed film must belong to the order before progress or media is shown',async()=>{
   assert.equal((await readPaymentFilm(async()=>({entry:film()}),order())).id,order().preparedId);
-  for(const change of [{filmId:'00000000-0000-4000-8000-000000000003'},{payments:[]},{payments:[{...order(),amountCents:379}]}])
+  for(const change of [{filmId:'00000000-0000-4000-8000-000000000003'},{payments:[]},{payments:[{...order(),amountCents:379}]},
+    ...[{status:'refunded',refundedCents:378},{requiresReview:true},{receiptAvailable:false},{sandbox:true}]
+      .map(payment=>({payments:[{...order(),...payment}]}))])
     await assert.rejects(readPaymentFilm(async()=>({entry:{...film(),...change}}),order()));
   assert.match(paymentProductionSummary(order(),film(),false),/production is currently unavailable.*has not started/);
   assert.doesNotMatch(paymentProductionSummary(order(),film(),false),/in production|minutes/);
+});
+
+test('automatic playback handoff requires the exact paid film and verified private video',()=>{
+  const saved=film(),finished={...saved,production:{...saved.production,status:'completed',mediaReady:true},
+    mediaUrl:`/api/studio?action=productionMedia&id=${saved.id}`,downloadUrl:`/api/studio?action=productionMedia&id=${saved.id}&download=1`};
+  assert.equal(paidFilmPlaybackLink(order(),finished),`#library?film=${saved.id}`);
+  for(const entry of [null,saved,{...finished,filmId:'different'},{...finished,payments:[]},
+    {...finished,production:{...finished.production,mediaReady:false}},
+    {...finished,mediaUrl:'https://example.invalid/unfinished.mp4'},
+    {...finished,payments:[{...order(),requiresReview:true}]}])
+    assert.equal(paidFilmPlaybackLink(order(),entry),null);
+  for(const change of [{status:'awaiting-payment'},{refundedCents:1},{requiresReview:true},{receiptAvailable:false}])
+    assert.equal(paidFilmPlaybackLink({...order(),...change},finished),null);
 });
 test('background payment checks outlast two minutes and notify once only after verified payment', async()=>{
   let clock=0, callback, checks=0, paid=0, captured=false, current;

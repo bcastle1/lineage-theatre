@@ -60,7 +60,9 @@ if [[ $action == stage ]]; then
   context=$(mktemp -d "$ROOT/context.XXXXXXXX")
   mkdir -p "$context/api/_lib" "$context/scripts"
   cp -- "$source_dir"/api/_lib/*.mjs "$context/api/_lib/"
-  cp -- "$source_dir/scripts/production-worker.mjs" "$source_dir/scripts/evaluate-film-models.mjs" "$context/scripts/"
+  # Ship the matching assembly, speech and soundtrack code with the provider.
+  # Updating only the entrypoint would leave old cut-count limits in the image.
+  cp -- "$source_dir"/scripts/*.mjs "$source_dir"/scripts/*.py "$context/scripts/"
   (cd "$context"; find api scripts -type f -print0 | sort -z | xargs -0 sha256sum) > "$ROOT/$rev.sources.sha256"
   cat > "$context/Dockerfile" <<'DOCKERFILE'
 ARG BASE

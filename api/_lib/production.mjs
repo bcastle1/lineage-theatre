@@ -3,14 +3,16 @@ import { filmProduction } from "./film-production.mjs";
 
 // A key, rate, or environment flag alone cannot establish a provider or merchant connection.
 export function productionReadiness({ env = process.env, pricingSettings={markupBasisPoints:0,revision:0}, filmService = filmProduction } = {}) {
-  let available = false, adapter = "fal";
+  let available = false, adapter = "fal", productionProvider = null;
   try {
     const ready = filmService.readiness();
     adapter = ready.adapter;
+    productionProvider = ready.productionProvider === "kling" ? "kling" : null;
     available = ready.available === true && adapter === "fal" && ready.environment === "production";
   } catch { /* Configuration failures cannot enable customer production. */ }
   return {
     production:available,
+    productionProvider,
     magiclight:available, // Compatibility for saved clients; never an alternative renderer.
     billing:false,
     pricing:pricingReadiness(env,pricingSettings),

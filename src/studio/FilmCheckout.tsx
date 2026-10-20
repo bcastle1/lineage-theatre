@@ -13,12 +13,13 @@ import { startPaymentStatusSync } from "./payment-status-sync";
 import { filmFulfillmentProgress, filmReadyToWatch, type ProductionStatus } from "./film-fulfillment";
 import { libraryFilmLink, normalizeLibraryEntry, type LibraryEntry } from "./film-library";
 import FilmProductionProgress from "./FilmProductionProgress";
+import { confirmedFilmPayment, paidFilmPlaybackLink } from "./payment-confirmation";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
 
-export default function FilmCheckout({ film, productionAvailable, generationAttemptAllowed = false, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
-  film: Film; productionAvailable: boolean; generationAttemptAllowed?: boolean;
+export default function FilmCheckout({ film, productionAvailable, productionProvider, generationAttemptAllowed = false, persistPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
+  film: Film; productionAvailable: boolean; productionProvider?: "kling"; generationAttemptAllowed?: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
   onNewFilmCheckout: () => void;
   onPrepared: (prepared: PreparedProduction) => void;
@@ -48,6 +49,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const checkoutKey = useRef(crypto.randomUUID());
   const attemptedPayment = useRef<FilmPaymentReference | null>(null);
   const mounted = useRef(false);
+  const openedFilm = useRef("");
   const input = useMemo(() => JSON.stringify(productionPreparationInput(film)), [film]);
   const currentPlan = Boolean(prepared && inputHash && prepared.inputHash === inputHash);
   const priceCurrent = Boolean(price && prepared && currentPlan && price.preparedId===prepared.id && price.manifestHash===prepared.manifestHash && Date.parse(price.expiresAt)>now);
@@ -151,6 +153,12 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     }).catch(() => { /* The status link offers a fresh authorized delivery check. */ });
     return () => { active = false; };
   }, [reviewContext, order?.status, production]);
+  useEffect(() => {
+    const destination = readyToWatch ? paidFilmPlaybackLink(order, delivery) : null;
+    if (!destination || openedFilm.current === destination) return;
+    openedFilm.current = destination;
+    window.location.hash = destination;
+  }, [readyToWatch, order, delivery]);
 
   async function work(label: string, operation: () => Promise<void>, expectedContext?: string) {
     if (lock.current) return;
@@ -241,6 +249,10 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     setOrder(result);
     if (result.status === "awaiting-payment" && result.invoiceUrl && !result.requiresReview) {
       if (paymentWindow.open(result.invoiceUrl)) rememberPaymentWindow(result.id, paymentWindow);
+      window.location.hash = paymentReturnLink(result.id);
+    } else if (confirmedFilmPayment(result)) {
+      // A recovered checkout may already be paid. Use the same production
+      // handoff as the normal QuickBooks return, without another invoice.
       window.location.hash = paymentReturnLink(result.id);
     } else setMessage(paymentStatusMessage(result));
   }
@@ -357,7 +369,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
       <p className="field-note">{!quote.sandbox
-        ? "Your saved film enters production automatically after QuickBooks confirms payment. You can close the browser; progress stays in your Film library."
+        ? `Your saved film enters ${productionProvider === "kling" ? "Kling production" : "production"} automatically after QuickBooks confirms payment. Follow its progress here or in your Film library. The finished film opens when its video is verified.`
         : "A test payment does not start production of this film."}</p>
       {!quote.sandbox && !checkoutProductionReady && <div className="feedback" role="status">
         <p>Production availability must be confirmed before a payment page can be created. Your saved film and price remain available.</p>
