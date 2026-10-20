@@ -18,6 +18,8 @@ const RECIPE = 'automatic-stock-soundtrack-v1';
 const HASH = /^[a-f0-9]{64}$/;
 const FILE = /^[a-z0-9-]{1,80}\.(?:wav|mid)$/;
 const MAX_FILE = 250 * 1024 * 1024, MAX_TOTAL = 512 * 1024 * 1024;
+const MAX_SCENES = 200, MAX_TURNS = 600, MAX_SCORE_FILES = 2;
+const MAX_CONSTRUCTION_FILES = MAX_SCENES * 2 + MAX_TURNS + MAX_SCORE_FILES;
 const failureReasons = new Set(['SOUNDTRACK_BINDING_INVALID', 'STOCK_CAST_UNAVAILABLE', 'SOUNDTRACK_CACHE_UNAVAILABLE',
   'SOUNDTRACK_RECOGNITION_FAILED', 'SOUNDTRACK_CLAIM_EXPIRED', 'SOUNDTRACK_CONTEXT_CHANGED', 'SOUNDTRACK_SCRATCH_UNAVAILABLE',
   'SOUNDTRACK_ATTEMPTS_EXHAUSTED', 'SOUNDTRACK_SPEECH_UNVERIFIED', 'SOUNDTRACK_SOURCE_CHANGED']);
@@ -51,7 +53,7 @@ export function standardFilmVoices(manifest, manifestHash) {
   return voices;
 }
 
-function constructionFiles(provenance, plan) {
+export function constructionFiles(provenance, plan) {
   requireValue(provenance?.manifestHash === plan.manifestHash && provenance.recipe === plan.recipe
     && provenance.status === 'constructed-needs-review' && provenance.engine === 'kokoro-82m-v1.0-cpu'
     && provenance.sourceTextRewritten === false && provenance.speed === 1 && provenance.providerGenerationCalls === 0
@@ -87,7 +89,7 @@ function constructionFiles(provenance, plan) {
   }
   if (provenance.score) { add(provenance.score.midi); add(provenance.score.audio); }
   const result = [...files.values()];
-  requireValue(result.length <= 262 && result.reduce((total, file) => total + file.sizeBytes, 0) <= MAX_TOTAL);
+  requireValue(result.length <= MAX_CONSTRUCTION_FILES && result.reduce((total, file) => total + file.sizeBytes, 0) <= MAX_TOTAL);
   return result;
 }
 
@@ -273,7 +275,7 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
       const resolveSpeechDifferences = createRepairSpeechResolver({ manifest: job.manifest, manifestHash: job.manifestHash,
         voices, provenance, constructionRoot: work, receiptRoot: work });
       const reviewedSpeech = await reviewSpeech({ manifest: job.manifest, clips: selected, ffmpeg,
-        transcribe: recordTranscript, resolveSpeechDifferences });
+        transcribe: recordTranscript, resolveSpeechDifferences, speakerAliases: voices.speakerAliases });
       const speechReview = { ...reviewedSpeech, transcriptionReceipts };
       requireValue(speechReview?.passed === true, 'SOUNDTRACK_SPEECH_UNVERIFIED');
       await guard();

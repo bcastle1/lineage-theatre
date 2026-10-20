@@ -6,6 +6,7 @@ import { createFilmProductionService, buildFilmManifest, fictionalOperatorProjec
 import { createStudioHandler } from "../api/studio.mjs";
 import { parseRange, MAX_FILM_BYTES } from "../api/_lib/archive.mjs";
 import { ProductionMediaError, streamProductionMedia, validateStoredProductionMedia } from "../api/_lib/production-media.mjs";
+import { planKlingShots } from "../api/_lib/kling-film-plan.mjs";
 
 const owner = "family@example.invalid", other = "other@example.invalid";
 const id = "11111111-1111-4111-8111-111111111111";
@@ -228,6 +229,28 @@ test("cross-account, missing, unfinished and corrupted jobs never fetch a Blob",
     assert.equal(res.statusCode, scenario.status); assert.equal(fix.blobReads.length, 0);
     assert.equal(res.headers["cache-control"], "private, no-store");
     assert.equal(res.body.toString().includes("production/media"), false);
+  }
+});
+
+test("Kling operator playback accepts only its fixed planned sample and preserves the customer payment gate",async()=>{
+  const operator={email:"erik@brocotech.ai",role:"owner",status:"active"};
+  const fixed=planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest),fixedHash=digest(JSON.stringify(fixed));
+  const job={...completeJob(),ownerHash:digest(operator.email),mode:"operator-test",filmId:fixed.filmId,
+    manifest:fixed,manifestHash:fixedHash,shots:fixed.shots.map(shot=>({id:shot.id,status:"completed"})),
+    provider:{id:"fal",model:"kling",recipe:"lineage-realistic-kling-o3-v1"},
+    authorization:{environment:"production",manifestHash:fixedHash},
+    media:{...completeJob().media,pathname:`production/media/${digest(operator.email)}/${id}/${sha256}.mp4`}};
+  const fix=fixture({job,order:null,ownerEmail:operator.email,account:operator});
+  assert.equal((await request(fix,{email:operator.email,actor:operator})).statusCode,200);
+  for(const mutate of [
+    value=>{value.manifest.shots[0].narration="A changed script.";value.manifestHash=digest(JSON.stringify(value.manifest));},
+    value=>{value.provider.model="wan";},
+    value=>{value.mode="customer";},
+  ]){
+    const changed=structuredClone(job);mutate(changed);
+    const denied=fixture({job:changed,order:null,ownerEmail:operator.email,account:operator});
+    assert.equal((await request(denied,{email:operator.email,actor:operator})).statusCode,402);
+    assert.equal(denied.blobReads.length,0);
   }
 });
 

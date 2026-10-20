@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeSpeech, repairCardinalSpan } from './review-film-speech.mjs';
+import { normalizeSpeech, repairCardinalSpan, intendedSpeechTokens } from './review-film-speech.mjs';
 import { soundtrackPlan } from './rebuild-film-soundtrack.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
@@ -21,7 +21,6 @@ const fail = () => markFinishingFailure(Object.assign(new Error('The exact repai
 const requireValue = value => { if (!value) throw fail(); };
 const words = transcript => (transcript.words || []).flatMap((word, rawIndex) => normalizeSpeech(word.word)
   .map(token => ({ token, raw: word.word, rawIndex, start: word.start, end: word.end })));
-const intendedWords = shot => normalizeSpeech(`${shot.narration || ''} ${(shot.dialogue || '').replace(/(?:^|\n)[A-Z][A-Z\s'-]*:\s*/g, ' ')}`);
 function rawCardinalSpanValid(rawTokens, first, last, canonicalTokens) {
   // Normalization drops punctuation-only tokens. Retain their raw adjacency
   // so a separated sign, decimal point or fraction bar cannot disappear.
@@ -86,7 +85,7 @@ export function createRepairSpeechResolver({ manifest, manifestHash, voices, pro
     const audioSha256 = hash(currentAudio);
     requireValue(audioSha256 === source.mix?.sha256 && currentAudio.length === source.mix.sizeBytes);
     await checkedFile(resolve(sourceDirectory, source.mix.file), sourceDirectory, source.mix);
-    const expected = intendedWords(shot), normal = words(input.normalTranscript), contextual = words(input.contextTranscript);
+    const expected = intendedSpeechTokens(shot, { manifest, speakerAliases: voices.speakerAliases }), normal = words(input.normalTranscript), contextual = words(input.contextTranscript);
     requireValue(expected.length && normal.length && normal.length === contextual.length
       && normal.every((word, index) => word.token === contextual[index].token)
       && [input.normalTranscript, input.contextTranscript].every(value => Number.isFinite(value.duration)

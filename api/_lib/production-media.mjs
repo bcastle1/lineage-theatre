@@ -4,6 +4,7 @@ import { get } from "@vercel/blob";
 import { digest, readRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { buildFilmManifest, fictionalOperatorProject } from "./film-production.mjs";
+import { planKlingShots } from "./kling-film-plan.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -41,7 +42,9 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
   // test flag alone never exempts a customer's film from payment.
   if (job.mode === "operator-test") {
     const current = (await read(userPath(email)))?.value;
-    const fixed = buildFilmManifest(fictionalOperatorProject());
+    const built = buildFilmManifest(fictionalOperatorProject());
+    const fixedManifest = job.provider?.id === "fal" && job.provider.model === "kling" ? planKlingShots(built.manifest) : built.manifest;
+    const fixed = { manifest: fixedManifest, manifestHash: digest(JSON.stringify(fixedManifest)) };
     if (!isOwner(actor) || actor.email !== email || actor.mustChangePassword || !isOwner(current)
       || current.email !== email || current.mustChangePassword || job.manifestHash !== fixed.manifestHash
       || job.filmId !== fixed.manifest.filmId || !Array.isArray(job.shots) || job.shots.length !== fixed.manifest.shots.length

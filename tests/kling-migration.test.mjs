@@ -12,6 +12,19 @@ const actor = { email, role: "customer", status: "active", approvedBy: "owner@ex
 const orderId = "a".repeat(64);
 const at = Date.parse("2026-10-20T12:00:00Z");
 
+test("long Kling preparations report reviewed scenes separately from generated cuts", async () => {
+  const data = storage();
+  const service = createFilmProductionService({ ...data, now: () => at, adapter: klingAdapter() });
+  const project = { ...fictionalOperatorProject(), duration: 600 };
+  const prepared = await service.prepare({ email, project, preparationConsent: true, idempotencyKey: "long-kling-scenes" });
+  assert.equal(prepared.sceneCount, project.scenes.length);
+  assert.ok(prepared.sceneCount <= 30);
+  assert.ok(prepared.shotCount > 30);
+  const saved = (await data.read(productionJobPath(email, prepared.id))).value;
+  assert.equal(prepared.shotCount, saved.manifest.shots.length);
+  assert.equal(prepared.durationSeconds, 600);
+});
+
 function storage() {
   const records = new Map();
   let revision = 0;
