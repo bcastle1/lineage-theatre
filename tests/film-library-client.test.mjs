@@ -13,6 +13,21 @@ const compile = source => ts.transpileModule(source, { compilerOptions: { target
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const modelUrl = moduleUrl(compile(await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8")));
 const helperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-library.ts", import.meta.url), "utf8")));
+const contractUrl = moduleUrl(compile(await readFile(new URL("../src/studio/checkout-contract.ts", import.meta.url), "utf8"))
+  .replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(new URL("../src/studio/hosted-invoice-url.mjs", import.meta.url).href)));
+const receiptUrl = moduleUrl(compile(await readFile(new URL("../src/studio/payment-receipt.ts", import.meta.url), "utf8"))
+  .replaceAll('from "./checkout-contract"', `from "${contractUrl}"`));
+const originalReceiptHelperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/original-payment-receipt.ts", import.meta.url), "utf8"))
+  .replaceAll('from "./checkout-contract"', `from "${contractUrl}"`));
+let originalReceiptSource = compile(await readFile(new URL("../src/studio/OriginalPaymentReceipt.tsx", import.meta.url), "utf8"))
+  .replaceAll('from "./model"', `from "${modelUrl}"`)
+  .replaceAll('from "./original-payment-receipt"', `from "${originalReceiptHelperUrl}"`)
+  .replaceAll('from "./payment-receipt"', `from "${receiptUrl}"`);
+for (const name of ["react", "react/jsx-runtime", "lucide-react"]) originalReceiptSource = originalReceiptSource.replaceAll(`from "${name}"`, `from "${pathToFileURL(require.resolve(name)).href}"`);
+const originalReceiptUrl = moduleUrl(originalReceiptSource);
+const { verifiedOriginalPaymentReceipt } = await import(originalReceiptHelperUrl);
+const correctionUrl = moduleUrl(compile(await readFile(new URL("../src/admin/production-correction.ts", import.meta.url), "utf8")));
+const { productionCorrectionRequest, verifyProductionCorrection } = await import(correctionUrl);
 const fulfillmentUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-fulfillment.ts", import.meta.url), "utf8")));
 const generationStatusUrl = moduleUrl("export default function FilmGenerationStatus() { return null; }");
 const ltxLibraryUrl = moduleUrl("export default function LtxFilmLibrary() { return null; }");
@@ -146,6 +161,7 @@ async function libraryComponents() {
   source = source.replaceAll('from "./film-fulfillment"', `from "${fulfillmentUrl}"`).replaceAll('from "./FilmGenerationStatus"', `from "${generationStatusUrl}"`);
   source = source.replaceAll('from "./FilmProductionProgress"', `from "${progressComponentUrl}"`);
   source = source.replaceAll('from "./LtxFilmLibrary"', `from "${ltxLibraryUrl}"`);
+  source = source.replaceAll('from "./OriginalPaymentReceipt"', `from "${originalReceiptUrl}"`);
   return import(moduleUrl(source));
 }
 
@@ -178,6 +194,74 @@ test("paid saved plan status confirms payment without claiming a completed video
   assert.doesNotMatch(html, /Production complete|video is complete|>Watch film<|>Download film<|MagicLight|QuickBooks/i);
   const unknown = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()) }));
   assert.doesNotMatch(unknown, /Film creation is currently unavailable/);
+});
+
+const coverage = () => ({ kind: "original-payment", correctionId: "c".repeat(64), orderId: "a".repeat(64),
+  originalPreparedId: "22222222-2222-4222-8222-222222222222", amountCents: 330, currency: "USD", receiptAvailable: true, customerChargeCents: 0 });
+test("correction coverage preserves original payment identity without creating a new paid order", async () => {
+  const { LibraryFilmStatus } = await libraryComponents();
+  const value = helpers.normalizeLibraryEntry(entry({ payments: [], coverage: coverage(),
+    production: { status: "processing", completedShots: 2, shotCount: 12, mediaReady: false, needsAttention: false } }));
+  assert.deepEqual(value.payments, []);
+  assert.deepEqual(value.coverage, coverage());
+  assert.equal(helpers.libraryGenerationOrder(value), null);
+  assert.equal(helpers.libraryCanWatch(value), false);
+  const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: value, productionAvailable: true }));
+  assert.match(html, /Covered by original payment/);
+  assert.match(html, /no additional charge/);
+  assert.match(html, /Download original payment receipt/);
+  assert.match(html, new RegExp(`href="#library\\?film=${coverage().originalPreparedId}"`));
+  assert.match(html, /2 of 12 shots complete/);
+  assert.match(html, /<span>22%<\/span>/);
+  assert.doesNotMatch(html, /No payment recorded|Paid ·|Production complete|video is complete/);
+});
+test("malformed or unrelated correction coverage is not shown as authorized payment coverage", () => {
+  for (const change of [{ kind: "free" }, { correctionId: "bad" }, { orderId: "bad" }, { originalPreparedId: entry().id },
+    { originalPreparedId: "not-a-plan" }, { amountCents: 0 }, { amountCents: 100_000_001 }, { currency: "CAD" },
+    { receiptAvailable: false }, { customerChargeCents: 1 }])
+    assert.throws(() => helpers.normalizeLibraryEntry(entry({ payments: [], coverage: { ...coverage(), ...change } })));
+  assert.throws(() => helpers.normalizeLibraryEntry(entry({ kind: "upload", payments: [], manifestHash: undefined, coverage: coverage() })));
+});
+test("a correction downloads only the original production payment receipt and preserves its recorded amount", () => {
+  const receipt = { receiptId: coverage().orderId, filmTitle: "The original paid version", currency: "USD", amountCents: 330,
+    refundedCents: 0, capturedAt: "2026-10-20T12:00:00Z", status: "captured", sandbox: false,
+    transactionId: "original-payment-1", confirmationSource: "quickbooks-accounting" };
+  assert.equal(verifiedOriginalPaymentReceipt(receipt, coverage()).amountCents, 330);
+  assert.equal(verifiedOriginalPaymentReceipt(receipt, coverage()).filmTitle, "The original paid version");
+  for (const change of [{ receiptId: coverage().correctionId }, { amountCents: 1980 }, { sandbox: true }, { currency: "CAD" }])
+    assert.throws(() => verifiedOriginalPaymentReceipt({ ...receipt, ...change }, coverage()));
+});
+test("owner correction request requires exact references, explicit approval and the approved production budget", () => {
+  const input = { originalOrderId: "a".repeat(64), preparedId: entry().id, manifestHash: entry().manifestHash,
+    budget: "19.80", reason: "Correct the original film using Kling.", confirmed: true };
+  const request = productionCorrectionRequest(input);
+  assert.deepEqual(request, { action: "createProductionCorrection", originalOrderId: input.originalOrderId,
+    preparedId: input.preparedId, manifestHash: input.manifestHash, maximumCostCents: 1980, reason: input.reason, confirmed: true });
+  for (const change of [{ originalOrderId: "short" }, { preparedId: "draft" }, { manifestHash: "bad" }, { budget: "19.81" },
+    { budget: "0" }, { budget: "-1" }, { budget: "1e1" }, { budget: "1.999" }, { reason: "short" }, { reason: "a".repeat(501) }, { confirmed: false }])
+    assert.throws(() => productionCorrectionRequest({ ...input, ...change }));
+  const correction = { correctionId: "c".repeat(64), originalOrderId: input.originalOrderId, preparedId: input.preparedId,
+    manifestHash: input.manifestHash, maximumCostCents: 1980, status: "authorized", customerChargeCents: 0 };
+  assert.deepEqual(verifyProductionCorrection({ correction }, request), correction);
+  for (const change of [{ originalOrderId: "b".repeat(64) }, { preparedId: coverage().originalPreparedId }, { manifestHash: "b".repeat(64) },
+    { maximumCostCents: 1981 }, { status: "pending" }, { customerChargeCents: 1 }, { correctionId: "bad" }])
+    assert.throws(() => verifyProductionCorrection({ correction: { ...correction, ...change } }, request));
+});
+test("owner correction form exposes exact references and budget with approval initially unchecked", async () => {
+  let source = compile(await readFile(new URL("../src/admin/ProductionCorrection.tsx", import.meta.url), "utf8"))
+    .replaceAll('from "../studio/model"', `from "${modelUrl}"`)
+    .replaceAll('from "../studio/film-library"', `from "${helperUrl}"`)
+    .replaceAll('from "./production-correction"', `from "${correctionUrl}"`);
+  for (const name of ["react", "react/jsx-runtime"]) source = source.replaceAll(`from "${name}"`, `from "${pathToFileURL(require.resolve(name)).href}"`);
+  const { default: Panel } = await import(moduleUrl(source));
+  const html = renderToStaticMarkup(React.createElement(Panel, { disabled: false, actionLock: { current: false }, onBusyChange() {} }));
+  for (const label of ["Produce corrected version using original payment", "Original order reference", "Corrected saved plan ID",
+    "Corrected plan manifest hash", "Maximum production cost", "No new customer invoice", "Authorize corrected film"]) assert.ok(html.includes(label));
+  assert.match(html, /max="19\.80"/);
+  assert.match(html, /<button[^>]*disabled=""/);
+  assert.doesNotMatch(html, /checked=""/);
+  const adminSource = await readFile(new URL("../src/admin/Admin.tsx", import.meta.url), "utf8");
+  assert.match(adminSource, /\{isOwner && <ProductionCorrectionPanel/);
 });
 
 test("customer library keeps operator controls private even for the signed-in owner", async () => {
@@ -231,6 +315,9 @@ test("new-version action is limited to a saved plan with its verified manifest",
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;\.jpg/);
   assert.doesNotMatch(html, /<img src=x/);
   assert.equal(calls, 0, "Displaying the action must not create a draft or accept any consent.");
+  const corrected = renderToStaticMarkup(React.createElement(SavedPlanVersionAction, { detail: { ...detail, entry: { ...detail.entry, coverage: coverage() } }, disabled: false, onCreateVersion }));
+  assert.match(corrected, /original payment remains with the original paid film/);
+  assert.match(corrected, /coverage does not transfer to a new draft/);
 });
 
 test("new-version action respects the shared busy state and dispatches only the selected immutable entry", async () => {

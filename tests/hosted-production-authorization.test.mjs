@@ -139,6 +139,20 @@ test("hosted paid planning orders dispatch through exact live allocation and a c
   assert.equal(h.quoteCalls.length, 1); assert.equal(h.requests.length, 12);
 });
 
+test("merchant correction sale proof validates completed original payment live without repricing or changing the financial order", async () => {
+  const h = await fixture(); h.advance(3600_000);
+  h.mutatePlan(job => { job.status = "completed"; job.shots.forEach(shot => { shot.status = "completed"; }); });
+  const before = structuredClone(h.records.get(h.orderPath));
+  const proof = await h.hosted.verifyPaidSale(h.request);
+  assert.deepEqual(proof.order, before.value); assert.deepEqual(h.records.get(h.orderPath), before);
+  assert.equal(h.quoteCalls.length, 0); assert.ok(h.requests.length >= 4); assert.ok(h.requests.every(request => request.method === "GET"));
+  await proof.recheck();
+  await denied(h.authorize());
+  h.editInvoice({ Balance: 4.5 });
+  await denied(h.hosted.verifyPaidSale(h.request));
+  assert.deepEqual(h.records.get(h.orderPath), before);
+});
+
 test("hosted production never treats a planning price or partner flag as an actual provider quote", async () => {
   for (const options of [{ missingAdapter: true }, { validation: { ready: false } }, { validation: { maximumCostCents: 301 } },
     { productionQuote: { providerCostCents: 301 } }, { productionQuote: { currency: "EUR" } }, { productionQuote: { manifestHash: "bad" } },

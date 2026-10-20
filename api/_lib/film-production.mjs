@@ -357,7 +357,8 @@ export function createFilmProductionService(dependencies = {}) {
       const validation = await adapter.validateManifest(clone(job.manifest));
       if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents) || validation.maximumCostCents > grant.budgetCents || validation.maximumCostCents < 0) throw new FilmProductionError("Review your production plan before starting the film.", 409, "PRODUCTION_REVIEW_REQUIRED");
       if (Date.parse(grant.expiresAt) <= now()) throw authorizationExpired();
-      job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp() };
+      job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp(),
+        ...(grant.correctionId ? { correctionId: grant.correctionId, originalOrderId: grant.originalOrderId } : {}) };
       job.provider ||= { id: adapter.id, model: adapter.model || null, recipe: adapter.modelVersion || null };
     }
     // Status reads continue after a grant expires. A multi-stage provider must

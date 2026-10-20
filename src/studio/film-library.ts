@@ -6,11 +6,15 @@ export type LibraryPayment = {
   id: string; status: string; amountCents: number; currency: "USD"; refundedCents: number;
   sandbox: boolean; requiresReview: boolean; receiptAvailable: boolean;
 };
+export type LibraryCoverage = {
+  kind: "original-payment"; correctionId: string; orderId: string; originalPreparedId: string;
+  amountCents: number; currency: "USD"; receiptAvailable: true; customerChargeCents: 0;
+};
 export type LibraryEntry = {
   kind: "plan" | "upload"; id: string; filmId: string; title: string; durationSeconds: number;
   createdAt: string; updatedAt: string; libraryState: LibraryView; revision: number;
   production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean; workerReady?: boolean; message?: string; progress?: unknown };
-  payments: LibraryPayment[]; manifestHash?: string; mediaUrl?: string; downloadUrl?: string; origin?: "studio-delivery";
+  payments: LibraryPayment[]; coverage?: LibraryCoverage; manifestHash?: string; mediaUrl?: string; downloadUrl?: string; origin?: "studio-delivery";
 };
 export type LibraryPage = { entries: LibraryEntry[]; cursor?: string };
 export type LibraryScene = { title: string; narration: string; visual: string; dialogue: string };
@@ -77,6 +81,16 @@ export function normalizeLibraryEntry(value: unknown): LibraryEntry {
       ...(value.production.message !== undefined ? { message: value.production.message as string } : {}),
       ...(value.production.progress !== undefined ? { progress: value.production.progress } : {}) }, payments,
     ...(value.kind === "plan" ? { manifestHash: value.manifestHash as string } : ["studio-delivery", "magiclight-delivery"].includes(String(value.origin)) ? { origin: "studio-delivery" as const } : {}) };
+  if (value.coverage !== undefined) {
+    const coverage = value.coverage;
+    if (entry.kind !== "plan" || !object(coverage) || coverage.kind !== "original-payment" || !digest(coverage.correctionId)
+      || !digest(coverage.orderId) || !uuid(coverage.originalPreparedId) || coverage.originalPreparedId === entry.id
+      || !count(coverage.amountCents) || coverage.amountCents < 1 || coverage.amountCents > 100_000_000
+      || coverage.currency !== "USD" || coverage.receiptAvailable !== true || coverage.customerChargeCents !== 0) throw invalid();
+    entry.coverage = { kind: "original-payment", correctionId: coverage.correctionId, orderId: coverage.orderId,
+      originalPreparedId: coverage.originalPreparedId, amountCents: coverage.amountCents, currency: "USD",
+      receiptAvailable: true, customerChargeCents: 0 };
+  }
   if (value.mediaUrl !== undefined || value.downloadUrl !== undefined || entry.production.mediaReady) {
     if (!entry.production.mediaReady || !["completed", "uploaded"].includes(entry.production.status)
       || value.mediaUrl !== libraryMediaUrl(entry) || value.downloadUrl !== libraryMediaUrl(entry, true)) throw invalid();

@@ -35,6 +35,7 @@ import FilmGenerationOperations from "./FilmGenerationOperations";
 import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
+import ProductionCorrectionPanel from "./ProductionCorrection";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import MediaLibrary from "../studio/MediaLibrary";
 import "./admin.css";
@@ -2062,6 +2063,7 @@ export default function Admin({
             </section>
             <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} refreshedSettings={hostedCheckoutRefresh} onSaved={() => void refresh()} />
             <ReceiptSettings disabled={busy || loading} />
+            {isOwner && <ProductionCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
             <div className="admin-section-heading">
               <div>
                 <h2>Payments & refunds</h2>

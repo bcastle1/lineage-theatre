@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryCanWatch, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+import { libraryActionRequest, libraryCanWatch, libraryFilmLink, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
   parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
 import type { ProductionStatus } from "./film-fulfillment";
 import "./film-library.css";
 import FilmProductionProgress from "./FilmProductionProgress";
 import LtxFilmLibrary from "./LtxFilmLibrary";
+import OriginalPaymentReceipt from "./OriginalPaymentReceipt";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
@@ -19,19 +20,26 @@ function resumablePayment(detail: LibraryDetail | null) {
 export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
   const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
     && payment.refundedCents === 0 && payment.receiptAvailable);
+  const covered = Boolean(entry.coverage), productionCovered = paid || covered;
   return <div className="film-library-progress">
-    <div className="film-library-statuses"><div><span>Payment</span>{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
+    <div className="film-library-statuses"><div><span>Payment</span>{covered && <strong>Covered by original payment</strong>}{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
       {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
-    </strong>) : <strong>{entry.origin === "studio-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
-      <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : paid && entry.kind === "plan" && !libraryCanWatch(entry) ? "See progress below" : productionLabel(entry)}</strong></div></div>
+    </strong>) : !covered && <strong>{entry.origin === "studio-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
+      <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : productionCovered && entry.kind === "plan" && !libraryCanWatch(entry) ? "See progress below" : productionLabel(entry)}</strong></div></div>
+    {entry.coverage && <div>
+      <p className="field-note">This corrected film is covered by your original payment. There is no additional charge for this correction.</p>
+      <p className="field-note"><a href={libraryFilmLink(entry.coverage.originalPreparedId)}>View original paid film</a> · Original payment reference: {entry.coverage.orderId.slice(0, 12)}</p>
+      <OriginalPaymentReceipt coverage={entry.coverage} />
+    </div>}
     {libraryCanWatch(entry) ? <p>Your video is complete and ready to watch or download below.</p> : <>
       {entry.production.needsAttention && <p>Production needs attention. Your saved version and payment records remain available.</p>}
-      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{paid ? "Payment is confirmed. Your paid version is saved; follow its progress below." : "Your production plan is saved. Your video has not been created yet."}</p>}
+      {entry.production.status === "prepared" && entry.kind === "plan" && <p>{covered ? "Your corrected version is saved; follow its production progress below."
+        : paid ? "Payment is confirmed. Your paid version is saved; follow its progress below." : "Your production plan is saved. Your video has not been created yet."}</p>}
       {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete. Your video is not ready yet.</p>}
       {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
-      {paid && entry.kind === "plan" && <p className="field-note">Your payment covers this saved version. <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
+      {productionCovered && entry.kind === "plan" && <p className="field-note">{covered ? "Your original payment covers this corrected version." : "Your payment covers this saved version."} <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
     </>}
-    {entry.kind === "plan" && <FilmProductionProgress paid={paid} ready={libraryCanWatch(entry)} available={productionAvailable} status={entry.production.status}
+    {entry.kind === "plan" && <FilmProductionProgress paid={productionCovered} ready={libraryCanWatch(entry)} available={productionAvailable} status={entry.production.status}
       completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention}
       workerReady={entry.production.workerReady} message={entry.production.message} />}
   </div>;
@@ -48,7 +56,9 @@ export function SavedPlanVersionAction({ detail, disabled, onCreateVersion }: {
 }) {
   if (detail.entry.kind !== "plan" || !detail.manifest) return null;
   return <div className="film-library-version-action">
-    <p className="field-note">Create a separate browser draft using this saved screenplay as its source. Original uploads are not copied. The original payment stays with this saved plan. Review the new draft and choose its running time before production.</p>
+    <p className="field-note">Create a separate browser draft using this saved screenplay as its source. Original uploads are not copied. {detail.entry.coverage
+      ? "The original payment remains with the original paid film. This correction's coverage does not transfer to a new draft."
+      : "The original payment stays with this saved plan."} Review the new draft and choose its running time before production.</p>
     {detail.sourceNames && detail.sourceNames.length > 0 && <details>
       <summary>Original source filenames ({detail.sourceNames.length})</summary>
       <p className="field-note">These names are references from the saved plan. Add the original files separately if you want them read again.</p>

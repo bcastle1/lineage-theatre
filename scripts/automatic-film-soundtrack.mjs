@@ -30,8 +30,9 @@ const fail = reason => markFinishingFailure(Object.assign(new Error('The saved s
   { code: 'FILM_SPEECH_REVIEW_REQUIRED', soundtrackReason: reason }), 'speech-review', 'SPEECH_REVIEW_REQUIRED');
 const requireValue = (value, reason = 'SOUNDTRACK_BINDING_INVALID') => { if (!value) throw fail(reason); };
 
-// Stock actors, not inferred identities or cloned voices. Saved cast order alone
-// chooses distinct voices; a changed script/recipe gets a different binding.
+// Stock actors, not cloned voices. Honor an explicit gender in the opening
+// description; never infer it from names, photos, ancestry, or other characters.
+// The resulting voice map is part of the durable soundtrack binding.
 const STOCK_VOICES = Object.freeze(['af_heart', 'am_fenrir', 'af_bella', 'am_adam', 'af_nicole', 'am_echo',
   'af_sarah', 'am_liam', 'af_nova', 'am_onyx', 'af_jessica', 'am_puck', 'af_kore', 'am_santa', 'af_aoede', 'am_eric']);
 export function standardFilmVoices(manifest, manifestHash) {
@@ -43,8 +44,20 @@ export function standardFilmVoices(manifest, manifestHash) {
     requireValue(typeof character?.id === 'string' && typeof character.name === 'string', 'STOCK_CAST_UNAVAILABLE');
     fullLabels.add(label(character.id)); fullLabels.add(label(character.name));
   }
+  const assigned = new Set(), explicit = new Map();
+  for (const character of cast) {
+    const opening = String(character.description || '').split(/[.!?]/, 1)[0];
+    const male = /\b(?:man|male)\b/i.test(opening), female = /\b(?:woman|female)\b/i.test(opening);
+    if (male === female) continue;
+    const voice = STOCK_VOICES.find(candidate => candidate.startsWith(male ? 'am_' : 'af_') && !assigned.has(candidate));
+    requireValue(voice, 'STOCK_CAST_UNAVAILABLE');
+    assigned.add(voice); explicit.set(character.id, voice);
+  }
   for (const [index, character] of cast.entries()) {
-    voices.characterVoices[character.id] = STOCK_VOICES[index];
+    const preferred = STOCK_VOICES[index];
+    const voice = explicit.get(character.id) || (!assigned.has(preferred) ? preferred : STOCK_VOICES.find(candidate => !assigned.has(candidate)));
+    requireValue(voice, 'STOCK_CAST_UNAVAILABLE');
+    assigned.add(voice); voices.characterVoices[character.id] = voice;
     const first = label(character.name).split(' ')[0];
     if (/^[a-z][a-z'-]{1,63}$/.test(first) && !fullLabels.has(first)
       && cast.filter(other => label(other.name).split(' ')[0] === first).length === 1) voices.speakerAliases[first] = character.id;
