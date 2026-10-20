@@ -29,10 +29,12 @@ export function parseRecoveryBilling(bytes, expectedHash, expectedAccount) {
     && Number.isFinite(row.quantity) && row.quantity >= 0 && row.quantity <= 15 && Math.round(row.quantity * 14) === row.amountCents));
   return { sha256: expectedHash, observedAt: source.observedAt, rows };
 }
-async function boundedResponse(response) {
+async function boundedResponse(response, maximumBytes = 64 * 1024) {
   requireValue(response.body); const reader = response.body.getReader(), chunks = []; let size = 0;
-  try { for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; requireValue(size <= 64 * 1024); chunks.push(next.value); }
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  try { for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.byteLength; requireValue(size <= maximumBytes); chunks.push(next.value); }
+    // Provider validation errors can echo private input. Never expose that
+    // input through a JSON parser error, including operator diagnostics.
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw fail(); }
   } finally { await reader.cancel().catch(() => {}); }
 }
 export function promptLengthRejection(body) {
@@ -53,7 +55,10 @@ export async function verifyPromptRejectedReceipt(receipt, { key = () => process
   requireValue(status.status === 'COMPLETED' && (!status.request_id || status.request_id === receipt.requestId));
   const resultResponse = await fetchImpl(falRequestUrl(receipt.responseUrl, receipt.endpoint, receipt.requestId, 'result'), options);
   if (resultResponse.status !== 422) { await resultResponse.body?.cancel(); throw Object.assign(fail(), { httpStatus: resultResponse.status }); }
-  requireValue(promptLengthRejection(await boundedResponse(resultResponse)));
+  // A terminal 422 may echo normalized reference images in its input field.
+  // Match the normal fal-client response bound only for this error result;
+  // status and authorization responses retain their 64 KiB limit.
+  requireValue(promptLengthRejection(await boundedResponse(resultResponse, 2_000_000)));
   return true;
 }
 async function remoteAuthorize(input) {

@@ -148,3 +148,43 @@ test('terminal proof accepts only GET-bound prompt-length422, never a processing
   await assert.rejects(verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async () => new Response(null, { status: 401 }) }),
     error => error.code === 'KLING_RECOVERY_UNVERIFIED' && error.httpStatus === 401);
 });
+
+test('terminal 422 accepts bounded echoed input while status retains its 64 KiB limit', async () => {
+  const receipt = { state: 'failed', failureCode: 'FAL_RENDER_FAILED', endpoint: FAL_MODELS.kling, requestId: 'fictional-request',
+    statusUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request/status', responseUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request' };
+  const result = { detail: [{ loc: ['body'], msg: 'prompt: size must be between 0 and 2500', type: 'input_value_error', input: { image_urls: [''] } }] };
+  const overhead = Buffer.byteLength(JSON.stringify(result));
+  for (const size of [411_058, 2_000_000]) {
+    result.detail[0].input.image_urls[0] = 'A'.repeat(size - overhead);
+    const bytes = Buffer.from(JSON.stringify(result)); assert.equal(bytes.length, size);
+    const methods = [];
+    assert.equal(await verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async (url, request) => {
+      methods.push(request.method);
+      return url.endsWith('/status') ? Response.json({ status: 'COMPLETED', request_id: receipt.requestId }) : new Response(bytes, { status: 422 });
+    } }), true);
+    assert.deepEqual(methods, ['GET', 'GET']);
+  }
+  for (const oversizedStatus of [false, true]) {
+    const limit = oversizedStatus ? 64 * 1024 : 2_000_000, bytes = new Uint8Array(limit + 1).fill(65);
+    let canceled = false, offset = 0, calls = 0;
+    const body = new ReadableStream({ pull(controller) {
+      if (offset === bytes.length) { controller.close(); return; }
+      const end = Math.min(offset + 16_384, bytes.length); controller.enqueue(bytes.slice(offset, end)); offset = end;
+    }, cancel() { canceled = true; } }, { highWaterMark: 0 });
+    await assert.rejects(verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async url => {
+      calls++;
+      if (url.endsWith('/status') && !oversizedStatus) return Response.json({ status: 'COMPLETED' });
+      return new Response(body, { status: oversizedStatus ? 200 : 422 });
+    } }), { code: 'KLING_RECOVERY_UNVERIFIED' });
+    assert.equal(canceled, true); assert.equal(calls, oversizedStatus ? 1 : 2);
+  }
+});
+
+test('malformed provider JSON cannot expose echoed private input in an error', async () => {
+  const receipt = { state: 'failed', failureCode: 'FAL_RENDER_FAILED', endpoint: FAL_MODELS.kling, requestId: 'fictional-request',
+    statusUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request/status', responseUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request' };
+  const marker = 'FICTIONAL_PRIVATE_ECHO';
+  await assert.rejects(verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async url => url.endsWith('/status')
+    ? Response.json({ status: 'COMPLETED' }) : new Response(`{"detail": ${marker}}`, { status: 422 }) }),
+  error => error.code === 'KLING_RECOVERY_UNVERIFIED' && !String(error.stack).includes(marker));
+});
