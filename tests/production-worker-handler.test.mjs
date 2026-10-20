@@ -57,3 +57,25 @@ test('reviewed delivery accepts an explicit supported candidate model but reject
   assert.equal((await invoke(f,{body:{...body,model:'unknown'}})).statusCode,400);assert.equal(calls,0);
   assert.equal((await invoke(f,{body})).statusCode,200);assert.equal(calls,1);
 });
+
+test('explicit failed-shot recovery uses a separate immutable-claim gate without relaxing ordinary worker leases', async () => {
+  const request = { action: 'authorize-failed-shot-recovery', email: input.email, preparedId: input.preparedId,
+    manifestHash: input.manifestHash, correctionId: input.orderId, recoveryId: 'd'.repeat(64),
+    originalIdentity: 'e'.repeat(64), originalRequestId: 'original-request-id', replacementIdentity: 'f'.repeat(64),
+    model: 'kling', recipe: adapter.modelVersion };
+  let calls = 0;
+  const f = fixture({ adapter: { ...adapter, model: 'kling' }, read: async () => null,
+    corrections: { authorizeFailedShotRecovery: async value => {
+      const { action, model, recipe, ...expected } = request; assert.deepEqual(value, expected); calls++;
+      return { allowed: true, recoveryId: value.recoveryId };
+    } } });
+  for (const change of [{ headers: {} }, { body: { ...request, paid: true } }, { body: { ...request, model: 'wan' } },
+    { body: { ...request, replacementIdentity: 'invalid' } }, { body: { ...request, preparedId: '../other' } }]) {
+    assert.notEqual((await invoke(f, { body: request, ...change })).statusCode, 200); assert.equal(calls, 0);
+  }
+  const result = await invoke(f, { body: request }); assert.equal(result.statusCode, 200); assert.equal(result.body.allowed, true);
+  assert.equal(calls, 1); assert.equal(f.calls(), 0);
+  assert.equal((await invoke(f, { body: { ...input, model: 'kling', recipe: adapter.modelVersion } })).statusCode, 409);
+  const unavailable = fixture({ adapter: { ...adapter, model: 'kling', available: false } });
+  assert.equal((await invoke(unavailable, { body: request })).statusCode, 400);
+});

@@ -1,7 +1,8 @@
 import { digest, readRecord, writeRecord, userPath } from './auth.mjs';
 import { isOwner } from './access.mjs';
-import { createFalFunding } from './fal-funding.mjs';
-import { FAL_RECIPE_VERSION } from './fal-production.mjs';
+import { createFalFunding, readFalCreditCents } from './fal-funding.mjs';
+import { FAL_RECIPE_VERSION, falPlan } from './fal-production.mjs';
+import { FAL_MODELS, falRequestPath } from './fal-client.mjs';
 
 const HASH = /^[a-f0-9]{64}$/, UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const hash = value => digest(JSON.stringify(value));
@@ -123,6 +124,23 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
       apiVerified: adapter.evidence?.apiVerified === true, qualityVerified: adapter.evidence?.qualityVerified === true,
       commercialTermsVerified: adapter.evidence?.commercialTermsVerified === true };
   },
+  recoveryQuoteProvider = async ({ email, preparedId, manifestHash }) => {
+    // An explicitly stopped queue has no fresh worker heartbeat. This separate
+    // read-only price check retains the qualified model and exact saved plan.
+    const { createFalProductionAdapter } = await import('./fal-production.mjs');
+    const adapter = createFalProductionAdapter({ requireWorker: false });
+    const record = await read(jobPath(email, preparedId)), job = record?.value;
+    if (!record?.etag || !validJob(job, email, preparedId, manifestHash) || !adapter.available
+      || adapter.model !== 'kling' || adapter.modelVersion !== FAL_RECIPE_VERSION) throw invalid();
+    const validation = await adapter.validateManifest(structuredClone(job.manifest));
+    const quote = await adapter.quote({ manifest: structuredClone(job.manifest), manifestHash });
+    if (validation?.ready !== true || !cents(validation.maximumCostCents) || quote?.manifestHash !== manifestHash
+      || (await read(jobPath(email, preparedId)))?.etag !== record.etag) throw invalid();
+    return { ...quote, preparedId, manifestHash, environment: 'production', maximumCostCents: validation.maximumCostCents,
+      apiVerified: adapter.evidence.apiVerified === true, qualityVerified: adapter.evidence.qualityVerified === true,
+      commercialTermsVerified: adapter.evidence.commercialTermsVerified === true };
+  },
+  readRecoveryCreditCents = readFalCreditCents,
   verifyPaidSale = input => import('./hosted-checkout.mjs').then(m => m.hostedCheckout.verifyPaidSale(input)),
   reserveFunding = createFalFunding({ read, write, now }).reserve } = {}) {
   async function immutable(path, value) {
@@ -206,6 +224,93 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
     return { allowed: true, manifestHash, budgetCents: grant.quote.maximumCostCents, quoteReference: grant.quote.quoteReference,
       expiresAt, environment: 'production', fictionalOnly: false, correctionId: grant.id, originalOrderId: grant.originalOrderId };
   }
-  return { approve, authorizeProduction };
+  async function authorizeFailedShotRecovery({ email, correctionId, preparedId, manifestHash, recoveryId,
+    originalIdentity, originalRequestId, replacementIdentity } = {}) {
+    if (![correctionId, manifestHash, recoveryId, originalIdentity, replacementIdentity].every(value => HASH.test(value || ''))
+      || !UUID.test(preparedId || '') || !/^[a-zA-Z0-9_-]{8,100}$/.test(originalRequestId || '')
+      || recoveryId !== digest(`kling-prompt-recovery-v1:${originalIdentity}:${originalRequestId}`)
+      || replacementIdentity !== digest(`${recoveryId}:replacement-v1`)) throw invalid();
+    const context = await readPaidFilmCorrection({ email, correctionId, read, now });
+    if (!context || context.grant.preparedId !== preparedId || context.grant.manifestHash !== manifestHash) throw invalid();
+    const { grant, job } = context, at = now();
+    if (job.status !== 'failed' || job.lease?.expiresAt > at || job.artifact
+      || job.authorization?.correctionId !== grant.id || job.authorization.originalOrderId !== grant.originalOrderId
+      || job.authorization.quoteReference !== grant.quote.quoteReference || job.authorization.budgetCents !== grant.quote.maximumCostCents
+      || job.authorization.manifestHash !== manifestHash || job.authorization.environment !== 'production'
+      || job.provider?.id !== 'fal' || job.provider.model !== 'kling' || job.provider.recipe !== grant.recipe) throw invalid();
+    const snapshots = [];
+    const snapshot = async path => { const record = await read(path); snapshots.push({ path, etag: record?.etag }); return record; };
+    const queue = await snapshot(`production/queue/${digest(email)}/${preparedId}.json`), ticket = queue?.value;
+    const saved = await snapshot(`production/fal/failed-shot-recoveries/${recoveryId}.json`), claim = saved?.value;
+    if (!queue?.etag || ticket.version !== 1 || ticket.state !== 'attention' || ticket.email !== email || ticket.id !== preparedId
+      || ticket.orderId !== correctionId || ticket.manifestHash !== manifestHash || ticket.lease?.expiresAt > at
+      || !saved?.etag || claim.version !== 1 || claim.kind !== 'kling-failed-shot-recovery-v1'
+      || claim.recoveryId !== recoveryId || claim.ownerHash !== digest(email) || claim.preparedId !== preparedId
+      || claim.manifestHash !== manifestHash || claim.correctionId !== correctionId || claim.model !== 'kling'
+      || claim.recipe !== grant.recipe || claim.maximumCostCents !== grant.quote.maximumCostCents
+      || claim.maximumTotalCostCents !== grant.maximumCostCents || claim.maximumCostCents !== claim.maximumTotalCostCents
+      || claim.originalIdentity !== originalIdentity || claim.originalRequestId !== originalRequestId
+      || claim.replacementIdentity !== replacementIdentity || claim.endpoint !== FAL_MODELS.kling
+      || !HASH.test(claim.originalInputHash || '') || !HASH.test(claim.inputHash || '') || claim.inputHash === claim.originalInputHash
+      || claim.terminalFailure !== 'PROMPT_LENGTH_422' || claim.zeroChargeCents !== 0
+      || !HASH.test(claim.billingEvidenceSha256 || '') || !HASH.test(claim.rejectionEvidenceSha256 || '')
+      || !time(claim.billingObservedAt) || !time(claim.createdAt) || Date.parse(claim.billingObservedAt) > Date.parse(claim.createdAt)
+      || Date.parse(claim.createdAt) > at || !Number.isSafeInteger(claim.priorSpendCents) || claim.priorSpendCents < 0
+      || !correctionBudget(claim.totalReplacementMaximumCents) || !correctionBudget(claim.replacementMaximumCents)
+      || claim.priorSpendCents + claim.totalReplacementMaximumCents > grant.quote.maximumCostCents
+      || !Array.isArray(claim.originalRequests) || claim.originalRequests.length !== job.shots.length
+      || !Array.isArray(claim.selectedRequests) || claim.selectedRequests.length < 1 || claim.selectedRequests.length > 2
+      || claim.selectedRequests.length > job.shots.length) throw invalid();
+    const plan = falPlan(job.manifest, 'kling');
+    const selected = new Map();
+    for (const item of claim.selectedRequests) {
+      if (!Number.isSafeInteger(item?.shotIndex) || item.shotIndex < 1 || item.shotIndex > job.shots.length
+        || !/^[a-zA-Z0-9_-]{8,100}$/.test(item.requestId || '') || selected.has(item.shotIndex)) throw invalid();
+      selected.set(item.shotIndex, item.requestId);
+    }
+    if (new Set(claim.originalRequests.map(item => item?.requestId)).size !== job.shots.length) throw invalid();
+    let originalSpend = 0, replacementCeiling = 0;
+    for (let index = 0; index < job.shots.length; index++) {
+      const shot = job.shots[index], identity = digest(`${grant.recipe}:kling:${shot.requestKey}`);
+      if (!HASH.test(shot.requestKey || '') || shot.providerJobId !== `fal-${identity}`) throw invalid();
+      const record = await snapshot(falRequestPath(identity)), receipt = record?.value;
+      const charge = claim.originalRequests.find(item => item.requestId === receipt?.requestId);
+      if (!record?.etag || receipt.version !== 1 || receipt.identity !== identity || receipt.endpoint !== FAL_MODELS.kling
+        || !HASH.test(receipt.inputHash || '') || !/^[a-zA-Z0-9_-]{8,100}$/.test(receipt.requestId || '')
+        || !charge || !Number.isSafeInteger(charge.amountCents) || charge.amountCents < 0) throw invalid();
+      originalSpend += charge.amountCents;
+      if (selected.has(index + 1)) {
+        if (selected.get(index + 1) !== receipt.requestId || receipt.state !== 'failed' || receipt.failureCode !== 'FAL_RENDER_FAILED'
+          || receipt.result || charge.amountCents !== 0 || !['failed', 'queued', 'processing', 'uncertain'].includes(shot.status)) throw invalid();
+        replacementCeiling += plan.shots[index].seconds * 15;
+      } else if (receipt.state !== 'completed' || charge.amountCents !== plan.shots[index].seconds * 14) throw invalid();
+      if (identity === originalIdentity && (claim.shotIndex !== index + 1 || claim.shotId !== shot.id
+        || !selected.has(index + 1) || receipt.requestId !== originalRequestId || receipt.inputHash !== claim.originalInputHash
+        || claim.providerSeconds !== plan.shots[index].seconds || claim.replacementMaximumCents !== plan.shots[index].seconds * 15)) throw invalid();
+    }
+    if (selected.get(claim.shotIndex) !== originalRequestId || claim.shotId !== job.shots[claim.shotIndex - 1]?.id
+      || originalIdentity !== digest(`${grant.recipe}:kling:${job.shots[claim.shotIndex - 1]?.requestKey}`)
+      || claim.priorSpendCents < originalSpend + plan.referenceCount * 30
+      || claim.totalReplacementMaximumCents !== replacementCeiling || claim.replacementMaximumCents > claim.totalReplacementMaximumCents
+      || await snapshot(falRequestPath(replacementIdentity)) || await snapshot(`production/fal/choices/${originalIdentity}.json`)) throw invalid();
+    const executionQuote = await recoveryQuoteProvider({ email, preparedId, manifestHash, environment: 'production', budgetCents: grant.quote.maximumCostCents });
+    if (!quoteValid(executionQuote, grant, now) || executionQuote.maximumCostCents > grant.quote.maximumCostCents) throw invalid();
+    // Only the remaining repair ceiling needs wallet capacity. The original
+    // correction reservation, invoice and paid amount are never recreated.
+    const available = await readRecoveryCreditCents();
+    if (!Number.isSafeInteger(available) || available < claim.totalReplacementMaximumCents) throw invalid();
+    const proof = await verifyPaidSale({ email, orderId: grant.originalOrderId, preparedId: grant.originalPreparedId, manifestHash: grant.originalManifestHash });
+    if (correctionSourceHash(proof?.order) !== grant.sourceOrderHash || !time(proof.expiresAt) || Date.parse(proof.expiresAt) <= now()) throw invalid();
+    await context.recheck(); await proof.recheck();
+    for (const saved of snapshots) if ((await read(saved.path))?.etag !== saved.etag) throw invalid();
+    const until = Math.min(Date.parse(proof.expiresAt), Date.parse(executionQuote.expiresAt), now() + 60_000);
+    if (until <= now()) throw invalid();
+    return { allowed: true, environment: 'production', fictionalOnly: false, preparedId, manifestHash, correctionId,
+      originalOrderId: grant.originalOrderId, budgetCents: grant.quote.maximumCostCents, quoteReference: grant.quote.quoteReference,
+      recoveryId, originalIdentity, originalRequestId, replacementIdentity, inputHash: claim.inputHash,
+      replacementMaximumCents: claim.replacementMaximumCents, totalReplacementMaximumCents: claim.totalReplacementMaximumCents,
+      expiresAt: new Date(until).toISOString() };
+  }
+  return { approve, authorizeProduction, authorizeFailedShotRecovery };
 }
 export const paidFilmCorrections = createPaidFilmCorrections();

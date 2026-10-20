@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { createFalClient, FAL_MODELS, falRequestUrl, falMediaUrl } from '../api/_lib/fal-client.mjs';
-import { createFalProductionAdapter, falAdapterForSavedProvider, qualifiedFalRelease, falPlan, falShotInput, FalProductionPlanError, FAL_RECIPE_VERSION, FAL_LEGACY_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { createFalProductionAdapter, falAdapterForSavedProvider, qualifiedFalRelease, falPlan, falShotInput, falRecoveryShotInput, FalProductionPlanError, FAL_RECIPE_VERSION, FAL_LEGACY_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 
@@ -305,11 +305,68 @@ test('long scene prompts compact only generic directions and retain every saved 
   shot.dialogue='Fictional Ada: We planted this together.\nFictional Alice: We can share it together.';
   const before=JSON.stringify(manifest),refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.jpg']));
   const prompt=falShotInput(manifest,shot,'kling',refs).prompt;
-  assert.ok(prompt.length<=2500);assert.match(prompt,/Verbatim once/);
+  assert.ok(Buffer.byteLength(prompt,'utf8')<2400);
+  assert.ok(Buffer.byteLength(JSON.stringify(prompt),'utf8')<2400);assert.match(prompt,/Verbatim once/);
   for(const value of [manifest.screenplay.logline,...manifest.screenplay.characters.map(c=>c.description),
     shot.visual,shot.dramatization,shot.narration,shot.dialogue])assert.ok(prompt.includes(value));
   assert.equal(JSON.stringify(manifest),before);
   shot.visual+=' More visual details.'.repeat(60);
   assert.throws(()=>falPlan(manifest,'kling'),error=>error instanceof FalProductionPlanError
     && error.status===422&&error.code==='FILM_PROMPT_TOO_LONG'&&/Scene 1.*Shorten/.test(error.message));
+});
+
+test('Kling prompt limits include Unicode bytes and JSON escapes without dropping saved text',()=>{
+  const {manifest}=klingFixture(),shot=manifest.shots[0];
+  const refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.jpg']));
+  shot.visual='A café with “period clothes” and a readable façade. '.repeat(14);
+  shot.narration='The café opens at dawn.';
+  const before=JSON.stringify(manifest),body=falRecoveryShotInput(manifest,shot,refs);
+  assert.deepEqual(body,falShotInput(manifest,shot,'kling',refs));
+  assert.ok(body.prompt.includes(shot.visual));assert.ok(body.prompt.includes(shot.narration));
+  assert.ok(Buffer.byteLength(body.prompt,'utf8')<2400);
+  assert.ok(Buffer.byteLength(JSON.stringify(body.prompt),'utf8')<2400);
+  assert.equal(body.duration,'12');assert.equal(body.generate_audio,true);
+  assert.equal(body.aspect_ratio,'16:9');assert.equal(body.shot_type,'customize');
+  assert.equal(body.enable_safety_checker,true);
+  assert.deepEqual(body.image_urls,shot.characterIds.map(id=>refs[id]));
+  assert.equal(JSON.stringify(manifest),before);
+  for(const visual of ['é'.repeat(1100),'"\\'.repeat(650)]){
+    shot.visual=visual;
+    const unchanged=JSON.stringify(manifest);
+    assert.ok(visual.length<2500);
+    assert.throws(()=>falRecoveryShotInput(manifest,shot,refs),error=>error instanceof FalProductionPlanError
+      &&error.status===422&&/UTF-8 bytes/.test(error.message));
+    assert.equal(JSON.stringify(manifest),unchanged);
+  }
+});
+
+test('stricter prompt validation cannot replay or prevent reconciliation of saved Kling operations',async()=>{
+  const {manifest}=klingFixture(),shot=manifest.shots[0];shot.visual='é'.repeat(1100);
+  const manifestHash=digest(JSON.stringify(manifest)),idempotencyKey=digest('saved preflight request');
+  const identity=digest(`${FAL_RECIPE_VERSION}:kling:${idempotencyKey}`);
+  assert.throws(()=>falPlan(manifest,'kling'),FalProductionPlanError);
+  for(const state of ['queued','failed','uncertain','completed']){
+    let polls=0;
+    const saved={endpoint:FAL_MODELS.kling,state,requestId:'fixture-saved-request',inputHash:digest('old exact prompt'),
+      result:{video:{url:'https://v3.fal.media/saved.mp4'}}};
+    const client={get:async id=>{assert.equal(id,identity);return saved;},
+      poll:async id=>{assert.equal(id,identity);polls++;return saved;},
+      submit:()=>assert.fail('A saved request must never be resubmitted')};
+    const adapter=createFalProductionAdapter({client,read:async()=>null,fetchImpl:async(url,options)=>{
+      assert.equal(url,saved.result.video.url);assert.equal(options.method,'HEAD');
+      return new Response(null,{headers:{'content-type':'video/mp4','content-length':'32'}});
+    }});
+    const result=await adapter.reconcileShot({manifest,manifestHash,shot,idempotencyKey,productionId:'saved-fixture',
+      authorizeSpend:()=>assert.fail('Reconciliation cannot acquire new spending authorization')});
+    assert.equal(result.status,state);assert.equal(polls,['queued','uncertain'].includes(state)?1:0);
+  }
+});
+
+test('an oversized new Kling prompt fails before any reference or video spending',async()=>{
+  const {manifest}=klingFixture();manifest.shots[0].visual='é'.repeat(1100);
+  const manifestHash=digest(JSON.stringify(manifest));
+  const adapter=createFalProductionAdapter({client:{get:async()=>null,submit:()=>assert.fail('No paid request')},
+    read:async()=>null,selectedPhoto:()=>assert.fail('No photo access is needed')});
+  await assert.rejects(adapter.submitShot({manifest,manifestHash,shot:manifest.shots[0],productionId:'new-fixture',
+    idempotencyKey:digest('oversized fresh request'),authorizeSpend:()=>assert.fail('No spending authorization')}),FalProductionPlanError);
 });
