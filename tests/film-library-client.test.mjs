@@ -222,6 +222,17 @@ test("malformed or unrelated correction coverage is not shown as authorized paym
     assert.throws(() => helpers.normalizeLibraryEntry(entry({ payments: [], coverage: { ...coverage(), ...change } })));
   assert.throws(() => helpers.normalizeLibraryEntry(entry({ kind: "upload", payments: [], manifestHash: undefined, coverage: coverage() })));
 });
+test("only the exact corrected browser draft is redirected from editing to its covered film status", () => {
+  const saved = helpers.normalizeLibraryEntry(entry({ payments: [], coverage: coverage() }));
+  const draft = { ...newFilm(), id: saved.filmId, productionPreparation: { id: saved.id, manifestHash: saved.manifestHash } };
+  assert.equal(helpers.libraryCoveredDraft([saved], draft), saved);
+  assert.equal(helpers.libraryFilmLink(helpers.libraryCoveredDraft([saved], draft).id), `#library?film=${saved.id}`);
+  for (const changed of [{ ...draft, id: "another-draft" }, { ...draft, productionPreparation: undefined },
+    { ...draft, productionPreparation: { ...draft.productionPreparation, id: coverage().originalPreparedId } },
+    { ...draft, productionPreparation: { ...draft.productionPreparation, manifestHash: "d".repeat(64) } }])
+    assert.equal(helpers.libraryCoveredDraft([saved], changed), null);
+  assert.equal(helpers.libraryCoveredDraft([{ ...saved, coverage: undefined }], draft), null);
+});
 test("a correction downloads only the original production payment receipt and preserves its recorded amount", () => {
   const receipt = { receiptId: coverage().orderId, filmTitle: "The original paid version", currency: "USD", amountCents: 330,
     refundedCents: 0, capturedAt: "2026-10-20T12:00:00Z", status: "captured", sandbox: false,

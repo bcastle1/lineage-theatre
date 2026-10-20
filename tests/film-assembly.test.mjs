@@ -20,6 +20,46 @@ test('film overlays preserve explicit date captions and a legible final dramatiz
   assert.doesNotMatch(filmOverlayAss(manifest), /\{\\pos/);
   assert.equal(filmOverlayAss({ shots: [{ visual: 'Uncaptioned fictional scene.' }] }), null);
 });
+
+test('saved unquoted titles retain dates and punctuation once across split scenes, with the end card at the end', () => {
+  const visuals = [
+    'A campus. Opening title: A Fictional Legacy. Small location title: Example University.',
+    'A montage. On-screen text: Accounting graduate, 1961; Service entry, 1964. Camera tracks left.',
+    'An office. Title: Managerial promotion, 1972. A restrained overlay identifies examples from his career: Example A; Example B; Example C.',
+    'A family visit. Title: After retirement, 1984.',
+    'A portrait. end card: Morgan Example | 1933–2002. Fade to black.',
+  ];
+  const shots = visuals.flatMap((visual, scene) => [1, 2].map(scenePart => ({
+    visual, scenePart, sceneParts: 2, startMs: scene * 20_000 + (scenePart - 1) * 10_000, targetDurationMs: 10_000,
+  })));
+  const manifest = { factuality: 'based-on-a-true-story', shots }, before = structuredClone(manifest);
+  const ass = filmOverlayAss(manifest), events = ass.split('\n').filter(line => line.startsWith('Dialogue:'));
+  assert.equal(events.length, 8);
+  assert.match(ass, /0:00:00.00,0:00:10.00,Opening.*A Fictional Legacy\./);
+  assert.match(ass, /0:00:00.00,0:00:10.00,Location.*Example University\./);
+  assert.match(ass, /0:00:20.00,0:00:30.00,Location.*Accounting graduate, 1961; Service entry, 1964\./);
+  assert.match(ass, /0:00:40.00,0:00:50.00,Title.*Managerial promotion, 1972\./);
+  assert.match(ass, /0:00:40.00,0:00:50.00,Location,,0,0,170,,Example A; Example B; Example C\./);
+  assert.match(ass, /0:01:00.00,0:01:10.00,Title.*After retirement, 1984\./);
+  assert.match(ass, /0:01:36.00,0:01:40.00,EndCard.*Morgan Example \| 1933–2002\./);
+  assert.match(ass, /0:01:30.00,0:01:40.00,Disclosure/);
+  assert.doesNotMatch(ass, /Camera tracks|Fade to black/);
+  assert.deepEqual(manifest, before);
+});
+
+test('title parsing remains bounded, escapes ASS controls, preserves quoted text and does not infer captions', () => {
+  const shot = visual => ({ visual, startMs: 0, targetDurationMs: 3000 });
+  assert.equal(filmOverlayAss({ shots: [shot('The story includes a title and an end card without supplied text.')] }), null);
+  assert.equal(filmOverlayAss({ shots: [shot(`Title: ${'x'.repeat(161)}.`)] }), null);
+  const ass = filmOverlayAss({ shots: [shot('Title: “A. B. Example, 1972.” Caption: “A. B. Example, 1972.” end card: {\\pos(1,1)}Dr. Example | 1933–2002.')] });
+  assert.equal(ass.split('\n').filter(line => line.startsWith('Dialogue:')).length, 2);
+  assert.match(ass, /A\. B\. Example, 1972\./);
+  assert.match(ass, /0:00:00.00,0:00:03.00,EndCard/);
+  assert.doesNotMatch(ass, /\{\\pos/);
+  const nested = filmOverlayAss({ shots: [shot('Opening title: “The title: A fictional story.”')] });
+  assert.equal(nested.split('\n').filter(line => line.startsWith('Dialogue:')).length, 1);
+  assert.throws(() => filmOverlayAss({ shots: [{ ...shot('Title: Example.'), scenePart: 3, sceneParts: 2 }] }), /scene-part timeline/);
+});
 test("native assembly profiles retain 1080p and exact fractional frame rates", () => {
   assert.deepEqual(chooseAssemblyProfile([profile(1920, 1080, 30000 / 1001, "30000/1001")]),
     { width: 1920, height: 1080, frameRate: 30000 / 1001, frameRateRatio: "30000/1001" });
