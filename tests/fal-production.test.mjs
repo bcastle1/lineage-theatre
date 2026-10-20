@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { createFalClient, FAL_MODELS, falRequestUrl, falMediaUrl } from '../api/_lib/fal-client.mjs';
-import { createFalProductionAdapter, falAdapterForSavedProvider, qualifiedFalRelease, falPlan, falShotInput, FAL_RECIPE_VERSION, FAL_LEGACY_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { createFalProductionAdapter, falAdapterForSavedProvider, qualifiedFalRelease, falPlan, falShotInput, FalProductionPlanError, FAL_RECIPE_VERSION, FAL_LEGACY_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
+import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 
 // All qualification, prices, requests and media here are synthetic test data.
 // They are not live provider or customer-film completion evidence.
@@ -281,4 +282,34 @@ test('a wrong-model durable request cannot be reused or polled under a Kling ide
   const adapter=createFalProductionAdapter({client:{get:async()=>({endpoint:FAL_MODELS.wan,state:'queued',requestId:'wrong-model-request'}),
     poll:()=>assert.fail('Do not poll a mismatched record'),submit:()=>assert.fail()},read:async()=>null});
   await assert.rejects(adapter.reconcileShot({manifest,manifestHash,shot:manifest.shots[0],productionId:'fixture',idempotencyKey}));
+});
+
+test('the in-flight fictional canary keeps the exact original prompt bytes',()=>{
+  const manifest=planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+  const refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.jpg']));
+  const expected=['06b1b10017c9ce4f1f224cc30808015a79b3f8064075a670460310109f150496',
+    '12cab436f52e4d9936c1b73fe46198f579377d9589e9a2b65d5dd9443ed10156',
+    '9f53b1ab585e41deacf4701a3493c6cc7c49c9c24b7bdaff31eb14fee2172081'];
+  assert.deepEqual(manifest.shots.map(shot=>digest(falShotInput(manifest,shot,'kling',refs).prompt)),expected);
+});
+
+test('long scene prompts compact only generic directions and retain every saved creative field',()=>{
+  const {manifest}=klingFixture(),shot=manifest.shots[0];
+  const fill=(text,length)=>text.repeat(Math.ceil(length/text.length)).slice(0,length);
+  manifest.screenplay.characters[0].description=fill('A Black American adult in a green apron with an attentive expression. ',580);
+  manifest.screenplay.characters[1].description=fill('A fictional adult gardener wearing a blue apron. ',201);
+  manifest.screenplay.logline=fill('Two fictional gardeners share the harvest in their imaginary village. ',196);
+  shot.visual=fill('A photographic garden scene with warm natural lighting and realistic clothing. ',762);
+  shot.dramatization=fill('An entirely fictional interaction without claims about real people. ',282);
+  shot.narration='The two fictional sisters share their memories and their harvest.';
+  shot.dialogue='Fictional Ada: We planted this together.\nFictional Alice: We can share it together.';
+  const before=JSON.stringify(manifest),refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.jpg']));
+  const prompt=falShotInput(manifest,shot,'kling',refs).prompt;
+  assert.ok(prompt.length<=2500);assert.match(prompt,/Verbatim once/);
+  for(const value of [manifest.screenplay.logline,...manifest.screenplay.characters.map(c=>c.description),
+    shot.visual,shot.dramatization,shot.narration,shot.dialogue])assert.ok(prompt.includes(value));
+  assert.equal(JSON.stringify(manifest),before);
+  shot.visual+=' More visual details.'.repeat(60);
+  assert.throws(()=>falPlan(manifest,'kling'),error=>error instanceof FalProductionPlanError
+    && error.status===422&&error.code==='FILM_PROMPT_TOO_LONG'&&/Scene 1.*Shorten/.test(error.message));
 });

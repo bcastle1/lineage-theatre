@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { connections, createStudioHandler } from "../api/studio.mjs";
 import { createFilmProductionService, FilmProductionError } from "../api/_lib/film-production.mjs";
 import { productionReadiness } from "../api/_lib/production.mjs";
+import { FalProductionPlanError } from "../api/_lib/fal-production.mjs";
 
 const user = { email: "customer@example.invalid", role: "customer", status: "active" };
 const fixtureAdapter = () => ({ id: "fal", environment: "production", available: true,
@@ -61,4 +62,19 @@ test("throttled payment retries leave previous charge status unknown and never c
     assert.match(response.result.message, /Check an existing order/);
   }
   assert.equal(calls, 0);
+});
+
+test("unsupported Kling scenes return actionable validation before payment and do not expose arbitrary provider errors",async()=>{
+  const message="Scene 2 exceeds Kling's 2,500-character scene limit by 30 characters. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.";
+  let payments=0;
+  const handler=createStudioHandler({captcha:captchaStub,getSession:async()=>({user}),limitAction:async()=>true,
+    filmPricing:{price:async()=>{throw new FalProductionPlanError(message);}},
+    payments:{quote:async()=>{payments++;},checkout:async()=>{payments++;}}});
+  const response=await request(handler,"price",{preparedId:"fixture"});
+  assert.equal(response.status,422);assert.equal(response.result.code,"FILM_PROMPT_TOO_LONG");
+  assert.equal(response.result.message,message);assert.equal(payments,0);
+  const generic=createStudioHandler({captcha:captchaStub,getSession:async()=>({user}),limitAction:async()=>true,
+    filmPricing:{price:async()=>{throw Object.assign(new Error("private provider request"),{status:422,code:"FILM_PROMPT_TOO_LONG"});}}});
+  const denied=await request(generic,"price",{preparedId:"fixture"});
+  assert.equal(denied.status,503);assert.doesNotMatch(JSON.stringify(denied.result),/private provider request/);
 });

@@ -14,6 +14,9 @@ export const FAL_LEGACY_RECIPE_VERSION = 'lineage-realistic-wan-v2';
 export const falRecipeVersion = model => model === 'kling' ? FAL_RECIPE_VERSION : FAL_LEGACY_RECIPE_VERSION;
 const invalid = () => { throw new Error('The film needs a supported production plan.'); };
 const speech = shot => `${shot.narration || ''} ${shot.dialogue || ''}`.trim();
+export class FalProductionPlanError extends Error {
+  constructor(message, code = 'FILM_PROMPT_TOO_LONG') { super(message); this.status = 422; this.code = code; }
+}
 
 export function falPlan(manifest, model) {
   if (!['kling', 'seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
@@ -68,10 +71,31 @@ function klingPrompt(manifest, shot, characters) {
     manifest.sound?.musicRequested ? 'Subtle instrumental strings and ambience under clear speech; no vocals.' : 'Natural ambience; no music.',
     'No captions, titles, logos or watermarks. No facial drift, extra fingers, modern props or abrupt cuts.',
   ].join('\n');
-  // Never truncate the approved script or identity to fit the API. Quote and
-  // submit share this validation, so an overlong plan fails before payment.
-  if (prompt.length > 2500) invalid();
-  return prompt;
+  // Preserve the original request bytes for every previously supported shot,
+  // including an in-flight canary. Only overflowing plans use terse directions.
+  if (prompt.length <= 2500) return prompt;
+  const compact = [
+    ...shot.characterIds.map((id, index) => {
+      const character = characters.find(value => value.id === id);
+      return `@Image${index + 1} ${character.name}: ${realisticCreativeText(character.description)}`;
+    }),
+    `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'}. Era:${manifest.era}. Keep identities.`,
+    manifest.screenplay.logline,
+    `Scene:${direction}`,
+    `Limits:${shot.dramatization || 'No undocumented claims.'}`,
+    `Narration:${shot.narration || '(none)'}`,
+    `Dialogue:${shot.dialogue || '(none)'}`,
+    `Verbatim once; fixed narrator, distinct voices, lip sync. End${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s; hold${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Soft instrumental score under speech.' : 'Ambience; no music.',
+    'No text, reference sheets, facial drift or modern props.',
+  ].join('\n');
+  // Every saved creative field is still complete; no summarization, script
+  // rewriting, identity truncation or silent source changes are allowed.
+  if (compact.length > 2500) {
+    const index = manifest.shots.findIndex(value => value.id === shot.id) + 1;
+    throw new FalProductionPlanError(`Scene ${index} exceeds Kling's 2,500-character scene limit by ${compact.length - 2500} characters. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.`);
+  }
+  return compact;
 }
 
 export function characterReferenceInput(manifest, character) {
