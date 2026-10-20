@@ -120,6 +120,20 @@ test('billing receipt parser pins bytes, account, exact price and amounts withou
   source.rows[0] = source.rows[0].replace('$1.40', '$0.00'); const changed = Buffer.from(JSON.stringify(source));
   assert.throws(() => parseRecoveryBilling(changed, digest(changed), 'fictional-account'));
 });
+test('body-wrapped rejection accepts only the exact prompt input error and rejects mixed errors', () => {
+  const exact = { loc: ['body'], msg: 'prompt: size must be between 0 and 2500', type: 'input_value_error' };
+  assert.equal(promptLengthRejection({ detail: [exact] }), true);
+  for (const changed of [
+    { ...exact, loc: [] }, { ...exact, loc: ['body', 'image'] }, { ...exact, type: 'value_error' },
+    { ...exact, msg: 'image: size must be between 0 and 2500' },
+    { ...exact, msg: 'prompt: size must be between 0 and 25000' },
+    { ...exact, msg: 'prefix prompt: size must be between 0 and 2500' },
+    { ...exact, msg: 'prompt: size must be between 0 and 2500; unrelated failure' }
+  ]) {
+    assert.equal(promptLengthRejection({ detail: [changed] }), false);
+    assert.equal(promptLengthRejection({ detail: [exact, changed] }), false);
+  }
+});
 test('terminal proof accepts only GET-bound prompt-length422, never a processing task or unrelated error', async () => {
   assert.equal(promptLengthRejection({ detail: [{ loc: ['body', 'prompt'], msg: 'size must be between 0 and 2500' }] }), true);
   assert.equal(promptLengthRejection({ detail: [{ loc: ['body', 'image'], msg: 'size must be between 0 and 2500' }] }), false);
@@ -127,7 +141,8 @@ test('terminal proof accepts only GET-bound prompt-length422, never a processing
     statusUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request/status', responseUrl: 'https://queue.fal.run/fal-ai/kling-video/requests/fictional-request' };
   const calls = [];
   await verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async (url, request) => { calls.push(request.method);
-    return url.endsWith('/status') ? Response.json({ status: 'COMPLETED' }) : Response.json({ detail: 'prompt: size must be between 0 and 2500' }, { status: 422 }); } });
+    return url.endsWith('/status') ? Response.json({ status: 'COMPLETED' })
+      : Response.json({ detail: [{ loc: ['body'], msg: 'prompt: size must be between 0 and 2500', type: 'input_value_error' }] }, { status: 422 }); } });
   assert.deepEqual(calls, ['GET', 'GET']);
   await assert.rejects(verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async () => Response.json({ status: 'IN_PROGRESS' }) }));
   await assert.rejects(verifyPromptRejectedReceipt(receipt, { key: 'fixture-key', fetchImpl: async () => new Response(null, { status: 401 }) }),

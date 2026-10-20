@@ -38,7 +38,9 @@ async function boundedResponse(response) {
 export function promptLengthRejection(body) {
   const message = value => typeof value === 'string' && value.length <= 2000 && /size must be between\s*0\s*and\s*2500/i.test(value);
   if (Array.isArray(body?.detail)) return body.detail.length > 0 && body.detail.every(item =>
-    Array.isArray(item?.loc) && item.loc.includes('prompt') && message(item.msg));
+    Array.isArray(item?.loc) && (item.loc.includes('prompt') && message(item.msg)
+      || item.loc.length === 1 && item.loc[0] === 'body' && item.type === 'input_value_error'
+        && item.msg === 'prompt: size must be between 0 and 2500'));
   return [body?.detail, body?.error, body?.message].some(value => typeof value === 'string' && /\bprompt\b/i.test(value) && message(value));
 }
 export async function verifyPromptRejectedReceipt(receipt, { key = () => process.env.FAL_KLING_KEY, fetchImpl = fetch } = {}) {
