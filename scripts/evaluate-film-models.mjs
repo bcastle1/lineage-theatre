@@ -1,7 +1,7 @@
 // Isolated, merchant-funded comparison. This script never writes a production
 // job, payment, qualification or Blob record. Keep its private directory intact:
 // an exclusive claim permits at most one POST per candidate, even after a crash.
-// One separately claimed recovery is limited to the reviewed Kling rejection.
+// Separately claimed recoveries are limited to the reviewed Kling rejections.
 import { open, readFile, mkdir, lstat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ const SEEDANCE_PRICING = Object.freeze({ basePerThousandTokens: 0.0214,
   highResolutionPerThousandTokens: 0.0234, width: 1920, height: 1080, framesPerSecond: 24, tokenPixels: 1024 });
 const MAXIMUM_APPROVED_COST_CENTS = 2000;
 const REVIEWED_KLING_REJECTION_ID = '01a15695-178d-7d90-838c-6be342ac18c3';
+const REVIEWED_KLING_PROMPT_REJECTION_ID = '01a156a6-105b-7ae3-a3af-c84dba6fc6c7';
 const HASH = /^[a-f0-9]{64}$/, UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const requireValue = (condition, code) => { if (!condition) fail(code); };
@@ -371,22 +372,167 @@ async function retryRejectedKling(args, directory) {
     emit({ model, status: 'recovery-uncertain-no-resubmission' });
   }
 }
+function correctedKlingPrompt(context, selection, prompt) {
+  requireValue(typeof prompt === 'string' && prompt.length > 0 && prompt.length <= 2500
+    && !prompt.includes('\uFFFD') && selection.durationSeconds === 12, 'AMENDED_PROMPT_INVALID');
+  const labels = new Set([...prompt.matchAll(/@Image(\d+)\b/g)].map(match => Number(match[1])));
+  const folded = value => value.replace(/\s+/g, ' ').trim().toLowerCase();
+  requireValue(labels.size === context.references.length && context.references.every((reference, index) =>
+    labels.has(index + 1) && folded(prompt).includes(folded(reference.character.name)))
+    && [selection.narration, selection.dialogue].every(text => !text || prompt.includes(text))
+    && (!context.shot.dramatization || folded(prompt).includes(folded(context.shot.dramatization))), 'AMENDED_PROMPT_OMITS_SAVED_CONTENT');
+  return prompt;
+}
+async function promptRecoveryContext(plan, planSha256, directory, prompt) {
+  const originalClaim = await localJson(join(directory, 'kling-claim.json'));
+  const original = await localJson(join(directory, 'kling-receipt.json'));
+  const previous = await localJson(join(directory, 'kling-recovery-receipt.json'));
+  const previousClaim = await localJson(join(directory, 'kling-recovery-claim.json'));
+  const accessRejection = await localJson(join(directory, 'kling-confirmed-rejection.json'));
+  requireValue(originalClaim.planSha256 === planSha256 && originalClaim.endpoint === ENDPOINTS.kling
+    && originalClaim.inputSha256 === plan.inputProof.kling.sha256 && originalClaim.claimedAt === original.claimedAt
+    && original.planSha256 === planSha256 && original.endpoint === ENDPOINTS.kling
+    && original.requestId === REVIEWED_KLING_REJECTION_ID && original.inputSha256 === plan.inputProof.kling.sha256
+    && previous.planSha256 === planSha256 && previous.endpoint === ENDPOINTS.kling
+    && previous.requestId === REVIEWED_KLING_PROMPT_REJECTION_ID && previous.originalRequestId === original.requestId
+    && previous.inputSha256 === plan.inputProof.kling.sha256 && previous.state === 'queued'
+    && previousClaim.planSha256 === planSha256 && previousClaim.endpoint === ENDPOINTS.kling
+    && previousClaim.originalRequestId === original.requestId && previousClaim.claimedAt === previous.claimedAt
+    && previousClaim.inputSha256 === previous.inputSha256 && previousClaim.rejectionSha256 === previous.rejectionSha256
+    && previous.rejectionSha256 === jsonHash(accessRejection), 'PROMPT_REJECTION_CHAIN_REQUIRED');
+  const oldTerminal = await localJson(join(directory, 'kling-recovery-terminal.json'), true);
+  requireValue(!oldTerminal || oldTerminal.planSha256 === planSha256 && oldTerminal.requestId === previous.requestId
+    && oldTerminal.state === 'failed' && !oldTerminal.output, 'PRIOR_KLING_OUTPUT_EXISTS');
+  const seedance = await localJson(join(directory, 'seedance-receipt.json'));
+  const terminal = await localJson(join(directory, 'seedance-terminal.json'));
+  requireValue(seedance.planSha256 === planSha256 && seedance.endpoint === ENDPOINTS.seedance
+    && seedance.inputSha256 === plan.inputProof.seedance.sha256 && terminal.planSha256 === planSha256
+    && terminal.requestId === seedance.requestId && terminal.endpoint === ENDPOINTS.seedance
+    && terminal.state === 'completed' && terminal.output, 'COMPLETED_SEEDANCE_REQUIRED');
+  const current = await source(plan.source.preparedId, plan.sourceSelection);
+  requireValue(jsonHash(current.binding) === jsonHash(plan.source), 'SOURCE_CHANGED');
+  const selected = excerpt(plan.selection, current.shot), payloads = inputs(current, selected);
+  requireValue(jsonHash(inputProof(payloads, current)) === jsonHash(plan.inputProof), 'INPUT_CHANGED');
+  const live = await pricing(), originalCost = auditedRates(plan.rates, live, selected.durationSeconds);
+  // Reserve the full bound for all three Kling submissions, including the two
+  // rejected attempts. No unverified billing exemption can increase this limit.
+  const priorKlingReserveCents = 2 * Math.ceil(selected.durationSeconds * plan.rates.kling.maximumMicroUsdPerSecond / 10000);
+  const worstCaseCostCents = originalCost + priorKlingReserveCents;
+  requireValue(originalCost === plan.maximumEstimatedCostCents && Number.isSafeInteger(plan.maximumCostCents)
+    && worstCaseCostCents <= plan.maximumCostCents && plan.maximumCostCents <= MAXIMUM_APPROVED_COST_CENTS, 'BUDGET_CHANGED');
+  const status = await request(falRequestUrl(previous.statusUrl, ENDPOINTS.kling, previous.requestId, 'status'));
+  requireValue(status.status === 'COMPLETED' && status.request_id === previous.requestId, 'TERMINAL_REJECTION_REQUIRED');
+  const response = await fetch(falRequestUrl(previous.responseUrl, ENDPOINTS.kling, previous.requestId, 'result'), {
+    method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store',
+    headers: { Authorization: `Key ${process.env.FAL_KEY}`, Accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
+  if (response.status !== 422) { await response.body?.cancel(); fail('EXACT_PROMPT_REJECTION_REQUIRED'); }
+  const body = await boundedJson(response), expected = { detail: [{ loc: ['body', 'prompt'],
+    msg: 'String should have at most 2500 characters', type: 'string_too_long',
+    inputSha256: digest(payloads.kling.prompt), ctx: { max_length: 2500 } }] };
+  requireValue(body && Object.keys(body).join(',') === 'detail' && Array.isArray(body.detail) && body.detail.length === 1
+    && body.detail[0] && Object.keys(body.detail[0]).sort().join(',') === 'ctx,input,loc,msg,type'
+    && jsonHash(body.detail[0].loc) === jsonHash(expected.detail[0].loc)
+    && body.detail[0].msg === expected.detail[0].msg && body.detail[0].type === expected.detail[0].type
+    && body.detail[0].input === payloads.kling.prompt && body.detail[0].ctx
+    && Object.keys(body.detail[0].ctx).join(',') === 'max_length' && body.detail[0].ctx.max_length === 2500,
+  'EXACT_PROMPT_REJECTION_REQUIRED');
+  const payload = { ...payloads.kling, prompt: correctedKlingPrompt(current, selected, prompt) };
+  const proof = inputProof({ kling: payload }, current).kling;
+  return { previous, payload, proof, live, worstCaseCostCents, priorKlingReserveCents,
+    rejection: { planSha256, endpoint: ENDPOINTS.kling, originalRequestId: previous.requestId, httpStatus: 422,
+      providerBodySha256: jsonHash(body), body: expected },
+    ledgerSha256: jsonHash({ originalClaim, original, previous, previousClaim, accessRejection, seedance, terminal }) };
+}
+async function prepareKlingPromptRecovery(args, directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  requireValue(args['approve-plan-sha256'] === planSha256 && Date.parse(plan.expiresAt) > Date.now(), 'CURRENT_PLAN_APPROVAL_REQUIRED');
+  requireValue(typeof args['prompt-file'] === 'string' && args['prompt-file'].length > 0, 'PRIVATE_PROMPT_FILE_REQUIRED');
+  const promptPath = resolve(args['prompt-file']), info = await lstat(promptPath);
+  requireValue(info.isFile() && !info.isSymbolicLink() && info.size > 0 && info.size <= 10_000, 'PRIVATE_PROMPT_FILE_INVALID');
+  const prompt = (await readFile(promptPath, 'utf8')).replace(/\r\n/g, '\n').trim();
+  const context = await promptRecoveryContext(plan, planSha256, directory, prompt);
+  requireValue(Date.parse(plan.expiresAt) > Date.now(), 'CURRENT_PLAN_APPROVAL_REQUIRED');
+  const rejectionPath = join(directory, 'kling-prompt-confirmed-rejection.json');
+  const savedRejection = await localJson(rejectionPath, true);
+  if (savedRejection) requireValue(jsonHash(savedRejection) === jsonHash(context.rejection), 'REJECTION_RECORD_CONFLICT');
+  else await saveExclusive(rejectionPath, context.rejection);
+  const amendment = { version: 1, kind: 'reviewed-kling-prompt-recovery', planSha256,
+    originalRequestId: context.previous.requestId, endpoint: ENDPOINTS.kling, createdAt: stamp(), expiresAt: plan.expiresAt,
+    sourceSha256: jsonHash(plan.source), ledgerSha256: context.ledgerSha256,
+    rejectionSha256: jsonHash(context.rejection), inputProof: context.proof,
+    pricing: context.live, priorKlingReserveCents: context.priorKlingReserveCents, worstCaseCostCents: context.worstCaseCostCents };
+  const amendmentSha256 = jsonHash(amendment);
+  await saveExclusive(join(directory, 'kling-prompt-amendment.json'), { amendmentSha256, amendment });
+  emit({ status: 'kling-prompt-amendment-prepared', amendmentSha256, prompt: context.payload.prompt,
+    promptCharacters: context.payload.prompt.length, worstCaseCostCents: context.worstCaseCostCents, providerSubmissions: 0 });
+}
+async function loadKlingPromptAmendment(directory, planSha256) {
+  const saved = await localJson(join(directory, 'kling-prompt-amendment.json')), amendment = saved.amendment;
+  requireValue(HASH.test(saved.amendmentSha256 || '') && jsonHash(amendment) === saved.amendmentSha256
+    && amendment?.version === 1 && amendment.kind === 'reviewed-kling-prompt-recovery' && amendment.planSha256 === planSha256
+    && amendment.endpoint === ENDPOINTS.kling && amendment.originalRequestId === REVIEWED_KLING_PROMPT_REJECTION_ID
+    && HASH.test(amendment.inputProof?.sha256 || ''), 'PROMPT_AMENDMENT_INVALID');
+  return saved;
+}
+async function submitKlingPromptRecovery(args, directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  const { amendment, amendmentSha256 } = await loadKlingPromptAmendment(directory, planSha256);
+  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-amendment-sha256'] === amendmentSha256
+    && Date.parse(plan.expiresAt) > Date.now() && Date.parse(amendment.expiresAt) > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
+  const claimPath = join(directory, 'kling-prompt-recovery-claim.json'), existing = await localJson(claimPath, true);
+  if (existing) {
+    requireValue(existing.planSha256 === planSha256 && existing.amendmentSha256 === amendmentSha256, 'RECOVERY_CLAIM_CONFLICT');
+    emit({ model: 'kling', status: 'prompt-recovery-already-claimed-no-resubmission' }); return;
+  }
+  for (const suffix of ['response', 'receipt', 'uncertain', 'terminal'])
+    requireValue(!await localJson(join(directory, `kling-prompt-recovery-${suffix}.json`), true), 'RECOVERY_CLAIM_MISSING');
+  const context = await promptRecoveryContext(plan, planSha256, directory, amendment.inputProof.review.prompt);
+  requireValue(amendment.sourceSha256 === jsonHash(plan.source) && amendment.ledgerSha256 === context.ledgerSha256
+    && amendment.rejectionSha256 === jsonHash(context.rejection) && jsonHash(amendment.inputProof) === jsonHash(context.proof)
+    && amendment.worstCaseCostCents === context.worstCaseCostCents
+    && amendment.priorKlingReserveCents === context.priorKlingReserveCents, 'PROMPT_AMENDMENT_CHANGED');
+  requireValue(Date.parse(plan.expiresAt) > Date.now() && Date.parse(amendment.expiresAt) > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
+  const claim = { version: 1, evaluationId: plan.evaluationId, planSha256, amendmentSha256, model: 'kling', endpoint: ENDPOINTS.kling,
+    recovery: 'reviewed-prompt-length', originalRequestId: context.previous.requestId, rejectionSha256: amendment.rejectionSha256,
+    inputSha256: context.proof.sha256, claimedAt: stamp(), state: 'submission-claimed', pricing: context.live,
+    worstCaseCostCents: context.worstCaseCostCents };
+  await saveExclusive(claimPath, claim);
+  try {
+    const response = await request(`https://queue.fal.run/${ENDPOINTS.kling}`, 'POST', context.payload);
+    await saveExclusive(join(directory, 'kling-prompt-recovery-response.json'), { planSha256, amendmentSha256, receivedAt: stamp(),
+      requestId: response.request_id, statusUrl: response.status_url, responseUrl: response.response_url });
+    requireValue(![REVIEWED_KLING_REJECTION_ID, REVIEWED_KLING_PROMPT_REJECTION_ID].includes(response.request_id), 'RECOVERY_REQUEST_ID_REUSED');
+    const receipt = { ...claim, state: 'queued', requestId: response.request_id, receivedAt: stamp(),
+      statusUrl: falRequestUrl(response.status_url, ENDPOINTS.kling, response.request_id, 'status'),
+      responseUrl: falRequestUrl(response.response_url, ENDPOINTS.kling, response.request_id, 'result') };
+    await saveExclusive(join(directory, 'kling-prompt-recovery-receipt.json'), receipt);
+    emit({ model: 'kling', status: 'prompt-recovery-queued', requestId: receipt.requestId, amendmentSha256 });
+  } catch (error) {
+    await saveExclusive(join(directory, 'kling-prompt-recovery-uncertain.json'), { planSha256, amendmentSha256,
+      state: 'uncertain', at: stamp(), code: /^[A-Z][A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'SUBMISSION_RECEIPT_UNCONFIRMED' }).catch(() => {});
+    emit({ model: 'kling', status: 'prompt-recovery-uncertain-no-resubmission' });
+  }
+}
 async function poll(directory) {
   const { plan, planSha256 } = await loadPlan(directory);
   for (const [model, endpoint] of Object.entries(ENDPOINTS)) {
-    const recovery = model === 'kling' ? await localJson(join(directory, 'kling-recovery-claim.json'), true) : null;
-    const prefix = recovery ? 'kling-recovery' : model;
+    const promptRecovery = model === 'kling' ? await localJson(join(directory, 'kling-prompt-recovery-claim.json'), true) : null;
+    const amendment = promptRecovery ? await loadKlingPromptAmendment(directory, planSha256) : null;
+    const recovery = promptRecovery || (model === 'kling' ? await localJson(join(directory, 'kling-recovery-claim.json'), true) : null);
+    const prefix = promptRecovery ? 'kling-prompt-recovery' : recovery ? 'kling-recovery' : model;
+    const expectedInputHash = amendment ? amendment.amendment.inputProof.sha256 : plan.inputProof?.[model]?.sha256;
     if (recovery) requireValue(recovery.planSha256 === planSha256 && recovery.endpoint === endpoint
-      && recovery.originalRequestId === REVIEWED_KLING_REJECTION_ID && recovery.inputSha256 === plan.inputProof.kling.sha256,
+      && recovery.originalRequestId === (promptRecovery ? REVIEWED_KLING_PROMPT_REJECTION_ID : REVIEWED_KLING_REJECTION_ID)
+      && recovery.inputSha256 === expectedInputHash && (!amendment || recovery.amendmentSha256 === amendment.amendmentSha256),
     'RECOVERY_CLAIM_CONFLICT');
     const receipt = await localJson(join(directory, `${prefix}-receipt.json`), true);
     if (recovery && !receipt) { emit({ model, status: 'recovery-uncertain-no-resubmission' }); continue; }
     if (!receipt) { emit({ model, status: await localJson(join(directory, `${model}-claim.json`), true) ? 'uncertain-no-resubmission' : 'not-submitted' }); continue; }
     requireValue(receipt.planSha256 === planSha256 && receipt.endpoint === endpoint
-      && receipt.inputSha256 === plan.inputProof?.[model]?.sha256, 'RECEIPT_CONFLICT');
+      && receipt.inputSha256 === expectedInputHash, 'RECEIPT_CONFLICT');
     if (recovery) requireValue(receipt.originalRequestId === recovery.originalRequestId
       && receipt.rejectionSha256 === recovery.rejectionSha256 && receipt.claimedAt === recovery.claimedAt
-      && receipt.requestId !== recovery.originalRequestId, 'RECOVERY_RECEIPT_CONFLICT');
+      && receipt.requestId !== recovery.originalRequestId && (!amendment || receipt.amendmentSha256 === amendment.amendmentSha256), 'RECOVERY_RECEIPT_CONFLICT');
     const terminalPath = join(directory, `${prefix}-terminal.json`), terminal = await localJson(terminalPath, true);
     if (terminal) {
       requireValue(terminal.planSha256 === planSha256 && terminal.requestId === receipt.requestId && terminal.endpoint === endpoint
@@ -411,7 +557,8 @@ async function poll(directory) {
     }
     let snapshot = { planSha256, model, endpoint, requestId: receipt.requestId, state, checkedAt: stamp(),
       elapsedSeconds: Math.round((Date.now() - Date.parse(receipt.claimedAt)) / 1000), ...(output ? { output } : {}),
-      ...(recovery ? { recovery: 'reviewed-resource-restricted', originalRequestId: recovery.originalRequestId } : {}) };
+      ...(recovery ? { recovery: recovery.recovery, originalRequestId: recovery.originalRequestId,
+        ...(amendment ? { amendmentSha256: amendment.amendmentSha256 } : {}) } : {}) };
     if (['completed', 'failed'].includes(state)) {
       snapshot.firstTerminalObservedAt = snapshot.checkedAt;
       try { await saveExclusive(terminalPath, snapshot); }
@@ -430,9 +577,12 @@ async function poll(directory) {
 }
 async function main() {
   const [action, ...values] = process.argv.slice(2), args = {};
-  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'poll'].includes(action) && values.length % 2 === 0, 'COMMAND_INVALID');
+  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'prepare-kling-prompt-recovery', 'submit-kling-prompt-recovery', 'poll'].includes(action)
+    && values.length % 2 === 0, 'COMMAND_INVALID');
   const allowed = { prepare: ['directory', 'prepared-id', 'config', 'maximum-cost-cents'],
-    submit: ['directory', 'approve-plan-sha256'], 'retry-rejected-kling': ['directory', 'approve-plan-sha256'], poll: ['directory'] }[action];
+    submit: ['directory', 'approve-plan-sha256'], 'retry-rejected-kling': ['directory', 'approve-plan-sha256'],
+    'prepare-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'prompt-file'],
+    'submit-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256'], poll: ['directory'] }[action];
   for (let i = 0; i < values.length; i += 2) {
     const name = values[i].replace(/^--/, '');
     requireValue(values[i].startsWith('--') && allowed.includes(name) && !(name in args) && values[i + 1], 'ARGUMENT_INVALID'); args[name] = values[i + 1];
@@ -443,6 +593,8 @@ async function main() {
   if (action === 'prepare') await prepare(args, directory);
   else if (action === 'submit') await submit(args, directory);
   else if (action === 'retry-rejected-kling') await retryRejectedKling(args, directory);
+  else if (action === 'prepare-kling-prompt-recovery') await prepareKlingPromptRecovery(args, directory);
+  else if (action === 'submit-kling-prompt-recovery') await submitKlingPromptRecovery(args, directory);
   else await poll(directory);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

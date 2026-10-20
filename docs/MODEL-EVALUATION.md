@@ -38,8 +38,8 @@ photo to an original manifest character ID. Supply the mapping even when the IDs
 are unchanged. No other keys are permitted. The mapped names must still identify
 the same person and no original reference may be assigned to two characters.
 Characters with a selected photo must have no mapping: their generated portraits
-cannot replace the selected photo. For example, if Phillip has the selected photo
-and Mary uses her original generated reference:
+cannot replace the selected photo. For example, when the lead has the selected
+photo and a supporting character uses an original generated reference:
 
 ```json
 {
@@ -47,7 +47,7 @@ and Mary uses her original generated reference:
   "originalManifestHash": "<original-64-character-sha256>",
   "correctedManifestHash": "<corrected-64-character-sha256>",
   "shotIndex": 0,
-  "referenceCharacterMap": { "<corrected-mary-id>": "<original-mary-id>" },
+  "referenceCharacterMap": { "<corrected-supporting-id>": "<original-supporting-id>" },
   "durationSeconds": 12,
   "narration": "<exact corrected scene excerpt>",
   "dialogue": ""
@@ -200,3 +200,59 @@ prefix. Once a recovery claim exists, this action never submits again. Polling
 uses its recovery receipt when available; a recovery claim without a receipt
 reports uncertainty and requires reconciliation. Never remove those records to
 make another attempt.
+
+## Reviewed Kling prompt-length amendment
+
+The access-rejection recovery returned a confirmed validation failure: request
+`01a156a6-105b-7ae3-a3af-c84dba6fc6c7` completed with HTTP 422 and exactly one
+`string_too_long` error for `body.prompt`, stating that the maximum is 2,500
+characters. The following separate amendment is restricted to that request and
+the reviewed 12-second scene. It never changes Seedance. The generic script stores
+no customer identities or screenplay text: supply the reviewed condensed prompt
+in a private UTF-8 file, at most 10 KB, outside the repository. The file must be a
+regular file rather than a symbolic link.
+
+```sh
+node scripts/evaluate-film-models.mjs prepare-kling-prompt-recovery --directory /evaluation --approve-plan-sha256 <original-approved-plan-sha256> --prompt-file /evaluation/kling-prompt.txt
+```
+
+Preparation rereads the rejection, source, private photo, original inputs, prior
+claims and receipts, completed Seedance record and current prices. It creates
+`kling-prompt-confirmed-rejection.json` and an immutable
+`kling-prompt-amendment.json`, then prints the compact prompt and amendment hash
+for explicit review. It submits no generation request. The supplied prompt must
+contain each reference's image label and character name, the exact selected
+narration and dialogue, and the full saved historical boundary (line wrapping is
+allowed). The reviewer must preserve confirmed identity traits, photographic
+likeness, period scene direction and exclusions for extra speech, music and titles.
+The image bytes, references, native-audio settings and 12-second duration remain
+identical. The only provider payload field changed is Kling's prompt. Its length
+must be at most 2,500 characters; nothing is silently truncated. Submission uses
+the immutable amendment's reviewed prompt, so later edits to the prompt file do
+not change the request.
+
+The exact validation response must also echo the original prompt in `input` and
+contain only `ctx: { max_length: 2500 }`. Stored rejection evidence replaces the
+echoed input with its SHA-256 and includes a SHA-256 of the entire provider body.
+The private script text is not repeated in the rejection evidence.
+
+The amendment uses the original plan's expiry. After inspecting the exact prompt,
+approve both immutable hashes:
+
+```sh
+node scripts/evaluate-film-models.mjs submit-kling-prompt-recovery --directory /evaluation --approve-plan-sha256 <original-approved-plan-sha256> --approve-amendment-sha256 <reviewed-amendment-sha256>
+node scripts/evaluate-film-models.mjs poll --directory /evaluation
+```
+
+Submission repeats the proof and price checks and binds the new payload hash to
+its own exclusive `kling-prompt-recovery-claim.json` before one POST. All prior
+records remain intact. The budget reserves the full conservative bound for one
+Seedance submission and **all three Kling submissions**, including both rejected
+ones: $16.20 + $1.80 + $1.80 = $19.80 at the reviewed rates. A larger total stops
+the action; the runner assumes no billing exemption for a rejected attempt.
+
+Latest response, receipt, uncertainty and terminal records use the separate
+`kling-prompt-recovery-` prefix. Polling follows that claim and receipt first.
+A lost/uncertain result or any existing claim can never cause another POST. This
+prompt amendment is also a comparison-method change: report that Kling required
+a condensed direction prompt while retaining identical references and speech.
