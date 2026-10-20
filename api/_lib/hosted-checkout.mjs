@@ -19,6 +19,7 @@ const productionUnavailable=reason=>markProductionAuthorizationFailure(new Hoste
 const reversalsUnavailable=reason=>markProductionAuthorizationFailure(new HostedCheckoutError("Film production is not available yet. Your payment and saved plan remain recorded.",503,"HOSTED_REVERSALS_UNVERIFIED"),"authorization",reason);
 const conflict=()=>new HostedCheckoutError("This request changed or is already being processed. Check the saved order before continuing.",409,"PAYMENT_CONFLICT",null);
 const expired=()=>new HostedCheckoutError("This price or its checkout terms changed. Prepare your price again.",409,"QUOTE_EXPIRED");
+const checkoutProductionUnavailable=()=>new HostedCheckoutError("Production availability or cost could not be confirmed for this saved film. No invoice has been requested. Check your film price before paying.",503,"PRODUCTION_UNAVAILABLE");
 const existingOrder=()=>new HostedCheckoutError("A payment page already exists for this saved film. Recover its saved payment or contact the administrator.",409,"ORDER_ALREADY_EXISTS");
 const stamp=now=>new Date(now).toISOString();
 const amountValid=n=>Number.isSafeInteger(n)&&n>0&&n<=100_000_000;
@@ -256,9 +257,10 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(order) {if(order.value.checkoutMethod!==METHOD)throw conflict();if(order.value.quoteId!==q.id||order.value.preparedId!==q.preparedId)throw existingOrder();}
     const path=quotePath(email,q.id),existing=await read(path);
     const matches=v=>v.customerEmail===email&&v.manifestHash===q.manifestHash&&v.preparedId===q.preparedId&&sameBinding(v.merchantBinding,binding);
-    if(existing) {if(!matches(existing.value))throw conflict();if(Date.parse(existing.value.expiresAt)<=now()||existing.value.checkoutSettings.revision!==s.revision)throw expired();return publicQuote(existing.value);}
+    const samePrice=v=>["currency","providerCostCents","markupCents","amountCents","pricingRevision","pricingBasis"].every(field=>v[field]===q[field]);
+    if(existing) {if(!matches(existing.value))throw conflict();if(Date.parse(existing.value.expiresAt)<=now()||existing.value.checkoutSettings.revision!==s.revision||!samePrice(existing.value))throw expired();return publicQuote(existing.value);}
     const fresh=await enabled(actor,false);if(fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw expired();
-    try{return publicQuote((await save(path,null,q)).value);}catch(error){const winner=await read(path);if(winner&&matches(winner.value)&&winner.value.checkoutSettings.revision===s.revision)return publicQuote(winner.value);throw error;}
+    try{return publicQuote((await save(path,null,q)).value);}catch(error){const winner=await read(path);if(winner&&matches(winner.value)&&winner.value.checkoutSettings.revision===s.revision){if(Date.parse(winner.value.expiresAt)<=now()||!samePrice(winner.value))throw expired();return publicQuote(winner.value);}throw error;}
   }
   async function readOrder(actor,orderReference) {
     const current=await currentActor(actor),record=await read(orderPath(reference(orderReference)));
@@ -300,7 +302,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   async function checkout(actor,body) {
     exact(body,["quoteId","idempotencyKey","consent","productionConsent"]);reference(body.quoteId);reference(body.idempotencyKey,keys);if(body.consent!==true)throw new HostedCheckoutError("Confirm the exact total and checkout terms before continuing.");
     if(body.productionConsent!==undefined&&typeof body.productionConsent!=="boolean")throw new HostedCheckoutError("Confirm whether this paid version should start automatically.");
-    const email=emailFor(actor),{binding,settings:s}=await enabled(actor,true),q=(await read(quotePath(email,body.quoteId)))?.value;
+    const email=emailFor(actor),{binding,settings:s}=await enabled(actor,true),savedQuote=await read(quotePath(email,body.quoteId)),q=savedQuote?.value;
     if(!q||q.customerEmail!==email||!sameBinding(q.merchantBinding,binding))throw conflict();
     await legacyGuard(q);const id=orderId(q),path=orderPath(id),existing=await read(path);
     if(existing) {
@@ -310,6 +312,23 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     }
     if(binding.environment==="production"&&body.productionConsent!==true)throw new HostedCheckoutError("Confirm that this saved film should be produced automatically after payment before opening checkout.",400,"PRODUCTION_CONSENT_REQUIRED");
     if(Date.parse(q.expiresAt)<=now()||q.checkoutSettings.revision!==s.revision)throw expired();
+    let productionUntil=Infinity;
+    if(binding.environment==="production") {
+      // Recheck the exact saved plan immediately before opening a payable
+      // invoice. A browser capability snapshot cannot authorize this step.
+      let production;
+      try {production=await productionQuote({email,preparedId:q.preparedId,manifestHash:q.manifestHash,environment:binding.environment,budgetCents:q.providerCostCents});}
+      catch {throw checkoutProductionUnavailable();}
+      productionUntil=typeof production?.expiresAt==="string"?Date.parse(production.expiresAt):NaN;
+      if(!amountValid(q.providerCostCents)||!production||production.preparedId!==q.preparedId||production.manifestHash!==q.manifestHash
+        ||production.environment!==binding.environment||production.currency!=="USD"||production.apiVerified!==true||production.qualityVerified!==true||production.commercialTermsVerified!==true
+        ||!Number.isSafeInteger(production.providerCostCents)||production.providerCostCents<0||production.providerCostCents>q.providerCostCents
+        ||!Number.isSafeInteger(production.maximumCostCents)||production.maximumCostCents<production.providerCostCents||production.maximumCostCents>q.providerCostCents
+        ||typeof production.quoteReference!=="string"||!production.quoteReference.trim()||production.quoteReference.length>200||!Number.isFinite(productionUntil)||productionUntil<=now())throw checkoutProductionUnavailable();
+      const fresh=await enabled(actor,false),currentQuote=await read(quotePath(email,body.quoteId));
+      if(!savedQuote?.etag||currentQuote?.etag!==savedQuote.etag||Date.parse(q.expiresAt)<=now()||fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw expired();
+      if(productionUntil<=now())throw checkoutProductionUnavailable();
+    }
     const previousConsentAt=existing?.value.productionConsentAt;
     const productionConsent=body.productionConsent===true?{productionConsent:true,productionConsentAt:
       existing?.value.productionConsent===true&&typeof previousConsentAt==="string"&&Number.isFinite(Date.parse(previousConsentAt))&&Date.parse(previousConsentAt)<=now()?previousConsentAt:stamp(now())}:{};
@@ -322,9 +341,11 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       const customerId=await customer(actor,binding);record=await save(path,record,{...record.value,customerId});
       const fresh=await enabled(actor,false);if(fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw conflict();
       const item=itemData((await response(binding,{method:"GET",path:`/item/${s.serviceItemId}`})).Item);if(!item||!item.active||item.type!=="Service"||item.id!==s.serviceItemId)throw conflict();
+      if(binding.environment==="production"&&(productionUntil<=now()||Date.parse(q.expiresAt)<=now()))throw checkoutProductionUnavailable();
       // This claim is durable before the one allowed POST. A timeout never retries it.
       record=await save(path,record,{...record.value,invoiceAttemptedAt:stamp(now())});
       const final=await enabled(actor,false);if(final.settings.revision!==s.revision||!sameBinding(binding,final.binding))throw conflict();
+      if(binding.environment==="production"&&(productionUntil<=now()||Date.parse(q.expiresAt)<=now()))throw checkoutProductionUnavailable();
       const amount=q.amountCents/100,body={CustomerRef:{value:customerId},BillEmail:{Address:email},CurrencyRef:{value:"USD"},AllowOnlineCreditCardPayment:true,AllowOnlineACHPayment:true,EmailStatus:"NotSet",PrivateNote:`Lineage order ${id}`,
         Line:[{Amount:amount,DetailType:"SalesItemLineDetail",Description:"Film production",SalesItemLineDetail:{ItemRef:{value:s.serviceItemId},Qty:1,UnitPrice:amount,TaxCodeRef:{value:"NON"}}}]};
       let invoice=(await response(binding,{method:"POST",path:"/invoice",requestId:record.value.invoiceRequestId,body})).Invoice;

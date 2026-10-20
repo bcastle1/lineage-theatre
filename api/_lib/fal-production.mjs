@@ -3,29 +3,33 @@ import { isOwner, OWNER_EMAIL } from './access.mjs';
 import { createFalClient, FAL_MODELS, FAL_MEDIA_HOSTS, falMediaUrl } from './fal-client.mjs';
 import { falQualification } from './fal-qualification.mjs';
 import { createFalPricing } from './fal-pricing.mjs';
-import { falReferenceData } from './fal-reference.mjs';
+import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from './film-visual-style.mjs';
 import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoDataUrl } from './production-photo-reference.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
-export const FAL_RECIPE_VERSION = 'lineage-realistic-wan-v2';
-export const FAL_PROMPT_VERSION = 'lineage-realistic-wan-v2';
+export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
+export const FAL_PROMPT_VERSION = FAL_RECIPE_VERSION;
+export const FAL_LEGACY_RECIPE_VERSION = 'lineage-realistic-wan-v2';
+export const falRecipeVersion = model => model === 'kling' ? FAL_RECIPE_VERSION : FAL_LEGACY_RECIPE_VERSION;
 const invalid = () => { throw new Error('The film needs a supported production plan.'); };
 const speech = shot => `${shot.narration || ''} ${shot.dialogue || ''}`.trim();
 
 export function falPlan(manifest, model) {
-  if (!['seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
-    || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > 30
+  if (!['kling', 'seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
+    || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > (model === 'kling' ? 200 : 30)
     || !Array.isArray(manifest.screenplay?.characters) || manifest.screenplay.characters.length > 16) invalid();
   let position = 0;
   const shots = manifest.shots.map(shot => {
     if (!Number.isSafeInteger(shot.targetDurationMs) || shot.targetDurationMs < 1000 || shot.targetDurationMs > 30_000
       || shot.startMs !== position || !Array.isArray(shot.characterIds) || shot.characterIds.length > 10
       || typeof shot.visual !== 'string' || shot.visual.length > 12_000 || !shot.visual.trim()) invalid();
+    if (model === 'kling' && (shot.targetDurationMs < 3000 || shot.targetDurationMs > 15000
+      || shot.characterIds.length > 4 || new Set(shot.characterIds).size !== shot.characterIds.length)) invalid();
     position += shot.targetDurationMs;
     // Leave a small edit handle after the spoken performance. Never speed up
     // narration, omit words, or invent a shorter script to fit a shot.
-    const seconds = Math.max(4, Math.ceil(shot.targetDurationMs / 1000));
+    const seconds = Math.max(model === 'kling' ? 3 : 4, Math.ceil(shot.targetDurationMs / 1000));
     if (speech(shot).split(/\s+/).filter(Boolean).length / (shot.targetDurationMs / 1000) > 3.2) invalid();
     if (shot.characterIds.some(id => !manifest.screenplay.characters.some(c => c.id === id))) invalid();
     return { ...shot, seconds };
@@ -39,8 +43,35 @@ export function falPlan(manifest, model) {
     if (!character.sourceIds.includes(character.referencePhotoId)
       || !manifest.sources?.some(source => source.id === character.referencePhotoId && ['image/jpeg', 'image/png', 'image/webp'].includes(source.type))) invalid();
   }
+  if (model === 'kling') for (const shot of shots) klingPrompt(manifest, shot, characters);
   return { model, endpoint: FAL_MODELS[model], shots, characters,
     generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length };
+}
+
+function klingPrompt(manifest, shot, characters) {
+  const cast = shot.characterIds.map((id, index) => {
+    const character = characters.find(value => value.id === id);
+    if (!character || typeof character.name !== 'string' || typeof character.description !== 'string') invalid();
+    return `@Image${index + 1}: ${character.name}; ${realisticCreativeText(character.description)}`
+      + (character.referencePhotoId ? '. User-selected photograph: preserve this person’s visible identity; change only scripted age and period styling.' : '');
+  });
+  const direction = realisticCreativeText(shot.visual).replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[“"][^”"]*[”"]/gi, '');
+  const prompt = [...cast,
+    `Photorealistic live-action ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'}, natural anatomy, visible skin texture. Era: ${manifest.era}.`,
+    `Continuity: ${manifest.screenplay.logline}.`,
+    'References guide identity only. Begin in the finished scene, never show reference images or extra versions of a person. Preserve explicitly described identity and appearance; do not infer ethnicity or biography from photographs.',
+    `Scene: ${direction}`,
+    `Historical boundaries: ${shot.dramatization || 'No undocumented claims.'}`,
+    `Narrator, same warm restrained adult English voice, once verbatim: ${shot.narration || '(none)'}`,
+    `Dialogue, distinct consistent voices and synchronized mouths, once verbatim: ${shot.dialogue || '(none)'}`,
+    `Start speech immediately; finish before ${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s. Natural pace, no added or omitted words; hold ending through ${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Subtle instrumental strings and ambience under clear speech; no vocals.' : 'Natural ambience; no music.',
+    'No captions, titles, logos or watermarks. No facial drift, extra fingers, modern props or abrupt cuts.',
+  ].join('\n');
+  // Never truncate the approved script or identity to fit the API. Quote and
+  // submit share this validation, so an overlong plan fails before payment.
+  if (prompt.length > 2500) invalid();
+  return prompt;
 }
 
 export function characterReferenceInput(manifest, character) {
@@ -53,6 +84,10 @@ export function characterReferenceInput(manifest, character) {
 export function falShotInput(manifest, shot, model, references) {
   const plan = falPlan(manifest, model), selected = plan.shots.find(s => s.id === shot.id);
   if (!selected) invalid();
+  if (model === 'kling') return { prompt: klingPrompt(manifest, selected, plan.characters), duration: String(selected.seconds),
+    image_urls: selected.characterIds.map(id => plan.characters.find(c => c.id === id).referencePhotoId
+      ? validatedPhotoDataUrl(references[id]) : falMediaUrl(references[id])),
+    generate_audio: true, aspect_ratio: '16:9', shot_type: 'customize', enable_safety_checker: true };
   const cast = selected.characterIds.map((id, index) => {
     const character = plan.characters.find(c => c.id === id);
     return `${model === 'seedance' ? '@Image' : 'Image '}${index + 1}: ${character.name}; ${realisticCreativeText(character.description)}`
@@ -84,18 +119,28 @@ export function falShotInput(manifest, shot, model, references) {
 }
 
 export function qualifiedFalRelease(value, model) {
-  return Boolean(value && value.version === 1 && value.recipeVersion === FAL_RECIPE_VERSION && value.model === model
-    && value.endpoint === FAL_MODELS[model] && HASH.test(value.comparisonManifestHash || '')
-    && HASH.test(value.deliveredMediaSha256 || '') && value.review?.visual === true && value.review?.speech === true
-    && value.review?.continuity === true && value.review?.privatePlayback === true && value.commercialUse === true
-    && Array.isArray(value.requestIds) && value.requestIds.length >= 1 && value.requestIds.every(id => /^[\w-]{8,100}$/.test(id))
+  const sample = value?.technicalSample;
+  return Boolean(model === 'kling' && value?.version === 2 && value.recipeVersion === FAL_RECIPE_VERSION && value.model === model
+    && value.endpoint === FAL_MODELS[model] && value.commercialUse === true
+    && value.commercialUseSource === `https://fal.ai/models/${FAL_MODELS.kling}`
+    && HASH.test(sample?.mediaSha256 || '') && /^[\w-]{8,100}$/.test(sample?.requestId || '')
+    && sample.width === 1920 && sample.height === 1080 && sample.videoCodec === 'h264' && sample.audioCodec === 'aac'
+    && Number.isSafeInteger(sample.durationMs) && sample.durationMs >= 3000 && sample.durationMs <= 15500
+    && sample.fullDecodePassed === true && sample.browserPlaybackPassed === true && sample.nativeAudio === true
+    && value.qualityScope === 'technical-media-with-per-film-speech-gate'
+    && Array.isArray(value.requiredDeliveryChecks)
+    && ['full-decode', 'exact-duration', 'script-speech', 'private-artifact'].every(check => value.requiredDeliveryChecks.includes(check))
+    && Array.isArray(value.knownLimitations) && value.knownLimitations.length > 0
+    && value.knownLimitations.every(item => typeof item === 'string' && item.length > 0)
     && Number.isFinite(Date.parse(value.reviewedAt)));
 }
 
-export function createFalProductionAdapter({ model = 'wan', qualification = falQualification,
-  key = () => process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now,
+export function createFalProductionAdapter({ model = 'kling', qualification = falQualification,
+  key = () => model === 'kling' ? process.env.FAL_KLING_KEY : process.env.FAL_KEY, client = createFalClient({ key }), fetchImpl = fetch, now = Date.now,
   pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData, read = readRecord, requireWorker = false,
-  selectedPhoto = productionPhotoData } = {}) {
+  selectedPhoto = productionPhotoData, normalizeKlingReference = klingReferenceData } = {}) {
+  if (!['kling', 'wan', 'seedance'].includes(model)) invalid();
+  const recipe = falRecipeVersion(model);
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
   const maximumCost = async manifest => {
@@ -103,7 +148,7 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     if (!qualified()) invalid();
     if(requireWorker){
       const heartbeat=(await read('production/worker-health.json'))?.value;
-      if(heartbeat?.recipe!==FAL_RECIPE_VERSION||heartbeat.model!=='wan'||heartbeat.ready!==true
+      if(heartbeat?.recipe!==FAL_RECIPE_VERSION||heartbeat.model!==model||heartbeat.ready!==true||heartbeat.deliveryChecksVersion!==1
         ||!Number.isFinite(Date.parse(heartbeat.checkedAt))||now()-Date.parse(heartbeat.checkedAt)>180000||Date.parse(heartbeat.checkedAt)>now())
         throw new Error('Film production is temporarily unavailable. Please try again shortly.');
       if (plan.characters.some(character => character.referencePhotoId) && heartbeat.referencePhotoVersion !== 1)
@@ -121,40 +166,57 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     if (!HASH.test(manifestHash || '') || digest(JSON.stringify(manifest)) !== manifestHash || !HASH.test(idempotencyKey || '') || !productionId) invalid();
     const plan = falPlan(manifest, model), references = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
     if (!selected) invalid();
-    const identity = digest(`${FAL_RECIPE_VERSION}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
+    const identity = digest(`${recipe}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
     if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
-    async function operation(operationId, endpoint, body) {
+    async function existingOperation(operationId, endpoint) {
       let saved = await client.get(operationId);
+      if (saved && saved.endpoint !== endpoint) invalid();
+      if (saved && !['completed', 'failed'].includes(saved.state) && saved.requestId) saved = await client.poll(operationId);
+      if (saved && saved.endpoint !== endpoint) invalid();
+      return saved;
+    }
+    async function operation(operationId, endpoint, body) {
+      let saved = await existingOperation(operationId, endpoint);
       if (!saved) {
+        if (model !== 'kling' || !qualified()) throw new Error('Only qualified Kling requests may start new production.');
         if (typeof authorizeSpend !== 'function' || await authorizeSpend() !== true) throw new Error('Production spending is not authorized.');
         saved = await client.submit({ identity: operationId, endpoint, input: body });
-      } else if (!['completed', 'failed'].includes(saved.state) && saved.requestId) saved = await client.poll(operationId);
+      }
       return saved;
     }
     let renderIdentity = identity;
-    let prior = await client.get(identity);
+    let prior = await existingOperation(identity, plan.endpoint);
     const choice = (await read(`production/fal/choices/${identity}.json`))?.value;
     if (choice) {
       const reviewer = (await read(userPath(OWNER_EMAIL)))?.value;
       if (choice.version !== 1 || choice.originalIdentity !== identity || choice.productionId !== productionId
         || choice.manifestHash !== manifestHash || choice.model !== model || choice.approvedBy !== OWNER_EMAIL
-        || choice.promptVersion !== FAL_PROMPT_VERSION || !HASH.test(choice.replacementIdentity || '')
+        || choice.promptVersion !== recipe || !HASH.test(choice.replacementIdentity || '')
         || !isOwner(reviewer) || reviewer.mustChangePassword) invalid();
       const replacement = await client.get(choice.replacementIdentity);
       if (replacement?.state !== 'completed' || replacement.endpoint !== plan.endpoint || replacement.requestId !== choice.requestId) invalid();
       prior = replacement; renderIdentity = choice.replacementIdentity;
     }
-    if (prior && !['completed', 'failed'].includes(prior.state) && prior.requestId) prior = await client.poll(identity);
     // A provider-confirmed input-size rejection did not produce a video. Allow
     // one separately journaled correction, never a retry of an uncertain job.
     if (model === 'wan' && prior?.state === 'failed' && prior.failureCode === 'FAL_REFERENCE_TOO_LARGE') {
       renderIdentity = digest(`${identity}:reference-jpeg-v1`);
-      prior = await client.get(renderIdentity);
-      if (prior && !['completed', 'failed'].includes(prior.state) && prior.requestId) prior = await client.poll(renderIdentity);
+      prior = await existingOperation(renderIdentity, plan.endpoint);
     }
     let result = prior;
     if (!result) {
-    // References are shared by every shot and by the two comparison candidates.
+    // Historical jobs may only read/poll their original durable operations.
+    // Switching providers must never create or reinterpret an old paid shot.
+    if (model !== 'kling') {
+      let pending = false;
+      for (const character of plan.characters.filter(c => c.referencePhotoId === undefined)) {
+        const saved = await existingOperation(digest(`${recipe}:cast:${productionId}:${manifestHash}:${character.id}`), FAL_MODELS.reference);
+        if (saved?.state === 'failed') return { providerJobId, status: 'failed' };
+        if (saved && !['completed', 'submitting', 'uncertain'].includes(saved.state)) pending = true;
+      }
+      return { providerJobId, status: pending ? 'processing' : 'uncertain' };
+    }
+    // References are shared by every shot in this exact production manifest.
     // Up to four independently journaled references can render together. A
     // new submission still requires its own fresh payment/budget authorization.
     // Verify every selected original before any new reference-generation spend.
@@ -164,7 +226,7 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     let pendingReferences = 0;
     for (const character of plan.characters) {
       if (character.referencePhotoId !== undefined) continue;
-      const referenceId = digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`);
+      const referenceId = digest(`${recipe}:cast:${productionId}:${manifestHash}:${character.id}`);
       const result = await operation(referenceId, FAL_MODELS.reference, characterReferenceInput(manifest, character));
       if (['failed','submitting','uncertain'].includes(result.state)) return { providerJobId, status: result.state === 'failed' ? 'failed' : 'uncertain' };
       if (result.state !== 'completed') { if (++pendingReferences >= 4) break; continue; }
@@ -175,6 +237,7 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     const request = falShotInput(manifest, shot, model, references);
     if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url =>
       url.startsWith('data:') ? validatedPhotoDataUrl(url) : normalizeReference(url, { fetchImpl })));
+    if (model === 'kling') request.image_urls = await Promise.all(request.image_urls.map(url => normalizeKlingReference(url, { fetchImpl })));
     result = await operation(renderIdentity, plan.endpoint, request);
     }
     if (result.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(result.state) ? 'uncertain' : result.state };
@@ -187,10 +250,13 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     return { status: 'completed', providerJobId, reviewedReuse: Boolean(choice), output: { url, sizeBytes, contentType, durationSeconds: selected.seconds } };
   }
   return {
-    id: 'fal', model, modelVersion: FAL_RECIPE_VERSION, timingVersion: `${model}:${FAL_PROMPT_VERSION}:parallel4`, maxConcurrentShots: 4,
+    id: 'fal', model, modelVersion: recipe, timingVersion: `${model}:${recipe}:parallel4`, maxConcurrentShots: 4,
     environment: 'production', outputHosts: FAL_MEDIA_HOSTS,
     get available() { return hasKey() && qualified(); },
-    get evidence() { return { apiVerified: qualified(), qualityVerified: qualified(), commercialTermsVerified: qualified(), reconciliationVerified: qualified() }; },
+    // The shared readiness contract uses qualityVerified for the technical
+    // delivery pipeline. This is not a likeness or artistic-quality guarantee.
+    get evidence() { return { apiVerified: qualified(), qualityVerified: qualified(), commercialTermsVerified: qualified(), reconciliationVerified: qualified(),
+      qualityScope: qualification?.qualityScope || null, knownLimitations: qualification?.knownLimitations || [] }; },
     gaps: ['The realistic film service needs its funded account and verified production worker.'],
     validateManifest: async manifest => ({ ready: true, maximumCostCents: (await maximumCost(manifest)).cents }),
     quote: async ({ manifest, manifestHash }) => {
@@ -201,6 +267,14 @@ export function createFalProductionAdapter({ model = 'wan', qualification = falQ
     },
     submitShot: step, pollShot: step, reconcileShot: step,
   };
+}
+
+// Explicit selector for an existing persisted provider binding. Callers must
+// retain that binding; unavailable legacy adapters reconcile only saved tasks.
+export function falAdapterForSavedProvider(provider, dependencies = {}) {
+  if (provider?.id !== 'fal' || !['kling', 'wan', 'seedance'].includes(provider.model)
+    || provider.recipe !== falRecipeVersion(provider.model)) invalid();
+  return createFalProductionAdapter({ ...dependencies, model: provider.model });
 }
 
 export const falProductionAdapter = createFalProductionAdapter({requireWorker:true});

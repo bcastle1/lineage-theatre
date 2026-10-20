@@ -22,7 +22,7 @@ const denied = promise => assert.rejects(promise, error => Boolean(error.code));
 async function fixture(options = {}) {
   const actor = options.actor || ACTOR, email = actor.email;
   let serial = 0, time = NOW, binding = structuredClone(BINDING), invoice, customer, quoteCount = 0;
-  let productionEffect, transportEffect, writeEffect, bindingEffect, reversalEffect;
+  let productionEffect, transportEffect, writeEffect, bindingEffect, reversalEffect, checkoutComplete=false;
   const records = new Map(), requests = [], quoteCalls = [];
   const seed = (path, value) => records.set(path, { value: structuredClone(value), etag: `etag-${++serial}` });
   const read = async path => structuredClone(records.get(path) || null);
@@ -90,11 +90,16 @@ async function fixture(options = {}) {
     quoteProvider: async () => ({ preparedId: plan.id, manifestHash: plan.manifestHash, filmId: plan.filmId, filmTitle: "Fictional film",
       currency: "USD", providerCostCents: 300, pricingBasis: "planning-rate", pricingRevision: 1, quoteReference: "paid-planning-price",
       environment: "production", expiresAt: new Date(NOW + 300_000).toISOString() }),
-    productionQuote: input => film.quoteForProductionBudget(input),
+    productionQuote: input => checkoutComplete?film.quoteForProductionBudget(input):({
+      preparedId:input.preparedId,manifestHash:input.manifestHash,environment:input.environment,currency:"USD",
+      providerCostCents:300,maximumCostCents:300,quoteReference:"fictional-checkout-preflight",expiresAt:new Date(time+300_000).toISOString(),
+      apiVerified:true,qualityVerified:true,commercialTermsVerified:true,
+    }),
   };
   const hosted = createHostedCheckoutService(dependencies);
   const q = await hosted.quote(actor, { project: {}, preparedId: plan.id, idempotencyKey: "fictional-hosted-quote" });
   const order = await hosted.checkout(actor, { quoteId: q.id, idempotencyKey: "fictional-hosted-checkout", consent: true, productionConsent: true });
+  checkoutComplete=true;
   invoice.Balance = 0; invoice.LinkedTxn = [{ TxnId: "40", TxnType: "Payment" }];
   assert.equal((await hosted.check(actor, { orderId: order.id })).status, "captured");
   const orderPath = `payments/orders/${order.id}.json`, quotePath = `payments/hosted-quotes/${digest(email)}/${q.id}.json`;

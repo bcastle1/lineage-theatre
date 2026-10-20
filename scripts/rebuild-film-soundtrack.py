@@ -166,7 +166,7 @@ def construct(request):
     plan = request.get('plan', {})
     require(plan.get('version') == 1 and plan.get('recipe') == 'local-authored-soundtrack-v1'
             and re.fullmatch(r'[a-f0-9]{64}', plan.get('manifestHash', ''))
-            and isinstance(plan.get('scenes'), list) and 1 <= len(plan['scenes']) <= 30
+            and isinstance(plan.get('scenes'), list) and 1 <= len(plan['scenes']) <= 200
             and isinstance(plan.get('durationMs'), int) and 15000 <= plan['durationMs'] <= 600000
             and plan.get('speed') == 1, 'INPUT_INVALID')
     directory = Path(request['directory']).resolve(strict=True)

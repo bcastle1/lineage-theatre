@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { digest, readRecord, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL, isOwner, accessStatusForUser } from '../api/_lib/access.mjs';
-import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS, falMediaUrl, falRequestUrl } from '../api/_lib/fal-client.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from '../api/_lib/film-visual-style.mjs';
 import { productionPhotoData } from '../api/_lib/production-photo-reference.mjs';

@@ -65,9 +65,10 @@ function customerCapabilities(ready) {
   return {
     story:ready.story===true,
     production:ready.magiclight===true,
+    productionProvider:ready.productionProvider === "kling" ? "kling" : null,
     billing:ready.billing===true,
     pricing:{currency:"USD",estimate:{status:"unavailable",amountCents:null,reason:"Your film's price will be confirmed before you approve a payment."},chargeReady:false},
-    quality:{label:ready.quality?.verified===true?"Film quality confirmed":"Film quality will be confirmed before production",verified:ready.quality?.verified===true},
+    quality:{label:ready.quality?.verified===true?"1080p video with verified playback and script checks":"Video playback and script checks are required before delivery",verified:ready.quality?.verified===true},
   };
 }
 

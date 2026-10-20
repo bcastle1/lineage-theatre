@@ -14,7 +14,7 @@ import { createFilmProductionService, productionJobPath } from '../api/_lib/film
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
-import { falProductionAdapter, FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { falProductionAdapter, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } from './production-worker.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';

@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { api } from "./model";
 import { paymentStatusMessage, type FilmOrder } from "./checkout-contract";
-import { libraryCanWatch, libraryFilmLink, type LibraryEntry } from "./film-library";
-import { confirmedFilmPayment, paymentProductionSummary, readPaymentFilm, watchPaymentConfirmation } from "./payment-confirmation";
+import { libraryFilmLink, type LibraryEntry } from "./film-library";
+import { confirmedFilmPayment, paidFilmPlaybackLink, paymentProductionSummary, readPaymentFilm, watchPaymentConfirmation } from "./payment-confirmation";
 import { completePaymentWindow, rememberPaymentWindow, reservePaymentWindow } from "./payment-window";
 import FilmProductionProgress from "./FilmProductionProgress";
 import "./payment-confirmation.css";
@@ -40,12 +40,12 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
     return () => { active = false; watcher.stop(); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [orderId, reload]);
   const paid = order?.id === orderId && confirmedFilmPayment(order);
-  const ready = Boolean(paid && film && film.id === order?.preparedId && libraryCanWatch(film));
+  const playbackLink = paid ? paidFilmPlaybackLink(order, film) : null;
+  const ready = Boolean(playbackLink);
   useEffect(() => {
-    if (!visible || !ready || !order) return;
-    const destination = libraryFilmLink(order.preparedId);
-    if (window.location.hash !== destination) window.location.hash = destination;
-  }, [visible, ready, orderId, order?.preparedId]);
+    if (!visible || !playbackLink) return;
+    if (window.location.hash !== playbackLink) window.location.hash = playbackLink;
+  }, [visible, playbackLink]);
   function openPayment() {
     if (!order?.invoiceUrl || order.status !== "awaiting-payment" || order.requiresReview || opening) return;
     setOpening(true);

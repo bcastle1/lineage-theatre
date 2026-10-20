@@ -14,7 +14,7 @@ const settings={revision:1,enabled:true,serviceItemId:"2",serviceItemName:"Film 
 const json=data=>new Response(JSON.stringify(data),{status:200});
 function fixture(options={}) {
   let serial=0,time=NOW,binding=structuredClone(BINDING),dispatch=options.dispatch,manifest=MANIFEST;
-  const records=new Map(),requests=[],bindings=[],quotes=[];
+  const records=new Map(),requests=[],bindings=[],quotes=[],productionQuotes=[];
   const seed=(path,value)=>records.set(path,{value:structuredClone(value),etag:`etag-${++serial}`});
   for(const actor of [OWNER,CUSTOMER,OTHER])seed(userPath(actor.email),actor);
   if(options.configured!==false)seed(HOSTED_CHECKOUT_SETTINGS_PATH,settings);
@@ -41,12 +41,19 @@ function fixture(options={}) {
   }};
   const dependencies={read,write,transport,receiptDelivery:options.receiptDelivery||{deliver:async()=>{}},now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
     ...(options.productionAutomation?{productionAutomation:options.productionAutomation}:{}),
-    pricingSettings:async()=>({revision:0,markupBasisPoints:5000}),quoteProvider:async(project,actor,request)=>{
+    productionQuote:async input=>{
+      productionQuotes.push(structuredClone(input));
+      if(options.productionQuote)return options.productionQuote(input);
+      return {preparedId:input.preparedId,manifestHash:input.manifestHash,environment:input.environment,currency:"USD",
+        providerCostCents:1000,maximumCostCents:1000,quoteReference:"fictional-production-preflight",expiresAt:new Date(time+300_000).toISOString(),
+        apiVerified:true,qualityVerified:true,commercialTermsVerified:true,...options.productionQuoteOverrides};
+    },
+    pricingSettings:options.pricingSettings||(async()=>({revision:0,markupBasisPoints:5000})),quoteProvider:async(project,actor,request)=>{
       quotes.push({project,actor,request});return {preparedId:PREPARED,manifestHash:manifest,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",providerCostCents:1000,
         pricingBasis:"planning-rate",pricingRevision:0,quoteReference:"fictional-reference",environment:binding.environment,expiresAt:new Date(time+300_000).toISOString(),...options.quoteOverrides};}};
   const service=createHostedCheckoutService(dependencies),makeQuote=(actor=OWNER,key=KEY)=>service.quote(actor,{project:{title:"Private source material"},preparedId:PREPARED,idempotencyKey:key});
   const checkout=async(actor=OWNER)=>{const q=await makeQuote(actor);return service.checkout(actor,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});};
-  return {service,records,requests,bindings,quotes,read,write,seed,makeQuote,checkout,peer:()=>createHostedCheckoutService(dependencies),advance:n=>time+=n,setBinding:b=>binding=b,setDispatch:d=>dispatch=d,
+  return {service,records,requests,bindings,quotes,productionQuotes,read,write,seed,makeQuote,checkout,peer:()=>createHostedCheckoutService(dependencies),advance:n=>time+=n,setBinding:b=>binding=b,setDispatch:d=>dispatch=d,
     invoice:()=>invoice,editInvoice:changes=>invoice={...invoice,...changes},setManifest:value=>manifest=value,editCustomer:changes=>customer={...customer,...changes}};
 }
 const error=(promise,code)=>assert.rejects(promise,e=>e instanceof HostedCheckoutError&&(!code||e.code===code));
@@ -91,6 +98,91 @@ test("fixed hosted quotes retain exact retail math, terms snapshot and do not ex
   assert.doesNotMatch(JSON.stringify(q),/providerCost|grantId|markupCents/);assert.equal(h.requests.length,0);assert.equal(h.quotes[0].request.environment,"production");
   for(const change of [{providerCostCents:-1},{currency:"EUR"},{pricingRevision:2},{expiresAt:"bad"},{preparedId:"mismatch"},{environment:"sandbox"},{pricingBasis:"provider-quote",apiVerified:false}])await error(fixture({quoteOverrides:change}).makeQuote());
   h.advance(300_001);await error(h.makeQuote(),"QUOTE_EXPIRED");
+});
+
+test("reusing a quote key cannot silently reuse a changed provider cost or retail price",async()=>{
+  for(const change of ["cost","markup","revision","basis"]) {
+    const quoteOverrides={},pricing={revision:0,markupBasisPoints:5000};
+    const h=fixture({quoteOverrides,pricingSettings:async()=>pricing}),first=await h.makeQuote();
+    if(change==="cost")quoteOverrides.providerCostCents=1100;
+    if(change==="markup")pricing.markupBasisPoints=6000;
+    if(change==="revision"){pricing.revision=1;quoteOverrides.pricingRevision=1;}
+    if(change==="basis")Object.assign(quoteOverrides,{pricingBasis:"provider-quote",apiVerified:true,qualityVerified:true,commercialTermsVerified:true});
+    await error(h.makeQuote(),"QUOTE_EXPIRED");
+    assert.equal(h.records.get(`payments/hosted-quotes/${digest(OWNER.email)}/${first.id}.json`).value.amountCents,1500);
+    assert.equal(mutationRequests(h).length,0);
+  }
+});
+
+test("a concurrent saved quote with different pricing cannot win idempotent quote recovery",async()=>{
+  let h,changed=false;
+  h=fixture({beforeWrite:(path,value)=>{
+    if(path.startsWith("payments/hosted-quotes/")&&!changed) {
+      changed=true;h.seed(path,{...value,changeId:"another-writer",providerCostCents:1100,markupCents:550,amountCents:1650});
+    }
+  }});
+  await error(h.makeQuote(),"QUOTE_EXPIRED");assert.equal(mutationRequests(h).length,0);
+});
+
+test("new live invoices require a fresh exact production quote within the accepted provider budget",async()=>{
+  const h=fixture(),order=await h.checkout();
+  assert.deepEqual(h.productionQuotes,[{email:OWNER.email,preparedId:PREPARED,manifestHash:MANIFEST,environment:"production",budgetCents:1000}]);
+  assert.equal(order.amountCents,1500);
+  await h.checkout();assert.equal(h.productionQuotes.length,1);
+  assert.equal(mutationRequests(h).filter(operation=>operation.path==="/invoice").length,1);
+});
+
+test("unavailable, over-budget or unverified production blocks checkout before accounting writes",async()=>{
+  for(const productionQuoteOverrides of [{preparedId:"different"}, {manifestHash:digest("different")}, {environment:"sandbox"},
+    {currency:"EUR"}, {providerCostCents:1001}, {providerCostCents:-1}, {maximumCostCents:1001}, {maximumCostCents:999},
+    {apiVerified:false}, {qualityVerified:false}, {commercialTermsVerified:false}, {quoteReference:""},
+    {expiresAt:"invalid"}, {expiresAt:new Date(NOW).toISOString()}]) {
+    const h=fixture({productionQuoteOverrides});await error(h.checkout(),"PRODUCTION_UNAVAILABLE");
+    assert.equal(h.requests.length,0);assert.equal([...h.records.keys()].some(path=>path.startsWith("payments/orders/")),false);
+  }
+  const h=fixture({productionQuote:async()=>{throw Error("PRIVATE_PROVIDER_DIAGNOSTIC");}});
+  await assert.rejects(h.checkout(),cause=>cause.code==="PRODUCTION_UNAVAILABLE"&&!cause.message.includes("PRIVATE_PROVIDER_DIAGNOSTIC"));
+  assert.equal(h.requests.length,0);
+});
+
+test("live checkout consent and quote changes fail before a production-backed invoice",async()=>{
+  const h=fixture(),quote=await h.makeQuote();
+  for(const productionConsent of [undefined,false])await error(h.service.checkout(OWNER,{quoteId:quote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent}),"PRODUCTION_CONSENT_REQUIRED");
+  assert.equal(h.productionQuotes.length,0);assert.equal(h.requests.length,0);
+  let changed;
+  changed=fixture({productionQuote:async input=>{
+    const path=[...changed.records.keys()].find(value=>value.startsWith("payments/hosted-quotes/"));
+    changed.seed(path,{...changed.records.get(path).value,providerCostCents:1100});
+    return {...input,currency:"USD",providerCostCents:1000,maximumCostCents:1000,quoteReference:"fresh",
+      expiresAt:new Date(NOW+300_000).toISOString(),apiVerified:true,qualityVerified:true,commercialTermsVerified:true};
+  }});
+  await error(changed.checkout(),"QUOTE_EXPIRED");assert.equal(changed.requests.length,0);
+});
+
+test("safe retries recheck production and sandbox invoices retain their separate behavior",async()=>{
+  const productionQuoteOverrides={},h=fixture({productionQuoteOverrides});let fail=true;
+  h.setDispatch(operation=>{if(operation.path==="/item/2"&&fail){fail=false;throw Error("synthetic read failure");}});
+  const quote=await h.makeQuote(),body={quoteId:quote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true};
+  const pending=await h.service.checkout(OWNER,body);assert.equal(pending.retryAllowed,true);
+  productionQuoteOverrides.maximumCostCents=1001;
+  await error(h.service.checkout(OWNER,body),"PRODUCTION_UNAVAILABLE");
+  assert.equal(h.productionQuotes.length,2);assert.equal(mutationRequests(h).filter(operation=>operation.path==="/invoice").length,0);
+  const sandboxBinding={...BINDING,environment:"sandbox"};
+  const sandbox=fixture({env:{QUICKBOOKS_ENVIRONMENT:"sandbox"},productionQuote:async()=>assert.fail("Sandbox checkout must not require live production")});
+  sandbox.setBinding(sandboxBinding);sandbox.seed(HOSTED_CHECKOUT_SETTINGS_PATH,{...settings,merchantBinding:sandboxBinding});
+  const sandboxQuote=await sandbox.makeQuote();
+  assert.equal((await sandbox.service.checkout(OWNER,{quoteId:sandboxQuote.id,idempotencyKey:CHECKOUT,consent:true})).status,"awaiting-payment");
+  assert.equal(sandbox.productionQuotes.length,0);
+});
+
+test("production or retail expiry during customer preparation prevents the invoice POST",async()=>{
+  for(const stage of ["customer","claim"]) {
+    let h;
+    h=fixture({afterWrite:(path,value)=>{if(stage==="claim"&&path.startsWith("payments/orders/")&&value.invoiceAttemptedAt&&value.status==="submitting")h.advance(300_001);}});
+    h.setDispatch(operation=>{if(stage==="customer"&&operation.path==="/item/2")h.advance(300_001);});
+    const pending=await h.checkout();assert.equal(pending.status,"uncertain");
+    assert.equal(mutationRequests(h).filter(operation=>operation.path==="/invoice").length,0);
+  }
 });
 
 test("hosted checkout creates exactly one minimal customer and fixed invoice with no send or private film data",async()=>{

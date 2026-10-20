@@ -162,7 +162,7 @@ export function filmOverlayAss(manifest) {
 }
 export async function assembleFilm({ manifest, manifestHash, clips, outputPath, ffmpeg = "ffmpeg", technicalSample = false }) {
   if (typeof technicalSample !== "boolean") throw new Error("The technical sample marker must be explicit.");
-  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > 30
+  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > 200
     || createHash("sha256").update(JSON.stringify(manifest)).digest("hex") !== manifestHash) throw new Error("The immutable manifest hash does not match.");
   if (!Array.isArray(clips) || clips.length !== manifest.shots.length || new Set(clips.map(c => c.shotId)).size !== clips.length) throw new Error("Supply exactly one reviewed clip for each manifest shot.");
   const output = resolve(outputPath);

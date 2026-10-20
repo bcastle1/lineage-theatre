@@ -33,8 +33,9 @@ export function productionQueueMessage({ progress, ticket, automaticPending = fa
     message: "Your paid film is scheduled. The studio is saving its place in the production queue and will retry automatically. You do not need to pay again.",
   };
   const checkedAt = typeof health?.checkedAt === "string" ? Date.parse(health.checkedAt) : NaN;
-  const workerReady = health?.version === 1 && health.ready === true && health.model === "wan"
-    && health.recipe === FAL_RECIPE_VERSION && Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt <= 180_000;
+  const workerReady = health?.version === 1 && health.ready === true && health.model === "kling"
+    && health.recipe === FAL_RECIPE_VERSION && health.deliveryChecksVersion === 1
+    && Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt <= 180_000;
   return { workerReady, message: !workerReady
     ? "Your film is queued. The studio is waiting for the production worker to confirm it is available. Your payment is saved; you do not need to pay again."
     : ticket?.lastResult === "RETRYABLE_FAILURE"
@@ -202,7 +203,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       const actor = await currentAccount(ticket.value.email);
       const input = { email: ticket.value.email, id: ticket.value.id };
       const job = await film.getPrepared(input);
-      if (job.manifestHash !== ticket.value.manifestHash) throw blocked();
+      if (job.manifestHash !== ticket.value.manifestHash) throw new FilmProductionError("The saved production plan changed.", 409, "PRODUCTION_CONFLICT");
       if (job.status === "completed") { await finishTicket("completed", "COMPLETED"); return { state: "completed" }; }
       if (job.status === "failed") { await finishTicket("attention", "PROVIDER_FAILED"); return { state: "attention" }; }
       if (job.status === "awaiting-assembly") {
@@ -222,7 +223,9 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       await finishTicket(state, state === "completed" ? "COMPLETED" : state === "attention" ? "REVIEW_REQUIRED" : uncertain ? "UNCERTAIN" : "PROGRESS");
       return { state };
     } catch (error) {
-      const needsReview = error instanceof FilmProductionError || error?.code==='FILM_SPEECH_REVIEW_REQUIRED' || ticket.value.attempts >= 10;
+      const retryable = error instanceof FilmProductionError
+        && ["PRODUCTION_UNAVAILABLE", "PRODUCTION_GRANT_EXPIRED", "ASSEMBLY_CLAIM_EXPIRED"].includes(error.code);
+      const needsReview = (error instanceof FilmProductionError && !retryable) || error?.code==='FILM_SPEECH_REVIEW_REQUIRED' || ticket.value.attempts >= 10;
       const failure = finishingFailure(error, finishingStage);
       if (failure) console.warn("FILM_FINISHING_FAILED", failure);
       await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE", failure);

@@ -36,7 +36,7 @@ export function soundtrackFailureDiagnostic(value) {
   if (!plain(value) || !diagnosticStages.has(value.stage) || !diagnosticCategories.has(value.category)) return null;
   const result = { stage: value.stage, category: value.category };
   if (value.category === 'dependency_missing' && diagnosticModules.has(value.module)) result.module = value.module;
-  for (const [key, minimum, maximum] of [['sceneIndex', 1, 30], ['turnIndex', 1, 20],
+  for (const [key, minimum, maximum] of [['sceneIndex', 1, 200], ['turnIndex', 1, 20],
     ['generatedMs', 0, 120_000], ['availableMs', 0, 30_000], ['overrunMs', 0, 120_000]]) {
     if (Number.isSafeInteger(value[key]) && value[key] >= minimum && value[key] <= maximum) result[key] = value[key];
   }
@@ -45,7 +45,7 @@ export function soundtrackFailureDiagnostic(value) {
 
 export function soundtrackPlan({ manifest, manifestHash, narratorVoice = 'am_michael', characterVoices = {}, speakerAliases = {}, music }) {
   requireValue(plain(manifest) && HASH.test(manifestHash || '') && hash(JSON.stringify(manifest)) === manifestHash, 'MANIFEST_CHANGED');
-  requireValue(manifest.version === 1 && Array.isArray(manifest.shots) && manifest.shots.length >= 1 && manifest.shots.length <= 30
+  requireValue(manifest.version === 1 && Array.isArray(manifest.shots) && manifest.shots.length >= 1 && manifest.shots.length <= 200
     && Number.isSafeInteger(manifest.targetDurationSeconds) && manifest.targetDurationSeconds >= 15 && manifest.targetDurationSeconds <= 600
     && Array.isArray(manifest.screenplay?.characters) && manifest.screenplay.characters.length <= 16
     && plain(characterVoices) && plain(speakerAliases) && VOICE.test(narratorVoice)
@@ -111,7 +111,7 @@ export function soundtrackPlan({ manifest, manifestHash, narratorVoice = 'am_mic
       requireValue(!/(?:^|\s)[A-Z][A-Z _'-]{1,100}:/.test(turn.text), 'DIALOGUE_LABEL_AMBIGUOUS');
     }
     turnCount += turns.length;
-    requireValue(turns.length <= 20 && turnCount <= 200, 'TOO_MANY_TURNS');
+    requireValue(turns.length <= 20 && turnCount <= 600, 'TOO_MANY_TURNS');
     return { shotId: shot.id, sceneIndex: sceneIndex + 1, startMs: shot.startMs, durationMs: shot.targetDurationMs,
       narrationSha256: hash(shot.narration), dialogueSha256: hash(shot.dialogue), turns };
   });

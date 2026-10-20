@@ -1,10 +1,21 @@
 import { normalizeFilmOrder, type FilmOrder } from "./checkout-contract";
-import { normalizeLibraryEntry, libraryCanWatch, type LibraryEntry } from "./film-library";
+import { normalizeLibraryEntry, libraryCanWatch, libraryFilmLink, type LibraryEntry } from "./film-library";
 
 type Request = (path: string, body?: unknown) => Promise<unknown>;
 export function confirmedFilmPayment(order: FilmOrder | null) {
   return Boolean(order?.status === "captured" && order.charged === true && order.receiptAvailable
     && !order.requiresReview && order.refundedCents === 0);
+}
+function paymentFilmMatches(order: FilmOrder, entry: LibraryEntry) {
+  return entry.kind === "plan" && entry.id === order.preparedId && entry.filmId === order.filmId
+    && entry.payments.some(payment => payment.id === order.id && payment.amountCents === order.amountCents
+      && payment.currency === order.currency && payment.sandbox === order.sandbox
+      && payment.status === order.status && payment.refundedCents === order.refundedCents
+      && payment.requiresReview === order.requiresReview && payment.receiptAvailable === order.receiptAvailable);
+}
+export function paidFilmPlaybackLink(order: FilmOrder | null, entry: LibraryEntry | null): string | null {
+  if (!order || !entry || !confirmedFilmPayment(order) || !paymentFilmMatches(order, entry) || !libraryCanWatch(entry)) return null;
+  return libraryFilmLink(entry.id);
 }
 export function verifyPaymentReturnOrder(value: unknown, id: string, previous?: FilmOrder | null): FilmOrder {
   const order = normalizeFilmOrder(value);
@@ -21,8 +32,7 @@ export async function readPaymentConfirmation(request: Request, id: string, prev
 export async function readPaymentFilm(request: Request, order: FilmOrder): Promise<LibraryEntry> {
   const value = await request(`/api/library?action=detail&kind=plan&id=${order.preparedId}`) as { entry?: unknown };
   const entry = normalizeLibraryEntry(value?.entry);
-  if (entry.kind !== "plan" || entry.id !== order.preparedId || entry.filmId !== order.filmId
-    || !entry.payments.some(payment => payment.id === order.id && payment.amountCents === order.amountCents && payment.sandbox === order.sandbox))
+  if (!paymentFilmMatches(order, entry))
     throw new Error("The film for this payment could not be verified. Your payment remains saved.");
   return entry;
 }

@@ -5,7 +5,7 @@ import { digest, readRecord, writeRecord, userPath } from '../api/_lib/auth.mjs'
 import { OWNER_EMAIL, isOwner } from '../api/_lib/access.mjs';
 import { comparisonPath } from '../api/_lib/fal-comparison.mjs';
 import { createFalClient, FAL_MODELS, FAL_MEDIA_HOSTS, falMediaUrl } from '../api/_lib/fal-client.mjs';
-import { falShotInput, FAL_RECIPE_VERSION, FAL_PROMPT_VERSION, falPlan } from '../api/_lib/fal-production.mjs';
+import { falShotInput, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION, FAL_LEGACY_RECIPE_VERSION as FAL_PROMPT_VERSION, falPlan } from '../api/_lib/fal-production.mjs';
 import { downloadProductionClip } from './production-worker.mjs';
 
 // An explicit bounded editorial pass. No automatic retries of completed or
