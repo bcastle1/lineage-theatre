@@ -7,6 +7,7 @@ import { createPaidFilmCorrections, readPaidFilmCorrection, correctionCoverage, 
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { createPaymentsService } from '../api/_lib/payments.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { FAL_MODELS, falRequestPath } from '../api/_lib/fal-client.mjs';
 
 const NOW = Date.parse('2026-10-20T12:00:00Z'), OWNER = { email: OWNER_EMAIL, role: 'owner' };
 const SOURCE = '11111111-1111-4111-8111-111111111111', TARGET = '22222222-2222-4222-8222-222222222222';
@@ -160,4 +161,113 @@ test('finished media and authored soundtrack require the explicit correction, sa
   const unapproved = fixture();
   await assert.rejects(requireFinishedFilmPayment({ job: { ...unapproved.target, authorization: grant }, email: OWNER.email, actor: OWNER,
     read: unapproved.read, now: unapproved.now }));
+});
+
+async function recoveryFixture(options = {}) {
+  const h = fixture();
+  const manifest = { ...h.target.manifest, version: 1, era: '1960s', style: 'Documentary', targetDurationSeconds: 24,
+    screenplay: { characters: [], scenes: [], logline: 'A fictional walk through a quiet town.' },
+    shots: [{ id: 'scene-one', startMs: 0, targetDurationMs: 12000, characterIds: [], visual: 'A quiet town in morning light.' },
+      { id: 'scene-two', startMs: 12000, targetDurationMs: 12000, characterIds: [], visual: 'The same quiet town at noon.' }] };
+  h.target.manifest = manifest; h.target.manifestHash = sha(manifest); h.input.manifestHash = h.target.manifestHash;
+  h.target.shots.push({ id: 'scene-two', status: 'prepared' });
+  h.seed(jobPath(TARGET), h.target);
+  const approved = await h.approve(), authorization = await h.auth(), requestKey = digest('saved-original-shot');
+  const originalIdentity = digest(`${FAL_RECIPE_VERSION}:kling:${requestKey}`), originalRequestId = 'original-request-id';
+  const recoveryId = digest(`kling-prompt-recovery-v1:${originalIdentity}:${originalRequestId}`);
+  const replacementIdentity = digest(`${recoveryId}:replacement-v1`);
+  const completedKey = digest('saved-completed-shot'), completedIdentity = digest(`${FAL_RECIPE_VERSION}:kling:${completedKey}`);
+  h.mutate(jobPath(TARGET), value => { value.status = 'failed'; value.authorization = authorization;
+    value.provider = { id: 'fal', model: 'kling', recipe: FAL_RECIPE_VERSION };
+    Object.assign(value.shots[0], { status: 'failed', requestKey, providerJobId: `fal-${originalIdentity}` });
+    Object.assign(value.shots[1], { status: 'completed', requestKey: completedKey, providerJobId: `fal-${completedIdentity}` }); });
+  const queuePath = `production/queue/${digest(OWNER.email)}/${TARGET}.json`;
+  h.seed(queuePath, { version: 1, email: OWNER.email, id: TARGET, manifestHash: h.target.manifestHash,
+    orderId: approved.correctionId, state: 'attention' });
+  const receiptPath = falRequestPath(originalIdentity), originalInputHash = digest('original long prompt');
+  h.seed(receiptPath, { version: 1, identity: originalIdentity, endpoint: FAL_MODELS.kling,
+    inputHash: originalInputHash, requestId: originalRequestId, state: 'failed', failureCode: 'FAL_RENDER_FAILED' });
+  h.seed(falRequestPath(completedIdentity), { version: 1, identity: completedIdentity, endpoint: FAL_MODELS.kling,
+    inputHash: digest('completed original input'), requestId: 'completed-request-id', state: 'completed' });
+  const claimPath = `production/fal/failed-shot-recoveries/${recoveryId}.json`;
+  const claim = { version: 1, kind: 'kling-failed-shot-recovery-v1', recoveryId, ownerHash: digest(OWNER.email),
+    preparedId: TARGET, manifestHash: h.target.manifestHash, correctionId: approved.correctionId, model: 'kling', recipe: FAL_RECIPE_VERSION,
+    maximumCostCents: 1980, maximumTotalCostCents: 1980, originalIdentity, originalRequestId, originalInputHash,
+    endpoint: FAL_MODELS.kling, replacementIdentity, inputHash: digest('shortened directions with exact saved script'),
+    shotId: 'scene-one', shotIndex: 1, providerSeconds: 12, replacementMaximumCents: 180,
+    terminalFailure: 'PROMPT_LENGTH_422', zeroChargeCents: 0, billingEvidenceSha256: digest('billing evidence'),
+    rejectionEvidenceSha256: digest('provider rejection evidence'), billingObservedAt: new Date(NOW).toISOString(),
+    priorSpendCents: 168, totalReplacementMaximumCents: 180, selectedRequests: [{ shotIndex: 1, requestId: originalRequestId }],
+    originalRequests: [{ requestId: originalRequestId, amountCents: 0 }, { requestId: 'completed-request-id', amountCents: 168 }],
+    createdAt: new Date(NOW).toISOString() };
+  h.seed(claimPath, claim);
+  const input = { email: OWNER.email, correctionId: approved.correctionId, preparedId: TARGET, manifestHash: h.target.manifestHash,
+    recoveryId, originalIdentity, originalRequestId, replacementIdentity };
+  const service = createPaidFilmCorrections({ ...h.deps, recoveryQuoteProvider: h.deps.quoteProvider,
+    readRecoveryCreditCents: async () => 180, ...options });
+  return { ...h, claim, claimPath, receiptPath, queuePath, recoveryInput: input,
+    recover: change => service.authorizeFailedShotRecovery({ ...input, ...change }) };
+}
+
+test('failed-shot authorization reuses the original sale and budget, with remaining wallet capacity and no writes', async () => {
+  const h = await recoveryFixture(), writes = h.writes.length, reservations = h.reservations.length;
+  await assert.rejects(h.auth());
+  const grant = await h.recover();
+  assert.equal(grant.allowed, true); assert.equal(grant.budgetCents, 1980); assert.equal(grant.replacementMaximumCents, 180);
+  assert.equal(grant.originalOrderId, h.orderId); assert.equal(grant.recoveryId, h.claim.recoveryId);
+  assert.equal(grant.inputHash, h.claim.inputHash); assert.equal(grant.quoteReference, 'fictional-kling-correction');
+  assert.ok(Date.parse(grant.expiresAt) > h.now() && Date.parse(grant.expiresAt) <= h.now() + 60_000);
+  assert.equal(h.writes.length, writes); assert.equal(h.reservations.length, reservations);
+  assert.deepEqual(h.verifications.at(-1), { email: OWNER.email, orderId: h.orderId, preparedId: SOURCE, manifestHash: h.original.manifestHash });
+});
+
+test('recovery rejects unproven failures, changed bindings, duplicate or overstated repair budgets', async () => {
+  const changes = [
+    c => { c.zeroChargeCents = 1; }, c => { c.terminalFailure = 'TIMEOUT'; }, c => { c.replacementMaximumCents = 181; },
+    c => { c.priorSpendCents = 1801; }, c => { c.totalReplacementMaximumCents = 179; }, c => { c.maximumCostCents = 1981; },
+    c => { c.originalRequests[0].amountCents = 1; }, c => { c.originalRequests[0].requestId = 'different-request'; },
+    c => { c.selectedRequests.push(c.selectedRequests[0]); }, c => { c.shotIndex = 2; }, c => { c.shotId = 'different'; },
+    c => { c.billingEvidenceSha256 = null; }, c => { c.rejectionEvidenceSha256 = null; },
+    c => { c.originalInputHash = digest('mismatched original input'); }, c => { c.inputHash = c.originalInputHash; },
+  ];
+  for (const change of changes) { const h = await recoveryFixture(); h.mutate(h.claimPath, change); await assert.rejects(h.recover()); }
+  for (const change of [r => { r.state = 'processing'; }, r => { r.state = 'uncertain'; }, r => { r.failureCode = 'FAL_HTTP_503'; },
+    r => { r.result = { video: {} }; }, r => { r.identity = digest('wrong identity'); }]) {
+    const h = await recoveryFixture(); h.mutate(h.receiptPath, change); await assert.rejects(h.recover());
+  }
+});
+
+test('completed original clips require exact 14-cent-per-second billing before replacement authorization', async () => {
+  for (const amountCents of [0, 167, 169]) {
+    const h = await recoveryFixture();
+    h.mutate(h.claimPath, claim => { claim.originalRequests[1].amountCents = amountCents; claim.priorSpendCents = amountCents; });
+    await assert.rejects(h.recover());
+  }
+  const h = await recoveryFixture();
+  assert.equal((await h.recover()).allowed, true);
+});
+
+test('failed-shot repair cannot overlap a worker, an existing replacement, or an already completed shot', async () => {
+  for (const [place, change] of [
+    ['queue', q => { q.state = 'pending'; }], ['queue', q => { q.lease = { expiresAt: NOW + 1 }; }],
+    ['job', j => { j.lease = { expiresAt: NOW + 1 }; }], ['job', j => { j.status = 'processing'; }],
+    ['job', j => { j.shots[0].status = 'completed'; }], ['job', j => { j.authorization.budgetCents++; }],
+  ]) { const h = await recoveryFixture(); h.mutate(place === 'queue' ? h.queuePath : jobPath(TARGET), change); await assert.rejects(h.recover()); }
+  for (const pathFor of [h => falRequestPath(h.claim.replacementIdentity), h => `production/fal/choices/${h.claim.originalIdentity}.json`]) {
+    const h = await recoveryFixture(); h.seed(pathFor(h), { state: 'uncertain' }); await assert.rejects(h.recover());
+  }
+  const h = await recoveryFixture(); h.mutate(h.queuePath, q => { q.lease = { expiresAt: NOW - 1 }; });
+  assert.equal((await h.recover()).allowed, true);
+});
+
+test('recovery denies changed payment, insufficient remaining funding, and storage races after live verification', async () => {
+  const unfunded = await recoveryFixture({ readRecoveryCreditCents: async () => 179 }); await assert.rejects(unfunded.recover());
+  const reversed = await recoveryFixture(); reversed.verifyEffect(() => { throw Error('original sale was reversed'); });
+  await assert.rejects(reversed.recover());
+  for (const mutate of [h => h.mutate(h.claimPath, c => { c.inputHash = digest('changed'); }),
+    h => h.mutate(h.queuePath, q => { q.state = 'pending'; }), h => h.mutate(h.receiptPath, r => { r.state = 'completed'; }),
+    h => h.seed(falRequestPath(h.claim.replacementIdentity), { state: 'submitting' }),
+    h => h.mutate(jobPath(TARGET), j => { j.lease = { expiresAt: NOW + 1 }; })]) {
+    const h = await recoveryFixture(); h.verifyEffect(() => mutate(h)); await assert.rejects(h.recover());
+  }
 });

@@ -5,12 +5,14 @@ import { falProductionAdapter } from './_lib/fal-production.mjs';
 import { productionQueuePath } from './_lib/production-queue.mjs';
 import { falReviewedDelivery } from './_lib/fal-reviewed-delivery.mjs';
 import { productionAuthorizationDiagnostic } from './_lib/production-authorization-diagnostics.mjs';
+import { paidFilmCorrections } from './_lib/paid-film-correction.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
 // allocation, recorded-reversal, owner, manifest and full-film budget checks.
 export function createProductionWorkerHandler({ env = process.env, paymentService = payments,
-  adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery } = {}) {
+  adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
+  corrections = paidFilmCorrections } = {}) {
   return async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); }
     const secret = env.LINEAGE_WORKER_SECRET, header = req.headers?.authorization;
@@ -20,6 +22,21 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       return json(res, 401, { code: 'WORKER_AUTH_REQUIRED' });
     try {
       const body = await readBody(req, 2048);
+      if (body?.action === 'authorize-failed-shot-recovery') {
+        const fields = ['action', 'email', 'preparedId', 'manifestHash', 'correctionId', 'recoveryId',
+          'originalIdentity', 'originalRequestId', 'replacementIdentity', 'model', 'recipe'];
+        if (Object.keys(body).sort().join(',') !== fields.sort().join(',')
+          || body.model !== 'kling' || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
+          || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
+          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
+          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId || '')
+          || !['manifestHash', 'correctionId', 'recoveryId', 'originalIdentity', 'replacementIdentity'].every(key => /^[a-f0-9]{64}$/.test(body[key] || ''))
+          || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.originalRequestId || ''))
+          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (!await limiter('production-worker:failed-shot-recovery', 20, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
+        const { action, model, recipe, ...input } = body;
+        return json(res, 200, await corrections.authorizeFailedShotRecovery(input));
+      }
       if (body?.action === 'deliver-reviewed-film') {
         if (Object.keys(body).some(key => !['action', 'artifactSha256', 'orderId', 'previousArtifactSha256', 'model'].includes(key))
           || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.artifactSha256 || '')
