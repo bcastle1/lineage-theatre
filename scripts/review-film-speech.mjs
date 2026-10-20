@@ -2,7 +2,8 @@ import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
-import {join} from 'node:path';
+import {isAbsolute,join} from 'node:path';
+import {isDeepStrictEqual} from 'node:util';
 import {markFinishingFailure,finishingFailure} from '../api/_lib/film-finishing-diagnostics.mjs';
 
 const failure=reason=>markFinishingFailure(Object.assign(new Error('The generated narration needs a production review. Your payment is saved.'),{code:'FILM_SPEECH_REVIEW_REQUIRED'}),'speech-review',reason);
@@ -107,18 +108,78 @@ function run(binary,args,reason='SPEECH_RECOGNITION_FAILED'){return new Promise(
   child.stderr.resume();child.once('error',()=>{clearTimeout(timer);reject(failure(reason));});
   child.once('close',code=>{clearTimeout(timer);code===0?resolve(output):reject(failure(reason));});
 });}
-export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences,speakerAliases}){
-  const reviews=[];
+const audioSnapshot=async path=>{const bytes=await readFile(path);return {sha256:hash(bytes),sizeBytes:bytes.length};};
+function adjacentSceneShot(manifest,shot,previous,speakerAliases){
+  const index=manifest.shots.findIndex(value=>value.id===shot.id),prior=previous?.shot;
+  const sameScene=manifest.shots.filter(value=>value.sceneIndex===shot.sceneIndex);
+  if(index<1||!prior||manifest.shots[index-1].id!==prior.id
+    ||!isDeepStrictEqual(manifest.shots[index-1],prior)||!isDeepStrictEqual(manifest.shots[index],shot)
+    ||!Number.isSafeInteger(shot.sceneIndex)||shot.sceneIndex<0||prior.sceneIndex!==shot.sceneIndex
+    ||sameScene.length!==2||sameScene[0].id!==prior.id||sameScene[1].id!==shot.id
+    ||prior.sceneParts!==2||shot.sceneParts!==2||prior.scenePart!==1||shot.scenePart!==2
+    ||shot.continuity?.precedingShotId!==prior.id||prior.startMs+prior.targetDurationMs!==shot.startMs
+    ||![prior,shot].every(value=>Number.isSafeInteger(value.startMs)&&value.startMs>=0
+      &&Number.isSafeInteger(value.targetDurationMs)&&value.targetDurationMs>0&&value.targetDurationMs<=15000)
+    ||previous.review?.shotId!==prior.id||previous.review.scriptMatched!==true||previous.review.edit
+    ||previous.review.adjacentContextProof||previous.review.verificationScope==='authored-scene-window')throw failure('SPEECH_SCRIPT_MISMATCH');
+  // This ephemeral aggregate checks the complete authored scene only. It is
+  // never saved as a manifest and never assigns window timestamps to a cut.
+  return {id:`${prior.id}+${shot.id}`,narration:[prior,shot]
+    .flatMap(value=>intendedSpeechTokens(value,{manifest,speakerAliases})).join(' '),dialogue:'',
+    targetDurationMs:prior.targetDurationMs+shot.targetDurationMs};
+}
+async function verifyAdjacentScene({result,manifest,shot,previous,currentAudio,normalTranscript,contextTranscript,speakerAliases}){
+  const windowShot=adjacentSceneShot(manifest,shot,previous,speakerAliases),proof=result?.proof;
+  const fullNormal=result?.normalTranscript,fullContext=result?.contextTranscript,equivalence=result?.equivalenceProof??null;
+  const sha=value=>hash(JSON.stringify(value)),validHash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+  const ids=[previous.shot.id,shot.id],duration=windowShot.targetDurationMs/1000;
+  const sources=[{shotId:ids[0],sha256:previous.audioSha256,sizeBytes:previous.audioSizeBytes},
+    {shotId:ids[1],sha256:currentAudio.sha256,sizeBytes:currentAudio.sizeBytes}];
+  if(proof?.kind!=='adjacent-authored-scene-proof-v1'||proof.version!==1
+    ||proof.verificationScope!=='authored-scene-window'||proof.perCutLocalization!==false||proof.pcmUnchanged!==true
+    ||proof.manifestHash!==sha(manifest)||!isDeepStrictEqual(proof.shotIds,ids)||!isDeepStrictEqual(proof.sourceAudio,sources)
+    ||proof.sceneIndex!==shot.sceneIndex||proof.durationSeconds!==duration
+    ||proof.previousReviewSha256!==sha(previous.review)
+    ||proof.standaloneNormalTranscriptSha256!==sha(normalTranscript)||proof.standaloneContextTranscriptSha256!==sha(contextTranscript)
+    ||!fullNormal||!fullContext||proof.fullNormalTranscriptSha256!==sha(fullNormal)||proof.fullContextTranscriptSha256!==sha(fullContext)
+    ||!['combinedAudioSha256','combinedPcmSha256','provenanceSha256','voiceAssignmentsSha256','bindingHash','evidenceSha256'].every(key=>validHash(proof[key]))
+    ||typeof proof.evidencePath!=='string'||!isAbsolute(proof.evidencePath)||proof.evidencePath.length>4096
+    ||typeof proof.receiptPath!=='string'||!proof.receiptPath.startsWith('production/')||proof.receiptPath.length>2048
+    ||proof.receiptPath.split('/').some(part=>part==='..'))throw failure('SPEECH_SCRIPT_MISMATCH');
+  let bytes;try{bytes=await readFile(proof.evidencePath);}catch{throw failure('SPEECH_SCRIPT_MISMATCH');}
+  if(bytes.length>1500000||hash(bytes)!==proof.evidenceSha256)throw failure('SPEECH_SCRIPT_MISMATCH');
+  let evidence;try{evidence=JSON.parse(bytes.toString('utf8'));}catch{throw failure('SPEECH_SCRIPT_MISMATCH');}
+  const {evidencePath,receiptPath,evidenceSha256,...metadata}=proof;
+  if(!isDeepStrictEqual(evidence,{...metadata,normalTranscript:fullNormal,contextTranscript:fullContext,equivalenceProof:equivalence}))throw failure('SPEECH_SCRIPT_MISMATCH');
+  if(equivalence&&(equivalence.kind!=='repair-speech-equivalence-proof-v2'||equivalence.version!==2
+    ||equivalence.scope!=='authored-scene-window'||Object.hasOwn(equivalence,'shotId')
+    ||!isDeepStrictEqual(equivalence.shotIds,ids)||equivalence.manifestHash!==proof.manifestHash
+    ||equivalence.audioSha256!==proof.combinedAudioSha256||equivalence.normalTranscriptSha256!==proof.fullNormalTranscriptSha256
+    ||equivalence.contextTranscriptSha256!==proof.fullContextTranscriptSha256||equivalence.provenanceSha256!==proof.provenanceSha256
+    ||equivalence.voiceAssignmentsSha256!==proof.voiceAssignmentsSha256))throw failure('SPEECH_SCRIPT_MISMATCH');
+  const tokens=value=>value.words.flatMap(word=>normalizeSpeech(word.word));
+  for(const full of [fullNormal,fullContext]){
+    if(!Number.isFinite(full.duration)||Math.abs(full.duration-duration)>.05||!Array.isArray(full.words)||full.words.length>10000
+      ||full.words.some((word,index)=>typeof word.word!=='string'||!Number.isFinite(word.start)||!Number.isFinite(word.end)
+        ||word.start<0||word.end<word.start||word.end>duration-.08||index>0&&word.start<full.words[index-1].start)
+      ||speechEdit(windowShot,full,{repairProof:equivalence})!==null)throw failure('SPEECH_SCRIPT_MISMATCH');
+  }
+  if(!isDeepStrictEqual(tokens(fullNormal),tokens(fullContext)))throw failure('SPEECH_SCRIPT_MISMATCH');
+  return structuredClone(proof);
+}
+export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences,resolveAdjacentSpeechContext,speakerAliases}){
+  const reviews=[],reviewedSources=new Map(),adjacentEnabled=typeof resolveAdjacentSpeechContext==='function';
   for(const clip of clips){
     const shot=manifest.shots.find(s=>s.id===clip.shotId);if(!shot)throw failure('SPEECH_SHOT_INVALID');
     // Review the same track that assembly will deliver, including a separately
     // provided soundtrack. Never validate embedded audio then publish another.
     const audioPath=clip.audioPath||clip.path;
+    const initialAudio=adjacentEnabled?await audioSnapshot(audioPath):null;
     const readTranscript=async context=>{
       try{return transcribe?await transcribe(audioPath,{contextSilence:context}):JSON.parse(await run(python,[fileURLToPath(new URL('./transcribe-film.py',import.meta.url)),audioPath,...(context?['--context-silence']:[])]));}
       catch(error){throw markFinishingFailure(error,'speech-review','SPEECH_RECOGNITION_FAILED');}
     };
-    let transcript=await readTranscript(false),edit,contextSilence=false,repairProof;
+    let transcript=await readTranscript(false),edit,contextSilence=false,repairProof,adjacentContextProof;
     const normalTranscript=transcript;
     try { edit=speechEdit(shot,transcript,{manifest,speakerAliases}); }
     catch(error){
@@ -129,18 +190,44 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
       try{edit=speechEdit(shot,transcript,{manifest,speakerAliases});}
       catch(contextError){
         if(finishingFailure(error)?.reason!=='SPEECH_SCRIPT_MISMATCH'
-          ||finishingFailure(contextError)?.reason!=='SPEECH_SCRIPT_MISMATCH'||typeof resolveSpeechDifferences!=='function')throw contextError;
+          ||finishingFailure(contextError)?.reason!=='SPEECH_SCRIPT_MISMATCH')throw contextError;
         // Only separately configured, provenance-bound authored-audio recovery
         // may prove an exact saved cast pronunciation or cardinal form.
         // Raw transcripts remain unchanged and all timing checks still run.
-        repairProof=await resolveSpeechDifferences({manifest:structuredClone(manifest),shot:structuredClone(shot),audioPath,
-          normalTranscript:structuredClone(normalTranscript),contextTranscript:structuredClone(transcript)});
-        if(repairProof?.kind!=='repair-speech-equivalence-proof-v2'||repairProof.version!==2||repairProof.shotId!==shot.id
-          ||repairProof.manifestHash!==hash(JSON.stringify(manifest))||repairProof.audioSha256!==hash(await readFile(audioPath))
-          ||repairProof.normalTranscriptSha256!==hash(JSON.stringify(normalTranscript))
-          ||repairProof.contextTranscriptSha256!==hash(JSON.stringify(transcript))||!Array.isArray(repairProof.spans)
-          ||!repairProof.spans.length||repairProof.spans.length>64)throw contextError;
-        edit=speechEdit(shot,transcript,{repairProof,manifest,speakerAliases});
+        let resolved=false;
+        if(typeof resolveSpeechDifferences==='function'){
+          try{
+            repairProof=await resolveSpeechDifferences({manifest:structuredClone(manifest),shot:structuredClone(shot),audioPath,
+              normalTranscript:structuredClone(normalTranscript),contextTranscript:structuredClone(transcript)});
+            if(repairProof?.kind!=='repair-speech-equivalence-proof-v2'||repairProof.version!==2||repairProof.shotId!==shot.id
+              ||repairProof.manifestHash!==hash(JSON.stringify(manifest))||repairProof.audioSha256!==hash(await readFile(audioPath))
+              ||repairProof.normalTranscriptSha256!==hash(JSON.stringify(normalTranscript))
+              ||repairProof.contextTranscriptSha256!==hash(JSON.stringify(transcript))||!Array.isArray(repairProof.spans)
+              ||!repairProof.spans.length||repairProof.spans.length>64)throw contextError;
+            edit=speechEdit(shot,transcript,{repairProof,manifest,speakerAliases});resolved=true;
+          }catch(repairError){
+            if(!adjacentEnabled||finishingFailure(repairError)?.reason!=='SPEECH_SCRIPT_MISMATCH')throw repairError;
+            repairProof=undefined;
+          }
+        }
+        if(!resolved){
+          if(!adjacentEnabled)throw contextError;
+          const index=manifest.shots.findIndex(value=>value.id===shot.id);
+          const previous=reviewedSources.get(manifest.shots[index-1]?.id);
+          adjacentSceneShot(manifest,shot,previous,speakerAliases);
+          if(reviews.at(-1)?.shotId!==previous.shot.id
+            ||!isDeepStrictEqual(await audioSnapshot(previous.audioPath),{sha256:previous.audioSha256,sizeBytes:previous.audioSizeBytes})
+            ||!isDeepStrictEqual(await audioSnapshot(audioPath),initialAudio))throw contextError;
+          const result=await resolveAdjacentSpeechContext({manifest:structuredClone(manifest),shot:structuredClone(shot),audioPath,
+            normalTranscript:structuredClone(normalTranscript),contextTranscript:structuredClone(transcript),previous:structuredClone(previous)});
+          adjacentContextProof=await verifyAdjacentScene({result,manifest,shot,previous,currentAudio:initialAudio,
+            normalTranscript,contextTranscript:transcript,speakerAliases});
+          if(!isDeepStrictEqual(await audioSnapshot(previous.audioPath),{sha256:previous.audioSha256,sizeBytes:previous.audioSizeBytes})
+            ||!isDeepStrictEqual(await audioSnapshot(audioPath),initialAudio))throw contextError;
+          // The isolated transcripts above stay unchanged. Acceptance is of
+          // the whole authored scene; it never produces a cut-level edit.
+          edit=null;
+        }
       }
     }
     if(edit){
@@ -150,7 +237,16 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
         '-c:a','pcm_s16le',output],'SPEECH_AUDIO_EDIT_FAILED');
       clip.audioPath=output;
     }
-    reviews.push({shotId:shot.id,scriptMatched:true,contextSilence,...(edit?{edit}:{}),...(repairProof?{repairProof}:{})});
+    const review={shotId:shot.id,scriptMatched:true,contextSilence,...(edit?{edit}:{}),...(repairProof?{repairProof}:{}),
+      ...(adjacentContextProof?{verificationScope:'authored-scene-window',adjacentContextProof}:{})};
+    reviews.push(review);
+    if(adjacentEnabled){
+      const acceptedAudio=await audioSnapshot(clip.audioPath||clip.path);
+      if(!edit&&!isDeepStrictEqual(acceptedAudio,initialAudio))throw failure('SPEECH_SCRIPT_MISMATCH');
+      reviewedSources.set(shot.id,{shot:structuredClone(shot),clip:structuredClone(clip),review:structuredClone(review),
+        audioPath:clip.audioPath||clip.path,audioSha256:acceptedAudio.sha256,audioSizeBytes:acceptedAudio.sizeBytes});
+    }
   }
-  return {version:1,method:reviews.some(review=>review.repairProof)?'local-speech-transcription-with-repair-proof':'local-speech-transcription',passed:true,shots:reviews};
+  return {version:1,method:reviews.some(review=>review.adjacentContextProof)?'local-speech-transcription-with-authored-scene-context'
+    :reviews.some(review=>review.repairProof)?'local-speech-transcription-with-repair-proof':'local-speech-transcription',passed:true,shots:reviews};
 }
