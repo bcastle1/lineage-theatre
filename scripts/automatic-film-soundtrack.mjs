@@ -10,7 +10,7 @@ import { accessStatusForUser } from '../api/_lib/access.mjs';
 import { productionJobPath } from '../api/_lib/film-production.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
-import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
+import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, validateBoundarySilence } from './rebuild-film-soundtrack.mjs';
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 
@@ -19,7 +19,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const FILE = /^[a-z0-9-]{1,80}\.(?:wav|mid)$/;
 const MAX_FILE = 250 * 1024 * 1024, MAX_TOTAL = 512 * 1024 * 1024;
 const MAX_SCENES = 200, MAX_TURNS = 600, MAX_SCORE_FILES = 2;
-const MAX_CONSTRUCTION_FILES = MAX_SCENES * 2 + MAX_TURNS + MAX_SCORE_FILES;
+const MAX_CONSTRUCTION_FILES = MAX_SCENES * 2 + MAX_TURNS * 2 + MAX_SCORE_FILES;
 const failureReasons = new Set(['SOUNDTRACK_BINDING_INVALID', 'STOCK_CAST_UNAVAILABLE', 'SOUNDTRACK_CACHE_UNAVAILABLE',
   'SOUNDTRACK_RECOGNITION_FAILED', 'SOUNDTRACK_CLAIM_EXPIRED', 'SOUNDTRACK_CONTEXT_CHANGED', 'SOUNDTRACK_SCRATCH_UNAVAILABLE',
   'SOUNDTRACK_ATTEMPTS_EXHAUSTED', 'SOUNDTRACK_SPEECH_UNVERIFIED', 'SOUNDTRACK_SOURCE_CHANGED']);
@@ -97,6 +97,7 @@ export function constructionFiles(provenance, plan) {
         && HASH.test(turn.phonemesSha256 || '') && Number.isFinite(turn.startSeconds) && Number.isFinite(turn.endSeconds)
         && turn.startSeconds >= previousEnd && turn.endSeconds > turn.startSeconds
         && turn.endSeconds <= expected.durationMs / 1000 - .19);
+      if (validateBoundarySilence(turn)) add(turn.originalAudio);
       add(turn.audio); previousEnd = turn.endSeconds;
     }
   }

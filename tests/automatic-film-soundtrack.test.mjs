@@ -54,6 +54,19 @@ test("fallback cache supports 200 intentionally silent cuts without inventing sp
   assert.equal(constructionFiles(provenance, plan).length, 402);
 });
 
+test("boundary-silence provenance retains original turn files in the private construction cache", () => {
+  const { plan, provenance } = fixture();
+  const turn = provenance.scenes[0].turns[0];
+  turn.durationSeconds = turn.endSeconds - turn.startSeconds;
+  turn.originalAudio = { file: 'original-turn.wav', sha256: 'd'.repeat(64), sizeBytes: 48 };
+  turn.boundarySilence = { version: 1, method: 'pcm16-edge-silence-v1', threshold: 1 / 32768, guardMs: 50,
+    sampleRate: 24000, sourceSamples: 12000, retainedSamples: 9600, trimStartSamples: 1200, trimEndSamples: 1200,
+    sourcePcmSha256: 'e'.repeat(64), selectedPcmSha256: 'f'.repeat(64) };
+  assert.ok(constructionFiles(provenance, plan).some(file => file.file === 'original-turn.wav'));
+  turn.boundarySilence.trimStartSamples++;
+  assert.throws(() => constructionFiles(provenance, plan));
+});
+
 test("expanded file count preserves per-file and total byte limits and exact provenance binding", () => {
   const { plan, provenance } = fixture();
   const tooLarge = structuredClone(provenance);

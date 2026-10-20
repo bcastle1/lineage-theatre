@@ -76,6 +76,23 @@ def descriptor(path, directory):
     return {'file': str(path.relative_to(directory)), 'sha256': sha(path), 'sizeBytes': path.stat().st_size}
 
 
+def boundary_silence_bounds(samples, rate):
+    """Remove only contiguous PCM16 edge silence, retaining a 50 ms guard.
+
+    One quantization step is about -90 dBFS. No interior samples, playback
+    rate, phonemes or text are changed; ordinary speech review is still needed.
+    """
+    require(rate == 24000 and len(samples) > 0, 'SPEECH_INVALID')
+    first, last, threshold = 0, len(samples), 1 / 32768
+    while first < last and abs(float(samples[first])) <= threshold:
+        first += 1
+    while last > first and abs(float(samples[last - 1])) <= threshold:
+        last -= 1
+    require(first < last, 'SPEECH_INVALID')
+    guard = round(rate * .05)
+    return max(0, first - guard), min(len(samples), last + guard)
+
+
 def offline(event, args):
     if event in ('socket.connect', 'socket.getaddrinfo'):
         raise SoundtrackError('MODEL_UNAVAILABLE')
@@ -169,8 +186,11 @@ def construct(request):
             and isinstance(plan.get('scenes'), list) and 1 <= len(plan['scenes']) <= 200
             and isinstance(plan.get('durationMs'), int) and 15000 <= plan['durationMs'] <= 600000
             and plan.get('speed') == 1, 'INPUT_INVALID')
-    directory = Path(request['directory']).resolve(strict=True)
-    require(directory.is_dir() and not any(directory.iterdir()), 'OUTPUT_INVALID')
+    inspect_fit = request.get('inspectFit', False)
+    require(isinstance(inspect_fit, bool), 'INPUT_INVALID')
+    directory = None if inspect_fit else Path(request['directory']).resolve(strict=True)
+    if not inspect_fit:
+        require(directory.is_dir() and not any(directory.iterdir()), 'OUTPUT_INVALID')
     stage('verify-assets')
     model_dir = Path(request['modelDirectory']).resolve(strict=True)
     for filename, expected in MODEL_HASHES.items():
@@ -185,7 +205,7 @@ def construct(request):
     engine = Kokoro.from_session(session, str(model_dir / 'voices-v1.0.bin'))
     g2p = {}
     rate = 24000
-    scene_results = []
+    scene_results, fit_results = [], []
     for scene_index, scene in enumerate(plan['scenes']):
         stage('prepare-scene', scene_index)
         remaining()
@@ -193,7 +213,7 @@ def construct(request):
         require(isinstance(scene.get('turns'), list) and len(scene['turns']) <= 20 and 1 <= duration <= 30, 'INPUT_INVALID')
         samples_count = round(duration * rate)
         speech = np.zeros(samples_count, dtype=np.float32)
-        cursor, turns = round(.12 * rate), []
+        cursor, turns, fit_turns = round(.12 * rate), [], []
         for turn_index, turn in enumerate(scene['turns']):
             stage('prepare-turn', scene_index, turn_index)
             remaining()
@@ -221,14 +241,38 @@ def construct(request):
             require(peak >= .001 and len(active) > 0, 'SPEECH_INVALID')
             gain = min(.80 / peak, .12 / float(np.sqrt(np.mean(active * active))))
             samples *= gain
+            # Quantize once, then select an unchanged contiguous range. Keep
+            # the original turn alongside any trimmed derivative for audit.
+            source_pcm = np.clip(np.rint(samples * 32768), -32768, 32767).astype('<i2')
+            source_samples = source_pcm.astype(np.float32) / 32768
+            begin, stop = boundary_silence_bounds(source_samples, rate)
+            selected_pcm = source_pcm[begin:stop]
+            samples = source_samples[begin:stop]
             end = cursor + len(samples)
-            stage('fit-turn', scene_index, turn_index, generatedMs=round(len(samples) * 1000 / rate),
-                  availableMs=max(0, round((samples_count - round(.20 * rate) - cursor) * 1000 / rate)),
-                  overrunMs=max(0, round((end - samples_count + round(.20 * rate)) * 1000 / rate)))
+            metrics = {'turnIndex': turn_index + 1, 'generatedMs': round(len(source_samples) * 1000 / rate),
+                       'retainedMs': round(len(samples) * 1000 / rate), 'trimStartMs': round(begin * 1000 / rate),
+                       'trimEndMs': round((len(source_samples) - stop) * 1000 / rate),
+                       'availableMs': max(0, round((samples_count - round(.20 * rate) - cursor) * 1000 / rate)),
+                       'overrunMs': max(0, round((end - samples_count + round(.20 * rate)) * 1000 / rate)),
+                       'fits': end <= samples_count - round(.20 * rate)}
+            fit_turns.append(metrics)
+            stage('fit-turn', scene_index, turn_index, **{key: metrics[key] for key in ('generatedMs', 'availableMs', 'overrunMs')})
+            if inspect_fit:
+                cursor = end + round(.18 * rate)
+                continue
             require(end <= samples_count - round(.20 * rate), 'SCENE_DURATION_EXCEEDED')
             stage('write-turn', scene_index, turn_index)
             path = directory / f'scene-{scene_index + 1:02d}-turn-{turn_index + 1:02d}.wav'
-            sf.write(path, samples, rate, subtype='PCM_16')
+            sf.write(path, selected_pcm, rate, subtype='PCM_16')
+            original_path = path
+            if begin or stop != len(source_samples):
+                original_path = directory / f'scene-{scene_index + 1:02d}-turn-{turn_index + 1:02d}-original.wav'
+                sf.write(original_path, source_pcm, rate, subtype='PCM_16')
+            boundary = {'version': 1, 'method': 'pcm16-edge-silence-v1', 'threshold': 1 / 32768, 'guardMs': 50,
+                        'sampleRate': rate, 'sourceSamples': len(source_pcm), 'retainedSamples': len(selected_pcm),
+                        'trimStartSamples': begin, 'trimEndSamples': len(source_pcm) - stop,
+                        'sourcePcmSha256': hashlib.sha256(source_pcm.tobytes()).hexdigest(),
+                        'selectedPcmSha256': hashlib.sha256(selected_pcm.tobytes()).hexdigest()}
             # Place the same quantized samples that the reviewer receives.
             stored, _ = sf.read(path, dtype='float32')
             speech[cursor:end] = stored
@@ -236,8 +280,13 @@ def construct(request):
                           'voice': voice, 'speed': 1, 'textSha256': turn['textSha256'], 'synthesisTextSha256': turn['textSha256'],
                           'phonemesSha256': hashlib.sha256(phonemes.encode()).hexdigest(),
                           'startSeconds': cursor / rate, 'endSeconds': end / rate, 'durationSeconds': len(samples) / rate,
-                          'gain': gain, 'audio': descriptor(path, directory)})
+                          'gain': gain, 'boundarySilence': boundary, 'originalAudio': descriptor(original_path, directory),
+                          'audio': descriptor(path, directory)})
             cursor = end + round(.18 * rate)
+        fit_results.append({'sceneIndex': scene_index + 1, 'durationMs': scene['durationMs'],
+                            'fits': all(turn['fits'] for turn in fit_turns), 'turns': fit_turns})
+        if inspect_fit:
+            continue
         stage('write-speech', scene_index)
         speech_path = directory / f'scene-{scene_index + 1:02d}-speech.wav'
         sf.write(speech_path, speech, rate, subtype='PCM_16')
@@ -249,6 +298,10 @@ def construct(request):
     engine.voices.close()
     del engine, session, g2p
     gc.collect()
+    if inspect_fit:
+        return {'status': 'inspected', 'version': 1, 'kind': 'soundtrack-fit-inspection-v1', 'manifestHash': plan['manifestHash'],
+                'durationMs': plan['durationMs'], 'speed': 1, 'providerGenerationCalls': 0,
+                'fits': all(scene['fits'] for scene in fit_results), 'scenes': fit_results}
     score_info = None
     score_path = directory / 'original-score.wav'
     if plan.get('musicRequested'):
