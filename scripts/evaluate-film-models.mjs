@@ -474,28 +474,93 @@ async function loadKlingPromptAmendment(directory, planSha256) {
     && HASH.test(amendment.inputProof?.sha256 || ''), 'PROMPT_AMENDMENT_INVALID');
   return saved;
 }
+function requireUnchangedPromptAmendment(plan, amendment, context) {
+  requireValue(amendment.sourceSha256 === jsonHash(plan.source) && amendment.ledgerSha256 === context.ledgerSha256
+    && amendment.rejectionSha256 === jsonHash(context.rejection) && jsonHash(amendment.inputProof) === jsonHash(context.proof)
+    && amendment.worstCaseCostCents === context.worstCaseCostCents
+    && amendment.priorKlingReserveCents === context.priorKlingReserveCents, 'PROMPT_AMENDMENT_CHANGED');
+}
+function requireUnchangedAmendmentPrices(amendment, context) {
+  requireValue(amendment.pricing?.prices && context.live?.prices
+    && jsonHash(amendment.pricing.prices) === jsonHash(context.live.prices), 'PROMPT_AMENDMENT_PRICES_CHANGED');
+}
+async function requireUnclaimedPromptRecovery(directory) {
+  for (const suffix of ['claim', 'response', 'receipt', 'uncertain', 'terminal'])
+    requireValue(!await localJson(join(directory, `kling-prompt-recovery-${suffix}.json`), true), 'PROMPT_RECOVERY_ALREADY_STARTED');
+}
+async function prepareKlingPromptRenewal(args, directory) {
+  const { plan, planSha256 } = await loadPlan(directory);
+  const { amendment, amendmentSha256 } = await loadKlingPromptAmendment(directory, planSha256);
+  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-amendment-sha256'] === amendmentSha256,
+    'EXACT_AMENDMENT_APPROVAL_REQUIRED');
+  requireValue(Number.isFinite(Date.parse(plan.expiresAt)) && Number.isFinite(Date.parse(amendment.expiresAt))
+    && plan.expiresAt === amendment.expiresAt && Date.parse(plan.expiresAt) <= Date.now(), 'EXPIRED_AMENDMENT_REQUIRED');
+  await requireUnclaimedPromptRecovery(directory);
+  const context = await promptRecoveryContext(plan, planSha256, directory, amendment.inputProof.review.prompt);
+  requireUnchangedPromptAmendment(plan, amendment, context);
+  requireUnchangedAmendmentPrices(amendment, context);
+  await requireUnclaimedPromptRecovery(directory);
+  // Extend only the final reviewed prompt recovery, without rewriting the old
+  // plan, amendment or any claim. The existing final claim path remains the
+  // single submission boundary even if commands race or the process crashes.
+  const createdAt = stamp();
+  const renewal = { version: 1, kind: 'reviewed-kling-prompt-recovery-renewal', planSha256, amendmentSha256,
+    endpoint: ENDPOINTS.kling, originalRequestId: REVIEWED_KLING_PROMPT_REJECTION_ID,
+    createdAt, expiresAt: new Date(Date.parse(createdAt) + 3600_000).toISOString(), originalExpiresAt: plan.expiresAt,
+    sourceSha256: amendment.sourceSha256, ledgerSha256: context.ledgerSha256,
+    rejectionSha256: amendment.rejectionSha256, inputSha256: context.proof.sha256,
+    maximumCostCents: plan.maximumCostCents, priorKlingReserveCents: context.priorKlingReserveCents,
+    worstCaseCostCents: context.worstCaseCostCents, pricing: context.live };
+  const renewalSha256 = jsonHash(renewal);
+  await saveExclusive(join(directory, 'kling-prompt-renewal.json'), { renewalSha256, renewal });
+  emit({ status: 'kling-prompt-renewal-prepared', planSha256, amendmentSha256, renewalSha256,
+    expiresAt: renewal.expiresAt, worstCaseCostCents: context.worstCaseCostCents, providerSubmissions: 0 });
+}
+async function loadKlingPromptRenewal(directory, plan, planSha256, amendment, amendmentSha256, approvedSha256) {
+  const saved = await localJson(join(directory, 'kling-prompt-renewal.json')), renewal = saved.renewal;
+  requireValue(HASH.test(saved.renewalSha256 || '') && saved.renewalSha256 === approvedSha256
+    && jsonHash(renewal) === saved.renewalSha256 && renewal?.version === 1
+    && renewal.kind === 'reviewed-kling-prompt-recovery-renewal' && renewal.planSha256 === planSha256
+    && renewal.amendmentSha256 === amendmentSha256 && renewal.endpoint === ENDPOINTS.kling
+    && renewal.originalRequestId === REVIEWED_KLING_PROMPT_REJECTION_ID
+    && renewal.originalExpiresAt === plan.expiresAt && renewal.originalExpiresAt === amendment.expiresAt
+    && Number.isFinite(Date.parse(renewal.createdAt)) && Date.parse(renewal.createdAt) >= Date.parse(plan.expiresAt)
+    && Date.parse(renewal.createdAt) <= Date.now()
+    && Date.parse(renewal.expiresAt) - Date.parse(renewal.createdAt) === 3600_000
+    && renewal.sourceSha256 === amendment.sourceSha256 && renewal.ledgerSha256 === amendment.ledgerSha256
+    && renewal.rejectionSha256 === amendment.rejectionSha256 && renewal.inputSha256 === amendment.inputProof.sha256
+    && renewal.maximumCostCents === plan.maximumCostCents
+    && renewal.worstCaseCostCents === amendment.worstCaseCostCents
+    && renewal.priorKlingReserveCents === amendment.priorKlingReserveCents
+    && renewal.pricing?.prices && amendment.pricing?.prices
+    && jsonHash(renewal.pricing.prices) === jsonHash(amendment.pricing.prices), 'PROMPT_RENEWAL_INVALID');
+  return saved;
+}
 async function submitKlingPromptRecovery(args, directory) {
   const { plan, planSha256 } = await loadPlan(directory);
   const { amendment, amendmentSha256 } = await loadKlingPromptAmendment(directory, planSha256);
-  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-amendment-sha256'] === amendmentSha256
-    && Date.parse(plan.expiresAt) > Date.now() && Date.parse(amendment.expiresAt) > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
+  requireValue(args['approve-plan-sha256'] === planSha256 && args['approve-amendment-sha256'] === amendmentSha256,
+    'EXACT_AMENDMENT_APPROVAL_REQUIRED');
   const claimPath = join(directory, 'kling-prompt-recovery-claim.json'), existing = await localJson(claimPath, true);
   if (existing) {
     requireValue(existing.planSha256 === planSha256 && existing.amendmentSha256 === amendmentSha256, 'RECOVERY_CLAIM_CONFLICT');
     emit({ model: 'kling', status: 'prompt-recovery-already-claimed-no-resubmission' }); return;
   }
-  for (const suffix of ['response', 'receipt', 'uncertain', 'terminal'])
-    requireValue(!await localJson(join(directory, `kling-prompt-recovery-${suffix}.json`), true), 'RECOVERY_CLAIM_MISSING');
+  await requireUnclaimedPromptRecovery(directory);
+  const savedRenewal = args['approve-renewal-sha256'] ? await loadKlingPromptRenewal(directory, plan, planSha256,
+    amendment, amendmentSha256, args['approve-renewal-sha256']) : null;
+  const approvalExpiresAt = savedRenewal ? Date.parse(savedRenewal.renewal.expiresAt)
+    : Math.min(Date.parse(plan.expiresAt), Date.parse(amendment.expiresAt));
+  requireValue(approvalExpiresAt > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
   const context = await promptRecoveryContext(plan, planSha256, directory, amendment.inputProof.review.prompt);
-  requireValue(amendment.sourceSha256 === jsonHash(plan.source) && amendment.ledgerSha256 === context.ledgerSha256
-    && amendment.rejectionSha256 === jsonHash(context.rejection) && jsonHash(amendment.inputProof) === jsonHash(context.proof)
-    && amendment.worstCaseCostCents === context.worstCaseCostCents
-    && amendment.priorKlingReserveCents === context.priorKlingReserveCents, 'PROMPT_AMENDMENT_CHANGED');
-  requireValue(Date.parse(plan.expiresAt) > Date.now() && Date.parse(amendment.expiresAt) > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
+  requireUnchangedPromptAmendment(plan, amendment, context);
+  if (savedRenewal) requireUnchangedAmendmentPrices(amendment, context);
+  requireValue(approvalExpiresAt > Date.now(), 'CURRENT_AMENDMENT_APPROVAL_REQUIRED');
   const claim = { version: 1, evaluationId: plan.evaluationId, planSha256, amendmentSha256, model: 'kling', endpoint: ENDPOINTS.kling,
     recovery: 'reviewed-prompt-length', originalRequestId: context.previous.requestId, rejectionSha256: amendment.rejectionSha256,
     inputSha256: context.proof.sha256, claimedAt: stamp(), state: 'submission-claimed', pricing: context.live,
-    worstCaseCostCents: context.worstCaseCostCents };
+    worstCaseCostCents: context.worstCaseCostCents,
+    ...(savedRenewal ? { renewalSha256: savedRenewal.renewalSha256 } : {}) };
   await saveExclusive(claimPath, claim);
   try {
     const response = await request(`https://queue.fal.run/${ENDPOINTS.kling}`, 'POST', context.payload);
@@ -525,6 +590,8 @@ async function poll(directory) {
       && recovery.originalRequestId === (promptRecovery ? REVIEWED_KLING_PROMPT_REJECTION_ID : REVIEWED_KLING_REJECTION_ID)
       && recovery.inputSha256 === expectedInputHash && (!amendment || recovery.amendmentSha256 === amendment.amendmentSha256),
     'RECOVERY_CLAIM_CONFLICT');
+    if (promptRecovery?.renewalSha256) await loadKlingPromptRenewal(directory, plan, planSha256,
+      amendment.amendment, amendment.amendmentSha256, promptRecovery.renewalSha256);
     const receipt = await localJson(join(directory, `${prefix}-receipt.json`), true);
     if (recovery && !receipt) { emit({ model, status: 'recovery-uncertain-no-resubmission' }); continue; }
     if (!receipt) { emit({ model, status: await localJson(join(directory, `${model}-claim.json`), true) ? 'uncertain-no-resubmission' : 'not-submitted' }); continue; }
@@ -532,6 +599,7 @@ async function poll(directory) {
       && receipt.inputSha256 === expectedInputHash, 'RECEIPT_CONFLICT');
     if (recovery) requireValue(receipt.originalRequestId === recovery.originalRequestId
       && receipt.rejectionSha256 === recovery.rejectionSha256 && receipt.claimedAt === recovery.claimedAt
+      && receipt.renewalSha256 === recovery.renewalSha256
       && receipt.requestId !== recovery.originalRequestId && (!amendment || receipt.amendmentSha256 === amendment.amendmentSha256), 'RECOVERY_RECEIPT_CONFLICT');
     const terminalPath = join(directory, `${prefix}-terminal.json`), terminal = await localJson(terminalPath, true);
     if (terminal) {
@@ -577,12 +645,13 @@ async function poll(directory) {
 }
 async function main() {
   const [action, ...values] = process.argv.slice(2), args = {};
-  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'prepare-kling-prompt-recovery', 'submit-kling-prompt-recovery', 'poll'].includes(action)
+  requireValue(['prepare', 'submit', 'retry-rejected-kling', 'prepare-kling-prompt-recovery', 'prepare-kling-prompt-renewal', 'submit-kling-prompt-recovery', 'poll'].includes(action)
     && values.length % 2 === 0, 'COMMAND_INVALID');
   const allowed = { prepare: ['directory', 'prepared-id', 'config', 'maximum-cost-cents'],
     submit: ['directory', 'approve-plan-sha256'], 'retry-rejected-kling': ['directory', 'approve-plan-sha256'],
     'prepare-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'prompt-file'],
-    'submit-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256'], poll: ['directory'] }[action];
+    'prepare-kling-prompt-renewal': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256'],
+    'submit-kling-prompt-recovery': ['directory', 'approve-plan-sha256', 'approve-amendment-sha256', 'approve-renewal-sha256'], poll: ['directory'] }[action];
   for (let i = 0; i < values.length; i += 2) {
     const name = values[i].replace(/^--/, '');
     requireValue(values[i].startsWith('--') && allowed.includes(name) && !(name in args) && values[i + 1], 'ARGUMENT_INVALID'); args[name] = values[i + 1];
@@ -594,6 +663,7 @@ async function main() {
   else if (action === 'submit') await submit(args, directory);
   else if (action === 'retry-rejected-kling') await retryRejectedKling(args, directory);
   else if (action === 'prepare-kling-prompt-recovery') await prepareKlingPromptRecovery(args, directory);
+  else if (action === 'prepare-kling-prompt-renewal') await prepareKlingPromptRenewal(args, directory);
   else if (action === 'submit-kling-prompt-recovery') await submitKlingPromptRecovery(args, directory);
   else await poll(directory);
 }

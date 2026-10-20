@@ -256,3 +256,40 @@ Latest response, receipt, uncertainty and terminal records use the separate
 A lost/uncertain result or any existing claim can never cause another POST. This
 prompt amendment is also a comparison-method change: report that Kling required
 a condensed direction prompt while retaining identical references and speech.
+
+### Renew an expired final amendment after an access interruption
+
+If the operator was unable to submit the already approved final prompt amendment
+before its one-hour deadline, preserve `plan.json`, `kling-prompt-amendment.json`
+and every existing claim, receipt and observation. Once the user has authorized
+continuation of that same final attempt, prepare a separate renewal:
+
+```sh
+node scripts/evaluate-film-models.mjs prepare-kling-prompt-renewal --directory /evaluation --approve-plan-sha256 <original-approved-plan-sha256> --approve-amendment-sha256 <reviewed-amendment-sha256>
+```
+
+This action submits no generation request. It requires both original records to
+have expired together and refuses if any final prompt-recovery claim, response,
+receipt, uncertainty or terminal record already exists. It freshly rechecks the
+full source and selected photo, exact original and amended payloads, both prior
+Kling rejection records, completed Seedance record, live pricing and the $19.80
+conservative combined bound under the original $20 ceiling. Every immutable
+amendment binding must still match. A changed prompt, source, price or ledger
+requires separate review and is not covered by renewal.
+
+The action exclusively creates `kling-prompt-renewal.json` with its own SHA-256,
+one-hour expiry and both original hashes. There is one renewal per evaluation;
+it neither extends the original two candidate submissions nor permits another
+access-rejection recovery. Inspect the returned renewal hash and submit using
+all three exact hashes:
+
+```sh
+node scripts/evaluate-film-models.mjs submit-kling-prompt-recovery --directory /evaluation --approve-plan-sha256 <original-approved-plan-sha256> --approve-amendment-sha256 <reviewed-amendment-sha256> --approve-renewal-sha256 <prepared-renewal-sha256>
+```
+
+Submission repeats the source, rejection, input and price checks, requires the
+renewal to remain current, and uses the same exclusive
+`kling-prompt-recovery-claim.json` as the original final amendment. The claim and
+receipt bind the renewal hash. Parallel calls, a lost response, or an expired
+renewal cannot reopen that claim or authorize a fourth Kling request. Polling
+validates the renewal binding without requiring it to remain unexpired.
