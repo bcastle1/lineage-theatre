@@ -14,6 +14,7 @@ import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, val
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { readSoundtrackCasting } from './authored-soundtrack-casting.mjs';
+import { createAdjacentAuthoredSpeechContext } from './adjacent-authored-speech.mjs';
 
 const RECIPE = 'automatic-stock-soundtrack-v1';
 const HASH = /^[a-f0-9]{64}$/;
@@ -303,8 +304,10 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
       };
       const resolveSpeechDifferences = createRepairSpeechResolver({ manifest: job.manifest, manifestHash: job.manifestHash,
         voices, provenance, constructionRoot: work, receiptRoot: work });
+      const resolveAdjacentSpeechContext = createAdjacentAuthoredSpeechContext({ manifest: job.manifest, manifestHash: job.manifestHash,
+        voices, provenance, constructionRoot: work, bindingHash, prefix, guard, transcribe, read, write });
       const reviewedSpeech = await reviewSpeech({ manifest: job.manifest, clips: selected, ffmpeg,
-        transcribe: recordTranscript, resolveSpeechDifferences, speakerAliases: voices.speakerAliases });
+        transcribe: recordTranscript, resolveSpeechDifferences, resolveAdjacentSpeechContext, speakerAliases: voices.speakerAliases });
       const speechReview = { ...reviewedSpeech, transcriptionReceipts };
       requireValue(speechReview?.passed === true, 'SOUNDTRACK_SPEECH_UNVERIFIED');
       await guard();

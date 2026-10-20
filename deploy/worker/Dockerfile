@@ -29,6 +29,7 @@ COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/check-worke
 COPY scripts/test-kling-production.mjs ./scripts/
 COPY scripts/automatic-film-soundtrack.mjs scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scripts/repair-name-proof.mjs scripts/compare-repair-name-pronunciations.py ./scripts/
 COPY scripts/authored-soundtrack-casting.mjs scripts/approve-film-soundtrack-casting.mjs scripts/inspect-film-soundtrack-fit.mjs ./scripts/
+COPY scripts/adjacent-authored-speech.mjs scripts/diagnose-authored-scene-context.mjs ./scripts/
 
 ENV NODE_ENV=production FFMPEG_PATH=/usr/bin/ffmpeg PYTHON_PATH=/opt/speech/bin/python HF_HOME=/opt/whisper HF_HUB_OFFLINE=1
 ENV LINEAGE_TTS_PYTHON=/opt/soundtrack/bin/python LINEAGE_TTS_MODEL_DIR=/opt/soundtrack/models/kokoro \

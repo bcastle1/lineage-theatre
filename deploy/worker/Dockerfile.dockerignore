@@ -19,6 +19,8 @@
 !scripts/transcribe-film.py
 !scripts/automatic-film-soundtrack.mjs
 !scripts/authored-soundtrack-casting.mjs
+!scripts/adjacent-authored-speech.mjs
+!scripts/diagnose-authored-scene-context.mjs
 !scripts/approve-film-soundtrack-casting.mjs
 !scripts/inspect-film-soundtrack-fit.mjs
 !scripts/rebuild-film-soundtrack.mjs
