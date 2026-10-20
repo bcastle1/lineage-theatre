@@ -22,6 +22,17 @@ export async function recoverFilmPayment(request: Request, reference: FilmPaymen
   return orderForReference(await request(`/api/studio?action=order&id=${encodeURIComponent(reference.orderId)}`), reference);
 }
 
+// Only the server's fenced terminal state can release a saved recovery
+// reference. An error code, expired local clock, or missing order cannot do so.
+export async function restartableFilmPayment(request: Request, reference: FilmPaymentReference, expected: ExpectedOrder): Promise<FilmOrder> {
+  const order = orderForReference(await request("/api/studio", { action: "checkPayment",
+    orderId: reference.orderId, expectedQuoteId: reference.quoteId }), reference, expected);
+  if (order.checkoutBlock !== "production-funding" || order.checkoutRestartAllowed !== true) {
+    throw new Error("This saved payment request cannot be replaced. Check its status before continuing.");
+  }
+  return order;
+}
+
 // Only a fresh server record explicitly proving that no invoice POST was
 // attempted can authorize this retry. It keeps every saved request identity.
 export async function retryFilmPayment({ request, order, reference, checkoutProof, productionConsent = false }: {
@@ -42,6 +53,12 @@ export async function retryFilmPayment({ request, order, reference, checkoutProo
       ...(productionConsent ? { productionConsent: true } : {}) }), reference, current);
   } catch (cause) {
     if (cause && typeof cause === "object" && "code" in cause && cause.code === "QUOTE_EXPIRED") {
+      if (current.checkoutBlock === "production-funding") {
+        try {
+          const saved = orderForReference(await recoverFilmPayment(request, reference), reference, current);
+          if (saved.checkoutBlock === "production-funding") return saved;
+        } catch { /* Keep the saved reference until an exact order can be read. */ }
+      }
       throw new Error("The saved price or checkout terms changed. Contact the administrator before continuing with this order.");
     }
     try { return orderForReference(await recoverFilmPayment(request, reference), reference, current); }

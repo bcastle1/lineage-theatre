@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import {createHostedCheckoutService,HostedCheckoutError,HOSTED_CHECKOUT_SETTINGS_PATH} from "../api/_lib/hosted-checkout.mjs";
 import {digest,userPath} from "../api/_lib/auth.mjs";
 import {OWNER_EMAIL} from "../api/_lib/access.mjs";
+import {createFalFunding} from "../api/_lib/fal-funding.mjs";
 
 const OWNER={email:OWNER_EMAIL,role:"owner"};
 const CUSTOMER={email:"customer@example.invalid",role:"customer",status:"active",approvedAt:"2026-09-01T00:00:00Z",approvedBy:OWNER_EMAIL};
 const OTHER={...CUSTOMER,email:"other@example.invalid"};
 const NOW=Date.parse("2026-09-23T18:00:00Z"),BINDING={environment:"production",grantId:"a".repeat(64),realmId:"1234"};
-const MANIFEST=digest("fictional-film"),PREPARED="fictional-prepared-film-123",KEY="fictional-price-request-123",CHECKOUT="fictional-checkout-request-123";
+const MANIFEST=digest("fictional-film"),PREPARED="12345678-1234-5678-9876-123456789012",KEY="fictional-price-request-123",CHECKOUT="fictional-checkout-request-123";
 const TERMS={deliveryTerms:"Your finished film will be delivered within 24 hours after payment.",refundTerms:"You may request a full refund within 10 calendar days after payment by contacting admin@brocotech.ai with your order reference."};
 const settings={revision:1,enabled:true,serviceItemId:"2",serviceItemName:"Film production",taxCode:"NON",...TERMS,merchantConfirmed:true,pciAcknowledged:true,automaticInvoiceEmailDisabled:true,merchantBinding:BINDING};
 const json=data=>new Response(JSON.stringify(data),{status:200});
@@ -40,6 +41,7 @@ function fixture(options={}) {
     assert.fail(`Unexpected operation ${operation.method} ${operation.path}`);
   }};
   const dependencies={read,write,transport,receiptDelivery:options.receiptDelivery||{deliver:async()=>{}},now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
+    reserveFunding:options.reserveFunding||(async()=>({recheck:async()=>true})),
     ...(options.productionAutomation?{productionAutomation:options.productionAutomation}:{}),
     productionQuote:async input=>{
       productionQuotes.push(structuredClone(input));
@@ -130,6 +132,144 @@ test("new live invoices require a fresh exact production quote within the accept
   assert.equal(order.amountCents,1500);
   await h.checkout();assert.equal(h.productionQuotes.length,1);
   assert.equal(mutationRequests(h).filter(operation=>operation.path==="/invoice").length,1);
+});
+
+test("live funding is bound to the saved film and rechecked before the single invoice request",async()=>{
+  const calls=[];
+  const h=fixture({reserveFunding:async input=>{
+    calls.push(structuredClone(input));
+    assert.equal(mutationRequests(h).length,0);
+    return {recheck:async()=>{calls.push("recheck");assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,0);return true;}};
+  }});
+  const order=await h.checkout();
+  assert.deepEqual(calls,[{orderId:order.id,customerEmail:OWNER.email,preparedId:PREPARED,manifestHash:MANIFEST,quoteId:order.quoteId,maximumCostCents:1000},"recheck"]);
+  await h.checkout();
+  assert.equal(calls.length,2);
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,1);
+});
+
+test("funding failure leaves quotes readable and blocks all accounting writes without leaking wallet details",async()=>{
+  const h=fixture({reserveFunding:async()=>{throw Error("PRIVATE_WALLET_TOTAL_AND_KEY");}});
+  const quote=await h.makeQuote();
+  assert.equal(quote.amountCents,1500);
+  await assert.rejects(h.checkout(),cause=>cause instanceof HostedCheckoutError&&cause.code==="PRODUCTION_FUNDING_UNAVAILABLE"
+    &&cause.status===503&&!cause.message.includes("PRIVATE_WALLET"));
+  assert.equal(mutationRequests(h).length,0);
+  const saved=await h.service.order(OWNER,quote.orderId);
+  assert.equal(saved.retryAllowed,true);
+  assert.equal(saved.checkoutBlock,"production-funding");
+  assert.equal(saved.checkoutRestartAllowed,false);
+  assert.deepEqual(await h.makeQuote(),quote);
+  const malformed=fixture({reserveFunding:async()=>({})});
+  await error(malformed.checkout(),"PRODUCTION_FUNDING_UNAVAILABLE");
+  assert.equal(mutationRequests(malformed).length,0);
+});
+
+test("a failed final funding check cannot attempt an invoice and retries reuse the exact order and customer",async()=>{
+  let available=false;
+  const h=fixture({reserveFunding:async()=>({recheck:async()=>{if(!available)throw Error("balance changed");return true;}})});
+  await error(h.checkout(),"PRODUCTION_FUNDING_UNAVAILABLE");
+  const path=[...h.records.keys()].find(path=>path.startsWith("payments/orders/")),saved=h.records.get(path).value;
+  assert.equal(saved.status,"uncertain");
+  assert.equal(saved.invoiceAttemptedAt,undefined);
+  assert.equal((await h.service.order(OWNER,saved.id)).retryAllowed,true);
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,0);
+  available=true;
+  const order=await h.checkout();
+  assert.equal(order.id,saved.id);
+  assert.equal(order.status,"awaiting-payment");
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/customer").length,1);
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,1);
+});
+
+test("existing invoices and paid reconciliation do not depend on later funding availability",async()=>{
+  let available=true,calls=0;
+  const h=fixture({reserveFunding:async()=>{calls++;if(!available)throw Error("unavailable");return {recheck:async()=>true};}});
+  const order=await h.checkout();available=false;
+  assert.equal((await h.checkout()).id,order.id);
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnType:"Payment",TxnId:"40"}]});
+  assert.equal((await h.service.check(OWNER,{orderId:order.id})).status,"captured");
+  assert.equal((await h.service.receipt(OWNER,order.id)).status,"captured");
+  assert.equal(calls,1);
+});
+
+test("expired funding failure can obtain one fresh price and invoice only after a durable no-invoice fence",async()=>{
+  let available=false;
+  const quoteOverrides={},invoiceOverrides={};
+  const h=fixture({quoteOverrides,invoiceOverrides,reserveFunding:async()=>{if(!available)throw Error("unavailable");return {recheck:async()=>true};}});
+  const oldQuote=await h.makeQuote();
+  await error(h.checkout(),"PRODUCTION_FUNDING_UNAVAILABLE");
+  h.advance(300_001);
+  const expiredOrder=await h.service.order(OWNER,oldQuote.orderId);
+  assert.equal(expiredOrder.retryAllowed,false);
+  assert.equal(expiredOrder.checkoutRestartAllowed,false);
+  await error(h.makeQuote(OWNER,"new-price-before-fence-123"),"ORDER_ALREADY_EXISTS");
+  const fenced=await h.service.check(OWNER,{orderId:oldQuote.orderId,expectedQuoteId:oldQuote.id});
+  assert.equal(fenced.checkoutRestartAllowed,true);
+  assert.equal(fenced.invoiceUrl,null);assert.equal(fenced.invoiceNumber,null);assert.equal(fenced.receiptAvailable,false);
+  assert.equal(mutationRequests(h).length,0);
+  quoteOverrides.providerCostCents=1100;
+  const freshQuote=await h.makeQuote(OWNER,"fresh-funded-price-request");
+  assert.equal(freshQuote.orderId,oldQuote.orderId);
+  assert.notEqual(freshQuote.id,oldQuote.id);
+  assert.equal(freshQuote.amountCents,1650);
+  await error(h.service.check(OWNER,{orderId:oldQuote.orderId,expectedQuoteId:oldQuote.id}),"PAYMENT_CONFLICT");
+  await error(h.service.checkout(OWNER,{quoteId:oldQuote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}),"ORDER_ALREADY_EXISTS");
+  available=true;Object.assign(invoiceOverrides,{TotalAmt:16.5,Balance:16.5});
+  const result=await h.service.checkout(OWNER,{quoteId:freshQuote.id,idempotencyKey:"fresh-funded-checkout-request",consent:true,productionConsent:true});
+  assert.equal(result.id,oldQuote.orderId);assert.equal(result.quoteId,freshQuote.id);assert.equal(result.status,"awaiting-payment");
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,1);
+});
+
+test("concurrent fresh prices after funding expiry have one shared-order winner",async()=>{
+  const h=fixture({reserveFunding:async()=>{throw Error("unavailable");}});
+  const original=await h.makeQuote();await error(h.checkout(),"PRODUCTION_FUNDING_UNAVAILABLE");h.advance(300_001);
+  await h.service.check(OWNER,{orderId:original.orderId,expectedQuoteId:original.id});
+  const outcomes=await Promise.allSettled([h.makeQuote(OWNER,"first-fresh-price-request"),h.makeQuote(OWNER,"second-fresh-price-request")]);
+  assert.equal(outcomes.filter(value=>value.status==="fulfilled").length,1);
+  const winner=outcomes.find(value=>value.status==="fulfilled").value;
+  assert.equal((await h.service.order(OWNER,original.orderId)).quoteId,winner.id);
+  assert.equal(mutationRequests(h).length,0);
+});
+
+test("an unused rollover quote survives a lost response or reload and safely refreshes after its own expiry",async()=>{
+  const h=fixture({reserveFunding:async()=>{throw Error("unavailable");}});
+  const original=await h.makeQuote();await error(h.checkout(),"PRODUCTION_FUNDING_UNAVAILABLE");h.advance(300_001);
+  await h.service.check(OWNER,{orderId:original.orderId,expectedQuoteId:original.id});
+  const refreshed=await h.makeQuote(OWNER,"lost-response-price-request");
+  const recovered=await h.makeQuote(OWNER,"reload-new-price-request");
+  assert.deepEqual(recovered,refreshed);
+  assert.equal((await h.service.order(OWNER,original.orderId)).quoteId,refreshed.id);
+  h.advance(300_001);
+  const newer=await h.makeQuote(OWNER,"expired-unused-price-request");
+  assert.notEqual(newer.id,refreshed.id);assert.equal(newer.orderId,original.orderId);
+  await error(h.service.checkout(OWNER,{quoteId:refreshed.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}),"ORDER_ALREADY_EXISTS");
+  assert.equal(mutationRequests(h).length,0);
+});
+
+test("a stalled invoice claimant cannot resume after an expired unattempted order has been fenced",async()=>{
+  let announce,unblock;
+  const ready=new Promise(resolve=>announce=resolve),wait=new Promise(resolve=>unblock=resolve);
+  const h=fixture({reserveFunding:async()=>{announce();await wait;return {recheck:async()=>true};}});
+  const quote=await h.makeQuote(),pending=h.service.checkout(OWNER,{quoteId:quote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});
+  await ready;h.advance(300_001);
+  const funding=createFalFunding({read:h.read,write:h.write,now:()=>NOW+300_001});
+  await funding.releaseExpiredOrder(quote.orderId,quote.id);
+  const fenced=await h.service.order(OWNER,quote.orderId);
+  assert.equal(fenced.checkoutBlock,"production-funding");assert.equal(fenced.checkoutRestartAllowed,true);
+  unblock();await error(pending,"PAYMENT_CONFLICT");
+  assert.equal(mutationRequests(h).length,0);
+});
+
+test("expired funding restart cannot fence an attempted invoice or a different quote cycle",async()=>{
+  const h=fixture(),original=await h.makeQuote(),order=await h.checkout(),path=`payments/orders/${order.id}.json`;
+  h.advance(300_001);
+  h.seed(path,{...h.records.get(path).value,status:"uncertain",checkoutBlock:"production-funding",invoiceUrl:null});
+  await error(h.service.check(OWNER,{orderId:order.id,expectedQuoteId:digest("other-cycle")}),"PAYMENT_CONFLICT");
+  await h.service.check(OWNER,{orderId:order.id,expectedQuoteId:original.id});
+  assert.equal(h.records.get(path).value.fundingRelease,undefined);
+  assert.equal((await h.service.order(OWNER,order.id)).checkoutRestartAllowed,undefined);
+  assert.equal(mutationRequests(h).filter(op=>op.path==="/invoice").length,1);
 });
 
 test("unavailable, over-budget or unverified production blocks checkout before accounting writes",async()=>{

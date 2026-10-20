@@ -11,7 +11,7 @@ const hostedInvoiceUrl = new URL("../src/studio/hosted-invoice-url.mjs", import.
 const contractUrl = moduleUrl((await compile("../src/studio/checkout-contract.ts")).replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(hostedInvoiceUrl)));
 const { canStartFilmProduction, normalizeHostedInvoiceUrl, normalizeCheckoutConfiguration, normalizeFilmQuote, normalizeFilmOrder, normalizeFilmReceipt, quoteMatchesConfiguration, paymentStatusMessage } = await import(contractUrl);
 const { reservePaymentWindow } = await import(moduleUrl((await compile("../src/studio/payment-window.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
-const { checkFilmPayment, commitFilmPayment, recoverFilmPayment, retryFilmPayment } = await import(moduleUrl((await compile("../src/studio/checkout-payment.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
+const { checkFilmPayment, commitFilmPayment, recoverFilmPayment, restartableFilmPayment, retryFilmPayment } = await import(moduleUrl((await compile("../src/studio/checkout-payment.ts")).replace('"./checkout-contract"', JSON.stringify(contractUrl))));
 const { normalizePaymentReference, normalizeFilm, customerProjectBackup, newFilm } = await import(moduleUrl(await compile("../src/studio/model.ts")));
 const now = Date.parse("2026-09-14T12:00:00.000Z");
 const method = "quickbooks-hosted-invoice";
@@ -295,6 +295,76 @@ test("an expired original retry quote is surfaced without creating a replacement
   await assert.rejects(retryFilmPayment({ order: { ...order("uncertain"), invoiceUrl: null, retryAllowed: true }, reference: reference(), checkoutProof: "d".repeat(64),
     request: async () => { calls++; throw Object.assign(new Error("Expired"), { code: "QUOTE_EXPIRED" }); } }), /saved price or checkout terms changed/);
   assert.equal(calls, 1);
+});
+
+const fundingOrder = (restart = false) => ({ ...order("uncertain"), sandbox: false, invoiceUrl: null, invoiceNumber: null,
+  checkoutBlock: "production-funding", retryAllowed: !restart, ...(restart ? { checkoutRestartAllowed: true } : {}) });
+
+test("funding rejection recovers the durable unattempted order without replaying checkout", async () => {
+  const calls = [], persisted = [], saved = fundingOrder(), ref = { ...reference(), sandbox: false };
+  const result = await commitFilmPayment({ quote: { ...quote(), sandbox: false }, reference: ref,
+    checkoutProof: "d".repeat(64), productionConsent: true, now: () => now, persist: value => persisted.push(value),
+    request: async (path, body) => {
+      calls.push({ path, body });
+      if (body) throw Object.assign(new Error("No invoice requested"), { code: "PRODUCTION_FUNDING_UNAVAILABLE" });
+      return saved;
+    } });
+  assert.deepEqual(persisted, [ref]);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map(call => call.body?.action || "read"), ["checkout", "read"]);
+  assert.equal(result.id, ref.orderId);
+  assert.equal(result.retryAllowed, true);
+  assert.equal(result.checkoutBlock, "production-funding");
+  assert.match(paymentStatusMessage(result), /No invoice was submitted.*retry/);
+});
+
+test("an expired funding retry reads the exact saved cycle and exposes its fenced restart", async () => {
+  const calls = [], saved = fundingOrder();
+  const result = await retryFilmPayment({ order: saved, reference: { ...reference(), sandbox: false },
+    checkoutProof: "d".repeat(64), productionConsent: true,
+    request: async (path, body) => {
+      calls.push({ path, body });
+      if (body) throw Object.assign(new Error("Expired"), { code: "QUOTE_EXPIRED" });
+      return fundingOrder(true);
+    } });
+  assert.deepEqual(calls.map(call => call.body?.action || "read"), ["checkout", "read"]);
+  assert.equal(result.checkoutRestartAllowed, true);
+  assert.equal(result.retryAllowed, false);
+  assert.equal(result.id, saved.id);
+  assert.match(paymentStatusMessage(result), /expired.*No invoice was submitted.*Refresh/);
+});
+
+test("funding restart requires an exact server-fenced order and never requests an invoice", async () => {
+  const calls = [], saved = fundingOrder(), ref = { ...reference(), sandbox: false };
+  const result = await restartableFilmPayment(async (path, body) => {
+    calls.push({ path, body }); return fundingOrder(true);
+  }, ref, saved);
+  assert.equal(result.checkoutRestartAllowed, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/studio");
+  assert.deepEqual(calls[0].body, { action: "checkPayment", orderId: ref.orderId, expectedQuoteId: ref.quoteId });
+  for (const value of [fundingOrder(), { ...fundingOrder(true), quoteId: "e".repeat(64) },
+    { ...fundingOrder(true), amountCents: 101 }, { ...fundingOrder(true), preparedId: "00000000-0000-4000-8000-000000000002" },
+    { ...fundingOrder(true), sandbox: true }, { ...order("awaiting-payment"), sandbox: false },
+    { ...order("captured"), sandbox: false }]) {
+    let requests = 0;
+    await assert.rejects(restartableFilmPayment(async (_path, body) => {
+      requests++; assert.equal(body.action, "checkPayment"); return value;
+    }, ref, saved));
+    assert.equal(requests, 1);
+  }
+  await assert.rejects(restartableFilmPayment(async () => { throw Object.assign(new Error("Missing"), { status: 404 }); }, ref, saved));
+});
+
+test("funding and restart flags cannot label charged, invoiced, refunded, or unverified orders safe", () => {
+  assert.equal(normalizeFilmOrder(fundingOrder()).checkoutBlock, "production-funding");
+  assert.equal(normalizeFilmOrder(fundingOrder(true)).checkoutRestartAllowed, true);
+  for (const change of [{ checkoutBlock: "unknown" }, { status: "captured", charged: true, receiptAvailable: true },
+    { status: "awaiting-payment", charged: false, requiresReview: false }, { invoiceUrl: order("awaiting-payment").invoiceUrl },
+    { invoiceNumber: "1234" }, { refundedCents: 1 }, { requiresReview: false }, { checkoutMethod: undefined },
+    { checkoutRestartAllowed: "true" }, { checkoutRestartAllowed: true, retryAllowed: true },
+    { checkoutRestartAllowed: true, checkoutBlock: undefined }])
+    assert.equal(normalizeFilmOrder({ ...fundingOrder(), ...change }), null);
 });
 
 test("payment navigation reserves a returnable tab immediately before verified Intuit navigation", () => {

@@ -6,6 +6,7 @@ import {createQuickBooksAccountingTransport} from "./quickbooks.mjs";
 import {PaymentError} from "./payments.mjs";
 import {productionJobPath} from "./film-production.mjs";
 import {readProductionAllowance} from "./production-allowance.mjs";
+import {createFalFunding,fundingCycleCanExpire} from "./fal-funding.mjs";
 import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
 import {markProductionAuthorizationFailure} from "./production-authorization-diagnostics.mjs";
 import {normalizeHostedInvoiceUrl as safeLink} from "../../src/studio/hosted-invoice-url.mjs";
@@ -20,6 +21,7 @@ const reversalsUnavailable=reason=>markProductionAuthorizationFailure(new Hosted
 const conflict=()=>new HostedCheckoutError("This request changed or is already being processed. Check the saved order before continuing.",409,"PAYMENT_CONFLICT",null);
 const expired=()=>new HostedCheckoutError("This price or its checkout terms changed. Prepare your price again.",409,"QUOTE_EXPIRED");
 const checkoutProductionUnavailable=()=>new HostedCheckoutError("Production availability or cost could not be confirmed for this saved film. No invoice has been requested. Check your film price before paying.",503,"PRODUCTION_UNAVAILABLE");
+const fundingUnavailable=()=>new HostedCheckoutError("Film production cannot be reserved right now. Your saved price remains available. No invoice has been requested. Please try again later.",503,"PRODUCTION_FUNDING_UNAVAILABLE");
 const existingOrder=()=>new HostedCheckoutError("A payment page already exists for this saved film. Recover its saved payment or contact the administrator.",409,"ORDER_ALREADY_EXISTS");
 const stamp=now=>new Date(now).toISOString();
 const amountValid=n=>Number.isSafeInteger(n)&&n>0&&n<=100_000_000;
@@ -143,7 +145,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   productionAutomation={schedule:async input=>(await import("./automatic-production.mjs")).automaticProduction.schedule(input)},
   pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
   productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),
-  verifyReversals=createHostedReversalVerifier({transport,now})}={}) {
+  verifyReversals=createHostedReversalVerifier({transport,now}),funding=createFalFunding({read,write,now,env}),reserveFunding=funding.reserve}={}) {
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
     try {const result=await write(path,next,previous?.etag);if(result?.etag)return {value:next,etag:result.etag};}catch{}
@@ -170,6 +172,10 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   const readSettings=async()=>await read(HOSTED_CHECKOUT_SETTINGS_PATH);
   async function presentOrder(value) {
     const result=publicOrder(value,now());
+    if(value.status==="uncertain"&&value.checkoutBlock==="production-funding"&&!value.invoiceAttemptedAt&&!value.invoiceId&&!value.invoiceNumber&&!value.invoiceUrl) {
+      result.checkoutBlock="production-funding";
+      result.checkoutRestartAllowed=await funding.wasReleased(value);
+    }
     if(result.retryAllowed) {
       const settings=(await readSettings())?.value;
       result.retryAllowed=complete(settings)&&settings.revision===value.checkoutSettings?.revision&&sameBinding(settings.merchantBinding,value.merchantBinding);
@@ -253,14 +259,50 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     const q={id:digest(`${email}:${body.idempotencyKey}`),customerEmail:email,preparedId:supplied.preparedId,manifestHash:supplied.manifestHash,filmId:supplied.filmId,filmTitle:supplied.filmTitle,currency:"USD",amountCents,
       providerCostCents:supplied.providerCostCents,markupCents,pricingRevision:pricing.revision,pricingBasis:supplied.pricingBasis,quoteReference:supplied.quoteReference,
       merchantBinding:binding,checkoutSettings:s,createdAt:stamp(now()),expiresAt:stamp(Math.min(until,now()+15*60_000))};
-    await legacyGuard(q);const order=await read(orderPath(orderId(q)));
-    if(order) {if(order.value.checkoutMethod!==METHOD)throw conflict();if(order.value.quoteId!==q.id||order.value.preparedId!==q.preparedId)throw existingOrder();}
+    await legacyGuard(q);let order=await read(orderPath(orderId(q)));
+    if(order?.value.quoteRollover===true&&order.value.checkoutKeyHash===null) {
+      if(fundingCycleCanExpire(order.value,now())) order=await funding.releaseExpiredOrder(order.value.id,order.value.quoteId);
+      else {
+        // A refresh response may be lost before the browser can save its new
+        // payment reference. Reuse the one exact, still-unclaimed saved quote.
+        const original=await read(quotePath(email,order.value.quoteId)),prior=original?.value;
+        if(!prior||prior.id!==order.value.quoteId||prior.customerEmail!==email||prior.manifestHash!==q.manifestHash
+          ||prior.preparedId!==q.preparedId||!sameBinding(prior.merchantBinding,binding))throw conflict();
+        if(Date.parse(prior.expiresAt)<=now()||prior.checkoutSettings?.revision!==s.revision
+          ||["currency","providerCostCents","markupCents","amountCents","pricingRevision","pricingBasis"].some(field=>prior[field]!==q[field]))throw expired();
+        const current=await enabled(actor,false);
+        if(current.settings.revision!==s.revision||!sameBinding(current.binding,binding)
+          ||(await read(orderPath(orderId(q))))?.etag!==order.etag||(await read(quotePath(email,prior.id)))?.etag!==original.etag)throw conflict();
+        return publicQuote(prior);
+      }
+    }
+    let rollover=false;
+    if(order) {
+      if(order.value.checkoutMethod!==METHOD||order.value.customerEmail!==email||order.value.manifestHash!==q.manifestHash)throw conflict();
+      rollover=order.value.quoteId!==q.id&&order.value.checkoutBlock==="production-funding"&&await funding.wasReleased(order.value);
+      if(!rollover&&(order.value.quoteId!==q.id||order.value.preparedId!==q.preparedId))throw existingOrder();
+    }
     const path=quotePath(email,q.id),existing=await read(path);
     const matches=v=>v.customerEmail===email&&v.manifestHash===q.manifestHash&&v.preparedId===q.preparedId&&sameBinding(v.merchantBinding,binding);
     const samePrice=v=>["currency","providerCostCents","markupCents","amountCents","pricingRevision","pricingBasis"].every(field=>v[field]===q[field]);
-    if(existing) {if(!matches(existing.value))throw conflict();if(Date.parse(existing.value.expiresAt)<=now()||existing.value.checkoutSettings.revision!==s.revision||!samePrice(existing.value))throw expired();return publicQuote(existing.value);}
+    async function finishQuote(value) {
+      if(rollover) {
+        // The immutable release proves this old cycle never attempted an
+        // invoice. CAS gives exactly one fresh quote the shared film order.
+        const next={...value,id:orderId(value),version:1,provider:"quickbooks",quoteId:value.id,checkoutMethod:METHOD,status:"uncertain",
+          refundedCents:0,providerChargeId:null,capturedAt:null,invoiceId:null,invoiceUrl:null,invoiceNumber:null,
+          invoiceRequestId:uuid(`invoice:${orderId(value)}:${value.id}`),checkoutKeyHash:null,quoteRollover:true,
+          previousFundingQuoteId:order.value.quoteId,createdAt:stamp(now())};
+        await save(orderPath(next.id),order,next);
+      }
+      return publicQuote(value);
+    }
+    if(existing) {if(!matches(existing.value))throw conflict();if(Date.parse(existing.value.expiresAt)<=now()||existing.value.checkoutSettings.revision!==s.revision||!samePrice(existing.value))throw expired();return finishQuote(existing.value);}
     const fresh=await enabled(actor,false);if(fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw expired();
-    try{return publicQuote((await save(path,null,q)).value);}catch(error){const winner=await read(path);if(winner&&matches(winner.value)&&winner.value.checkoutSettings.revision===s.revision){if(Date.parse(winner.value.expiresAt)<=now()||!samePrice(winner.value))throw expired();return publicQuote(winner.value);}throw error;}
+    let created;
+    try {created=(await save(path,null,q)).value;}
+    catch(error){const winner=await read(path);if(winner&&matches(winner.value)&&winner.value.checkoutSettings.revision===s.revision){if(Date.parse(winner.value.expiresAt)<=now()||!samePrice(winner.value))throw expired();created=winner.value;}else throw error;}
+    return finishQuote(created);
   }
   async function readOrder(actor,orderReference) {
     const current=await currentActor(actor),record=await read(orderPath(reference(orderReference)));
@@ -307,12 +349,14 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     await legacyGuard(q);const id=orderId(q),path=orderPath(id),existing=await read(path);
     if(existing) {
       if(existing.value.checkoutMethod!==METHOD||existing.value.customerEmail!==email||existing.value.manifestHash!==q.manifestHash||!sameBinding(existing.value.merchantBinding,binding))throw conflict();
-      if(existing.value.quoteId!==q.id||existing.value.preparedId!==q.preparedId||existing.value.checkoutKeyHash!==digest(body.idempotencyKey))throw existingOrder();
+      if(existing.value.quoteId!==q.id||existing.value.preparedId!==q.preparedId
+        ||!(existing.value.quoteRollover===true&&existing.value.checkoutKeyHash===null)&&existing.value.checkoutKeyHash!==digest(body.idempotencyKey))throw existingOrder();
+      if(existing.value.fundingRelease)throw expired();
       if(existing.value.status!=="uncertain"||existing.value.invoiceAttemptedAt)return presentOrder(existing.value);
     }
     if(binding.environment==="production"&&body.productionConsent!==true)throw new HostedCheckoutError("Confirm that this saved film should be produced automatically after payment before opening checkout.",400,"PRODUCTION_CONSENT_REQUIRED");
     if(Date.parse(q.expiresAt)<=now()||q.checkoutSettings.revision!==s.revision)throw expired();
-    let productionUntil=Infinity;
+    let productionUntil=Infinity,fundingReservation;
     if(binding.environment==="production") {
       // Recheck the exact saved plan immediately before opening a payable
       // invoice. A browser capability snapshot cannot authorize this step.
@@ -333,14 +377,26 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     const productionConsent=body.productionConsent===true?{productionConsent:true,productionConsentAt:
       existing?.value.productionConsent===true&&typeof previousConsentAt==="string"&&Number.isFinite(Date.parse(previousConsentAt))&&Date.parse(previousConsentAt)<=now()?previousConsentAt:stamp(now())}:{};
     let record;
-    try {record=existing?await save(path,existing,{...existing.value,status:"submitting",...(binding.environment==="production"?productionConsent:{})}):await save(path,null,{...q,id,version:1,provider:"quickbooks",quoteId:q.id,checkoutMethod:METHOD,status:"submitting",refundedCents:0,providerChargeId:null,capturedAt:null,
+    try {record=existing?await save(path,existing,{...existing.value,status:"submitting",quoteRollover:false,checkoutKeyHash:digest(body.idempotencyKey),checkoutBlock:null,...(binding.environment==="production"?productionConsent:{})}):await save(path,null,{...q,id,version:1,provider:"quickbooks",quoteId:q.id,checkoutMethod:METHOD,status:"submitting",refundedCents:0,providerChargeId:null,capturedAt:null,
       invoiceId:null,invoiceUrl:null,invoiceNumber:null,invoiceRequestId:uuid(`invoice:${id}`),checkoutKeyHash:digest(body.idempotencyKey),consentAt:stamp(now()),createdAt:stamp(now()),
       ...productionConsent});}
     catch(error) {const winner=await read(path);if(winner?.value.checkoutMethod===METHOD&&winner.value.customerEmail===email&&winner.value.quoteId===q.id&&winner.value.preparedId===q.preparedId&&winner.value.checkoutKeyHash===digest(body.idempotencyKey)&&sameBinding(winner.value.merchantBinding,binding))return presentOrder(winner.value);throw error;}
     try {
+      if(binding.environment==="production") {
+        try {
+          fundingReservation=await reserveFunding({orderId:id,customerEmail:email,preparedId:q.preparedId,
+            manifestHash:q.manifestHash,quoteId:q.id,maximumCostCents:q.providerCostCents});
+          if(typeof fundingReservation?.recheck!=="function")throw fundingUnavailable();
+        }catch {throw fundingUnavailable();}
+        if(productionUntil<=now()||Date.parse(q.expiresAt)<=now())throw checkoutProductionUnavailable();
+        if((await read(path))?.etag!==record.etag)throw conflict();
+      }
       const customerId=await customer(actor,binding);record=await save(path,record,{...record.value,customerId});
       const fresh=await enabled(actor,false);if(fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw conflict();
       const item=itemData((await response(binding,{method:"GET",path:`/item/${s.serviceItemId}`})).Item);if(!item||!item.active||item.type!=="Service"||item.id!==s.serviceItemId)throw conflict();
+      if(binding.environment==="production") {
+        try {if(await fundingReservation.recheck()!==true)throw fundingUnavailable();}catch {throw fundingUnavailable();}
+      }
       if(binding.environment==="production"&&(productionUntil<=now()||Date.parse(q.expiresAt)<=now()))throw checkoutProductionUnavailable();
       // This claim is durable before the one allowed POST. A timeout never retries it.
       record=await save(path,record,{...record.value,invoiceAttemptedAt:stamp(now())});
@@ -355,11 +411,20 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       // Keep its identity so a later status check can recover the link without another POST.
       const unpaid=data.balanceCents===q.amountCents&&data.paymentIds.length===0&&data.invoiceLinkStatus!=="invalid";
       record=await save(path,record,{...record.value,...data,status:unpaid?"awaiting-payment":"uncertain"});
-    }catch {record=await save(path,record,{...record.value,status:"uncertain",invoiceUrl:null});}
+    }catch(error) {
+      record=await save(path,record,{...record.value,status:"uncertain",invoiceUrl:null,
+        ...(error instanceof HostedCheckoutError&&error.code==="PRODUCTION_FUNDING_UNAVAILABLE"&&!record.value.invoiceAttemptedAt?{checkoutBlock:"production-funding"}:{})});
+      if(error instanceof HostedCheckoutError&&error.code==="PRODUCTION_FUNDING_UNAVAILABLE"&&!record.value.invoiceAttemptedAt)throw error;
+    }
     return presentOrder(record.value);
   }
-  async function check(actor,{orderId:referenceId}={}) {
+  async function check(actor,{orderId:referenceId,expectedQuoteId}={}) {
     let record=await readOrder(actor,referenceId);const value=record.value;
+    if(expectedQuoteId!==undefined&&(!hex.test(expectedQuoteId)||value.quoteId!==expectedQuoteId))throw conflict();
+    // This explicit POST may fence an expired funding-blocked checkout. GET
+    // order remains read-only. A receipt exists before any restart is offered.
+    if(expectedQuoteId!==undefined&&value.checkoutBlock==="production-funding"&&fundingCycleCanExpire(value,now()))
+      return presentOrder((await funding.releaseExpiredOrder(value.id,expectedQuoteId)).value);
     const attemptedAt=stamp(now());let binding;
     // Pausing new checkout must not prevent prior customers reading their invoice.
     // Reconnecting the same company does not change an existing invoice's identity.

@@ -49,6 +49,16 @@ test("GET order only reads saved hosted state; provider status checking is an ex
   assert.deepEqual(h.calls.at(-1),["check",{orderId:ID}]);
   assert.equal((await invoke(h.handler,"order",{method:"GET",id:QUOTE})).body.id,"legacy");
 });
+test("expired funding restart binds its explicit status request to one saved quote",async()=>{
+  const h=studio();
+  for(const expectedQuoteId of [null,"","not-a-quote",QUOTE.toUpperCase(),[QUOTE]]) {
+    assert.equal((await invoke(h.handler,"checkPayment",{body:{orderId:ID,expectedQuoteId}})).statusCode,400);
+  }
+  assert.equal(h.calls.length,0);
+  assert.equal((await invoke(h.handler,"checkPayment",{origin:"https://wrong.invalid",body:{orderId:ID,expectedQuoteId:QUOTE}})).statusCode,403);
+  assert.equal((await invoke(h.handler,"checkPayment",{body:{orderId:ID,expectedQuoteId:QUOTE}})).statusCode,200);
+  assert.deepEqual(h.calls,[["check",{orderId:ID,expectedQuoteId:QUOTE}]]);
+});
 test("hosted invoice settings are owner-only and hosted refunds never reach the card refund adapter",async()=>{
   const calls=[];
   const setup=user=>createAdminHandler({getSession:async()=>({user}),limitAction:async()=>true,audit:async()=>{},

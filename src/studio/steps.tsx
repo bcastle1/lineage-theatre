@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
 import FilmCheckout from "./FilmCheckout";
+import type { FilmOrder } from "./checkout-contract";
 import { getSourceObjectUrl } from "../lib/storage";
 
 import type { Capabilities, StepProps } from "./Workspace";
@@ -1019,6 +1020,7 @@ type CreateProps = StepProps & {
   checkFilm: () => Promise<void>;
   resultUrl: string;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
+  clearExpiredPaymentReference: (reference: FilmPaymentReference, order: FilmOrder) => void;
   onNewFilmCheckout: () => void;
   onCheckoutBusy: (message: string) => void;
   brief: () => void;
@@ -1033,6 +1035,7 @@ export function CreateStep({
   checkFilm,
   resultUrl,
   persistPaymentReference,
+  clearExpiredPaymentReference,
   onNewFilmCheckout,
   onCheckoutBusy,
   brief,
@@ -1076,7 +1079,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} productionProvider={caps?.productionProvider} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} productionProvider={caps?.productionProvider} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} clearExpiredPaymentReference={clearExpiredPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

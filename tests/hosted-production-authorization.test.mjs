@@ -85,6 +85,7 @@ async function fixture(options = {}) {
       checkedAt: new Date(time).toISOString(), expiresAt: new Date(time + 60_000).toISOString(), ...options.reversalEvidence };
   };
   const dependencies = { read, write, now: () => time, env, transport, receiptDelivery: { deliver: async () => {} }, productionAutomation: { schedule: async () => {} },
+    reserveFunding: async () => ({ recheck: async () => true }),
     ...(options.useRecordedReversalVerifier ? {} : { verifyReversals: options.missingReversalVerifier ? null : verifyReversals }),
     pricingSettings: async () => ({ revision: 1, markupBasisPoints: 5000 }),
     quoteProvider: async () => ({ preparedId: plan.id, manifestHash: plan.manifestHash, filmId: plan.filmId, filmTitle: "Fictional film",

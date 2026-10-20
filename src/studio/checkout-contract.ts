@@ -20,6 +20,8 @@ export type FilmOrder = {
   checkoutMethod?: "quickbooks-hosted-invoice"; invoiceUrl?: string | null; invoiceNumber?: string | null;
   confirmationSource?: "quickbooks-accounting";
   retryAllowed?: boolean;
+  checkoutBlock?: "production-funding";
+  checkoutRestartAllowed?: boolean;
 };
 export type FilmReceipt = { receiptId: string; filmTitle: string; currency: "USD"; amountCents: number; refundedCents: number; capturedAt: string; status: FilmOrder["status"]; sandbox: boolean; transactionId: string | null; processorDisclosure: string; confirmationSource?: "quickbooks-accounting" };
 
@@ -70,6 +72,11 @@ export function normalizeFilmOrder(value: unknown): FilmOrder | null {
   if (value.checkoutMethod !== undefined && !hosted) return null;
   if (value.retryAllowed !== undefined && (typeof value.retryAllowed !== "boolean" || !hosted)) return null;
   if (value.retryAllowed === true && (value.status !== "uncertain" || value.charged !== null || !value.requiresReview || value.receiptAvailable || value.invoiceUrl != null)) return null;
+  if (value.checkoutBlock !== undefined && (value.checkoutBlock !== "production-funding" || !hosted
+    || value.status !== "uncertain" || value.charged !== null || !value.requiresReview || value.receiptAvailable
+    || value.refundedCents !== 0 || value.invoiceUrl != null || value.invoiceNumber != null)) return null;
+  if (value.checkoutRestartAllowed !== undefined && (typeof value.checkoutRestartAllowed !== "boolean" || !hosted)) return null;
+  if (value.checkoutRestartAllowed === true && (value.checkoutBlock !== "production-funding" || value.retryAllowed !== false)) return null;
   if (value.confirmationSource !== undefined && (value.confirmationSource !== "quickbooks-accounting" || !hosted)) return null;
   if (hosted && value.charged === true && value.confirmationSource !== "quickbooks-accounting") return null;
   if ((value.status === "awaiting-payment" && (!hosted || value.charged !== false || value.receiptAvailable || value.refundedCents !== 0))
@@ -82,6 +89,8 @@ export function normalizeFilmOrder(value: unknown): FilmOrder | null {
     charged: value.charged as boolean | null, requiresReview: value.requiresReview, receiptAvailable: value.receiptAvailable,
     createdAt: value.createdAt, updatedAt: value.updatedAt, sandbox: value.sandbox,
     ...(hosted ? { checkoutMethod: hostedMethod, invoiceUrl, invoiceNumber: value.invoiceNumber as string | null | undefined ?? null, retryAllowed: value.retryAllowed === true,
+      ...(value.checkoutBlock === "production-funding" ? { checkoutBlock: "production-funding" as const } : {}),
+      ...(value.checkoutRestartAllowed === true ? { checkoutRestartAllowed: true } : {}),
       ...(value.confirmationSource === "quickbooks-accounting" ? { confirmationSource: "quickbooks-accounting" as const } : {}) } : {}) };
 }
 
@@ -107,6 +116,10 @@ export function quoteMatchesConfiguration(quote: FilmQuote | null, configuration
 }
 
 export function paymentStatusMessage(order: FilmOrder): string {
+  if (order.checkoutBlock === "production-funding") return order.checkoutRestartAllowed
+    ? "Production was temporarily unavailable and this unused payment request has expired. No invoice was submitted. Refresh your film price to try again."
+    : order.retryAllowed ? "Production is temporarily unavailable. No invoice was submitted. Your saved price is still valid; retry preparing this payment page when the service is available."
+      : "Production is temporarily unavailable. No invoice was submitted. Check this saved request's status before continuing.";
   if (order.retryAllowed === true) return "Your payment page could not be prepared. No invoice was submitted for this order. You can retry preparing the saved payment page.";
   if (order.requiresReview) return "Your payment needs review. Do not submit another payment. Check this order's status or contact the administrator.";
   switch (order.status) {

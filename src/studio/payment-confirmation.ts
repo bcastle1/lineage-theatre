@@ -2,6 +2,10 @@ import { normalizeFilmOrder, type FilmOrder } from "./checkout-contract";
 import { normalizeLibraryEntry, libraryCanWatch, libraryFilmLink, type LibraryEntry } from "./film-library";
 
 type Request = (path: string, body?: unknown) => Promise<unknown>;
+export function paymentViewReentered(previous: { orderId: string | null; visible: boolean }, current: { orderId: string | null; visible: boolean }, order: FilmOrder | null) {
+  return Boolean(current.orderId && previous.orderId === current.orderId && !previous.visible && current.visible
+    && order?.id === current.orderId && order.checkoutBlock === "production-funding");
+}
 export function confirmedFilmPayment(order: FilmOrder | null) {
   return Boolean(order?.status === "captured" && order.charged === true && order.receiptAvailable
     && !order.requiresReview && order.refundedCents === 0);
