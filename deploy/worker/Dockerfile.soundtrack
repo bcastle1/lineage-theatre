@@ -27,6 +27,7 @@ COPY scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scri
 COPY scripts/repair-name-proof.mjs scripts/compare-repair-name-pronunciations.py ./scripts/
 COPY scripts/automatic-film-soundtrack.mjs ./scripts/
 COPY scripts/authored-soundtrack-casting.mjs scripts/approve-film-soundtrack-casting.mjs scripts/inspect-film-soundtrack-fit.mjs ./scripts/
+COPY scripts/adjacent-authored-speech.mjs scripts/diagnose-authored-scene-context.mjs ./scripts/
 
 ENV LINEAGE_TTS_PYTHON=/opt/soundtrack/bin/python LINEAGE_TTS_MODEL_DIR=/opt/soundtrack/models/kokoro \
     FLUIDSYNTH_PATH=/usr/bin/fluidsynth LINEAGE_SOUNDFONT=/usr/share/sounds/sf2/FluidR3_GM.sf2 \

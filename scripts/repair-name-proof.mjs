@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeSpeech, repairCardinalSpan, intendedSpeechTokens } from './review-film-speech.mjs';
+import { normalizeSpeech, repairCardinalSpan, intendedSpeechTokens, speechEdit } from './review-film-speech.mjs';
 import { soundtrackPlan } from './rebuild-film-soundtrack.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
@@ -65,6 +65,178 @@ function comparePronunciations(pairs, python) {
   });
 }
 
+async function compareBoundSpeech({ manifest, shot, expected, normal, contextual, binding, input, python, allowExact = false }) {
+  requireValue(expected.length && normal.length && normal.length === contextual.length
+    && normal.every((word, index) => word.token === contextual[index].token)
+    && binding.length === expected.length && binding.every((value, index) => value.token === expected[index])
+    && [input.normalTranscript, input.contextTranscript].every(value => Number.isFinite(value.duration)
+      && value.duration >= shot.targetDurationMs / 1000 - .05));
+  for (const transcript of [normal, contextual]) requireValue(transcript.every((word, index) => Number.isFinite(word.start)
+    && Number.isFinite(word.end) && word.start >= 0 && word.end >= word.start && word.end <= shot.targetDurationMs / 1000
+    && (!index || word.start >= transcript[index - 1].start)));
+  const nameSpans = [], castNames = manifest.screenplay.characters.map(cast => ({ cast, name: normalizeSpeech(cast.name) }));
+  for (const { cast, name } of castNames) {
+    if (name.length < 2 || name.length > 8) continue;
+    for (let start = 0; start <= expected.length - name.length; start++) if (name.every((token, offset) => expected[start + offset] === token)
+      && name.every((_, offset) => binding[start + offset].turn === binding[start].turn)) nameSpans.push({ castId: cast.id, start, end: start + name.length, nameScope: 'full-name' });
+  }
+  const actualTokens = normal.map(word => word.token), changes = [];
+  let left = 0, right = 0;
+  while (left < expected.length || right < normal.length) {
+    requireValue(left < expected.length && right < normal.length);
+    if (expected[left] === normal[right].token) { left++; right++; continue; }
+    const expectedNumber = repairCardinalSpan(expected, left), actualNumber = repairCardinalSpan(actualTokens, right);
+    let change;
+    if (expectedNumber && actualNumber && expectedNumber.form !== actualNumber.form && expectedNumber.value === actualNumber.value) {
+      requireValue(binding.slice(left, expectedNumber.end).every(value => value.turn === binding[left].turn));
+      requireValue(rawCardinalSpanValid(binding[left].rawTokens, binding[left].rawIndex,
+        binding[expectedNumber.end - 1].rawIndex, expected.slice(left, expectedNumber.end)));
+      for (const [transcript, rawTranscript] of [[normal, input.normalTranscript], [contextual, input.contextTranscript]])
+        requireValue(rawCardinalSpanValid(rawTranscript.words.map(word => word.word), transcript[right].rawIndex,
+          transcript[actualNumber.end - 1].rawIndex, actualTokens.slice(right, actualNumber.end)));
+      change = { kind: 'cardinal', expectedStart: left, expectedEnd: expectedNumber.end,
+        actualStart: right, actualEnd: actualNumber.end, canonicalValue: expectedNumber.value,
+        expectedForm: expectedNumber.form, recognizedForm: actualNumber.form, method: 'canonical-cardinal-0-99-v1' };
+    } else {
+      let candidates = nameSpans.filter(span => left >= span.start && left < span.end);
+      const honorificPrecedes = left > 0 && right > 0 && ['mr', 'mrs', 'ms', 'dr'].includes(expected[left - 1])
+        && normal[right - 1].token === expected[left - 1];
+      if (!candidates.length && !honorificPrecedes) {
+        // A lone first name qualifies only when it uniquely identifies one
+        // saved cast member. This branch permits no surname or other alias.
+        const firstNames = castNames.filter(({ name }) => name[0] === expected[left]);
+        if (firstNames.length === 1 && firstNames[0].name.length >= 2 && firstNames[0].name.length <= 8
+          && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: firstNames[0].cast.id,
+            start: left, end: left + 1, nameScope: 'unique-first-name' }];
+      }
+      if (!candidates.length && honorificPrecedes && binding[left - 1].turn === binding[left].turn) {
+        // A surname is permitted only immediately after an already exact
+        // honorific, within one verified synthesis turn, and unique in cast.
+        const surnames = castNames.filter(({ name }) => name.at(-1) === expected[left]);
+        if (surnames.length === 1 && surnames[0].name.length >= 2 && surnames[0].name.length <= 8
+          && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: surnames[0].cast.id,
+            start: left - 1, end: left + 1, nameScope: 'honorific-surname',
+            honorific: { token: expected[left - 1], expectedWordIndex: left - 1, actualWordIndex: right - 1,
+              normalTiming: { start: normal[right - 1].start, end: normal[right - 1].end },
+              contextTiming: { start: contextual[right - 1].start, end: contextual[right - 1].end } } }];
+      }
+      requireValue(candidates.length === 1);
+      change = { kind: 'cast-name', expectedStart: left, expectedEnd: left + 1, actualStart: right, actualEnd: right + 1,
+        castId: candidates[0].castId, nameScope: candidates[0].nameScope,
+        castNameSpan: { start: candidates[0].start, end: candidates[0].end },
+        ...(candidates[0].honorific ? { honorific: candidates[0].honorific } : {}) };
+    }
+    const bound = binding[left], generated = bound.generated;
+    requireValue(binding.slice(change.expectedStart, change.expectedEnd).every(value => value.turn === bound.turn));
+    // Both unchanged ASR timestamp spans must lie in the exact verified
+    // synthesis turn; the bounded variation is only a decoder boundary.
+    const timingStart = change.honorific ? change.honorific.actualWordIndex : change.actualStart;
+    for (const transcript of [normal, contextual]) for (const actual of transcript.slice(timingStart, change.actualEnd))
+      requireValue(actual.start >= Math.max(0, generated.startSeconds - .35)
+        && actual.end <= Math.min(shot.targetDurationMs / 1000, generated.endSeconds + .35));
+    changes.push({ ...change, bound }); requireValue(changes.length <= 64);
+    left = change.expectedEnd; right = change.actualEnd;
+  }
+  if (!changes.length && allowExact) return [];
+  requireValue(changes.length > 0);
+  const names = changes.filter(change => change.kind === 'cast-name');
+  const compared = names.length ? await comparePronunciations(names.map(change => ({ expected: expected[change.expectedStart],
+    recognized: normal[change.actualStart].token })), python) : null;
+  if (names.length) requireValue(compared?.version === 1 && compared.status === 'compared'
+    && Array.isArray(compared.pairs) && compared.pairs.length === names.length);
+  const spans = changes.map(change => {
+    const { bound, ...alignment } = change;
+    const base = { ...alignment, expectedTokensSha256: jsonHash(expected.slice(change.expectedStart, change.expectedEnd)),
+      recognizedTokensSha256: jsonHash(actualTokens.slice(change.actualStart, change.actualEnd)),
+      normalTiming: normal.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
+      contextTiming: contextual.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
+      turnIndex: bound.turn.turnIndex, turnTextSha256: bound.turn.textSha256, turnAudioSha256: bound.generated.audio.sha256,
+      voice: bound.turn.voice, synthesisPhonemesSha256: bound.generated.phonemesSha256,
+      ...(bound.windowBinding ? { sourceTurn: bound.windowBinding } : {}) };
+    if (change.kind === 'cardinal') return { ...base, evidenceHash: jsonHash(base) };
+    const pairIndex = names.indexOf(change);
+    const proof = compared.pairs[pairIndex];
+    requireValue(proof?.equal === true && proof.expectedSha256 === hash(expected[change.expectedStart])
+      && proof.recognizedSha256 === hash(normal[change.actualStart].token)
+      && ['misaki-exact', 'cmudict-exact'].includes(proof.method) && proof.engineVersion === 'misaki-0.9.4'
+      && HASH.test(proof.phonemeHash || '') && HASH.test(proof.evidenceHash || '')
+      && HASH.test(proof.expectedPhonemeHash || '') && HASH.test(proof.recognizedPhonemeHash || '')
+      && proof.dictionarySha256 === DICTIONARY_SHA256 && proof.dictionaryCommit === DICTIONARY_COMMIT
+      && Object.entries(PRONUNCIATION_RUNTIME).every(([name, version]) => proof.runtimeVersions?.[name] === version));
+    return { ...base,
+      expectedSha256: proof.expectedSha256, recognizedSha256: proof.recognizedSha256,
+      method: proof.method, phonemeHash: proof.phonemeHash, evidenceHash: proof.evidenceHash,
+      expectedPhonemeHash: proof.expectedPhonemeHash, recognizedPhonemeHash: proof.recognizedPhonemeHash,
+      engineVersion: proof.engineVersion, dictionarySha256: proof.dictionarySha256, dictionaryCommit: proof.dictionaryCommit,
+      runtimeVersions: { ...PRONUNCIATION_RUNTIME } };
+  });
+  return spans;
+}
+
+// Whole-scene evidence keeps original synthesis turns and raw ASR timestamps.
+// Offsets translate only the immutable turn placement into the scene timeline.
+// This proof cannot be presented as an original per-cut recognition result.
+export async function verifyAuthoredSceneEquivalence({ manifest, manifestHash, voices, provenance, constructionRoot,
+  shotIds, audioPaths, combinedAudioPath, normalTranscript, contextTranscript,
+  python = process.env.LINEAGE_TTS_PYTHON || '/opt/soundtrack/bin/python' }) {
+  requireValue(HASH.test(manifestHash || '') && jsonHash(manifest) === manifestHash
+    && provenance?.manifestHash === manifestHash && provenance.recipe === 'local-authored-soundtrack-v1'
+    && provenance.engine === 'kokoro-82m-v1.0-cpu' && provenance.sourceTextRewritten === false && provenance.speed === 1
+    && provenance.runtimeVersions?.misaki === '0.9.4' && Array.isArray(shotIds) && shotIds.length === 2
+    && Array.isArray(audioPaths) && audioPaths.length === 2);
+  const firstIndex = manifest.shots.findIndex(shot => shot.id === shotIds[0]);
+  const shots = manifest.shots.slice(firstIndex, firstIndex + 2);
+  requireValue(firstIndex >= 0 && shots.length === 2 && shots.every((shot, index) => shot.id === shotIds[index]
+    && shot.sceneParts === 2 && shot.scenePart === index + 1 && shot.targetDurationMs <= 15000)
+    && shots[0].sceneIndex === shots[1].sceneIndex && manifest.shots.filter(shot => shot.sceneIndex === shots[0].sceneIndex).length === 2
+    && shots[1].continuity?.precedingShotId === shots[0].id && shots[1].startMs === shots[0].startMs + shots[0].targetDurationMs);
+  const durationMs = shots.reduce((sum, shot) => sum + shot.targetDurationMs, 0), plan = soundtrackPlan({ manifest, manifestHash, ...voices, music: provenance.musicRequested });
+  requireValue(durationMs <= 30000 && [normalTranscript, contextTranscript].every(transcript => Number.isFinite(transcript?.duration)
+    && Math.abs(transcript.duration - durationMs / 1000) < .001 && Array.isArray(transcript.words)
+    && transcript.words.every(word => Number.isFinite(word.end) && word.end <= durationMs / 1000 - .08)));
+  const originalScene = manifest.screenplay.scenes?.[shots[0].sceneIndex];
+  requireValue(originalScene && jsonHash(intendedSpeechTokens(originalScene, { manifest, speakerAliases: voices.speakerAliases }))
+    === jsonHash(shots.flatMap(shot => intendedSpeechTokens(shot, { manifest, speakerAliases: voices.speakerAliases }))));
+  const sourceDirectory = resolve(constructionRoot, 'soundtrack'), expected = [], binding = [];
+  let offsetSeconds = 0;
+  for (const [index, shot] of shots.entries()) {
+    const scene = plan.scenes.find(value => value.shotId === shot.id), source = provenance.scenes.find(value => value.shotId === shot.id);
+    requireValue(source && source.durationMs === shot.targetDurationMs && source.originalProviderAudioIncluded === false
+      && Array.isArray(source.turns) && source.turns.length === scene.turns.length);
+    await checkedFile(audioPaths[index], sourceDirectory, source.mix);
+    expected.push(...intendedSpeechTokens(shot, { manifest, speakerAliases: voices.speakerAliases }));
+    for (const [turnIndex, turn] of scene.turns.entries()) {
+      const original = source.turns[turnIndex];
+      requireValue(original.turnIndex === turn.turnIndex && original.speakerId === turn.speakerId && original.source === turn.source
+        && original.voice === turn.voice && /^(?:af|am)_[a-z]{2,24}$/.test(turn.voice) && original.speed === 1
+        && original.textSha256 === turn.textSha256 && original.synthesisTextSha256 === turn.textSha256
+        && HASH.test(original.phonemesSha256 || '') && Number.isFinite(original.startSeconds) && Number.isFinite(original.endSeconds)
+        && original.startSeconds >= 0 && original.endSeconds > original.startSeconds && original.endSeconds <= shot.targetDurationMs / 1000);
+      await checkedFile(resolve(sourceDirectory, original.audio.file), sourceDirectory, original.audio);
+      const generated = { ...original, startSeconds: original.startSeconds + offsetSeconds, endSeconds: original.endSeconds + offsetSeconds };
+      const windowBinding = { shotId: shot.id, offsetSeconds, originalStartSeconds: original.startSeconds,
+        originalEndSeconds: original.endSeconds, audioSha256: original.audio.sha256, textSha256: original.textSha256 };
+      const rawTokens = turn.text.split(/\s+/);
+      for (const [rawIndex, raw] of rawTokens.entries()) for (const token of normalizeSpeech(raw))
+        binding.push({ token, raw, rawIndex, rawTokens, generated, turn, windowBinding });
+    }
+    offsetSeconds += shot.targetDurationMs / 1000;
+  }
+  const combined = await checkedFile(combinedAudioPath, constructionRoot);
+  const spans = await compareBoundSpeech({ manifest, shot: { targetDurationMs: durationMs }, expected,
+    normal: words(normalTranscript), contextual: words(contextTranscript), binding,
+    input: { normalTranscript, contextTranscript }, python, allowExact: true });
+  const proof = spans.length ? { kind: 'repair-speech-equivalence-proof-v2', version: 2, scope: 'authored-scene-window', manifestHash,
+    shotIds: [...shotIds], audioSha256: combined.sha256, normalTranscriptSha256: jsonHash(normalTranscript),
+    contextTranscriptSha256: jsonHash(contextTranscript), provenanceSha256: jsonHash(provenance), voiceAssignmentsSha256: jsonHash(voices),
+    expectedWordCount: expected.length, actualWordCount: words(normalTranscript).length, spans } : null;
+  // An ephemeral token aggregate is only a review input, never a saved manifest
+  // or a claim that separate source turns were synthesized as one utterance.
+  const aggregate = { narration: expected.join(' '), dialogue: '', targetDurationMs: durationMs };
+  for (const transcript of [normalTranscript, contextTranscript]) requireValue(speechEdit(aggregate, transcript, { repairProof: proof }) === null);
+  return proof;
+}
+
 export function createRepairSpeechResolver({ manifest, manifestHash, voices, provenance, constructionRoot, receiptRoot,
   python = process.env.LINEAGE_TTS_PYTHON || '/opt/soundtrack/bin/python' }) {
   requireValue(HASH.test(manifestHash || '') && jsonHash(manifest) === manifestHash && typeof constructionRoot === 'string'
@@ -106,100 +278,7 @@ export function createRepairSpeechResolver({ manifest, manifestHash, voices, pro
       for (const [rawIndex, raw] of rawTokens.entries()) for (const token of normalizeSpeech(raw)) binding.push({ token, raw, rawIndex, rawTokens, generated, turn });
     }
     requireValue(binding.length === expected.length && binding.every((value, index) => value.token === expected[index]));
-    const nameSpans = [], castNames = manifest.screenplay.characters.map(cast => ({ cast, name: normalizeSpeech(cast.name) }));
-    for (const { cast, name } of castNames) {
-      if (name.length < 2 || name.length > 8) continue;
-      for (let start = 0; start <= expected.length - name.length; start++) if (name.every((token, offset) => expected[start + offset] === token)
-        && name.every((_, offset) => binding[start + offset].turn === binding[start].turn)) nameSpans.push({ castId: cast.id, start, end: start + name.length, nameScope: 'full-name' });
-    }
-    const actualTokens = normal.map(word => word.token), changes = [];
-    let left = 0, right = 0;
-    while (left < expected.length || right < normal.length) {
-      requireValue(left < expected.length && right < normal.length);
-      if (expected[left] === normal[right].token) { left++; right++; continue; }
-      const expectedNumber = repairCardinalSpan(expected, left), actualNumber = repairCardinalSpan(actualTokens, right);
-      let change;
-      if (expectedNumber && actualNumber && expectedNumber.form !== actualNumber.form && expectedNumber.value === actualNumber.value) {
-        requireValue(binding.slice(left, expectedNumber.end).every(value => value.turn === binding[left].turn));
-        requireValue(rawCardinalSpanValid(binding[left].rawTokens, binding[left].rawIndex,
-          binding[expectedNumber.end - 1].rawIndex, expected.slice(left, expectedNumber.end)));
-        for (const [transcript, rawTranscript] of [[normal, input.normalTranscript], [contextual, input.contextTranscript]])
-          requireValue(rawCardinalSpanValid(rawTranscript.words.map(word => word.word), transcript[right].rawIndex,
-            transcript[actualNumber.end - 1].rawIndex, actualTokens.slice(right, actualNumber.end)));
-        change = { kind: 'cardinal', expectedStart: left, expectedEnd: expectedNumber.end,
-          actualStart: right, actualEnd: actualNumber.end, canonicalValue: expectedNumber.value,
-          expectedForm: expectedNumber.form, recognizedForm: actualNumber.form, method: 'canonical-cardinal-0-99-v1' };
-      } else {
-        let candidates = nameSpans.filter(span => left >= span.start && left < span.end);
-        const honorificPrecedes = left > 0 && right > 0 && ['mr', 'mrs', 'ms', 'dr'].includes(expected[left - 1])
-          && normal[right - 1].token === expected[left - 1];
-        if (!candidates.length && !honorificPrecedes) {
-          // A lone first name qualifies only when it uniquely identifies one
-          // saved cast member. This branch permits no surname or other alias.
-          const firstNames = castNames.filter(({ name }) => name[0] === expected[left]);
-          if (firstNames.length === 1 && firstNames[0].name.length >= 2 && firstNames[0].name.length <= 8
-            && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: firstNames[0].cast.id,
-              start: left, end: left + 1, nameScope: 'unique-first-name' }];
-        }
-        if (!candidates.length && honorificPrecedes && binding[left - 1].turn === binding[left].turn) {
-          // A surname is permitted only immediately after an already exact
-          // honorific, within one verified synthesis turn, and unique in cast.
-          const surnames = castNames.filter(({ name }) => name.at(-1) === expected[left]);
-          if (surnames.length === 1 && surnames[0].name.length >= 2 && surnames[0].name.length <= 8
-            && /^[a-z]{2,64}$/.test(expected[left])) candidates = [{ castId: surnames[0].cast.id,
-              start: left - 1, end: left + 1, nameScope: 'honorific-surname',
-              honorific: { token: expected[left - 1], expectedWordIndex: left - 1, actualWordIndex: right - 1,
-                normalTiming: { start: normal[right - 1].start, end: normal[right - 1].end },
-                contextTiming: { start: contextual[right - 1].start, end: contextual[right - 1].end } } }];
-        }
-        requireValue(candidates.length === 1);
-        change = { kind: 'cast-name', expectedStart: left, expectedEnd: left + 1, actualStart: right, actualEnd: right + 1,
-          castId: candidates[0].castId, nameScope: candidates[0].nameScope,
-          castNameSpan: { start: candidates[0].start, end: candidates[0].end },
-          ...(candidates[0].honorific ? { honorific: candidates[0].honorific } : {}) };
-      }
-      const bound = binding[left], generated = bound.generated;
-      requireValue(binding.slice(change.expectedStart, change.expectedEnd).every(value => value.turn === bound.turn));
-      // Both unchanged ASR timestamp spans must lie in the exact verified
-      // synthesis turn; the bounded variation is only a decoder boundary.
-      const timingStart = change.honorific ? change.honorific.actualWordIndex : change.actualStart;
-      for (const transcript of [normal, contextual]) for (const actual of transcript.slice(timingStart, change.actualEnd))
-        requireValue(actual.start >= Math.max(0, generated.startSeconds - .35)
-          && actual.end <= Math.min(shot.targetDurationMs / 1000, generated.endSeconds + .35));
-      changes.push({ ...change, bound }); requireValue(changes.length <= 64);
-      left = change.expectedEnd; right = change.actualEnd;
-    }
-    requireValue(changes.length > 0);
-    const names = changes.filter(change => change.kind === 'cast-name');
-    const compared = names.length ? await comparePronunciations(names.map(change => ({ expected: expected[change.expectedStart],
-      recognized: normal[change.actualStart].token })), python) : null;
-    if (names.length) requireValue(compared?.version === 1 && compared.status === 'compared'
-      && Array.isArray(compared.pairs) && compared.pairs.length === names.length);
-    const spans = changes.map(change => {
-      const { bound, ...alignment } = change;
-      const base = { ...alignment, expectedTokensSha256: jsonHash(expected.slice(change.expectedStart, change.expectedEnd)),
-        recognizedTokensSha256: jsonHash(actualTokens.slice(change.actualStart, change.actualEnd)),
-        normalTiming: normal.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
-        contextTiming: contextual.slice(change.actualStart, change.actualEnd).map(({ start, end }) => ({ start, end })),
-        turnIndex: bound.turn.turnIndex, turnTextSha256: bound.turn.textSha256, turnAudioSha256: bound.generated.audio.sha256,
-        voice: bound.turn.voice, synthesisPhonemesSha256: bound.generated.phonemesSha256 };
-      if (change.kind === 'cardinal') return { ...base, evidenceHash: jsonHash(base) };
-      const pairIndex = names.indexOf(change);
-      const proof = compared.pairs[pairIndex];
-      requireValue(proof?.equal === true && proof.expectedSha256 === hash(expected[change.expectedStart])
-        && proof.recognizedSha256 === hash(normal[change.actualStart].token)
-        && ['misaki-exact', 'cmudict-exact'].includes(proof.method) && proof.engineVersion === 'misaki-0.9.4'
-        && HASH.test(proof.phonemeHash || '') && HASH.test(proof.evidenceHash || '')
-        && HASH.test(proof.expectedPhonemeHash || '') && HASH.test(proof.recognizedPhonemeHash || '')
-        && proof.dictionarySha256 === DICTIONARY_SHA256 && proof.dictionaryCommit === DICTIONARY_COMMIT
-        && Object.entries(PRONUNCIATION_RUNTIME).every(([name, version]) => proof.runtimeVersions?.[name] === version));
-      return { ...base,
-        expectedSha256: proof.expectedSha256, recognizedSha256: proof.recognizedSha256,
-        method: proof.method, phonemeHash: proof.phonemeHash, evidenceHash: proof.evidenceHash,
-        expectedPhonemeHash: proof.expectedPhonemeHash, recognizedPhonemeHash: proof.recognizedPhonemeHash,
-        engineVersion: proof.engineVersion, dictionarySha256: proof.dictionarySha256, dictionaryCommit: proof.dictionaryCommit,
-        runtimeVersions: { ...PRONUNCIATION_RUNTIME } };
-    });
+    const spans = await compareBoundSpeech({ manifest, shot, expected, normal, contextual, binding, input, python });
     requireValue(hash(await readFile(input.audioPath)) === audioSha256);
     const proof = { kind: 'repair-speech-equivalence-proof-v2', version: 2, manifestHash, shotId: shot.id, audioSha256,
       normalTranscriptSha256: jsonHash(input.normalTranscript), contextTranscriptSha256: jsonHash(input.contextTranscript),
