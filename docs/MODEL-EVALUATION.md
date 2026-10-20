@@ -165,3 +165,38 @@ Completed samples still need full decoding, saved-script speech verification,
 visual continuity and lip-sync review, and private playback. Polling deliberately
 returns those quality flags as false. It does not deliver either sample to the
 customer or qualify a replacement production model.
+
+## One reviewed Kling access-rejection recovery
+
+The explicit `retry-rejected-kling` action is limited to the already reviewed
+original request `01a15695-178d-7d90-838c-6be342ac18c3`. It is not a general retry
+mechanism. Use the newly authorized temporary Kling credential in the same secured
+runtime and keep the existing evaluation directory and approved plan intact:
+
+```sh
+node scripts/evaluate-film-models.mjs retry-rejected-kling --directory /evaluation --approve-plan-sha256 <same-approved-plan-sha256>
+node scripts/evaluate-film-models.mjs poll --directory /evaluation
+```
+
+Before its single recovery POST, the action requires the original claim and
+receipt, a completed Seedance receipt and terminal record, unchanged source and
+photo bytes, identical payload hashes, fresh matching prices, and the unexpired
+approved plan. The combined cost bound still covers one Seedance generation and
+one Kling generation and must remain at most $20. This recovery applies only to
+the confirmed access rejection, which produced no Kling video; it cannot authorize
+another Seedance request or another attempt after an uncertain Kling submission.
+
+It rereads the original Kling status and requires `COMPLETED` with the same
+request ID. The original result GET must return HTTP 403 with exactly
+`type: "resource_restricted"` and
+`detail: "API key does not have access to model: fal-ai/kling-video/o3/pro/reference-to-video"`.
+A successful result, different error, nonterminal state or ambiguous response
+stops recovery. The exact rejection is saved in `kling-confirmed-rejection.json`
+before an exclusive `kling-recovery-claim.json` is created.
+
+Original claims, receipts and observations remain unchanged. Recovery response,
+receipt, uncertainty and terminal records use the separate `kling-recovery-`
+prefix. Once a recovery claim exists, this action never submits again. Polling
+uses its recovery receipt when available; a recovery claim without a receipt
+reports uncertainty and requires reconciliation. Never remove those records to
+make another attempt.
