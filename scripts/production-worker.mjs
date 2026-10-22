@@ -17,6 +17,8 @@ import { createRemoteProductionAuthorization } from "../api/_lib/remote-producti
 import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { finishingFailure, markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { createAutomaticSoundtrackFallback } from './automatic-film-soundtrack.mjs';
+import { createFilmVisualReviewer } from './review-film-visuals.mjs';
+import { verifyFilmVisualReceipts } from '../api/_lib/film-visual-review.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -75,7 +77,7 @@ export async function downloadProductionAudio(output, allowedHosts, { fetchImpl 
   return downloadProductionMedia(validateProviderAudio(output, allowedHosts), fetchImpl);
 }
 
-export async function verifyPublishedFilm({ email, id, manifestHash, artifact, manifest }, { getBlob = get } = {}) {
+export async function verifyPublishedFilm({ email, id, manifestHash, artifact, manifest }, { getBlob = get, read = readRecord } = {}) {
   try {
   verifiedMediaProfile(artifact);
   if (!artifact || artifact.technicalSample !== false || artifact.playable !== true || artifact.hasAudio !== true
@@ -90,12 +92,13 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
   }
   const bytes = await boundedBytes(stored.stream, artifact.sizeBytes);
   if (sha256(bytes) !== artifact.sha256) throw finishingError("The private film checksum does not match.", "STORED_CHECKSUM_MISMATCH");
+  await verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review: artifact.visualReview }, { read });
   return { ...artifact, playable: true };
   } catch (error) { throw markFinishingFailure(error, 'stored-verification'); }
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
-  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, prepareClips, soundtrackFallback,
+  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, reviewVisuals = createFilmVisualReviewer(), prepareClips, soundtrackFallback,
   ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
@@ -126,6 +129,11 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         clips.push(clip);
       }
       const outputPath = join(work, "film.mp4");
+      stage = 'visual-review';
+      const visualReview = job.manifest.visualContinuity
+        ? await reviewVisuals({ email, id, job, clips, work, ffmpeg, stillOwned }) : null;
+      if (job.manifest.visualContinuity && visualReview?.passed !== true)
+        throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
       stage = 'speech-review';
       // Only an explicitly configured operator repair supplies this hook. The
       // ordinary worker reviews native audio before considering local fallback.
@@ -175,7 +183,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         await putBlob(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false,
           contentType: "video/mp4", cacheControlMaxAge: 60 });
       } catch { /* A complete matching private readback is the only success signal. */ }
-      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}) };
+      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}), ...(visualReview?{visualReview}:{}) };
       // acceptAssembly verifies the private readback before marking completion,
       // including a lost upload response. Avoid downloading the same film twice.
       // Retain captions privately; failed caption publication cannot claim success.
@@ -230,7 +238,7 @@ async function main() {
   const healthPath='production/worker-health.json';
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
-    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,referencePhotoVersion:1,deliveryChecksVersion:1,checkedAt:new Date().toISOString()},old?.etag);
+    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,referencePhotoVersion:1,deliveryChecksVersion:1,visualChecksVersion:1,checkedAt:new Date().toISOString()},old?.etag);
   };
   await heartbeat();
   const pulse=setInterval(()=>void heartbeat().catch(()=>{}),30000);pulse.unref();

@@ -7,6 +7,7 @@ import { payments } from "./payments.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
 import { FAL_RECIPE_VERSION } from "./fal-production.mjs";
 import { finishingFailure, sanitizeFinishingFailure } from "./film-finishing-diagnostics.mjs";
+import { validateStoredProductionMedia, requireFinishedFilmPayment } from "./production-media.mjs";
 
 const prefix = "production/queue/";
 const automaticPrefix = "production/automatic-starts/";
@@ -147,15 +148,29 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       && ["pending", "queued"].includes(automatic.state) ? automatic : null;
     const automaticPending = !validTicket && saved.status === "prepared" && validAutomatic?.state === "pending";
     const queued = validTicket || (automaticPending ? { state: "pending" } : null);
-    const snapshot = await progress.snapshot({ job: saved, email, queue: queued });
+    // The polling endpoint must use the same delivery gates as the library.
+    // A completed renderer alone neither proves a valid private film nor paid
+    // playback access; conversely, a verified delivered film must not stay at 90%.
+    let mediaReady = false;
+    if (saved.status === "completed") {
+      try {
+        const actor = await currentAccount(email);
+        validateStoredProductionMedia(saved, email);
+        await requireFinishedFilmPayment({ job: saved, email, actor, read, now });
+        mediaReady = true;
+      } catch { /* Keep playback unavailable while its saved evidence needs review. */ }
+    }
+    const needsAttention = !mediaReady && (validTicket?.state === "attention" || saved.status === "completed");
+    const snapshot = await progress.snapshot({ job: saved, email, queue: queued, mediaReady, needsAttention });
     const health = snapshot.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
     const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health, now: now() });
-    return { ...job, progress: snapshot,
+    return { ...job, mediaReady, progress: snapshot,
+      ...(mediaReady ? { status: "completed", preparationOnly: false } : {}),
       ...(job.status === "prepared" && ["creating", "finishing"].includes(snapshot.stage) ? { status: "processing", preparationOnly: false } : {}),
       ...(snapshot.stage === "attention" ? { needsAttention: true } : {}),
       ...(snapshot.stage === "queued" ? { status: "queued", preparationOnly: false } : {}),
       ...queueMessage,
-      ...(validTicket?.state === "attention" ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
+      ...(needsAttention ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
   }
   async function claim(path) {
     const old = await read(path), value = old?.value;
@@ -225,8 +240,14 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     } catch (error) {
       const retryable = error instanceof FilmProductionError
         && ["PRODUCTION_UNAVAILABLE", "PRODUCTION_GRANT_EXPIRED", "ASSEMBLY_CLAIM_EXPIRED"].includes(error.code);
-      const needsReview = (error instanceof FilmProductionError && !retryable) || error?.code==='FILM_SPEECH_REVIEW_REQUIRED' || ticket.value.attempts >= 10;
       const failure = finishingFailure(error, finishingStage);
+      const visualReviewRequired = ["VISUAL_CONTINUITY_MISMATCH", "VISUAL_REVIEW_REQUIRED", "VISUAL_REVIEW_UNCERTAIN",
+        "VISUAL_REVIEW_INVALID", "VISUAL_REVIEW_AUTH_REQUIRED"];
+      // A mismatch or an unknown, already-claimed model response needs review.
+      // Only pre-claim unavailability and confirmed retryable rejection use the
+      // existing bounded backoff; a paused claim must never invite a new call.
+      const needsReview = (error instanceof FilmProductionError && !retryable) || error?.code==='FILM_SPEECH_REVIEW_REQUIRED'
+        || visualReviewRequired.includes(error?.code) || visualReviewRequired.includes(failure?.reason) || ticket.value.attempts >= 10;
       if (failure) console.warn("FILM_FINISHING_FAILED", failure);
       await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE", failure);
       return { state: needsReview ? "attention" : "pending" };

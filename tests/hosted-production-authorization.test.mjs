@@ -298,7 +298,7 @@ test("parallel hosted authorizations lock one whole-film quote and cannot overwr
   assert.equal((await h.authorize()).quoteReference, saved.quoteReference); assert.equal(h.quoteCalls.length, 2);
 });
 
-test("started films retain the original quote and budget, and expire closed without refreshing", async () => {
+test("unbound legacy started films retain the original quote and expire closed without changing providers", async () => {
   const h = await fixture(), initial = await h.authorize();
   h.mutatePlan(job => { job.status = "processing"; job.shots[0].status = "completed"; job.authorization = { ...initial }; });
   assert.equal((await h.authorize()).quoteReference, initial.quoteReference); assert.equal(h.quoteCalls.length, 1);

@@ -53,6 +53,17 @@ test('timing profiles separate model versions, runtimes, quality and sound', () 
   for (const change of [{ targetDurationSeconds: 120 }, { style: 'Documentary' }, { qualityPreference: 'draft' }, { sound: { musicRequested: false } }])
     assert.notEqual(productionTimingProfile({ ...film, manifest: { ...film.manifest, ...change } }, adapter), original);
 });
+test('visual finishing learns new timing history without invalidating legacy profiles', () => {
+  const film = job(), adapter = { id: 'magiclight', environment: 'production', timingVersion: 1 };
+  const legacy = productionTimingProfile(film, adapter);
+  assert.equal(legacy, '56a63e5b824fcb87f976ea076f9a30ec94cd33597863aa7d029f1667d44c0a8b');
+  film.manifest.visualContinuity = { version: 1 };
+  const reviewed = productionTimingProfile(film, adapter);
+  assert.notEqual(reviewed, legacy, 'older finishing durations cannot supply new visual-review ETAs');
+  film.manifest.visualContinuity.version = 2;
+  assert.notEqual(productionTimingProfile(film, adapter), reviewed);
+});
+
 test('recording samples is idempotent, private and excludes test/uncertain runs', async () => {
   const records = new Map(); let serial = 0;
   const read = async path => structuredClone(records.get(path) || null);

@@ -7,6 +7,7 @@
 !scripts/production-worker.mjs
 !scripts/assemble-film.mjs
 !scripts/review-film-speech.mjs
+!scripts/review-film-visuals.mjs
 !scripts/transcribe-film.py
 !scripts/rebuild-film-soundtrack.mjs
 !scripts/rebuild-film-soundtrack.py

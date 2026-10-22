@@ -10,10 +10,10 @@ import { accessStatusForUser } from '../api/_lib/access.mjs';
 import { productionJobPath } from '../api/_lib/film-production.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
-import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, validateBoundarySilence } from './rebuild-film-soundtrack.mjs';
+import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, validateBoundarySilence, inspectFilmSoundtrackFit } from './rebuild-film-soundtrack.mjs';
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
-import { readSoundtrackCasting } from './authored-soundtrack-casting.mjs';
+import { readSoundtrackCasting, selectAutomaticSoundtrackCasting, readAutomaticSoundtrackCasting, automaticSoundtrackCastingPath } from './authored-soundtrack-casting.mjs';
 import { createAdjacentAuthoredSpeechContext } from './adjacent-authored-speech.mjs';
 
 const RECIPE = 'automatic-stock-soundtrack-v1';
@@ -37,10 +37,13 @@ const requireValue = (value, reason = 'SOUNDTRACK_BINDING_INVALID') => { if (!va
 // The resulting voice map is part of the durable soundtrack binding.
 const STOCK_VOICES = Object.freeze(['af_heart', 'am_fenrir', 'af_bella', 'am_adam', 'af_nicole', 'am_echo',
   'af_sarah', 'am_liam', 'af_nova', 'am_onyx', 'af_jessica', 'am_puck', 'af_kore', 'am_santa', 'af_aoede', 'am_eric']);
-export function standardFilmVoices(manifest, manifestHash) {
-  const cast = manifest?.screenplay?.characters;
+export function standardFilmVoices(manifest, manifestHash, { stable = false, narratorVoice = 'am_michael' } = {}) {
+  const originalCast = manifest?.screenplay?.characters;
+  const cast = stable && Array.isArray(originalCast) ? [...originalCast].sort((a, b) => String(a?.id) < String(b?.id) ? -1 : String(a?.id) > String(b?.id) ? 1 : 0) : originalCast;
   requireValue(Array.isArray(cast) && cast.length <= STOCK_VOICES.length, 'STOCK_CAST_UNAVAILABLE');
-  const voices = { narratorVoice: 'am_michael', characterVoices: {}, speakerAliases: {} };
+  requireValue(['am_michael', 'am_puck'].includes(narratorVoice), 'STOCK_CAST_UNAVAILABLE');
+  const pool = STOCK_VOICES.map(voice => voice === narratorVoice ? 'am_michael' : voice);
+  const voices = { narratorVoice, characterVoices: {}, speakerAliases: {} };
   const fullLabels = new Set(['narrator']);
   for (const character of cast) {
     requireValue(typeof character?.id === 'string' && typeof character.name === 'string', 'STOCK_CAST_UNAVAILABLE');
@@ -51,13 +54,13 @@ export function standardFilmVoices(manifest, manifestHash) {
     const opening = String(character.description || '').split(/[.!?]/, 1)[0];
     const male = /\b(?:man|male)\b/i.test(opening), female = /\b(?:woman|female)\b/i.test(opening);
     if (male === female) continue;
-    const voice = STOCK_VOICES.find(candidate => candidate.startsWith(male ? 'am_' : 'af_') && !assigned.has(candidate));
+    const voice = pool.find(candidate => candidate.startsWith(male ? 'am_' : 'af_') && !assigned.has(candidate));
     requireValue(voice, 'STOCK_CAST_UNAVAILABLE');
     assigned.add(voice); explicit.set(character.id, voice);
   }
   for (const [index, character] of cast.entries()) {
-    const preferred = STOCK_VOICES[index];
-    const voice = explicit.get(character.id) || (!assigned.has(preferred) ? preferred : STOCK_VOICES.find(candidate => !assigned.has(candidate)));
+    const preferred = pool[index];
+    const voice = explicit.get(character.id) || (!assigned.has(preferred) ? preferred : pool.find(candidate => !assigned.has(candidate)));
     requireValue(voice, 'STOCK_CAST_UNAVAILABLE');
     assigned.add(voice); voices.characterVoices[character.id] = voice;
     const first = label(character.name).split(' ')[0];
@@ -66,6 +69,12 @@ export function standardFilmVoices(manifest, manifestHash) {
   }
   soundtrackPlan({ manifest, manifestHash, ...voices });
   return voices;
+}
+
+// Two natural-speed stock readings at most. Existing constructions retain the
+// original casting; only a first construction selects from these stable maps.
+export function automaticFilmVoiceCandidates(manifest, manifestHash) {
+  return ['am_michael', 'am_puck'].map(narratorVoice => standardFilmVoices(manifest, manifestHash, { stable: true, narratorVoice }));
 }
 
 export function nextSoundtrackAttempt(savedAttempts, inheritedAttempts = 0) {
@@ -176,7 +185,8 @@ function transcribeAuthored(path, { contextSilence = false } = {}) {
 }
 
 export function createAutomaticSoundtrackFallback({ read = readRecord, write = writeRecord, getBlob = get, putBlob = put,
-  build = rebuildFilmSoundtrack, reviewSpeech = reviewFilmSpeech, transcribe = transcribeAuthored, now = Date.now } = {}) {
+  build = rebuildFilmSoundtrack, inspectFit = inspectFilmSoundtrackFit,
+  reviewSpeech = reviewFilmSpeech, transcribe = transcribeAuthored, now = Date.now } = {}) {
   return async ({ email, id, job, clips, work, ffmpeg, stillOwned }) => {
     let saved;
     try {
@@ -188,6 +198,7 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
       const jobHash = jsonHash(job), jobPath = productionJobPath(email, id);
       const defaultVoices = standardFilmVoices(job.manifest, job.manifestHash);
       const casting = await readSoundtrackCasting({ job, defaultVoices, read });
+      let automaticCasting;
       const guard = async () => {
         requireValue(await stillOwned(), 'SOUNDTRACK_CLAIM_EXPIRED');
         const current = await read(jobPath), account = (await read(userPath(email)))?.value;
@@ -195,6 +206,9 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
           && !account.mustChangePassword && accessStatusForUser(account) === 'approved', 'SOUNDTRACK_CONTEXT_CHANGED');
         const activeCasting = await readSoundtrackCasting({ job: current.value, defaultVoices, read });
         requireValue(jsonHash(activeCasting) === jsonHash(casting), 'SOUNDTRACK_CONTEXT_CHANGED');
+        if (automaticCasting) requireValue((await readAutomaticSoundtrackCasting({ job: current.value,
+          binding: automaticCasting.binding, candidates: automaticCasting.candidates, read }))?.receiptSha256 === automaticCasting.receiptSha256,
+        'SOUNDTRACK_CONTEXT_CHANGED');
         await requireFinishedFilmPayment({ job: current.value, email, actor: account, read, now });
         requireValue(await stillOwned(), 'SOUNDTRACK_CLAIM_EXPIRED');
       };
@@ -207,7 +221,17 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
         originalPaths.set(shot.id, path);
         sources.push({ shotId: shot.id, sha256: hash(await readFile(path)), sizeBytes: info.size });
       }
-      const voices = casting?.voices || defaultVoices;
+      const originalBinding = { version: 1, recipe: RECIPE, ownerHash: job.ownerHash, id, manifestHash: job.manifestHash,
+        sources, sourceOutputsSha256: jsonHash(job.shots.map(shot => ({ id: shot.id, output: shot.output }))), voices: defaultVoices };
+      // Never reset a legacy construction's consumed attempts or replace an
+      // explicitly approved casting. Those exact bindings stay readable.
+      if (!casting) {
+        const legacy = await read(`production/soundtracks/${job.ownerHash}/${id}/${jsonHash(originalBinding)}/construction.json`);
+        if (legacy) requireValue(!await read(automaticSoundtrackCastingPath(job)), 'SOUNDTRACK_CONTEXT_CHANGED');
+        else automaticCasting = await selectAutomaticSoundtrackCasting({ job, sources, defaultVoices,
+          candidates: automaticFilmVoiceCandidates(job.manifest, job.manifestHash), read, write, guard, inspectFit, now });
+      }
+      const voices = casting?.voices || automaticCasting?.voices || defaultVoices;
       if (casting) requireValue(jsonHash(sources) === jsonHash(casting.sources), 'SOUNDTRACK_SOURCE_CHANGED');
       const plan = soundtrackPlan({ manifest: job.manifest, manifestHash: job.manifestHash, ...voices });
       // Sources are already present and are never copied. Reserve bounded room
@@ -218,6 +242,7 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
         'SOUNDTRACK_SCRATCH_UNAVAILABLE');
       const binding = { version: 1, recipe: RECIPE, ownerHash: job.ownerHash, id, manifestHash: job.manifestHash,
         sources, sourceOutputsSha256: jsonHash(job.shots.map(shot => ({ id: shot.id, output: shot.output }))), voices,
+        ...(automaticCasting ? { automaticCastingSha256: automaticCasting.receiptSha256 } : {}),
         ...(casting ? { castingApproval: { approvalSha256: casting.approvalSha256, priorBindingHash: casting.priorBindingHash,
           priorReceiptSha256: casting.priorReceiptSha256, priorAttempts: casting.priorAttempts } } : {}) };
       const bindingHash = jsonHash(binding), prefix = `production/soundtracks/${job.ownerHash}/${id}/${bindingHash}`;

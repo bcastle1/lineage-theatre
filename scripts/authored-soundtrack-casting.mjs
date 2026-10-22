@@ -1,5 +1,6 @@
-// Owner-operated, one-time stock-casting approval for an interrupted local finish.
-// No provider submissions, payment mutations, synthesis, or retry-budget reset.
+// Bounded automatic stock casting and owner-approved interrupted-film recovery.
+// No video provider submissions, payment mutations, or construction-budget reset.
+import { randomUUID } from 'node:crypto';
 import { digest, readRecord, writeRecord, userPath } from '../api/_lib/auth.mjs';
 import { accessStatusForUser, isOwner } from '../api/_lib/access.mjs';
 import { productionJobPath } from '../api/_lib/film-production.mjs';
@@ -18,6 +19,8 @@ const outputsHash = job => hash(job.shots.map(shot => ({ id: shot.id, output: sh
 const rootPath = job => `production/soundtracks/${job.ownerHash}/${job.id}`;
 export const soundtrackCastingPath = job => `${rootPath(job)}/casting.json`;
 const priorPath = (job, bindingHash) => `${rootPath(job)}/${bindingHash}/construction.json`;
+const AUTOMATIC_KIND = 'automatic-authored-soundtrack-casting-v1';
+export const automaticSoundtrackCastingPath = job => `${rootPath(job)}/automatic-casting.json`;
 
 function validJob(job) {
   check(job?.mode === 'customer' && job.status === 'awaiting-assembly' && !job.lease && HASH.test(job.ownerHash || '')
@@ -86,6 +89,107 @@ export async function readSoundtrackCasting({ job, defaultVoices, read = readRec
   const expected = { ...saved.value.priorReceipt, state: 'superseded', castingApprovalSha256: result.approvalSha256 };
   check(prior?.etag && hash(prior.value) === hash(expected));
   return result;
+}
+
+function automaticFit(report, job, voices) {
+  const plan = soundtrackPlan({ manifest: job.manifest, manifestHash: job.manifestHash, ...voices });
+  check(report?.version === 1 && report.kind === 'soundtrack-fit-inspection-v1'
+    && report.manifestHash === job.manifestHash && report.durationMs === plan.durationMs && report.speed === 1
+    && report.providerGenerationCalls === 0 && typeof report.fits === 'boolean'
+    && Array.isArray(report.scenes) && report.scenes.length === plan.scenes.length
+    && Buffer.byteLength(JSON.stringify(report)) <= 250_000);
+  for (const [i, scene] of report.scenes.entries()) {
+    check(scene.sceneIndex === i + 1 && scene.durationMs === plan.scenes[i].durationMs
+      && Array.isArray(scene.turns) && scene.turns.length === plan.scenes[i].turns.length
+      && scene.fits === scene.turns.every(turn => turn.fits === true));
+    for (const [t, turn] of scene.turns.entries()) check(turn.turnIndex === t + 1 && typeof turn.fits === 'boolean'
+      && ['generatedMs', 'retainedMs', 'trimStartMs', 'trimEndMs', 'availableMs', 'overrunMs']
+        .every(key => Number.isSafeInteger(turn[key]) && turn[key] >= 0 && turn[key] <= 120_000)
+      && turn.retainedMs > 0 && (!turn.fits || turn.overrunMs === 0 && turn.retainedMs <= turn.availableMs));
+  }
+  check(report.fits === report.scenes.every(scene => scene.fits));
+  return report;
+}
+
+function automaticBinding(job, sources, defaultVoices, candidates) {
+  validJob(job);
+  check(Array.isArray(sources) && sources.length === job.shots.length && sources.every((source, i) => source.shotId === job.shots[i].id
+    && HASH.test(source.sha256 || '') && Number.isSafeInteger(source.sizeBytes) && source.sizeBytes > 16 && source.sizeBytes <= 250 * 1024 * 1024)
+    && Array.isArray(candidates) && candidates.length === 2);
+  for (const voices of candidates) {
+    approvedVoices(job, defaultVoices, { narratorVoice: voices.narratorVoice, characterVoices: voices.characterVoices });
+    check(hash(Object.entries(voices.speakerAliases || {}).sort()) === hash(Object.entries(defaultVoices.speakerAliases || {}).sort()));
+  }
+  return { version: 1, kind: AUTOMATIC_KIND, ownerHash: job.ownerHash, id: job.id, manifestHash: job.manifestHash,
+    authorizationSha256: hash(job.authorization ?? null), sourceOutputsSha256: outputsHash(job), sources,
+    defaultVoicesSha256: hash(defaultVoices), candidateVoicesSha256: candidates.map(hash) };
+}
+
+export async function readAutomaticSoundtrackCasting({ job, binding, candidates, read = readRecord }) {
+  const saved = await read(automaticSoundtrackCastingPath(job));
+  if (!saved) return null;
+  validJob(job);
+  const value = saved.value;
+  check(saved.etag && value?.version === 1 && value.kind === AUTOMATIC_KIND && hash(value.binding) === hash(binding)
+    && binding.manifestHash === job.manifestHash && binding.ownerHash === job.ownerHash && binding.id === job.id
+    && binding.authorizationSha256 === hash(job.authorization ?? null) && binding.sourceOutputsSha256 === outputsHash(job)
+    && Number.isSafeInteger(value.selectedCandidate) && value.selectedCandidate >= 0 && value.selectedCandidate < 2
+    && Array.isArray(candidates) && candidates.length === 2 && hash(value.voices) === hash(candidates[value.selectedCandidate])
+    && hash(candidates.map(hash)) === hash(binding.candidateVoicesSha256)
+    && value.fitReportSha256 === hash(value.fitReport) && value.fitReport?.fits === true && Number.isFinite(Date.parse(value.selectedAt)));
+  automaticFit(value.fitReport, job, value.voices);
+  const inspected = await read(`${rootPath(job)}/casting-fit/${hash(binding)}/${value.selectedCandidate}.json`);
+  check(inspected?.etag && inspected.value?.kind === 'automatic-casting-fit-v1' && inspected.value.state === 'inspected'
+    && inspected.value.bindingHash === hash(binding) && inspected.value.candidateIndex === value.selectedCandidate
+    && inspected.value.voiceAssignmentsSha256 === hash(value.voices)
+    && inspected.value.fitReportSha256 === value.fitReportSha256 && hash(inspected.value.fitReport) === value.fitReportSha256);
+  return { voices: value.voices, receiptSha256: hash(value), binding, candidates };
+}
+
+// First-construction casting is bounded to two offline natural-speed readings.
+// Each claimed inspection and its result are durable. A partial inspection
+// cannot silently rerun on a later worker pass or reset the construction cap.
+// Existing construction and explicit owner approvals are handled by the caller.
+export async function selectAutomaticSoundtrackCasting({ job, sources, defaultVoices, candidates,
+  read = readRecord, write = writeRecord, guard, inspectFit, now = Date.now }) {
+  check(typeof guard === 'function' && typeof inspectFit === 'function');
+  const binding = automaticBinding(job, sources, defaultVoices, candidates), bindingHash = hash(binding);
+  const existing = await readAutomaticSoundtrackCasting({ job, binding, candidates, read });
+  if (existing) return existing;
+  for (const [index, voices] of candidates.entries()) {
+    const path = `${rootPath(job)}/casting-fit/${bindingHash}/${index}.json`;
+    let inspected = await read(path);
+    if (!inspected) {
+      const claim = { version: 1, kind: 'automatic-casting-fit-v1', bindingHash, candidateIndex: index,
+        voiceAssignmentsSha256: hash(voices), state: 'inspecting', claimId: randomUUID(), startedAt: new Date(now()).toISOString() };
+      await guard();
+      try { await write(path, claim); } catch { /* Exact readback fences offline synthesis. */ }
+      inspected = await read(path);
+      check(inspected?.etag && hash(inspected.value) === hash(claim));
+      await guard();
+      const fitReport = automaticFit(await inspectFit({ manifest: job.manifest, manifestHash: job.manifestHash, ...voices }), job, voices);
+      await guard();
+      const complete = { ...claim, state: 'inspected', fitReport, fitReportSha256: hash(fitReport) };
+      try { await write(path, complete, inspected.etag); } catch { /* Exact readback recovers a lost response. */ }
+      inspected = await read(path);
+      check(inspected?.etag && hash(inspected.value) === hash(complete));
+    }
+    check(inspected?.etag && inspected.value?.kind === 'automatic-casting-fit-v1' && inspected.value.state === 'inspected'
+      && inspected.value.bindingHash === bindingHash && inspected.value.candidateIndex === index
+      && inspected.value.voiceAssignmentsSha256 === hash(voices)
+      && inspected.value.fitReportSha256 === hash(inspected.value.fitReport));
+    const fitReport = automaticFit(inspected.value.fitReport, job, voices);
+    if (!fitReport.fits) continue;
+    const value = { version: 1, kind: AUTOMATIC_KIND, binding, selectedCandidate: index, voices, fitReport,
+      fitReportSha256: hash(fitReport), selectedAt: new Date(now()).toISOString() };
+    await guard();
+    try { await write(automaticSoundtrackCastingPath(job), value); } catch { /* The immutable winner must match. */ }
+    const selected = await readAutomaticSoundtrackCasting({ job, binding, candidates, read });
+    check(selected?.receiptSha256 === hash(value));
+    await guard();
+    return selected;
+  }
+  throw fail();
 }
 
 export function createSoundtrackCastingApproval({ read = readRecord, write = writeRecord, now = Date.now,

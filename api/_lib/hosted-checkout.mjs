@@ -623,18 +623,23 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     if(started&&(!fresh||job.authorization?.manifestHash!==manifestHash||job.authorization.environment!==binding.environment
       ||job.authorization.quoteReference!==fresh.quoteReference||job.authorization.budgetCents!==fresh.maximumCostCents))throw productionUnavailable("STARTED_AUTHORIZATION_MISMATCH");
     if(!fresh||Date.parse(fresh.expiresAt)<=now()) {
-      // An expired full-film quote cannot be replaced after even one submission.
-      if(started)throw productionUnavailable("STARTED_QUOTE_EXPIRED");
+      // A film can outlive its provider pricing snapshot. The film service
+      // rechecks the original Kling binding and total execution ceiling; this
+      // never changes the approved retail price or creates another invoice.
       stage="quote-request";
-      fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,budgetCents:allowance.budgetCents});
+      fresh=await productionQuote({email,preparedId,manifestHash,environment:binding.environment,
+        budgetCents:started?job.authorization.budgetCents:allowance.budgetCents});
       stage="quote-refresh-validation";
-      if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now())throw productionUnavailable("FRESH_QUOTE_INVALID");
+      if(!quoteValid(fresh)||Date.parse(fresh.expiresAt)<=now()
+        ||started&&(fresh.maximumCostCents!==job.authorization.budgetCents||fresh.quoteReference!==job.authorization.quoteReference
+          ||typeof fresh.providerQuoteReference!=="string"||!fresh.providerQuoteReference.trim()||fresh.providerQuoteReference.length>200))throw productionUnavailable("FRESH_QUOTE_INVALID");
       // Payment may have been voided/refunded while the provider quote was read.
       verifiedAt=await verifyPaidInvoice();
       stage="quote-refresh-validation";
       if(Date.parse(fresh.expiresAt)<=now())throw productionUnavailable("FRESH_QUOTE_EXPIRED");
       const fulfillmentQuote=Object.fromEntries(["preparedId","manifestHash","environment","currency","providerCostCents","maximumCostCents",
         "quoteReference","expiresAt","apiVerified","qualityVerified","commercialTermsVerified"].map(field=>[field,fresh[field]]));
+      if(started)fulfillmentQuote.providerQuoteReference=fresh.providerQuoteReference;
       stage="quote-save";
       authorizedRecord=await save(path,record,{...value,fulfillmentQuote});
     }
