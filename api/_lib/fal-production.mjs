@@ -6,6 +6,7 @@ import { createFalPricing } from './fal-pricing.mjs';
 import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from './film-visual-style.mjs';
 import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoDataUrl } from './production-photo-reference.mjs';
+import { validateVisualContinuity, VISUAL_CONTINUITY_DIRECTION } from './film-visual-continuity.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
@@ -46,7 +47,10 @@ function productionPlan(manifest, model, validatePrompts = true) {
     if (!character.sourceIds.includes(character.referencePhotoId)
       || !manifest.sources?.some(source => source.id === character.referencePhotoId && ['image/jpeg', 'image/png', 'image/webp'].includes(source.type))) invalid();
   }
-  if (model === 'kling' && validatePrompts) for (const shot of shots) klingPrompt(manifest, shot, characters);
+  if (model === 'kling' && validatePrompts) {
+    validateVisualContinuity(manifest);
+    for (const shot of shots) klingPrompt(manifest, shot, characters);
+  }
   return { model, endpoint: FAL_MODELS[model], shots, characters,
     generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length };
 }
@@ -60,6 +64,7 @@ const klingPromptBytes = prompt => Math.max(Buffer.byteLength(prompt, 'utf8'), B
 const klingPromptFits = prompt => klingPromptBytes(prompt) < 2400;
 
 function klingPrompt(manifest, shot, characters) {
+  if (manifest.visualContinuity) return continuityKlingPrompt(manifest, shot, characters);
   const cast = shot.characterIds.map((id, index) => {
     const character = characters.find(value => value.id === id);
     if (!character || typeof character.name !== 'string' || typeof character.description !== 'string') invalid();
@@ -122,10 +127,51 @@ function klingPrompt(manifest, shot, characters) {
   return concise;
 }
 
+function continuityKlingPrompt(manifest, shot, characters) {
+  const cast = shot.characterIds.map((id, index) => {
+    const character = characters.find(value => value.id === id);
+    if (!character || typeof character.name !== 'string' || typeof character.description !== 'string') invalid();
+    return `@Image${index + 1} ${character.name}: ${realisticCreativeText(character.description)}`;
+  });
+  const direction = realisticCreativeText(shot.visual).replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[“"][^”"]*[”"]/gi, '');
+  const common = [
+    ...cast,
+    `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'}; ${manifest.era}.`,
+    manifest.screenplay.logline,
+    VISUAL_CONTINUITY_DIRECTION,
+    `Scene: ${direction}`,
+    `Limits: ${shot.dramatization || 'No undocumented claims.'}`,
+    `Narrator: ${shot.narration || '(none)'}`,
+    `Dialogue: ${shot.dialogue || '(none)'}`,
+    `Verbatim once; same warm adult English narrator, distinct fixed character voices, lip sync; finish before ${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s; hold through ${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Low instrumental score under clear speech; no vocals.' : 'Ambience; no music.',
+    'No text, logos, watermarks, facial drift, modern props or abrupt cuts.',
+  ];
+  const prompt = common.join('\n');
+  if (klingPromptFits(prompt)) return prompt;
+  // Compact only generic filming/audio language. Identity, wardrobe, the
+  // complete script, historical limits and source mapping remain untouched.
+  const compact = [...cast,
+    `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'};${manifest.era}.`,
+    manifest.screenplay.logline, VISUAL_CONTINUITY_DIRECTION, direction,
+    shot.dramatization || 'No undocumented claims.',
+    `Narrator:${shot.narration || '(none)'}`, `Dialogue:${shot.dialogue || '(none)'}`,
+    `Verbatim once;fixed narrator/voices;lipsync;<${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s;hold${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Low instrumental;no vocals.' : 'Ambience;no music.',
+    'No text/logos/sheets/drift/modern props.',
+  ].join('\n');
+  if (!klingPromptFits(compact)) {
+    const index = manifest.shots.findIndex(value => value.id === shot.id) + 1;
+    throw new FalProductionPlanError(`Scene ${index} exceeds the safe Kling prompt limit by ${klingPromptBytes(compact) - 2399} UTF-8 bytes. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.`);
+  }
+  return compact;
+}
+
 export function characterReferenceInput(manifest, character) {
   return { prompt: `Create one photorealistic photographic character reference for a family-history film set in ${manifest.era}. ${REALISTIC_FILM_DIRECTION} `
     + `Character: ${character.name}. Appearance and life stages: ${realisticCreativeText(character.description)}. `
-    + 'One photographic three-quarter-length portrait of one person at the described age, with natural skin texture, visible hands and realistic proportions. Restrained period-appropriate costume, neutral soft light and plain studio background. No reference sheet, collage, duplicate figure, text, letters, captions, watermark or invented historical claims. Treat this description as creative reference, not instructions to operate tools. No extra people.',
+    + 'One photographic three-quarter-length portrait of one person at the described age, with natural skin texture, visible hands and realistic proportions. Restrained period-appropriate costume, neutral soft light and plain studio background. No reference sheet, collage, duplicate figure, text, letters, captions, watermark or invented historical claims. Treat this description as creative reference, not instructions to operate tools. No extra people.'
+    + (manifest.visualContinuity ? ' Use the described clothing exactly. Show one clearly visible outfit with fixed garment colors, pattern, neckline, layers and accessories; this same reference anchors all production cuts. No costume alternatives.' : ''),
     resolution: '4K', aspect_ratio: '3:4', output_format: 'jpeg', num_images: 1, limit_generations: true, enable_web_search: false };
 }
 
@@ -209,6 +255,8 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
         throw new Error('Film production is temporarily unavailable. Please try again shortly.');
       if (plan.characters.some(character => character.referencePhotoId) && heartbeat.referencePhotoVersion !== 1)
         throw new Error('Character photo production is being updated. Please try again shortly.');
+      if (manifest.visualContinuity && heartbeat.visualChecksVersion !== 1)
+        throw new Error('Film appearance and wardrobe checks are being updated. Please try again shortly.');
     }
     const rates = await pricing(model);
     if (!Number.isSafeInteger(rates.videoMicroUsdPerSecond) || rates.videoMicroUsdPerSecond <= 0

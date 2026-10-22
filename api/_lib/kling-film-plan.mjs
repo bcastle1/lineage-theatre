@@ -1,8 +1,20 @@
+import { createVisualContinuity, validateVisualContinuity } from './film-visual-continuity.mjs';
+
 // Plan new films before pricing/payment. Never rewrite an already-paid manifest.
 // The reviewed screenplay remains intact; these are consecutive production cuts.
-export function planKlingShots(manifest) {
+// visualContinuity:false is only for reproducing historical immutable plans.
+export function planKlingShots(manifest, { visualContinuity = true } = {}) {
+  // A prepared/paid plan is already an immutable contract. In particular, do
+  // not upgrade a legacy plan or turn the cuts of one scene into new scenes.
+  if (manifest.productionPlan?.provider === 'kling') {
+    validateVisualContinuity(manifest);
+    return manifest;
+  }
+  const contract = visualContinuity ? createVisualContinuity(manifest) : null;
   const shots = [];
-  for (const scene of manifest.shots) {
+  for (const [scenePosition, original] of manifest.shots.entries()) {
+    const scene = contract ? { ...original, continuity: { ...original.continuity,
+      sourceSceneId: contract.scenes[scenePosition].sceneId } } : original;
     if (scene.targetDurationMs < 3000) throw new Error("Each scene needs at least three seconds. Increase the film length or combine short scenes.");
     const count = Math.ceil(scene.targetDurationMs / 15000);
     if (count === 1) { shots.push({ ...scene }); continue; }
@@ -37,7 +49,8 @@ export function planKlingShots(manifest) {
   }
   // A 600-second film can contain at most 200 three-second cuts.
   if (shots.length > 200) throw new Error("This film has too many production cuts.");
-  return { ...manifest, productionPlan: { provider: "kling", version: 1 },
+  return { ...manifest, ...(contract ? { visualContinuity: contract } : {}),
+    productionPlan: { provider: "kling", version: 1, ...(contract ? { visualContinuityVersion: 1 } : {}) },
     shots: shots.map((shot, index) => ({ ...shot, id: `shot-${String(index + 1).padStart(3, "0")}`,
       continuity: { ...shot.continuity, precedingShotId: index ? `shot-${String(index).padStart(3, "0")}` : null } })) };
 }

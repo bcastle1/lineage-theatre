@@ -11,11 +11,13 @@
 !scripts/
 !scripts/production-worker.mjs
 !scripts/test-kling-production.mjs
+!scripts/test-kling-quality.mjs
 !scripts/assemble-film.mjs
 !scripts/check-worker-runtime.mjs
 !scripts/check-hosted-reversals.mjs
 !scripts/paid-film-delivery-worker.mjs
 !scripts/review-film-speech.mjs
+!scripts/review-film-visuals.mjs
 !scripts/transcribe-film.py
 !scripts/automatic-film-soundtrack.mjs
 !scripts/authored-soundtrack-casting.mjs

@@ -13,7 +13,10 @@ export function productionTimingProfile(job, adapter) {
   return digest(JSON.stringify({ version: 1, renderer: adapter.id, environment: adapter.environment,
     timingVersion: adapter.timingVersion || 1, duration: job.manifest.targetDurationSeconds,
     shots: job.shots.length, style: job.manifest.style, quality: job.manifest.qualityPreference,
-    music: job.manifest.sound?.musicRequested === true }));
+    music: job.manifest.sound?.musicRequested === true,
+    // New finishing checks must learn their own delivery times; omit the key
+    // for legacy manifests so their existing history remains usable.
+    ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}) }));
 }
 
 function samples(value, now) {

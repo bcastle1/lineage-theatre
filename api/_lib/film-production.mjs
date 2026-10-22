@@ -220,7 +220,7 @@ export function createFilmProductionService(dependencies = {}) {
     // sandbox test. Verify the saved content against the fixed server sample.
     const built = buildFilmManifest(fictionalOperatorProject());
     const savedModel = job.provider?.model || adapter.model;
-    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest) : built.manifest;
+    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity) }) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: hash(fixedManifest) };
     if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
         || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
@@ -283,13 +283,24 @@ export function createFilmProductionService(dependencies = {}) {
     if (job.id !== preparedId || job.manifestHash !== manifestHash || hash(job.manifest) !== manifestHash
       || job.filmId !== job.manifest.filmId || !Array.isArray(job.manifest.shots) || !job.manifest.shots.length
       || !Array.isArray(job.shots) || job.shots.length !== job.manifest.shots.length
-      || job.shots.some((shot, index) => shot.id !== job.manifest.shots[index].id)
-      || job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) throw unavailable();
+      || job.shots.some((shot, index) => shot.id !== job.manifest.shots[index].id)) throw unavailable();
+    const started = job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared");
+    // An ongoing Kling film may outlive a pricing snapshot. Refresh only that
+    // exact execution: no provider migration, larger budget or new plan identity.
+    // Public checkout repricing still rejects every already-started film.
+    if (started && (!["processing", "uncertain", "awaiting-assembly"].includes(job.status)
+      || adapter.id !== "fal" || adapter.model !== "kling" || !adapter.modelVersion
+      || job.provider?.id !== adapter.id || job.provider.model !== adapter.model || job.provider.recipe !== adapter.modelVersion
+      || job.authorization?.environment !== environment || job.authorization.manifestHash !== manifestHash
+      || !Number.isSafeInteger(job.authorization.budgetCents) || job.authorization.budgetCents < 1 || job.authorization.budgetCents > budgetCents
+      || typeof job.authorization.quoteReference !== "string" || !job.authorization.quoteReference.trim() || job.authorization.quoteReference.length > 200
+      || job.status === "awaiting-assembly" && job.shots.some(shot => shot.status !== "completed"))) throw unavailable();
+    const executionBudget = started ? job.authorization.budgetCents : budgetCents;
     const actor = job.mode === "operator-test" ? (await read(userPath(email)))?.value : undefined;
     await requireProductionContext(job, actor, email);
     const validation = await adapter.validateManifest(clone(job.manifest));
     if (validation?.ready !== true || !Number.isSafeInteger(validation.maximumCostCents)
-      || validation.maximumCostCents < 0 || validation.maximumCostCents > budgetCents) throw unavailable();
+      || validation.maximumCostCents < 0 || validation.maximumCostCents > executionBudget) throw unavailable();
     // Refresh the actual production quote without changing the paid retail
     // price or increasing the original server-authorized production budget.
     const quote = await adapter.quote({ manifest: clone(job.manifest), manifestHash,
@@ -298,14 +309,18 @@ export function createFilmProductionService(dependencies = {}) {
     if (!quote || quote.manifestHash !== manifestHash || quote.currency !== "USD"
       || typeof quote.quoteReference !== "string" || !quote.quoteReference.trim() || quote.quoteReference.length > 200
       || !Number.isSafeInteger(quote.providerCostCents) || quote.providerCostCents < 0
-      || quote.providerCostCents > validation.maximumCostCents || quote.providerCostCents > budgetCents
+      || quote.providerCostCents > validation.maximumCostCents || quote.providerCostCents > executionBudget
       || !Number.isFinite(until) || until <= now()) throw unavailable();
     const current = await get(email, preparedId);
     if (typeof record.etag !== "string" || current.etag !== record.etag || current.value.manifestHash !== manifestHash || until <= now()) throw unavailable();
     checkAdapter(adapter);
     if (adapter.environment !== environment) throw unavailable();
     return { preparedId, manifestHash, environment, currency: "USD", providerCostCents: quote.providerCostCents,
-      maximumCostCents: validation.maximumCostCents, quoteReference: quote.quoteReference, expiresAt: quote.expiresAt,
+      maximumCostCents: started ? executionBudget : validation.maximumCostCents,
+      // The execution authorization and provider operation keys remain fixed.
+      // Retain the fresh pricing reference separately as supporting evidence.
+      quoteReference: started ? job.authorization.quoteReference : quote.quoteReference,
+      ...(started ? { providerQuoteReference: quote.quoteReference } : {}), expiresAt: quote.expiresAt,
       apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
   }
   async function prepareOperatorTest({ actor, idempotencyKey }) {
@@ -469,6 +484,7 @@ export function createFilmProductionService(dependencies = {}) {
     catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     if(verified.speechReview?.passed===true)job.speechReview=verified.speechReview;
+    if(verified.visualReview?.passed===true)job.visualReview=verified.visualReview;
     job.status = "completed";
     job.completedAt = stamp();
     await save(productionJobPath(email, id), job, record.etag);
