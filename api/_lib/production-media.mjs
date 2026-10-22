@@ -44,7 +44,8 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
   if (job.mode === "operator-test") {
     const current = (await read(userPath(email)))?.value;
     const built = buildFilmManifest(fictionalOperatorProject());
-    const fixedManifest = job.provider?.id === "fal" && job.provider.model === "kling" ? planKlingShots(built.manifest) : built.manifest;
+    const fixedManifest = job.provider?.id === "fal" && job.provider.model === "kling"
+      ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity) }) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: digest(JSON.stringify(fixedManifest)) };
     if (!isOwner(actor) || actor.email !== email || actor.mustChangePassword || !isOwner(current)
       || current.email !== email || current.mustChangePassword || job.manifestHash !== fixed.manifestHash

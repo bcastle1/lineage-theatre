@@ -186,7 +186,7 @@ async function cachedAutomatic(t){
       if(basename(path)==='scene-2-mix.wav')return clone(options.contextSilence?f.context:f.normal);
       return clone(options.contextSilence?f.fullContext:f.fullNormal);
     }};
-  return {...f,job,work,clips,receiptPath,orderPath,order,cached,dependencies,observed,
+  return {...f,job,work,clips,sources,blobs,receiptPath,orderPath,order,cached,dependencies,observed,
     execute:()=>createAutomaticSoundtrackFallback(dependencies)({email,id,job,clips,work,ffmpeg:'must-not-run',stillOwned:async()=>true}),
     counts:()=>({builds,uploads})};
 }
@@ -226,4 +226,54 @@ test('cached attempt two cannot publish a reviewed construction after saved job 
     assert.equal(f.records.get(f.receiptPath).value.attempts,2);assert.deepEqual(f.counts(),{builds:0,uploads:0});
     assert.ok(f.writes.every(value=>value.value.state!=='reviewed'));
   }
+});
+
+test('first construction chooses a fitting stock narrator and a fresh worker reuses the exact casting and audio',async t=>{
+  const f=await cachedAutomatic(t);f.records.delete(f.receiptPath);
+  let fitCalls=0,builds=0,uploads=0;
+  f.dependencies.inspectFit=async request=>{
+    fitCalls++;const plan=soundtrackPlan(request),fits=request.narratorVoice==='am_puck';
+    return {version:1,kind:'soundtrack-fit-inspection-v1',manifestHash:f.manifestHash,durationMs:plan.durationMs,speed:1,
+      providerGenerationCalls:0,fits,scenes:plan.scenes.map(scene=>({sceneIndex:scene.sceneIndex,durationMs:scene.durationMs,fits,
+        turns:scene.turns.map(turn=>({turnIndex:turn.turnIndex,generatedMs:1000,retainedMs:900,trimStartMs:50,trimEndMs:50,
+          availableMs:fits?1000:800,overrunMs:fits?0:100,fits}))}))};
+  };
+  f.dependencies.build=async request=>{
+    builds++;assert.equal(request.narratorVoice,'am_puck');assert.deepEqual(request.manifest,f.job.manifest);
+    const directory=join(request.workDir,'soundtrack');await mkdir(directory);
+    for(const [name,bytes] of f.fileBytes)await writeFile(join(directory,name),bytes);
+    const provenance=clone(f.provenance);provenance.narratorVoice=request.narratorVoice;
+    for(const scene of provenance.scenes)for(const turn of scene.turns)turn.voice=request.narratorVoice;
+    await writeFile(join(directory,'provenance.json'),JSON.stringify(provenance));return {provenance};
+  };
+  f.dependencies.putBlob=async(path,bytes)=>{uploads++;assert.equal(f.blobs.has(path),false);f.blobs.set(path,Buffer.from(bytes));};
+  const first=await f.execute();assert.equal(first.passed,true);assert.equal(builds,1);assert.equal(fitCalls,2);
+  assert.ok(uploads>0);const originalUploads=uploads,receiptPath=first.soundtrack.receiptPath;
+  const construction=clone(f.records.get(receiptPath).value),castingPath=`production/soundtracks/${f.job.ownerHash}/${f.job.id}/automatic-casting.json`;
+  const casting=clone(f.records.get(castingPath).value);
+  assert.equal(construction.attempts,1);assert.equal(construction.binding.automaticCastingSha256,sha(casting));
+  const work=join(f.root,'retry');await mkdir(work);const clips=[];
+  for(const clip of f.clips){const path=join(work,basename(clip.path));await writeFile(path,await readFile(clip.path));clips.push({shotId:clip.shotId,path});}
+  const repeated=await createAutomaticSoundtrackFallback(f.dependencies)({email:'approved-customer@example.test',id:f.job.id,
+    job:f.job,clips,work,ffmpeg:'must-not-run',stillOwned:async()=>true});
+  assert.equal(repeated.passed,true);assert.deepEqual(repeated.soundtrack,first.soundtrack);
+  assert.equal(fitCalls,2);assert.equal(builds,1);assert.equal(uploads,originalUploads);
+  assert.deepEqual(f.records.get(castingPath).value,casting);
+  assert.equal(f.records.get(receiptPath).value.attempts,1);
+  assert.equal(f.records.get(receiptPath).value.provenanceSha256,construction.provenanceSha256);
+  assert.deepEqual(f.records.get(f.orderPath).value,f.order);
+  assert.ok(f.writes.every(value=>!value.path.startsWith('payments/')&&!value.path.includes('/jobs/')));
+});
+
+test('payment revoked during automatic casting prevents selection and construction',async t=>{
+  const f=await cachedAutomatic(t);f.records.delete(f.receiptPath);let inspected=0;
+  f.dependencies.inspectFit=async request=>{
+    inspected++;const plan=soundtrackPlan(request);f.records.get(f.orderPath).value.refundedCents=1;
+    return {version:1,kind:'soundtrack-fit-inspection-v1',manifestHash:f.manifestHash,durationMs:plan.durationMs,speed:1,
+      providerGenerationCalls:0,fits:true,scenes:plan.scenes.map(scene=>({sceneIndex:scene.sceneIndex,durationMs:scene.durationMs,fits:true,
+        turns:scene.turns.map(turn=>({turnIndex:turn.turnIndex,generatedMs:1000,retainedMs:900,trimStartMs:50,trimEndMs:50,
+          availableMs:1000,overrunMs:0,fits:true}))}))};
+  };
+  await assert.rejects(f.execute(),error);assert.equal(inspected,1);assert.deepEqual(f.counts(),{builds:0,uploads:0});
+  assert.ok(f.writes.every(entry=>entry.value.kind!=='automatic-authored-soundtrack-casting-v1'&&entry.value.kind!=='automatic-stock-soundtrack-v1'));
 });

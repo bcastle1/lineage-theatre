@@ -285,7 +285,7 @@ test('a wrong-model durable request cannot be reused or polled under a Kling ide
 });
 
 test('the in-flight fictional canary keeps the exact original prompt bytes',()=>{
-  const manifest=planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+  const manifest=planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest,{visualContinuity:false});
   const refs=Object.fromEntries(manifest.screenplay.characters.map(c=>[c.id,'https://v3.fal.media/reference.jpg']));
   const expected=['06b1b10017c9ce4f1f224cc30808015a79b3f8064075a670460310109f150496',
     '12cab436f52e4d9936c1b73fe46198f579377d9589e9a2b65d5dd9443ed10156',
