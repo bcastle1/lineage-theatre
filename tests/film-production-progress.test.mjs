@@ -52,6 +52,22 @@ test('attention states stay paused even when a stale percentage exists', () => {
   assert.match(html, /do not need to pay again/);
   assert.equal(renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, paid: false })), '');
 });
+test('automatic reconciliation renders a checking status without a percentage, ETA or manual hold', () => {
+  const snapshot = { ...progress(), stage: 'reconciling', percent: null, basis: 'confirmed-work', timing: 'checking', estimate: null };
+  const view = filmProductionProgress({ ...input, status: 'uncertain', progress: snapshot });
+  assert.equal(view.stageKey, 'reconciling'); assert.equal(view.percent, null); assert.equal(view.estimate, null);
+  const html = renderToStaticMarkup(React.createElement(FilmProductionProgress, { ...input, status: 'uncertain', progress: snapshot }));
+  assert.match(html, /Checking film production status/); assert.match(html, /existing production request automatically/);
+  assert.doesNotMatch(html, /Paused|Film production paused|Delivery estimate paused|needs attention|team needs|[0-9]%|minutes remaining|Delivery window:|aria-valuenow|<progress/);
+  for (const patch of [{ needsAttention: true }, { status: 'failed' }]) {
+    const held = filmProductionProgress({ ...input, status: 'uncertain', progress: snapshot, ...patch });
+    assert.equal(held.stageKey, 'attention'); assert.equal(held.timing, 'paused'); assert.equal(held.percent, null);
+  }
+  for (const patch of [{ percent: 10 }, { timing: 'learning' }, { estimate: progress().estimate }, { basis: 'measured-estimate' }]) {
+    assert.equal(normalizeFilmProgress({ ...snapshot, ...patch }), null);
+    assert.equal(filmProductionProgress({ ...input, status: 'uncertain', progress: { ...snapshot, ...patch } }).stageKey, 'attention');
+  }
+});
 test('invalid timing and percentages fail closed to stage-based progress', () => {
   for (const patch of [{ percent: 101 }, { percent: -1 }, { percent: NaN }, { stage: 'secret' }, { observedAt: 'bad' },
     { estimate: { ...progress().estimate, sampleCount: 1 } }, { estimate: { ...progress().estimate, latestAt: 'bad' } },

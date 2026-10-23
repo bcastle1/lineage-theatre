@@ -1,6 +1,7 @@
 import type { FilmOrder } from "./checkout-contract";
 import type { FilmPaymentReference } from "./model";
 import type { LibraryEntry } from "./film-library";
+import { normalizeFilmProgress } from "./film-production-progress";
 
 export type ProductionStatus = { id: string; manifestHash: string; status: string; completedShots: number; shotCount: number; preparationOnly: boolean; mediaReady?: boolean; needsAttention?: boolean; workerReady?: boolean; message?: string; progress?: unknown };
 
@@ -19,7 +20,9 @@ export function filmFulfillmentProgress(order: FilmOrder | null, production: Pro
     : order?.checkoutBlock === "production-funding" ? "No invoice submitted" : order?.requiresReview ? "Needs review" : "Awaiting confirmation";
   if (!paid) return { payment, paid: false, production: "Waiting for payment", watch: "Not ready yet", ready: false };
   if (ready) return { payment, paid: true, production: "Completed", watch: "Ready to watch", ready: true };
-  const creation = !production ? "Checking status" : production.needsAttention || ["failed", "uncertain"].includes(production.status)
+  const reconciling = production?.status === "uncertain" && !production.needsAttention
+    && normalizeFilmProgress(production.progress)?.stage === "reconciling";
+  const creation = !production || reconciling ? "Checking status" : production.needsAttention || ["failed", "uncertain"].includes(production.status)
     ? "Needs attention" : production.status === "completed" ? "Verifying finished video"
       : production.status === "queued" ? "Queued" : ["submitting", "processing"].includes(production.status)
         ? "Creating your film" : productionAvailable ? "Ready to start" : "Not started";

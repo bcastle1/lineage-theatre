@@ -28,10 +28,11 @@ const originalReceiptUrl = moduleUrl(originalReceiptSource);
 const { verifiedOriginalPaymentReceipt } = await import(originalReceiptHelperUrl);
 const correctionUrl = moduleUrl(compile(await readFile(new URL("../src/admin/production-correction.ts", import.meta.url), "utf8")));
 const { productionCorrectionRequest, verifyProductionCorrection } = await import(correctionUrl);
-const fulfillmentUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-fulfillment.ts", import.meta.url), "utf8")));
 const generationStatusUrl = moduleUrl("export default function FilmGenerationStatus() { return null; }");
 const ltxLibraryUrl = moduleUrl("export default function LtxFilmLibrary() { return null; }");
 const progressHelperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-production-progress.ts", import.meta.url), "utf8")));
+const fulfillmentUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-fulfillment.ts", import.meta.url), "utf8"))
+  .replaceAll('from "./film-production-progress"', `from "${progressHelperUrl}"`));
 const progressSource = compile(await readFile(new URL("../src/studio/FilmProductionProgress.tsx", import.meta.url), "utf8"))
   .replace(/import "\.\/film-production-progress\.css";\s*/g, "")
   .replaceAll('from "./film-production-progress"', `from "${progressHelperUrl}"`)

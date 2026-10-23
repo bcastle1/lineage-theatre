@@ -9,6 +9,30 @@ function job() { return { id: 'saved-film', ownerHash: digest(email), manifestHa
   status: 'processing', productionStartedAt: at(-200), lastCheckedAt: at(0), updatedAt: at(0),
   manifest: { targetDurationSeconds: 60, style: 'Cinematic', qualityPreference: 'highest', sound: { musicRequested: true }, shots: [{ id: 'one', targetDurationMs: 30000 }, { id: 'two', targetDurationMs: 30000 }] },
   shots: [{ id: 'one', status: 'processing', submittedAt: at(-200) }, { id: 'two', status: 'prepared' }] }; }
+const pending = film => ({ version: 1, email, id: film.id, manifestHash: film.manifestHash,
+  orderId: digest(`${email}:production:${film.manifestHash}`), state: 'pending', attempts: 1, nextAttemptAt: NOW + 10000 });
+test('an uncertain request in its bound automatic queue shows reconciliation without progress or ETA', () => {
+  const film = { ...job(), status: 'uncertain' }, queue = pending(film);
+  for (const orderId of [queue.orderId, digest(`${email}:${film.manifestHash}`)]) {
+    const result = productionProgressSnapshot({ job: film, queue: { ...queue, orderId }, history, now: NOW });
+    assert.equal(result.stage, 'reconciling'); assert.equal(result.timing, 'checking');
+    assert.equal(result.percent, null); assert.equal(result.estimate, null); assert.equal(result.basis, 'confirmed-work');
+    assert.doesNotMatch(JSON.stringify(result), /sample@example|orderId|lease|requestKey|manifestHash/);
+  }
+  assert.equal(productionProgressSnapshot({ job: { ...film, status: 'processing' }, queue, now: NOW }).stage, 'creating');
+});
+test('reconciliation cannot hide unknown queues, mismatched identities, actual failures or explicit review', () => {
+  const film = { ...job(), status: 'uncertain' }, queue = pending(film);
+  for (const patch of [null, { version: 2 }, { state: 'attention' }, { state: 'completed' }, { state: 'unknown' },
+    { id: 'another-film' }, { email: 'other@example.invalid' }, { email: email.toUpperCase() }, { manifestHash: 'b'.repeat(64) },
+    { orderId: 'b'.repeat(64) }, { attempts: undefined }, { attempts: -1 }, { nextAttemptAt: undefined }]) {
+    const result = productionProgressSnapshot({ job: film, queue: patch === null ? null : { ...queue, ...patch }, now: NOW });
+    assert.equal(result.stage, 'attention', JSON.stringify(patch)); assert.equal(result.percent, null); assert.equal(result.timing, 'paused');
+  }
+  for (const input of [{ job: { ...film, status: 'failed' } }, { needsAttention: true }, { job: { ...film, mode: 'operator-test' } },
+    { job: { ...film, status: 'prepared' }, attempt: { status: 'uncertain', updatedAt: at(0) } }])
+    assert.equal(productionProgressSnapshot({ job: film, queue, now: NOW, ...input }).stage, 'attention');
+});
 test('uncalibrated generation cannot invent an ETA or time-driven progress', () => {
   const film = job(); const first = productionProgressSnapshot({ job: film, now: NOW });
   assert.equal(first.estimate, null); assert.equal(first.percent, 10); assert.equal(first.timing, 'learning');

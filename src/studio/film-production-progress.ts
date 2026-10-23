@@ -2,8 +2,8 @@ export type FilmProductionProgressInput = {
   paid: boolean; ready: boolean; available?: boolean; status?: string | null; completedShots?: number; shotCount?: number;
   reportedPercent?: number | null; progress?: unknown; needsAttention?: boolean; workerReady?: boolean; message?: string | null; now?: number;
 };
-type Stage = "waiting" | "queued" | "creating" | "finishing" | "ready" | "attention";
-type Timing = "learning" | "available" | "delayed" | "stale" | "paused" | "complete";
+type Stage = "waiting" | "queued" | "creating" | "reconciling" | "finishing" | "ready" | "attention";
+type Timing = "learning" | "available" | "delayed" | "stale" | "checking" | "paused" | "complete";
 export type FilmProgressSnapshot = { version: 1; stage: Stage; percent: number | null;
   basis: "confirmed-work" | "measured-estimate" | "initial-estimate"; timing: Timing; asOf: string; observedAt: string | null;
   completedScenes: number; totalScenes: number;
@@ -17,12 +17,14 @@ const count = (value: unknown): value is number => Number.isSafeInteger(value) &
 // Invalid telemetry never invents a percentage, deadline or completion.
 // Watch and download remain independently verified by the caller.
 export function normalizeFilmProgress(value: unknown): FilmProgressSnapshot | null {
-  if (!object(value) || value.version !== 1 || !["waiting", "queued", "creating", "finishing", "ready", "attention"].includes(String(value.stage))
-    || !["learning", "available", "delayed", "stale", "paused", "complete"].includes(String(value.timing))
+  if (!object(value) || value.version !== 1 || !["waiting", "queued", "creating", "reconciling", "finishing", "ready", "attention"].includes(String(value.stage))
+    || !["learning", "available", "delayed", "stale", "checking", "paused", "complete"].includes(String(value.timing))
     || !["confirmed-work", "measured-estimate", "initial-estimate"].includes(String(value.basis)) || !date(value.asOf)
     || value.observedAt !== null && !date(value.observedAt)
     || value.percent !== null && (!count(value.percent) || value.percent > 100)
     || !count(value.completedScenes) || !count(value.totalScenes) || value.completedScenes > value.totalScenes) return null;
+  if ((value.stage === "reconciling" || value.timing === "checking") && (value.stage !== "reconciling" || value.timing !== "checking"
+    || value.percent !== null || value.estimate !== null || value.basis !== "confirmed-work")) return null;
   let estimate: FilmProgressSnapshot["estimate"] = null;
   if (value.estimate !== null) {
     if (!object(value.estimate) || value.timing !== "available" || !["creating", "finishing"].includes(String(value.stage))
@@ -37,16 +39,16 @@ export function normalizeFilmProgress(value: unknown): FilmProgressSnapshot | nu
     completedScenes: value.completedScenes, totalScenes: value.totalScenes, estimate };
 }
 const titles: Record<Stage, string> = { waiting: "Preparing production", queued: "Your film is queued", creating: "Creating your film",
-  finishing: "Finishing and checking your video", ready: "Ready to watch", attention: "Your film needs attention" };
+  reconciling: "Checking your film's status", finishing: "Finishing and checking your video", ready: "Ready to watch", attention: "Your film needs attention" };
 const remainingText: Record<Timing, string> = { learning: "Calculating your delivery estimate", available: "", delayed: "Taking longer than expected",
-  stale: "Waiting for a fresh update", paused: "Delivery estimate paused", complete: "Ready now" };
+  stale: "Waiting for a fresh update", checking: "Waiting for confirmed production status", paused: "Delivery estimate paused", complete: "Ready now" };
 
 export function filmProductionProgress(input: FilmProductionProgressInput): FilmProductionProgressView {
   const snapshot = normalizeFilmProgress(input.progress), now = input.now ?? Date.now();
   let stageKey: Stage = snapshot?.stage ?? (["failed", "uncertain"].includes(input.status || "") ? "attention"
     : ["completed", "uploaded", "verifying", "awaiting-assembly"].includes(input.status || "") ? "finishing"
       : ["processing", "submitting", "submitted"].includes(input.status || "") ? "creating" : input.status === "queued" ? "queued" : "waiting");
-  if (input.needsAttention) stageKey = "attention";
+  if (input.needsAttention || input.status === "failed") stageKey = "attention";
   if (stageKey === "ready" && !input.ready) stageKey = "finishing";
   if (input.paid && input.ready) stageKey = "ready";
   if (input.paid && stageKey === "waiting" && input.available === false) return {
@@ -65,6 +67,7 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
   if (!input.paid) { percent = null; timing = "learning"; stageKey = "waiting"; }
   else if (stageKey === "ready") { percent = 100; timing = "complete"; }
   else if (stageKey === "attention") { percent = null; timing = "paused"; }
+  else if (stageKey === "reconciling") { percent = null; timing = "checking"; }
   else { percent = Math.min(99, percent); if (timing === "complete") timing = "learning"; }
   if (timing !== "available") estimate = null;
   let remaining = remainingText[timing];
@@ -75,7 +78,9 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
       : low === high ? `About ${high} ${high === 1 ? "minute" : "minutes"} remaining` : `About ${low}–${high} minutes remaining`;
   }
   const statusMessage = ["waiting", "queued", "attention"].includes(stageKey) ? input.message : null;
-  const explanation = statusMessage || (stageKey === "queued" && input.workerReady === false
+  const explanation = statusMessage || (stageKey === "reconciling"
+    ? "We are checking your existing production request automatically. Your payment and saved progress are safe; you do not need to pay again."
+    : stageKey === "queued" && input.workerReady === false
     ? "Your film is queued. We are waiting for the production service to confirm it is available before rendering starts. Your payment is saved; you do not need to pay again."
     : timing === "available" ? estimate?.source === "initial"
     ? "Initial estimate based on your film's scenes and finishing work. Rendering times vary; progress updates automatically as work completes."
@@ -85,6 +90,6 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
         : timing === "paused" ? "The Lineage Theatre team needs to check this film. Your payment and saved version are safe; you do not need to pay again."
           : timing === "complete" ? "Your finished film is available to watch and download in your library."
           : "Progress follows confirmed production stages. A delivery window appears when enough measured timing is available.");
-  return { percent, label: stageKey === "ready" ? "Production complete" : stageKey === "queued" ? "Production queue" : "Estimated progress", stageKey, stage: input.paid ? titles[stageKey] : "Waiting for payment confirmation",
+  return { percent, label: stageKey === "ready" ? "Production complete" : stageKey === "queued" ? "Production queue" : stageKey === "reconciling" ? "Production status" : "Estimated progress", stageKey, stage: input.paid ? titles[stageKey] : "Waiting for payment confirmation",
     explanation, timing, remaining, estimate, updatedAt: snapshot?.observedAt ?? null };
 }

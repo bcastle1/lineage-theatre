@@ -1,5 +1,6 @@
 import { normalizeFilmOrder, type FilmOrder } from "./checkout-contract";
 import { normalizeLibraryEntry, libraryCanWatch, libraryFilmLink, type LibraryEntry } from "./film-library";
+import { normalizeFilmProgress } from "./film-production-progress";
 
 type Request = (path: string, body?: unknown) => Promise<unknown>;
 export function paymentViewReentered(previous: { orderId: string | null; visible: boolean }, current: { orderId: string | null; visible: boolean }, order: FilmOrder | null) {
@@ -87,6 +88,9 @@ export function paymentProductionSummary(order: FilmOrder | null, film: LibraryE
   if (!confirmedFilmPayment(order)) return "We are waiting for confirmed payment before showing production progress.";
   if (!film) return "Payment received. We are checking your saved film's production status.";
   if (libraryCanWatch(film)) return "Your finished film is ready to watch and download.";
+  if (!film.production.needsAttention && film.production.status === "uncertain"
+    && normalizeFilmProgress(film.production.progress)?.stage === "reconciling")
+    return "Your payment is confirmed. We are checking your existing production request automatically. You do not need to pay again.";
   if (film.production.needsAttention || ["failed", "uncertain"].includes(film.production.status)) return "Your payment is confirmed. The studio needs to resolve a production issue before your film can continue. You do not need to pay again.";
   if (film.production.status === "queued") return film.production.message || "Your payment is confirmed and your film is queued for production.";
   if (["processing", "submitting", "verifying", "completed"].includes(film.production.status)) return "Your payment is confirmed and your film is in production. Follow its progress below.";
