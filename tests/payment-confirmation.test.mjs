@@ -8,8 +8,9 @@ const compile = async path => ts.transpileModule(await readFile(new URL(path, im
 const url = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const contract = url((await compile('../src/studio/checkout-contract.ts')).replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(new URL('../src/studio/hosted-invoice-url.mjs', import.meta.url).href)));
 const library = url(await compile('../src/studio/film-library.ts'));
+const progress = url(await compile('../src/studio/film-production-progress.ts'));
 const { initialWorkspaceView } = await import(library);
-const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary, paidFilmPlaybackLink, paymentViewReentered } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library))));
+const { readPaymentConfirmation, readPaymentFilm, watchPaymentConfirmation, paymentProductionSummary, paidFilmPlaybackLink, paymentViewReentered } = await import(url((await compile('../src/studio/payment-confirmation.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract)).replaceAll('"./film-library"', JSON.stringify(library)).replaceAll('"./film-production-progress"', JSON.stringify(progress))));
 const { reservePaymentWindow, paymentReturnLink, paymentReturnOrder, rememberPaymentWindow, completePaymentWindow, releasePaymentWindows } = await import(url((await compile('../src/studio/payment-window.ts')).replaceAll('"./checkout-contract"', JSON.stringify(contract))));
 const id = 'b'.repeat(64), stamp = '2026-10-08T12:00:00Z';
 const invoiceUrl = 'https://connect.intuit.com/portal/app/CommerceNetwork/view/scs-v1-fixture';
@@ -19,6 +20,18 @@ const order = (status = 'captured') => ({ id, quoteId:'a'.repeat(64), preparedId
 const film = () => ({kind:'plan', id:order().preparedId, filmId:order().filmId, title:'SAMPLE ONLY', durationSeconds:30,createdAt:stamp,updatedAt:stamp,libraryState:'active',revision:1,manifestHash:'c'.repeat(64),
   production:{status:'prepared',completedShots:0,shotCount:4,mediaReady:false,needsAttention:false},payments:[order()]});
 const settle = async () => { for(let i=0;i<12;i++) await Promise.resolve(); };
+
+test('confirmed payment explains automatic reconciliation only with valid checking progress and no review flag', () => {
+  const saved = film(), checking = { ...saved, production: { ...saved.production, status: 'uncertain',
+    progress: { version: 1, stage: 'reconciling', timing: 'checking', percent: null, basis: 'confirmed-work',
+      asOf: stamp, observedAt: stamp, completedScenes: 0, totalScenes: 4, estimate: null } } };
+  assert.match(paymentProductionSummary(order(), checking), /existing production request automatically/);
+  assert.doesNotMatch(paymentProductionSummary(order(), checking), /resolve a production issue|in production|minutes/);
+  for (const patch of [{ needsAttention: true }, { status: 'failed' }, { progress: undefined },
+    { progress: { ...checking.production.progress, percent: 10 } }])
+    assert.match(paymentProductionSummary(order(), { ...checking, production: { ...checking.production, ...patch } }), /resolve a production issue/);
+  assert.match(paymentProductionSummary(order('awaiting-payment'), checking), /waiting for confirmed payment/);
+});
 
 test('payment return routes never interpret a URL as proof of payment', async()=>{
   assert.equal(paymentReturnOrder(paymentReturnLink(id)),id);

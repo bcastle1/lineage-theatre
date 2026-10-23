@@ -15,10 +15,11 @@ export default function FilmProductionProgress(props: FilmProductionProgressInpu
   }, [props.paid, props.ready]);
   if (!props.paid) return null;
   const progress = filmProductionProgress({ ...props, now: props.now ?? now });
+  const checking = progress.stageKey === "reconciling";
   const current = stages.findIndex(([stage]) => stage === progress.stageKey);
   return <section className="film-production-progress" aria-label="Film production progress" data-timing={progress.timing}>
-    <div className="film-production-progress-heading"><span>{progress.label}</span><span>{progress.percent === null ? "Paused" : `${progress.percent}%`}</span></div>
-    {progress.percent === null ? <div className="film-progress-paused" role="progressbar" aria-label="Film production paused" aria-valuemin={0} aria-valuemax={100} aria-valuetext={progress.stage} />
+    <div className="film-production-progress-heading"><span>{progress.label}</span><span>{progress.percent === null ? checking ? "Checking" : "Paused" : `${progress.percent}%`}</span></div>
+    {progress.percent === null ? <div className="film-progress-paused" role="progressbar" aria-label={checking ? "Checking film production status" : "Film production paused"} aria-valuemin={0} aria-valuemax={100} aria-valuetext={progress.stage} />
       : <progress max={100} value={progress.percent} aria-label={progress.label} aria-valuetext={`${progress.percent}% · ${progress.stage}`} />}
     <p className="film-progress-stage" role="status">{progress.stage}</p>
     <ol className="film-progress-stages" aria-label="Film production stages">{stages.map(([key, label], index) =>

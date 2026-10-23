@@ -33,6 +33,17 @@ function bounds(values) {
     middle: sorted[Math.floor((sorted.length - 1) * .5)] };
 }
 
+// Presentation only: a recoverable request is still owned by the automatic
+// queue. Never infer this from an uncertain job or an unbound ticket alone.
+function pendingReconciliation(job, queue) {
+  if (job.status !== "uncertain" || job.mode !== "customer" || queue?.version !== 1 || queue.state !== "pending"
+    || queue.id !== job.id || queue.manifestHash !== job.manifestHash || !HASH.test(job.manifestHash || "")
+    || typeof queue.email !== "string" || queue.email !== queue.email.toLowerCase().trim() || !queue.email
+    || job.ownerHash !== digest(queue.email) || !Number.isSafeInteger(queue.attempts) || queue.attempts < 0
+    || !Number.isFinite(queue.nextAttemptAt)) return false;
+  return [digest(`${queue.email}:production:${job.manifestHash}`), digest(`${queue.email}:${job.manifestHash}`)].includes(queue.orderId);
+}
+
 // Contains no provider identity, task reference, URL, cost, or source material.
 export function productionProgressSnapshot({ job, queue, attempt, history = [], mediaReady = false, needsAttention = false, now = Date.now() }) {
   let status = job.status;
@@ -52,12 +63,13 @@ export function productionProgressSnapshot({ job, queue, attempt, history = [], 
   const completed = legacy ? 0 : shots.filter(s => s.status === "completed").length;
   const completedMs = legacy ? 0 : manifestShots.reduce((n, s) => n + (shots.find(row => row.id === s.id)?.status === "completed" ? s.targetDurationMs : 0), 0);
   const fraction = total > 0 ? Math.min(1, completedMs / total) : 0;
-  const attention = needsAttention || queue?.state === "attention" || ["uncertain", "failed"].includes(status);
-  const stage = mediaReady ? "ready" : attention ? "attention" : ["completed", "verifying", "awaiting-assembly"].includes(status)
+  const reconciling = !legacy && pendingReconciliation(job, queue);
+  const attention = needsAttention || queue?.state === "attention" || status === "failed" || status === "uncertain" && !reconciling;
+  const stage = mediaReady ? "ready" : attention ? "attention" : reconciling ? "reconciling" : ["completed", "verifying", "awaiting-assembly"].includes(status)
     ? "finishing" : ["processing", "submitting", "submitted"].includes(status) ? "creating" : status === "queued" ? "queued" : "waiting";
-  const result = { version: 1, stage, percent: mediaReady ? 100 : attention ? null : stage === "finishing" ? 90
+  const result = { version: 1, stage, percent: mediaReady ? 100 : attention || reconciling ? null : stage === "finishing" ? 90
     : stage === "creating" ? 10 + Math.floor(fraction * 75) : stage === "queued" ? 5 : 0,
-    basis: "confirmed-work", timing: mediaReady ? "complete" : attention ? "paused" : "learning",
+    basis: "confirmed-work", timing: mediaReady ? "complete" : attention ? "paused" : reconciling ? "checking" : "learning",
     asOf: new Date(now).toISOString(), observedAt: Number.isFinite(stamp(observedAt)) ? observedAt : null,
     completedScenes: completed, totalScenes: shots.length, estimate: null };
   if (mediaReady || attention || !["creating", "finishing"].includes(stage)) return result;

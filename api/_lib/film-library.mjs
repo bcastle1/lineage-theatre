@@ -144,9 +144,11 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
           mediaReady = true;
         } catch { /* Playback remains unavailable until the existing delivery checks pass. */ }
       }
+      // The progress read model distinguishes an uncertain request still being
+      // reconciled by its bound queue from an uncertainty requiring review.
       production = { status: value.status === "awaiting-assembly" ? "processing" : value.status,
         completedShots: value.shots.filter(shot => shot.status === "completed").length, shotCount: value.shots.length, mediaReady,
-        needsAttention: ticket?.state === "attention" || value.status === "uncertain" || value.status === "failed" || value.status === "completed" && !mediaReady };
+        needsAttention: ticket?.state === "attention" || value.status === "failed" || value.status === "completed" && !mediaReady };
       production.progress = await progress.snapshot({ job: value, email: actor.email, queue: queued, mediaReady, needsAttention: production.needsAttention });
       const health = production.progress.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
       Object.assign(production, productionQueueMessage({ progress: production.progress, ticket, automaticPending, health, now: now() }));

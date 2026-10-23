@@ -77,6 +77,30 @@ test("server library recovers a paid saved plan without browser storage and excl
   assert.equal(h.reads.some(path => path.startsWith("payments/") && !path.startsWith("payments/orders/")), false);
 });
 
+test("library distinguishes automatic reconciliation from a manual hold using the exact saved queue binding", async () => {
+  const h = fixture(), job = h.plan(1, { status: "uncertain" }), order = h.payment(job);
+  const path = `production/queue/${digest(EMAIL)}/${job.id}.json`;
+  const ticket = { version: 1, email: EMAIL, id: job.id, manifestHash: job.manifestHash, orderId: order.id,
+    state: "pending", attempts: 1, nextAttemptAt: NOW + 10000, lastResult: "UNCERTAIN" };
+  h.put(path, ticket);
+  const { entry } = await h.detail("plan", job.id);
+  assert.equal(entry.production.status, "uncertain"); assert.equal(entry.production.needsAttention, false);
+  assert.equal(entry.production.progress.stage, "reconciling"); assert.equal(entry.production.progress.percent, null);
+  assert.equal(entry.production.progress.estimate, null); assert.equal(entry.production.mediaReady, false); assert.equal(entry.mediaUrl, undefined);
+  assert.doesNotMatch(JSON.stringify(entry.production), /orderId|lease|PRIVATE|family@example/);
+  for (const patch of [{ state: "attention" }, { state: "unknown" }, { id: uuid(2) }, { email: OTHER },
+    { manifestHash: "b".repeat(64) }, { orderId: "b".repeat(64) }, { version: undefined }]) {
+    h.put(path, { ...ticket, ...patch });
+    const { entry: held } = await h.detail("plan", job.id);
+    assert.equal(held.production.needsAttention, true); assert.equal(held.production.progress.stage, "attention");
+  }
+  h.put(path, ticket); h.put(productionJobPath(EMAIL, job.id), { ...job, status: "processing" });
+  assert.equal((await h.detail("plan", job.id)).entry.production.progress.stage, "creating");
+  h.put(productionJobPath(EMAIL, job.id), { ...job, status: "failed" });
+  assert.equal((await h.detail("plan", job.id)).entry.production.needsAttention, true);
+  assert.deepEqual(h.writes, [], "reading progress never changes a job, ticket or payment");
+});
+
 test("distinct saved versions remain distinct and payment binds only its exact prepared version", async () => {
   const h = fixture(), first = h.plan(1), second = h.plan(2), changed = h.plan(3, { title: "Another saved version" });
   h.payment(first); h.payment(changed);

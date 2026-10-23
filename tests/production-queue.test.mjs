@@ -139,6 +139,24 @@ test("ambiguous submission is reconciled after restart, never automatically resu
   assert.doesNotMatch(JSON.stringify((await f.read(path)).value), /signed-url/);
 });
 
+test("automatic uncertainty stays checking until the existing retry limit requires review, without another submission", async () => {
+  const f = fixture({ submitFails: true }), job = await f.prepare();
+  const boundOrder = digest(`${email}:production:${job.manifestHash}`), path = productionQueuePath(email, job.id);
+  await f.queue.enqueue({ actor, id: job.id, orderId: boundOrder });
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    const outcome = await f.queue.runTicket(path), state = await f.queue.status({ email, id: job.id });
+    assert.equal((await f.read(path)).value.attempts, attempt);
+    assert.equal(outcome.state, attempt < 10 ? "pending" : "attention");
+    assert.equal(state.status, "uncertain"); assert.equal(state.progress.stage, attempt < 10 ? "reconciling" : "attention");
+    assert.equal(Boolean(state.needsAttention), attempt === 10);
+    assert.equal(state.progress.percent, null); assert.equal(state.progress.estimate, null);
+    f.advanceTime();
+  }
+  assert.equal(f.calls.submit, 1); assert.equal(f.calls.reconcile, 9);
+  assert.deepEqual(await f.queue.runTicket(path), { state: "skipped" });
+  assert.equal(f.calls.submit, 1);
+});
+
 test("suspension after enqueue prevents provider calls and exposes attention without private data", async () => {
   const f = fixture(), job = await f.prepare(); await f.queue.enqueue({ actor, id: job.id, orderId });
   const stored = await f.read(userPath(email)); await f.write(userPath(email), { ...actor, status: "suspended" }, stored.etag);

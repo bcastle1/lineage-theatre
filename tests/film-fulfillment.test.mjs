@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
-const load = async name => import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(await readFile(new URL(`../src/studio/${name}.ts`, import.meta.url), "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText).toString("base64")}`);
+const compile = async name => ts.transpileModule(await readFile(new URL(`../src/studio/${name}.ts`, import.meta.url), "utf8"),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const progressUrl = moduleUrl(await compile("film-production-progress"));
+const load = async name => import(moduleUrl((await compile(name)).replaceAll('"./film-production-progress"', JSON.stringify(progressUrl))));
 const { filmReadyToWatch, filmFulfillmentProgress, generationTimeEstimate } = await load("film-fulfillment");
 const { normalizeGenerationAttempt, generationStatusLabel, generationAttemptExplanation, generationDiagnosticExplanation, generationReplacementRequest } = await load("generation-attempt");
 const identity = { preparedId: "00000000-0000-4000-8000-000000000001", filmId: "paid-film", manifestHash: "a".repeat(64), orderId: "b".repeat(64) };
@@ -17,6 +21,15 @@ test("payment confirmation and a raw completed job never imply a watchable film"
   }
   assert.equal(filmFulfillmentProgress(paid, { status: "prepared" }, false, false).production, "Not started");
   assert.equal(filmFulfillmentProgress(paid, { status: "processing" }, true, false).production, "Creating your film");
+});
+test("checkout summary distinguishes automatic status checks from failed or unconfirmed requests", () => {
+  const production = { status: "uncertain", needsAttention: false, progress: { version: 1, stage: "reconciling", timing: "checking",
+    percent: null, estimate: null, basis: "confirmed-work", asOf: "2026-10-23T17:00:00Z", observedAt: "2026-10-23T17:00:00Z", completedScenes: 0, totalScenes: 3 } };
+  assert.equal(filmFulfillmentProgress(paid, production, true, false).production, "Checking status");
+  for (const patch of [{ needsAttention: true }, { status: "failed" }, { progress: undefined },
+    { progress: { ...production.progress, percent: 10 } }])
+    assert.equal(filmFulfillmentProgress(paid, { ...production, ...patch }, true, false).production, "Needs attention");
+  assert.equal(filmFulfillmentProgress({ ...paid, status: "awaiting-payment" }, production, true, false).production, "Waiting for payment");
 });
 test("watch links require the exact paid plan and verified private media", () => {
   assert.equal(filmReadyToWatch(finished, identity, identity.filmId), true);
