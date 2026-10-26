@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -24,13 +25,31 @@ def sha(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def verify_package_assets(font, root=Path('/')):
+    """Check the rendered asset and license, independently of stripped docs."""
+    relative_files = ('usr/share/sounds/sf2/FluidR3_GM.sf2', 'usr/share/doc/fluid-soundfont-gm/copyright')
+    manifest = root / 'var/lib/dpkg/info/fluid-soundfont-gm.md5sums'
+    require(manifest.is_file() and not manifest.is_symlink() and manifest.stat().st_size <= 128000)
+    entries = [line.split() for line in manifest.read_text().splitlines()]
+    require(font == (root / relative_files[0]).resolve(strict=True))
+    for relative in relative_files:
+        matches = [entry for entry in entries if len(entry) == 2 and entry[1] == relative]
+        require(len(matches) == 1 and re.fullmatch(r'[a-f0-9]{32}', matches[0][0]))
+        path = root / relative
+        require(path.is_file() and not path.is_symlink() and 16 < path.stat().st_size <= 200 * 1024 * 1024)
+        with path.open('rb') as stream:
+            require(hashlib.file_digest(stream, 'md5').hexdigest() == matches[0][0])
+
+
 def main(request):
     # Verify the actual installed licensed asset, not just an executable name.
     font = Path(request['soundfont']).resolve(strict=True)
     require(font == Path('/usr/share/sounds/sf2/FluidR3_GM.sf2').resolve(strict=True)
             and font.is_file() and 16 < font.stat().st_size <= 200 * 1024 * 1024)
     require(command(['dpkg-query', '-W', '-f=${Version}', 'fluid-soundfont-gm'], 15).decode().strip() == '3.1-5.3')
-    require(command(['dpkg', '--verify', 'fluid-soundfont-gm'], 30).strip() == b'')
+    # Slim images omit READMEs/changelogs. The exact installed font and copyright
+    # must still match the pinned package; unrelated missing docs prove neither.
+    verify_package_assets(font)
     command([request['fluidsynth'], '--version'], 15)
     assets = {'soundfontSha256': sha(font), 'soundfontPackage': 'fluid-soundfont-gm', 'soundfontPackageVersion': '3.1-5.3'}
     require(request['mode'] in ('assets', 'render'))

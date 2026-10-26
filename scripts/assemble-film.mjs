@@ -34,7 +34,7 @@ async function run(binary, args, onStderrLine, cwd) {
 }
 async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
   // Decode the whole file, so a container header alone cannot count as playable.
-  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, previousTime, videoCodec, audioCodec;
+  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, firstTime, previousTime, videoCodec, audioCodec;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:v:0", "-vf", "showinfo", "-fps_mode", "passthrough", "-f", "null", "-", "-progress", "pipe:1"], line => {
     if (/Stream .*Audio:/.test(line)) hasAudio = true;
     if (videoCodec === undefined) videoCodec = /Stream .*Video:\s*([A-Za-z0-9_]+)/.exec(line)?.[1];
@@ -52,6 +52,7 @@ async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
       const next = { width: Number(frame[3]), height: Number(frame[4]) };
       const timestamp = /\bpts_time:([\d.eE+-]+)/.exec(line);
       const time = timestamp ? Number(timestamp[1]) : NaN;
+      if (firstTime === undefined) firstTime = time;
       // Some generated H.264 inputs omit SAR (0/1). Treat only that explicit
       // unspecified value as square during source assembly; setsar=1 writes
       // unambiguous output metadata. Declared non-square pixels still fail.
@@ -66,10 +67,13 @@ async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
   });
   const frames = [...result.stdout.matchAll(/^frame=(\d+)$/gm)].at(-1);
   const decoded = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gm)].at(-1);
-  if (!profile || !rate || invalidProfile || decodedFrames < 1 || !frames || Number(frames[1]) < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The file did not decode into a consistent progressive, square-pixel video profile at a constant frame rate.");
+  if (!profile || !rate || invalidProfile || decodedFrames < 1 || !frames || Number(frames[1]) !== decodedFrames || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The file did not decode into a consistent progressive, square-pixel video profile at a constant frame rate.");
   const checked = chooseAssemblyProfile([{ ...profile, frameRate: rate.numerator / rate.denominator,
     frameRateRatio: `${rate.numerator}/${rate.denominator}` }]);
-  return { ...checked, durationSeconds: Number(decoded[1]) / 1_000_000, decodedDurationSeconds: Number(decoded[1]) / 1_000_000, frameCount: Number(frames[1]), hasAudio, videoCodec, audioCodec };
+  // FFmpeg versions disagree on whether progress ends at the last frame's PTS
+  // or its end. The fully decoded, verified CFR frames define the duration.
+  const durationSeconds = decodedFrames * rate.denominator / rate.numerator;
+  return { ...checked, durationSeconds, decodedDurationSeconds: durationSeconds, startSeconds: firstTime, frameCount: decodedFrames, hasAudio, videoCodec, audioCodec };
 }
 
 // Same-aspect inputs use their smallest native dimensions and slowest native
@@ -94,7 +98,7 @@ export function chooseAssemblyProfile(profiles) {
 }
 
 async function audioInfo(ffmpeg, path) {
-  let sampleDuration = 0, frames = 0, invalid = false, firstTime, sampleRate, channels;
+  let sampleDuration = 0, sampleCount = 0, frames = 0, invalid = false, firstTime, sampleRate, channels;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:a:0", "-af", "ashowinfo", "-f", "null", "-", "-progress", "pipe:1"], line => {
     if (!/Parsed_ashowinfo_/.test(line)) return;
     const frame = /\brate:(\d+)\s+nb_samples:(\d+)/.exec(line);
@@ -107,12 +111,14 @@ async function audioInfo(ffmpeg, path) {
       const time = timestamp ? Number(timestamp[1]) : NaN;
       if (firstTime === undefined) firstTime = time;
       if (rate < 1 || samples < 1 || !Number.isFinite(time) || Math.abs(time - firstTime - sampleDuration) > 0.05) invalid = true;
-      else { sampleDuration += samples / rate; frames++; }
+      else { sampleCount += samples; sampleDuration = sampleCount / rate; frames++; }
     }
   });
   const decoded = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gm)].at(-1);
   if (invalid || frames < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The reviewed audio did not fully decode.");
-  return { durationSeconds: Math.min(sampleDuration, Number(decoded[1]) / 1_000_000), sampleRate, channels };
+  // Progress can report the start of the last PCM frame on older FFmpeg. Count
+  // every decoded sample, including that frame; never shorten speech to match it.
+  return { durationSeconds: sampleCount / sampleRate, startSeconds: firstTime, sampleRate, channels };
 }
 
 export async function verifyPerformanceMusicMedia({ music, manifest, ffmpeg = 'ffmpeg' }) {
@@ -158,10 +164,15 @@ export async function preparePerformanceClip({ manifest, shot, clip, work, ffmpe
     if (mode === 'dialogue') {
       if (clip.audioPath !== undefined || !video.hasAudio) throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
       sourceAudio = await audioInfo(ffmpeg, clip.path);
+      // Assembly resets audio and video timestamps separately. Reject a real
+      // source offset rather than silently move synchronized speech to zero.
+      if (Math.abs(sourceAudio.startSeconds - video.startSeconds) > Math.max(1 / video.frameRate, 0.05) + 0.002)
+        throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
       // AAC packet padding can extend decoded audio beyond the last video frame.
       if (Math.abs(sourceAudio.durationSeconds - seconds) > 0.05)
         throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
-      return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, sourceAudioDurationSeconds: sourceAudio.durationSeconds,
+      return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, videoStartSeconds: video.startSeconds,
+        sourceAudioStartSeconds: sourceAudio.startSeconds, sourceAudioDurationSeconds: sourceAudio.durationSeconds,
         selectedAudioDurationSeconds: sourceAudio.durationSeconds, audioSelection: 'embedded-synchronized' };
     }
     if (mode === 'narration') {
@@ -179,7 +190,8 @@ export async function preparePerformanceClip({ manifest, shot, clip, work, ffmpe
     const selected = await audioInfo(ffmpeg, output);
     if (Math.abs(selected.durationSeconds - seconds) > 0.001) throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
     clip.audioPath = output;
-    return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, sourceAudioDurationSeconds: sourceAudio?.durationSeconds ?? null,
+    return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, videoStartSeconds: video.startSeconds,
+      sourceAudioStartSeconds: sourceAudio?.startSeconds ?? null, sourceAudioDurationSeconds: sourceAudio?.durationSeconds ?? null,
       selectedAudioDurationSeconds: selected.durationSeconds,
       audioSelection: mode === 'narration' ? 'stock-narration-silence-padded' : 'planned-silence' };
   } catch (error) {
@@ -278,6 +290,9 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     }
     if (audioPath) {
       const audio = await audioInfo(ffmpeg, audioPath);
+      if (performance && shot.performance.mode === 'dialogue'
+        && Math.abs(audio.startSeconds - info.startSeconds) > Math.max(1 / info.frameRate, 0.05) + 0.002)
+        throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
       if (performance && Math.abs(audio.durationSeconds - seconds) > 0.05) throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
       if (audio.durationSeconds < seconds - 0.05) throw new Error(`Reviewed audio for ${shot.id} is shorter than its reviewed timeline.`);
     } else if (!technicalSample) throw new Error(`Clip ${shot.id} has no reviewed audio. Prepare narration and dialogue before assembling a customer film.`);

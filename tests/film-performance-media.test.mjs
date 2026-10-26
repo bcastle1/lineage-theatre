@@ -58,10 +58,28 @@ test('real decoded media preserves synchronized dialogue and only appends silenc
     const measured = await preparePerformanceClip({ manifest, shot: manifest.shots[0], clip, work: root, ffmpeg });
     assert.equal(clip.audioPath, undefined); assert.equal(sha(await readFile(dialogue)), before);
     assert.equal(measured.audioSelection, 'embedded-synchronized'); assert.equal(measured.videoDurationSeconds, 3);
+    assert.equal(measured.videoStartSeconds, 0); assert.equal(measured.sourceAudioStartSeconds, 0);
     const outputPath = join(root, 'dialogue-film.mp4');
     const report = await assembleFilm({ manifest, manifestHash: sha(JSON.stringify(manifest)), clips: [clip], outputPath, ffmpeg });
     assert.equal(report.playable, true); assert.equal(report.hasAudio, true); assert.equal(report.durationSeconds, 3);
     assert.equal(sha(await readFile(dialogue)), before);
+  });
+  await t.test('dialogue with an offset audio or video start is held before timestamp normalization', async () => {
+    const manifest = manifestFor('dialogue');
+    for (const track of ['a', 'v']) {
+      const path = join(root, `${track}-offset.mp4`);
+      await run(['-n', '-f', 'lavfi', '-i', 'color=c=green:s=320x180:r=30:d=3',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
+        `-filter:${track}`, `${track === 'a' ? 'asetpts' : 'setpts'}=PTS+0.2/TB`,
+        '-fps_mode:v', 'passthrough', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', path]);
+      const original = sha(await readFile(path)), clip = { shotId: 'shot-001', path };
+      await assert.rejects(preparePerformanceClip({ manifest, shot: manifest.shots[0], clip, work: root, ffmpeg }),
+        error => finishingFailure(error)?.reason === 'PERFORMANCE_AUDIO_MISMATCH');
+      await assert.rejects(assembleFilm({ manifest, manifestHash: sha(JSON.stringify(manifest)), clips: [clip],
+        outputPath: join(root, `${track}-offset-must-not-assemble.mp4`), ffmpeg }),
+        error => finishingFailure(error)?.reason === 'PERFORMANCE_AUDIO_MISMATCH');
+      assert.equal(sha(await readFile(path)), original); assert.equal(clip.audioPath, undefined);
+    }
   });
   await t.test('narration keeps every PCM sample unchanged and adds only trailing zero samples', async () => {
     const manifest = manifestFor('narration'), work = join(root, 'narration'); await mkdir(work);

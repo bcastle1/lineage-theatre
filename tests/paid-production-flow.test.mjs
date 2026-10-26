@@ -193,6 +193,7 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
         const saved = job.shots[index], mode = shot.performance.mode, videoHash = digest(`synthetic-video-bytes:${shot.id}`);
         return { shotId: shot.id, outputHash: digest(JSON.stringify(saved.output)), provenance: validatePerformanceOutput(job.manifest, shot, saved.output),
           videoSha256: videoHash, videoBytes: saved.output.sizeBytes, videoDurationSeconds: shot.targetDurationMs / 1000, videoFrameRate: 24,
+          videoStartSeconds: 0, sourceAudioStartSeconds: mode === 'silent' ? null : 0,
           selectedAudioContainerSha256: mode === 'dialogue' ? videoHash : digest(`synthetic-selected-audio:${shot.id}`),
           selectedAudioContainerBytes: 128, selectedAudioDurationSeconds: shot.targetDurationMs / 1000,
           providerAudioSha256: mode === 'narration' ? digest(`synthetic-provider-audio:${shot.id}`) : null,

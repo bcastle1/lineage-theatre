@@ -39,7 +39,7 @@ function fixture() {
     shots: [{ shotId: 'shot-001', scriptMatched: true, contextSilence: false }] };
   return { job, read, write, records, speech };
 }
-const decoded = { videoDurationSeconds: 3, videoFrameRate: 30, sourceAudioDurationSeconds: 3,
+const decoded = { videoDurationSeconds: 3, videoFrameRate: 30, videoStartSeconds: 0, sourceAudioStartSeconds: 0, sourceAudioDurationSeconds: 3,
   selectedAudioDurationSeconds: 3, audioSelection: 'embedded-synchronized' };
 const prepare = input => prepareFilmPerformance(input, { prepareClip: async () => decoded });
 const held = error => error.code === 'FILM_PERFORMANCE_REVIEW_REQUIRED';
@@ -136,6 +136,17 @@ test('receipt verification rejects changed final clips, speech, coverage, source
   }
   await assert.rejects(verifyFilmPerformanceReceipts({ ...input, speechReview: { ...f.speech, passed: false } }, { read: f.read }), held);
   assert.throws(() => validatePerformanceReviewProof({ ...input, ownerHash: digest(email), review: { ...proof, shotCount: 2 } }), held);
+});
+
+test('missing or offset decoded start times cannot become a verified dialogue receipt or upload', async t => {
+  for (const starts of [{ videoStartSeconds: undefined }, { sourceAudioStartSeconds: undefined },
+    { sourceAudioStartSeconds: 0.2 }, { videoStartSeconds: 0.2 }, { sourceAudioStartSeconds: NaN }]) {
+    const f = await workerFixture(t, { preparePerformance: input => prepareFilmPerformance(input,
+      { prepareClip: async () => ({ ...decoded, ...starts }) }) });
+    await assert.rejects(f.run(), held);
+    assert.equal(f.calls.upload, 0); assert.equal(f.calls.fallback, 0);
+    assert.equal([...f.records.keys()].some(path => path.startsWith('production/performance-reviews/')), false);
+  }
 });
 
 test('media changes during review or a lost lease cannot persist a performance receipt', async t => {

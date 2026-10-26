@@ -59,6 +59,7 @@ export function validatePerformanceReviewBinding(binding, { job, ownerHash, id, 
       && HASH.test(measured.videoSha256 || '') && size(measured.videoBytes)
       && measured.videoBytes === saved.output.sizeBytes && HASH.test(measured.selectedAudioContainerSha256 || '')
       && size(measured.selectedAudioContainerBytes) && duration(measured.videoDurationSeconds)
+      && Number.isFinite(measured.videoStartSeconds)
       && Number.isFinite(measured.videoFrameRate) && measured.videoFrameRate >= 1 && measured.videoFrameRate <= 60
       && Math.abs(measured.videoDurationSeconds - shot.targetDurationMs / 1000) <= 1 / measured.videoFrameRate + 0.002
       && duration(measured.selectedAudioDurationSeconds) && Math.abs(measured.selectedAudioDurationSeconds - shot.targetDurationMs / 1000) <= 0.05);
@@ -66,13 +67,16 @@ export function validatePerformanceReviewBinding(binding, { job, ownerHash, id, 
     if (mode === 'dialogue') requireValue(measured.audioSelection === 'embedded-synchronized'
       && measured.selectedAudioContainerSha256 === measured.videoSha256 && measured.selectedAudioContainerBytes === measured.videoBytes
       && measured.providerAudioSha256 === null && measured.providerAudioBytes === null
+      && Number.isFinite(measured.sourceAudioStartSeconds)
+      && Math.abs(measured.sourceAudioStartSeconds - measured.videoStartSeconds) <= Math.max(1 / measured.videoFrameRate, 0.05) + 0.002
       && measured.sourceAudioDurationSeconds === measured.selectedAudioDurationSeconds);
     else if (mode === 'narration') requireValue(measured.audioSelection === 'stock-narration-silence-padded'
       && HASH.test(measured.providerAudioSha256 || '') && size(measured.providerAudioBytes)
       && measured.providerAudioBytes === saved.output.audio.sizeBytes && duration(measured.sourceAudioDurationSeconds)
+      && Number.isFinite(measured.sourceAudioStartSeconds)
       && measured.sourceAudioDurationSeconds <= shot.targetDurationMs / 1000);
     else requireValue(measured.audioSelection === 'planned-silence' && measured.providerAudioSha256 === null
-      && measured.providerAudioBytes === null && measured.sourceAudioDurationSeconds === null);
+      && measured.providerAudioBytes === null && measured.sourceAudioDurationSeconds === null && measured.sourceAudioStartSeconds === null);
   }
   return binding;
 }
