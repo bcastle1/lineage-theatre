@@ -4,6 +4,7 @@ import { digest, userPath } from "../api/_lib/auth.mjs";
 import { OWNER_EMAIL } from "../api/_lib/access.mjs";
 import { createFilmProductionService, fictionalOperatorProject } from "../api/_lib/film-production.mjs";
 import { createProductionQueue, productionQueuePath } from "../api/_lib/production-queue.mjs";
+import { performanceReviewFailure } from '../api/_lib/film-performance-review.mjs';
 
 const email = "customer@example.invalid", orderId = "a".repeat(64);
 const actor = { email, role: "customer", status: "active", approvedBy: "owner@example.invalid", approvedAt: "2026-09-20T00:00:00Z" };
@@ -196,4 +197,21 @@ test("owned claims renew during long assembly without permitting a second worker
     return f.assemble(input);
   } });
   assert.equal((await f.film.getPrepared({ email, id: job.id })).status, "completed"); assert.ok(cleared > 0);
+});
+
+test('performance failures hold the first finishing attempt with a precise message and no further provider submissions', async () => {
+  const f = fixture(), job = await f.prepare(); await f.queue.enqueue({ actor, id: job.id, orderId });
+  const path = productionQueuePath(email, job.id);
+  for (let step = 0; step < 6; step++) { await f.queue.runTicket(path); f.advanceTime(); }
+  const submissions = f.calls.submit;
+  assert.equal((await f.film.getPrepared({ email, id: job.id })).status, 'awaiting-assembly');
+  assert.deepEqual(await f.queue.runTicket(path, { assemble: async () => { throw performanceReviewFailure('PERFORMANCE_AUDIO_MISMATCH'); } }), { state: 'attention' });
+  const ticket = (await f.read(path)).value;
+  assert.equal(ticket.attempts, 1); assert.equal(ticket.lastResult, 'REVIEW_REQUIRED');
+  assert.deepEqual(ticket.lastFailure, { stage: 'speech-review', reason: 'PERFORMANCE_AUDIO_MISMATCH' });
+  const status = await f.queue.status({ email, id: job.id });
+  assert.equal(status.needsAttention, true); assert.match(status.message, /selected voice and mouth movements need review/);
+  assert.doesNotMatch(status.message, /charged again|refund|private|https:/);
+  f.advanceTime(); assert.deepEqual(await f.queue.runTicket(path, { assemble: f.assemble }), { state: 'skipped' });
+  assert.equal(f.calls.submit, submissions); assert.equal(f.calls.assembly, 0);
 });

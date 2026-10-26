@@ -1,3 +1,4 @@
+import { resolveBrowserTestImports } from './helpers/browser-imports.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -8,7 +9,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
 const { customerProjectBackup, newFilm, normalizeFilm, productionStatusMessage } =
-  await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+  await import(`data:text/javascript;base64,${Buffer.from(resolveBrowserTestImports(compiled)).toString("base64")}`);
 
 const internalAttribution = /magiclight|gpt-6|astra|openai|quickbooks|legacy-vendor/i;
 const persistedCopy = (value) => JSON.parse(JSON.stringify(value));

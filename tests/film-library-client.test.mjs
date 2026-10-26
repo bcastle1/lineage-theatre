@@ -1,3 +1,4 @@
+import { resolveBrowserTestImports } from './helpers/browser-imports.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -10,7 +11,7 @@ import ts from "typescript";
 
 const require = createRequire(import.meta.url);
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(resolveBrowserTestImports(source)).toString("base64")}`;
 const modelUrl = moduleUrl(compile(await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8")));
 const helperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-library.ts", import.meta.url), "utf8")));
 const contractUrl = moduleUrl(compile(await readFile(new URL("../src/studio/checkout-contract.ts", import.meta.url), "utf8"))

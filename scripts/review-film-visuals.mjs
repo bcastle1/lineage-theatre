@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { visualSampleTimes, boundedVisualJson } from '../api/_lib/film-visual-review.mjs';
+import { visualSampleTimes, boundedVisualJson, visualReviewVersion } from '../api/_lib/film-visual-review.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
 const failed = reason => markFinishingFailure(Object.assign(new Error('Visual continuity needs review before delivery.'), { code: reason }), 'visual-review', reason);
@@ -36,25 +36,30 @@ export function createRemoteVisualReview({ env = process.env, fetchImpl = fetch 
 }
 export function createFilmVisualReviewer({ extract = extractVisualFrame, review = createRemoteVisualReview() } = {}) {
   return async ({ email, id, job, clips, ffmpeg, stillOwned, work }) => {
-    if (!job.manifest.visualContinuity) return null;
+    const version = visualReviewVersion(job.manifest);
+    if (!job.manifest.visualContinuity) {
+      if (version !== 1) throw failed('VISUAL_REVIEW_REQUIRED');
+      return null;
+    }
     const proofs = [], previousFrames = new Map();
     for (const [index, shot] of job.manifest.shots.entries()) {
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
       const clip = clips[index]; if (clip?.shotId !== shot.id) throw failed('VISUAL_REVIEW_REQUIRED');
       const frames = [];
-      for (const atMs of visualSampleTimes(shot)) frames.push({ shotId: shot.id, atMs, dataUrl: await extract({ path: clip.path, atMs, ffmpeg }) });
-      previousFrames.set(shot.id, frames[2]);
+      for (const atMs of visualSampleTimes(shot, version)) frames.push({ shotId: shot.id, atMs, dataUrl: await extract({ path: clip.path, atMs, ffmpeg }) });
+      previousFrames.set(shot.id, frames.at(-1));
       const previous = job.manifest.shots[index - 1];
       if (previous && previous.sceneIndex === shot.sceneIndex) frames.push(previousFrames.get(previous.id));
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
       const proof = await review({ email, preparedId: id, manifestHash: job.manifestHash, shotId: shot.id, frames });
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
-      if (proof?.version !== 1 || proof.manifestHash !== job.manifestHash || proof.shotId !== shot.id
+      if (proof?.version !== version || proof.manifestHash !== job.manifestHash || proof.shotId !== shot.id
         || !/^[a-f0-9]{64}$/.test(proof.bindingHash || '') || typeof proof.receiptPath !== 'string') throw failed('VISUAL_REVIEW_REQUIRED');
       if (proof.passed !== true) throw failed('VISUAL_CONTINUITY_MISMATCH');
       proofs.push(proof);
     }
-    const result = { version: 1, manifestHash: job.manifestHash, passed: true, sampling: 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
+    const result = { version, manifestHash: job.manifestHash, passed: true,
+      sampling: version === 2 ? 'five-frames-including-first-and-final-percent-and-same-scene-boundary' : 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
     if (work) await writeFile(join(work, 'visual-review.json'), JSON.stringify(result), { flag: 'wx' });
     return result;
   };

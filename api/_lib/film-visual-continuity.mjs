@@ -1,6 +1,8 @@
 // A production contract, saved before the manifest is priced or paid. It is
 // derived only from the approved script and explicit reference selection; it
 // never analyzes a photograph or invents demographic/biographical facts.
+import { validateFilmPerformance } from './film-performance.mjs';
+
 export const VISUAL_CONTINUITY_VERSION = 1;
 export const VISUAL_CONTINUITY_POLICY = 'reference-appearance-scripted-wardrobe-v1';
 
@@ -23,6 +25,7 @@ export function createVisualContinuity(manifest) {
     policy: VISUAL_CONTINUITY_POLICY,
     characters: manifest.screenplay.characters.filter(character => used.has(character.id)).map(character => ({
       characterId: character.id, appearance: character.description, reference: referenceFor(character),
+      ...(manifest.performance?.version === 1 ? { wardrobe: character.wardrobe } : {}),
     })),
     scenes: manifest.shots.map((shot, index) => ({
       sceneId: `scene-${String(index + 1).padStart(3, '0')}`, sceneIndex: shot.sceneIndex,
@@ -35,18 +38,22 @@ export function createVisualContinuity(manifest) {
 // Legacy paid manifests have no continuity contract and retain their original
 // generation recipe. A partial new contract must never silently fall back.
 export function validateVisualContinuity(manifest) {
+  const performance = validateFilmPerformance(manifest);
   const contract = manifest.visualContinuity;
   if (contract === undefined) {
-    requireValue(manifest.productionPlan?.visualContinuityVersion === undefined
+    requireValue(!performance && manifest.productionPlan?.visualContinuityVersion === undefined
       && !manifest.shots.some(shot => shot.continuity?.sourceSceneId !== undefined));
     return null;
   }
   requireValue(contract?.version === VISUAL_CONTINUITY_VERSION && contract.policy === VISUAL_CONTINUITY_POLICY
     && manifest.productionPlan?.visualContinuityVersion === VISUAL_CONTINUITY_VERSION
     && Array.isArray(contract.characters) && Array.isArray(contract.scenes));
-  const used = new Set(manifest.shots.flatMap(shot => shot.characterIds));
+  // Speaking cuts may show only a subset of the approved scene cast. Keep the
+  // original scene contract and its references intact, including offscreen cast.
+  const used = new Set((performance ? manifest.screenplay.scenes : manifest.shots).flatMap(scene => scene.characterIds));
   const expectedCharacters = manifest.screenplay.characters.filter(character => used.has(character.id)).map(character => ({
     characterId: character.id, appearance: character.description, reference: referenceFor(character),
+    ...(performance ? { wardrobe: character.wardrobe } : {}),
   }));
   requireValue(same(contract.characters, expectedCharacters));
   const scenes = new Map();
@@ -55,13 +62,18 @@ export function validateVisualContinuity(manifest) {
       && Number.isSafeInteger(scene.sceneIndex) && scene.sceneIndex >= 0
       && scene.era === manifest.era && typeof scene.direction === 'string'
       && Array.isArray(scene.characterIds) && scene.wardrobeRule === 'script-overrides-reference');
+    if (performance) {
+      const source = manifest.screenplay.scenes[scene.sceneIndex];
+      requireValue(source && scene.direction === source.visual && same(scene.characterIds, source.characterIds));
+    }
     scenes.set(scene.sceneId, scene);
   }
   const usedScenes = new Set();
   for (const shot of manifest.shots) {
     const scene = scenes.get(shot.continuity?.sourceSceneId);
     requireValue(scene && scene.sceneIndex === shot.sceneIndex && scene.direction === shot.visual
-      && same(scene.characterIds, shot.characterIds));
+      && (performance ? new Set(shot.characterIds).size === shot.characterIds.length
+        && shot.characterIds.every(id => scene.characterIds.includes(id)) : same(scene.characterIds, shot.characterIds)));
     usedScenes.add(scene.sceneId);
   }
   requireValue(scenes.size === usedScenes.size);

@@ -1,3 +1,6 @@
+import klingVoices from '../../shared/kling-voices.json' with { type: 'json' };
+export const KLING_VOICES = klingVoices;
+export const DEFAULT_NARRATOR_VOICE_ID = KLING_VOICES[0].id;
 export interface User {
   email: string;
   name: string;
@@ -48,6 +51,8 @@ export interface Character {
   basis: "documented" | "inferred" | "invented";
   sourceIds: string[];
   referencePhotoId?: string;
+  voiceId?: string;
+  wardrobe?: string;
 }
 export interface Assumption {
   id: string;
@@ -114,6 +119,8 @@ export interface Film {
   outputAt?: string;
   audioId?: string;
   music: boolean;
+  performanceControlsVersion?: 1;
+  narratorVoiceId?: string;
   productionPreparation?: PreparedProduction;
   paymentReference?: FilmPaymentReference;
   localVideoJobId?: string;
@@ -161,10 +168,12 @@ export function productionPreparationInput(film: Film) {
   return {
     id: film.id, title: film.title, ancestor: film.ancestor, era: film.era, script: film.script, duration: film.duration,
     style: film.style, factuality: film.factuality, music: film.music, logline: film.logline,
+    ...(film.performanceControlsVersion === 1 ? { performanceControlsVersion: 1, narratorVoiceId: film.narratorVoiceId || DEFAULT_NARRATOR_VOICE_ID } : {}),
     sources: film.sources.map(({ id, name, type, text, note, extraction }) => ({ id, name, type, text: text || "", note: note || "", extraction: extraction || "" })),
     selectedThemes: film.selectedThemes.map(({ title, plot, climax, reason }) => ({ title, plot, climax, reason })),
-    characters: film.characters.map(({ id, name, role, description, basis, sourceIds, referencePhotoId }) => ({ id, name, role, description, basis, sourceIds,
-      ...(referencePhotoId ? { referencePhotoId } : {}) })),
+    characters: film.characters.map(({ id, name, role, description, basis, sourceIds, referencePhotoId, voiceId, wardrobe }, index) => ({ id, name, role, description, basis, sourceIds,
+      ...(referencePhotoId ? { referencePhotoId } : {}),
+      ...(film.performanceControlsVersion === 1 ? { voiceId: voiceId || KLING_VOICES[index % KLING_VOICES.length].id, wardrobe: wardrobe || '' } : {}) })),
     assumptions: film.assumptions.map(({ id, description, reason }) => ({ id, description, reason })),
     scenes: film.scenes.map(({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization }) => ({ title, narration, visual, sourceIds, characterIds, dialogue, dramatization })),
   };
@@ -193,6 +202,8 @@ export const newFilm = (): Film => ({
   logline: "",
   updatedAt: new Date().toISOString(),
   music: true,
+  performanceControlsVersion: 1,
+  narratorVoiceId: DEFAULT_NARRATOR_VOICE_ID,
 });
 
 // A separate purchase starts with a new identity and the current story only.
@@ -203,6 +214,7 @@ export function createCheckoutDraft(film: Film): Film {
     ...structuredClone({
       title: film.title, ancestor: film.ancestor, script: film.script, era: film.era,
       style: film.style, duration: film.duration, factuality: film.factuality, music: film.music,
+      narratorVoiceId: film.narratorVoiceId || DEFAULT_NARRATOR_VOICE_ID,
       sources: film.sources, themes: film.themes, selectedThemes: film.selectedThemes,
       characters: film.characters, assumptions: film.assumptions, logline: film.logline,
       generatedBy: film.generatedBy, sourceCoverage: film.sourceCoverage,
@@ -271,6 +283,10 @@ export function normalizeFilm(raw: Partial<Film>): Film {
   return {
     ...newFilm(),
     ...fields,
+    // Preserve historical prepared/paid input hashes. A new checkout draft or
+    // explicit control change opts an older film into the current recipe.
+    performanceControlsVersion: raw.performanceControlsVersion,
+    narratorVoiceId: raw.narratorVoiceId,
     ...(productionPreparation ? { productionPreparation } : {}),
     ...(paymentReference ? { paymentReference } : {}),
     duration,

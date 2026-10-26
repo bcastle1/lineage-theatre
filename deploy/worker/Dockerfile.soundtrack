@@ -22,8 +22,10 @@ RUN /opt/soundtrack/bin/python /opt/soundtrack/cache-assets.py /opt/soundtrack
 RUN chmod -R a+rX /opt/soundtrack \
     && dpkg-query -W fluidsynth fluid-soundfont-gm > /opt/soundtrack/score-packages.txt
 COPY api/_lib/ ./api/_lib/
+COPY shared/ ./shared/
 COPY scripts/production-worker.mjs scripts/assemble-film.mjs scripts/review-film-speech.mjs scripts/transcribe-film.py ./scripts/
-COPY scripts/review-film-visuals.mjs ./scripts/
+COPY scripts/review-film-visuals.mjs scripts/review-film-performance.mjs ./scripts/
+COPY scripts/film-performance-music.mjs scripts/film-performance-music.py ./scripts/
 COPY scripts/rebuild-film-soundtrack.mjs scripts/rebuild-film-soundtrack.py scripts/repair-paid-film-soundtrack.mjs ./scripts/
 COPY scripts/repair-name-proof.mjs scripts/compare-repair-name-pronunciations.py ./scripts/
 COPY scripts/automatic-film-soundtrack.mjs ./scripts/

@@ -6,7 +6,12 @@ export const FAL_MODELS = Object.freeze({
   seedance: 'bytedance/seedance-2.5/us/reference-to-video',
   wan: 'alibaba/wan-3.0/reference-to-video',
   reference: 'fal-ai/nano-banana-pro',
+  referenceEdit: 'fal-ai/nano-banana-pro/edit',
+  speech: 'fal-ai/kling-video/v1/tts',
+  lipsync: 'fal-ai/kling-video/lipsync/text-to-video',
 });
+const SUBMISSION_MODELS = Object.freeze([FAL_MODELS.kling, FAL_MODELS.reference,
+  FAL_MODELS.referenceEdit, FAL_MODELS.speech, FAL_MODELS.lipsync]);
 export const FAL_MEDIA_HOSTS = Object.freeze(['v3.fal.media', 'v3b.fal.media', 'v3c.fal.media', 'fal.media']);
 const ID = /^[a-zA-Z0-9_-]{8,100}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -82,7 +87,7 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
       if (existing.value.endpoint !== endpoint || existing.value.inputHash !== inputHash) throw failure('FAL_IDEMPOTENCY_CONFLICT');
       return existing.value;
     }
-    if (![FAL_MODELS.kling, FAL_MODELS.reference].includes(endpoint)) throw failure('FAL_LEGACY_SUBMISSION_DISABLED');
+    if (!SUBMISSION_MODELS.includes(endpoint)) throw failure('FAL_LEGACY_SUBMISSION_DISABLED');
     if (!(typeof key === 'function' ? key() : key)) throw failure('FAL_KEY_REQUIRED');
     const claim = { version: 1, identity, endpoint, inputHash, state: 'submitting', createdAt: new Date(now()).toISOString() };
     try { await write(path, claim); }

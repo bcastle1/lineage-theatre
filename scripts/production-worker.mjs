@@ -18,7 +18,25 @@ import { reviewFilmSpeech } from './review-film-speech.mjs';
 import { finishingFailure, markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { createAutomaticSoundtrackFallback } from './automatic-film-soundtrack.mjs';
 import { createFilmVisualReviewer } from './review-film-visuals.mjs';
-import { verifyFilmVisualReceipts } from '../api/_lib/film-visual-review.mjs';
+import { verifyFilmVisualReceipts, visualReviewVersion, PERFORMANCE_VISUAL_REVIEW_VERSION } from '../api/_lib/film-visual-review.mjs';
+import { validateFilmPerformance, validatePerformanceOutput, FILM_PERFORMANCE_RECIPE } from '../api/_lib/film-performance.mjs';
+import { performanceReviewFailure, verifyFilmPerformanceReceipts } from '../api/_lib/film-performance-review.mjs';
+import { prepareFilmPerformance, storeFilmPerformanceReview } from './review-film-performance.mjs';
+import { buildPerformanceMusic, checkPerformanceMusicAssets } from './film-performance-music.mjs';
+
+export const workerFinishingCapabilities = Object.freeze({ filmPerformanceVersion: 1, visualChecksVersion: PERFORMANCE_VISUAL_REVIEW_VERSION });
+export async function publishWorkerHeartbeat({ adapter = falProductionAdapter, read = readRecord, write = writeRecord, now = Date.now,
+  musicAssets = checkPerformanceMusicAssets } = {}) {
+  const music = await musicAssets();
+  const common = { version: 1, ready: true, model: adapter.model, referencePhotoVersion: 1, deliveryChecksVersion: 1,
+    ...workerFinishingCapabilities, checkedAt: new Date(now()).toISOString() };
+  for (const [path, recipe] of [['production/worker-health.json', adapter.modelVersion],
+    ['production/worker-health-performance-v1.json', FILM_PERFORMANCE_RECIPE]]) {
+    const old = await read(path);
+    await write(path, { ...common, recipe, ...(recipe === FILM_PERFORMANCE_RECIPE
+      ? { ready: music.ready === true, performanceMusicVersion: music.ready === true ? 1 : 0 } : {}) }, old?.etag);
+  }
+}
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -93,18 +111,36 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
   const bytes = await boundedBytes(stored.stream, artifact.sizeBytes);
   if (sha256(bytes) !== artifact.sha256) throw finishingError("The private film checksum does not match.", "STORED_CHECKSUM_MISMATCH");
   await verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review: artifact.visualReview }, { read });
+  await verifyFilmPerformanceReceipts({ email, id, manifestHash, manifest, artifactSha256: artifact.sha256,
+    review: artifact.performanceReview, speechReview: artifact.speechReview }, { read });
   return { ...artifact, playable: true };
   } catch (error) { throw markFinishingFailure(error, 'stored-verification'); }
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
   assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, reviewVisuals = createFilmVisualReviewer(), prepareClips, soundtrackFallback,
+  read = readRecord, write = writeRecord, preparePerformance = prepareFilmPerformance, buildMusic = buildPerformanceMusic,
   ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
     try {
     if (job.status !== "awaiting-assembly" || job.shots.length !== job.manifest.shots.length
       || job.shots.some(shot => shot.status !== "completed") || adapter.available !== true) throw finishingError("The film is not ready for assembly.", "ASSEMBLY_NOT_READY");
+    let performance;
+    try {
+      performance = validateFilmPerformance(job.manifest);
+      if (performance) {
+        if (adapter.id !== 'fal' || prepareClips !== undefined || !job.manifest.visualContinuity
+          || sha256(JSON.stringify(job.manifest)) !== job.manifestHash) throw performanceReviewFailure();
+        for (const [index, shot] of job.manifest.shots.entries()) {
+          if (job.shots[index].id !== shot.id) throw performanceReviewFailure('PERFORMANCE_PROVENANCE_INVALID');
+          validatePerformanceOutput(job.manifest, shot, job.shots[index].output);
+        }
+      }
+    } catch (error) {
+      if (error?.code === 'FILM_PERFORMANCE_REVIEW_REQUIRED') throw error;
+      throw performanceReviewFailure('PERFORMANCE_PROVENANCE_INVALID');
+    }
     const root = resolve(tempRoot);
     await mkdir(root, { recursive: true });
     const work = await mkdtemp(join(root, "lineage-worker-"));
@@ -129,11 +165,14 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         clips.push(clip);
       }
       const outputPath = join(work, "film.mp4");
+      stage = 'speech-review';
+      const performanceObservations = performance ? await preparePerformance({ job, clips, work, ffmpeg, stillOwned }) : null;
       stage = 'visual-review';
       const visualReview = job.manifest.visualContinuity
         ? await reviewVisuals({ email, id, job, clips, work, ffmpeg, stillOwned }) : null;
       if (job.manifest.visualContinuity && visualReview?.passed !== true)
         throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
+      if (performance && visualReview?.version !== visualReviewVersion(job.manifest)) throw performanceReviewFailure();
       stage = 'speech-review';
       // Only an explicitly configured operator repair supplies this hook. The
       // ordinary worker reviews native audio before considering local fallback.
@@ -146,10 +185,13 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       if (adapter.id === 'fal') {
         const nativeClips = clips.map(clip => ({ ...clip }));
         try {
-          speechReview = await reviewSpeech({ manifest: job.manifest, clips: nativeClips, ffmpeg });
+          speechReview = await reviewSpeech({ manifest: job.manifest, clips: nativeClips, ffmpeg, ...(performance ? { allowAudioEdits: false } : {}) });
+          if (performance && nativeClips.some((clip, index) => clip.path !== clips[index].path || clip.audioPath !== clips[index].audioPath))
+            throw performanceReviewFailure('PERFORMANCE_AUDIO_MISMATCH');
           for (const [index, clip] of nativeClips.entries()) if (clip.audioPath) clips[index].audioPath = clip.audioPath;
         }
         catch (error) {
+          if (performance) throw performanceReviewFailure('PERFORMANCE_REVIEW_REQUIRED');
           // The operator repair has its own reviewed soundtrack path. Normal
           // fallback is confined to a completed paid film with mismatched speech.
           if (prepareClips !== undefined || typeof soundtrackFallback !== 'function'
@@ -167,7 +209,9 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       }
       if(adapter.id==='fal'&&speechReview?.passed!==true)throw finishingError('Film narration was not verified.', 'SPEECH_REVIEW_REQUIRED');
       stage = 'assembly';
-      const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
+      if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
+      const music = performance ? await buildMusic({ manifest: job.manifest, manifestHash: job.manifestHash, work, ffmpeg }) : undefined;
+      const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false, ...(performance ? { music } : {}) });
       verifiedMediaProfile(report);
       const bytes = await readFile(outputPath);
       if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
@@ -175,6 +219,8 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
         || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw finishingError("Assembly verification failed.", "ASSEMBLY_REPORT_INVALID");
       if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
+      const performanceReview = performance ? await storeFilmPerformanceReview({ email, id, job, clips,
+        observations: performanceObservations, artifactSha256: report.sha256, speechReview, music: report.music, stillOwned }, { read, write }) : null;
       const pathname = `production/media/${digest(email)}/${id}/${report.sha256}.mp4`;
       // Immutable, content-addressed publication: retrying a lost response never
       // overwrites a different film. Readback verifies both new and prior writes.
@@ -183,7 +229,8 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         await putBlob(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false,
           contentType: "video/mp4", cacheControlMaxAge: 60 });
       } catch { /* A complete matching private readback is the only success signal. */ }
-      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}), ...(visualReview?{visualReview}:{}) };
+      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}), ...(visualReview?{visualReview}:{}),
+        ...(performanceReview ? { performanceReview } : {}) };
       // acceptAssembly verifies the private readback before marking completion,
       // including a lost upload response. Avoid downloading the same film twice.
       // Retain captions privately; failed caption publication cannot claim success.
@@ -215,11 +262,12 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
     readRecordImpl: read,
     writeRecordImpl: write,
     authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
-    verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
+    verifyAssembledMedia: value => verifyPublishedFilm(value, { ...dependencies, read }) });
   const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
   const soundtrackFallback = dependencies.soundtrackFallback ?? createAutomaticSoundtrackFallback({ ...dependencies, read, write });
-  const assemble = createWorkerAssembly({ ...dependencies, adapter, soundtrackFallback });
-  return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
+  const assemble = createWorkerAssembly({ ...dependencies, read, write, adapter, soundtrackFallback });
+  return { runBatch: options => queue.runBatch({ ...options, assemble }),
+    runTicket: path => queue.runTicket(path, { assemble }), readiness: film.readiness };
 }
 
 async function main() {
@@ -235,11 +283,7 @@ async function main() {
   }
   if (!readiness.available || !process.env.BLOB_READ_WRITE_TOKEN) throw new Error("Worker is not configured: connect the documented provider and private storage before processing jobs.");
   await cleanStaleWorkerDirectories();
-  const healthPath='production/worker-health.json';
-  const heartbeat=async()=>{
-    const old=await readRecord(healthPath);
-    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,referencePhotoVersion:1,deliveryChecksVersion:1,visualChecksVersion:1,checkedAt:new Date().toISOString()},old?.etag);
-  };
+  const heartbeat = () => publishWorkerHeartbeat();
   await heartbeat();
   const pulse=setInterval(()=>void heartbeat().catch(()=>{}),30000);pulse.unref();
   let cursor;

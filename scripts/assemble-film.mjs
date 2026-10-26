@@ -5,6 +5,13 @@ import { readFile, writeFile, stat, mkdir } from "node:fs/promises";
 import { dirname, extname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
+import { validateFilmPerformance } from '../api/_lib/film-performance.mjs';
+import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
+import { validatePerformanceMusicReceipt } from '../api/_lib/film-performance-review.mjs';
+import { savedOverlays } from '../api/_lib/film-overlay-directives.mjs';
+
+const performanceFailure = reason => markFinishingFailure(Object.assign(new Error('The selected voice and mouth movements need review. The original performance is retained.'),
+  { code: 'FILM_PERFORMANCE_REVIEW_REQUIRED' }), 'speech-review', reason);
 
 async function run(binary, args, onStderrLine, cwd) {
   return new Promise((resolveRun, reject) => {
@@ -27,7 +34,7 @@ async function run(binary, args, onStderrLine, cwd) {
 }
 async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
   // Decode the whole file, so a container header alone cannot count as playable.
-  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, previousTime, videoCodec, audioCodec;
+  let profile, rate, invalidProfile = false, hasAudio = false, decodedFrames = 0, firstTime, previousTime, videoCodec, audioCodec;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:v:0", "-vf", "showinfo", "-fps_mode", "passthrough", "-f", "null", "-", "-progress", "pipe:1"], line => {
     if (/Stream .*Audio:/.test(line)) hasAudio = true;
     if (videoCodec === undefined) videoCodec = /Stream .*Video:\s*([A-Za-z0-9_]+)/.exec(line)?.[1];
@@ -45,6 +52,7 @@ async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
       const next = { width: Number(frame[3]), height: Number(frame[4]) };
       const timestamp = /\bpts_time:([\d.eE+-]+)/.exec(line);
       const time = timestamp ? Number(timestamp[1]) : NaN;
+      if (firstTime === undefined) firstTime = time;
       // Some generated H.264 inputs omit SAR (0/1). Treat only that explicit
       // unspecified value as square during source assembly; setsar=1 writes
       // unambiguous output metadata. Declared non-square pixels still fail.
@@ -59,10 +67,13 @@ async function mediaInfo(ffmpeg, path, { allowUnspecifiedSar = false } = {}) {
   });
   const frames = [...result.stdout.matchAll(/^frame=(\d+)$/gm)].at(-1);
   const decoded = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gm)].at(-1);
-  if (!profile || !rate || invalidProfile || decodedFrames < 1 || !frames || Number(frames[1]) < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The file did not decode into a consistent progressive, square-pixel video profile at a constant frame rate.");
+  if (!profile || !rate || invalidProfile || decodedFrames < 1 || !frames || Number(frames[1]) !== decodedFrames || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The file did not decode into a consistent progressive, square-pixel video profile at a constant frame rate.");
   const checked = chooseAssemblyProfile([{ ...profile, frameRate: rate.numerator / rate.denominator,
     frameRateRatio: `${rate.numerator}/${rate.denominator}` }]);
-  return { ...checked, durationSeconds: Number(decoded[1]) / 1_000_000, decodedDurationSeconds: Number(decoded[1]) / 1_000_000, frameCount: Number(frames[1]), hasAudio, videoCodec, audioCodec };
+  // FFmpeg versions disagree on whether progress ends at the last frame's PTS
+  // or its end. The fully decoded, verified CFR frames define the duration.
+  const durationSeconds = decodedFrames * rate.denominator / rate.numerator;
+  return { ...checked, durationSeconds, decodedDurationSeconds: durationSeconds, startSeconds: firstTime, frameCount: decodedFrames, hasAudio, videoCodec, audioCodec };
 }
 
 // Same-aspect inputs use their smallest native dimensions and slowest native
@@ -87,22 +98,106 @@ export function chooseAssemblyProfile(profiles) {
 }
 
 async function audioInfo(ffmpeg, path) {
-  let sampleDuration = 0, frames = 0, invalid = false, firstTime;
+  let sampleDuration = 0, sampleCount = 0, frames = 0, invalid = false, firstTime, sampleRate, channels;
   const result = await run(ffmpeg, ["-hide_banner", "-v", "info", "-nostdin", "-xerror", "-err_detect", "explode", "-protocol_whitelist", "file,pipe", "-i", path, "-map", "0:a:0", "-af", "ashowinfo", "-f", "null", "-", "-progress", "pipe:1"], line => {
     if (!/Parsed_ashowinfo_/.test(line)) return;
     const frame = /\brate:(\d+)\s+nb_samples:(\d+)/.exec(line);
     if (frame) {
       const rate = Number(frame[1]), samples = Number(frame[2]);
+      const nextChannels = Number(/\bchannels:(\d+)/.exec(line)?.[1]);
+      if (sampleRate !== undefined && sampleRate !== rate || channels !== undefined && channels !== nextChannels) invalid = true;
+      sampleRate = rate; channels = nextChannels;
       const timestamp = /\bpts_time:([\d.eE+-]+)/.exec(line);
       const time = timestamp ? Number(timestamp[1]) : NaN;
       if (firstTime === undefined) firstTime = time;
       if (rate < 1 || samples < 1 || !Number.isFinite(time) || Math.abs(time - firstTime - sampleDuration) > 0.05) invalid = true;
-      else { sampleDuration += samples / rate; frames++; }
+      else { sampleCount += samples; sampleDuration = sampleCount / rate; frames++; }
     }
   });
   const decoded = [...result.stdout.matchAll(/^out_time_us=(\d+)$/gm)].at(-1);
   if (invalid || frames < 1 || !decoded || Number(decoded[1]) <= 0 || !/progress=end/.test(result.stdout)) throw new Error("The reviewed audio did not fully decode.");
-  return { durationSeconds: Math.min(sampleDuration, Number(decoded[1]) / 1_000_000) };
+  // Progress can report the start of the last PCM frame on older FFmpeg. Count
+  // every decoded sample, including that frame; never shorten speech to match it.
+  return { durationSeconds: sampleCount / sampleRate, startSeconds: firstTime, sampleRate, channels };
+}
+
+export async function verifyPerformanceMusicMedia({ music, manifest, ffmpeg = 'ffmpeg' }) {
+  const receipt = validatePerformanceMusicReceipt(music?.receipt, manifest);
+  if (!receipt.requested) return receipt;
+  if (typeof music.path !== 'string' || extname(music.path).toLowerCase() !== '.wav') throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  const bytes = await readFile(music.path);
+  if (bytes.length !== receipt.scoreBytes || createHash('sha256').update(bytes).digest('hex') !== receipt.scoreSha256)
+    throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  const audio = await audioInfo(ffmpeg, music.path);
+  if (Math.abs(audio.durationSeconds - manifest.targetDurationSeconds) > 0.001 || audio.sampleRate !== 48000 || audio.channels !== 2)
+    throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  const volume = await run(ffmpeg, ['-hide_banner', '-nostdin', '-v', 'info', '-xerror', '-err_detect', 'explode',
+    '-protocol_whitelist', 'file,pipe', '-i', music.path, '-map', '0:a:0', '-af', 'volumedetect', '-f', 'null', '-']);
+  const peak = Number(/max_volume:\s*([\d.-]+) dB/.exec(volume.stderr)?.[1]);
+  if (!Number.isFinite(peak) || peak > -20 || peak < -90) throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  return receipt;
+}
+
+// An additive mix: neither input is delayed, stretched, gated, or normalized.
+// The verified <=0.10 score peak and fixed gains keep the theoretical sum <1.
+export function performanceMusicFilters(inputIndex, seconds) {
+  if (!Number.isSafeInteger(inputIndex) || inputIndex < 0 || !Number.isFinite(seconds) || seconds <= 0 || seconds > 600)
+    throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  return ['[speech]volume=0.95[speechlevel]',
+    `[${inputIndex}:a:0]atrim=duration=${seconds},asetpts=PTS-STARTPTS,volume=0.25[scorelevel]`,
+    '[speechlevel][scorelevel]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[audio]'];
+}
+
+// New speaking plans never replace on-screen dialogue after lip synchronization.
+// Narration may gain trailing silence, but its complete source must fit first.
+export async function preparePerformanceClip({ manifest, shot, clip, work, ffmpeg = 'ffmpeg' }) {
+  if (!validateFilmPerformance(manifest) || !manifest.shots.includes(shot) || clip.shotId !== shot.id)
+    throw performanceFailure('PERFORMANCE_PROVENANCE_INVALID');
+  const seconds = shot.targetDurationMs / 1000, mode = shot.performance.mode;
+  let video, sourceAudio;
+  try {
+    video = await mediaInfo(ffmpeg, clip.path, { allowUnspecifiedSar: true });
+    // The provider may return one extra native frame. Never extend a short clip
+    // or silently cut a materially longer synchronized performance to fit.
+    if (Math.abs(video.durationSeconds - seconds) > 1 / video.frameRate + 0.002)
+      throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
+    if (mode === 'dialogue') {
+      if (clip.audioPath !== undefined || !video.hasAudio) throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
+      sourceAudio = await audioInfo(ffmpeg, clip.path);
+      // Assembly resets audio and video timestamps separately. Reject a real
+      // source offset rather than silently move synchronized speech to zero.
+      if (Math.abs(sourceAudio.startSeconds - video.startSeconds) > Math.max(1 / video.frameRate, 0.05) + 0.002)
+        throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
+      // AAC packet padding can extend decoded audio beyond the last video frame.
+      if (Math.abs(sourceAudio.durationSeconds - seconds) > 0.05)
+        throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
+      return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, videoStartSeconds: video.startSeconds,
+        sourceAudioStartSeconds: sourceAudio.startSeconds, sourceAudioDurationSeconds: sourceAudio.durationSeconds,
+        selectedAudioDurationSeconds: sourceAudio.durationSeconds, audioSelection: 'embedded-synchronized' };
+    }
+    if (mode === 'narration') {
+      if (typeof clip.audioPath !== 'string') throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
+      sourceAudio = await audioInfo(ffmpeg, clip.audioPath);
+      if (sourceAudio.durationSeconds <= 0 || sourceAudio.durationSeconds > seconds)
+        throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
+    } else if (clip.audioPath !== undefined) throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
+    const output = join(work, `${shot.id}-performance.wav`);
+    if (dirname(resolve(output)) !== resolve(work)) throw performanceFailure('PERFORMANCE_PROVENANCE_INVALID');
+    await run(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
+      ...(mode === 'narration' ? ['-protocol_whitelist', 'file,pipe', '-i', clip.audioPath, '-map', '0:a:0', '-af', `apad=whole_dur=${seconds}`]
+        : ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo']),
+      '-t', String(seconds), '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output]);
+    const selected = await audioInfo(ffmpeg, output);
+    if (Math.abs(selected.durationSeconds - seconds) > 0.001) throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
+    clip.audioPath = output;
+    return { videoDurationSeconds: video.durationSeconds, videoFrameRate: video.frameRate, videoStartSeconds: video.startSeconds,
+      sourceAudioStartSeconds: sourceAudio?.startSeconds ?? null, sourceAudioDurationSeconds: sourceAudio?.durationSeconds ?? null,
+      selectedAudioDurationSeconds: selected.durationSeconds,
+      audioSelection: mode === 'narration' ? 'stock-narration-silence-padded' : 'planned-silence' };
+  } catch (error) {
+    if (error?.code === 'FILM_PERFORMANCE_REVIEW_REQUIRED') throw error;
+    throw performanceFailure('PERFORMANCE_MEDIA_UNVERIFIED');
+  }
 }
 
 // A returned whole-film file is kept unchanged. Technical verification is not
@@ -142,40 +237,6 @@ const assTime = ms => {
   return `${Math.floor(cs / 360000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;
 };
 const assText = text => text.replaceAll('\\', '＼').replaceAll('{', '｛').replaceAll('}', '｝').replace(/[\r\n\u0000-\u001f]/g, ' ');
-function savedOverlays(visual) {
-  if (typeof visual !== 'string' || visual.length > 20_000) return [];
-  const labels = /\b(opening title|small location title|location title|on-screen text|title card|end card|caption|title|overlay identifies examples from (?:his|her|their) career)(?:\s*:\s*|\s+(?=["“]))/gi;
-  const result = [];
-  let quotedUntil = 0;
-  for (const match of visual.matchAll(labels)) {
-    if (match.index < quotedUntil) continue;
-    const rest = visual.slice(match.index + match[0].length);
-    let text;
-    if (rest[0] === '"' || rest[0] === '“') {
-      const end = rest.indexOf(rest[0] === '"' ? '"' : '”', 1);
-      quotedUntil = end < 0 ? visual.length : match.index + match[0].length + end + 1;
-      if (end < 2 || end > 161) continue;
-      text = rest.slice(1, end);
-    } else {
-      // Unquoted directions require a colon and one bounded sentence. Keep
-      // written punctuation; never infer text from surrounding visual prose.
-      if (!match[0].includes(':')) continue;
-      const nextLabel = new RegExp(labels.source, 'i').exec(rest), newline = rest.search(/[\r\n]/);
-      const bounded = rest.slice(0, Math.min(nextLabel?.index ?? rest.length, newline < 0 ? rest.length : newline));
-      let end = bounded.length;
-      for (const stop of bounded.matchAll(/[.!?](?=\s|$)/g)) {
-        if (stop[0] === '.' && /\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|Prof|Rev|Mt|[A-Z])\.$/.test(bounded.slice(0, stop.index + 1))) continue;
-        end = stop.index + 1; break;
-      }
-      text = bounded.slice(0, end).trim();
-    }
-    if (!text || text.length > 160 || /[\r\n]/.test(text) || text.startsWith('Based on a true story.')) continue;
-    const label = match[1].toLowerCase();
-    result.push({ text, style: label === 'opening title' ? 'Opening' : label === 'end card' ? 'EndCard'
-      : ['title', 'title card'].includes(label) ? 'Title' : 'Location' });
-  }
-  return result;
-}
 export function filmOverlayAss(manifest) {
   const events = [];
   for (const shot of manifest.shots) {
@@ -201,11 +262,13 @@ export function filmOverlayAss(manifest) {
   if (!events.length) return null;
   return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Location,DejaVu Sans,38,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,7,80,80,70,1\nStyle: Opening,DejaVu Sans,64,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,12,0,5,180,180,70,1\nStyle: Title,DejaVu Sans,42,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,10,0,8,180,180,70,1\nStyle: EndCard,DejaVu Sans,52,&H00FFFFFF,&H00FFFFFF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,3,12,0,5,180,180,70,1\nStyle: Disclosure,DejaVu Sans,34,&H00FFFFFF,&H00FFFFFF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,3,12,0,2,180,180,70,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events.join('\n')}\n`;
 }
-export async function assembleFilm({ manifest, manifestHash, clips, outputPath, ffmpeg = "ffmpeg", technicalSample = false }) {
+export async function assembleFilm({ manifest, manifestHash, clips, outputPath, ffmpeg = "ffmpeg", technicalSample = false, music }) {
   if (typeof technicalSample !== "boolean") throw new Error("The technical sample marker must be explicit.");
   if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > 200
     || createHash("sha256").update(JSON.stringify(manifest)).digest("hex") !== manifestHash) throw new Error("The immutable manifest hash does not match.");
   if (!Array.isArray(clips) || clips.length !== manifest.shots.length || new Set(clips.map(c => c.shotId)).size !== clips.length) throw new Error("Supply exactly one reviewed clip for each manifest shot.");
+  const performance = validateFilmPerformance(manifest);
+  const musicReceipt = performance ? await verifyPerformanceMusicMedia({ music: music ?? { receipt: { requested: false } }, manifest, ffmpeg }) : null;
   const output = resolve(outputPath);
   if (extname(output).toLowerCase() !== ".mp4") throw new Error("The assembled film must use an MP4 output path.");
   const inputs = [], filters = [], segments = [], reviewed = [];
@@ -215,6 +278,8 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     const path = resolve(clip.path), size = (await stat(path)).size;
     if (path === output || size < 16 || size > 250 * 1024 * 1024) throw new Error("A clip is too large or conflicts with the output file.");
     const info = await mediaInfo(ffmpeg, path, { allowUnspecifiedSar: true }), seconds = shot.targetDurationMs / 1000;
+    if (performance && (Math.abs(info.durationSeconds - seconds) > 1 / info.frameRate + 0.002
+      || shot.performance.mode === 'dialogue' && clip.audioPath !== undefined)) throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
     if (!Number.isFinite(seconds) || seconds <= 0 || info.durationSeconds < seconds - 0.05 || info.decodedDurationSeconds < seconds - 0.1) throw new Error(`Clip ${shot.id} is shorter than its reviewed timeline.`);
     let audioPath = info.hasAudio ? path : null;
     if (clip.audioPath !== undefined) {
@@ -225,6 +290,10 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     }
     if (audioPath) {
       const audio = await audioInfo(ffmpeg, audioPath);
+      if (performance && shot.performance.mode === 'dialogue'
+        && Math.abs(audio.startSeconds - info.startSeconds) > Math.max(1 / info.frameRate, 0.05) + 0.002)
+        throw performanceFailure('PERFORMANCE_AUDIO_MISMATCH');
+      if (performance && Math.abs(audio.durationSeconds - seconds) > 0.05) throw performanceFailure('PERFORMANCE_DURATION_MISMATCH');
       if (audio.durationSeconds < seconds - 0.05) throw new Error(`Reviewed audio for ${shot.id} is shorter than its reviewed timeline.`);
     } else if (!technicalSample) throw new Error(`Clip ${shot.id} has no reviewed audio. Prepare narration and dialogue before assembling a customer film.`);
     reviewed.push({ info, path, audioPath, seconds });
@@ -246,7 +315,11 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
   }
   await mkdir(dirname(output), { recursive: true });
   const overlays = filmOverlayAss(manifest);
-  filters.push(`${segments.join("")}concat=n=${clips.length}:v=1:a=1[${overlays ? 'joined' : 'video'}][audio]`);
+  filters.push(`${segments.join("")}concat=n=${clips.length}:v=1:a=1[${overlays ? 'joined' : 'video'}][${musicReceipt?.requested ? 'speech' : 'audio'}]`);
+  if (musicReceipt?.requested) {
+    inputs.push('-protocol_whitelist', 'file,pipe', '-i', music.path);
+    filters.push(...performanceMusicFilters(inputIndex, manifest.targetDurationSeconds));
+  }
   if (overlays) {
     const overlayName = `${manifestHash}.ass`;
     await writeFile(join(dirname(output), overlayName), overlays, { flag: 'wx' });
@@ -259,7 +332,10 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
   const audio = await audioInfo(ffmpeg, output);
   if (audio.durationSeconds < manifest.targetDurationSeconds - 0.1) throw new Error("The assembled audio is shorter than the reviewed film.");
   const bytes = await readFile(output);
-  const report = { manifestHash, playable: true, technicalSample, verification: "FFmpeg fully decoded every source and the assembled output", ...info, contentType: "video/mp4", sizeBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), outputPath: output };
+  if (musicReceipt?.requested && createHash('sha256').update(await readFile(music.path)).digest('hex') !== musicReceipt.scoreSha256)
+    throw performanceFailure('PERFORMANCE_MUSIC_UNAVAILABLE');
+  const report = { manifestHash, playable: true, technicalSample, verification: "FFmpeg fully decoded every source and the assembled output", ...info, contentType: "video/mp4", sizeBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), outputPath: output,
+    ...(performance ? { music: musicReceipt } : {}) };
   await writeFile(`${output}.vtt`, filmCaptions(manifest), { flag: "wx" });
   await writeFile(`${output}.verification.json`, JSON.stringify(report, null, 2), { flag: "wx" });
   return report;

@@ -7,6 +7,7 @@ import { buildFilmManifest, fictionalOperatorProject } from "./film-production.m
 import { planKlingShots } from "./kling-film-plan.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
 import { readPaidFilmCorrection } from "./paid-film-correction.mjs";
+import { validatePerformanceReviewProof } from './film-performance-review.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -34,6 +35,9 @@ export function validateStoredProductionMedia(job, email) {
     || media.pathname !== `production/media/${ownerHash}/${job.id}/${media.sha256}.mp4`
     || !Number.isSafeInteger(media.sizeBytes) || media.sizeBytes < 16 || media.sizeBytes > MAX_FILM_BYTES
     || !Number.isFinite(media.durationSeconds) || media.durationSeconds <= 0 || media.durationSeconds > 600) throw invalidMedia();
+  try { validatePerformanceReviewProof({ manifest: job.manifest, manifestHash: job.manifestHash, ownerHash, id: job.id,
+    artifactSha256: media.sha256, review: job.performanceReview }); }
+  catch { throw invalidMedia(); }
   return Object.fromEntries(["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"].map(key => [key, media[key]]));
 }
 

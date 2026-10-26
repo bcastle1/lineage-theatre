@@ -10,23 +10,63 @@ import { digest } from '../api/_lib/auth.mjs';
 import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { extractVisualFrame, createRemoteVisualReview, createFilmVisualReviewer } from '../scripts/review-film-visuals.mjs';
 import { createWorkerAssembly } from '../scripts/production-worker.mjs';
+import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
+import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 
 const email = 'visual-worker@example.invalid', id = '11111111-1111-4111-8111-111111111111';
 const bytes = Buffer.from('0000ftypisom00000000000000000000');
 const failureReason = reason => error => { assert.deepEqual(finishingFailure(error), { stage: 'visual-review', reason }); return true; };
-async function fixture() {
+async function fixture({ performance = false } = {}) {
   const jpeg = await sharp({ create: { width: 96, height: 96, channels: 3, background: '#667788' } }).jpeg().toBuffer();
   const image = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
-  const manifest = { visualContinuity: { version: 1 }, targetDurationSeconds: 30,
+  let manifest = { visualContinuity: { version: 1 }, targetDurationSeconds: 30,
     shots: [0, 0, 1].map((sceneIndex, index) => ({ id: `shot-${index + 1}`, sceneIndex, targetDurationMs: 10000 })) };
+  if (performance) {
+    const project = fictionalOperatorProject(); project.duration = 30; project.scenes = project.scenes.slice(0, 1);
+    project.performanceControlsVersion = 1;
+    manifest = planKlingShots(buildFilmManifest(project).manifest);
+  }
   const job = { status: 'awaiting-assembly', manifest, manifestHash: digest(JSON.stringify(manifest)),
     shots: manifest.shots.map(shot => ({ id: shot.id, status: 'completed', output: { url: `https://v3.fal.media/${shot.id}.mp4`,
       contentType: 'video/mp4', sizeBytes: bytes.length, durationSeconds: 10 } })) };
   const clips = manifest.shots.map(shot => ({ shotId: shot.id, path: join(tmpdir(), `${shot.id}.mp4`) }));
-  const proof = shotId => ({ version: 1, shotId, manifestHash: job.manifestHash,
+  const proof = shotId => ({ version: performance ? 2 : 1, shotId, manifestHash: job.manifestHash,
     bindingHash: digest(shotId), passed: true, receiptPath: `production/visual-reviews/${digest(email)}/${id}/${digest(shotId)}.json` });
   return { jpeg, image, job, clips, proof, input: { email, id, job, clips, ffmpeg: 'fixture-ffmpeg', stillOwned: async () => true } };
 }
+
+test('performance worker requires version-two visual proof for every final cut', async () => {
+  const f = await fixture({ performance: true }), extracts = [], requests = [];
+  const reviewer = createFilmVisualReviewer({ extract: async input => { extracts.push(input); return f.image; },
+    review: async input => { requests.push(input); return f.proof(input.shotId); } });
+  const report = await reviewer(f.input);
+  assert.equal(report.version, 2);
+  assert.equal(report.shots.length, f.job.manifest.shots.length);
+  assert.ok(report.shots.every(proof => proof.version === 2));
+  assert.equal(report.sampling, 'five-frames-including-first-and-final-percent-and-same-scene-boundary');
+  assert.equal(extracts.length, f.job.manifest.shots.length * 5);
+  for (const [index, request] of requests.entries()) {
+    const shot = f.job.manifest.shots[index], prior = f.job.manifest.shots[index - 1];
+    assert.deepEqual(request.frames.slice(0, 5).map(frame => frame.atMs), [0, .15, .5, .85, .99].map(fraction => Math.round(shot.targetDurationMs * fraction)));
+    assert.equal(request.frames.length, prior?.sceneIndex === shot.sceneIndex ? 6 : 5);
+    if (prior?.sceneIndex === shot.sceneIndex) assert.deepEqual(request.frames[5], requests[index - 1].frames[4]);
+  }
+  let legacyRequests = 0;
+  const legacy = createFilmVisualReviewer({ extract: async () => f.image,
+    review: async input => { legacyRequests++; return { ...f.proof(input.shotId), version: 1 }; } });
+  await assert.rejects(legacy(f.input), failureReason('VISUAL_REVIEW_REQUIRED'));
+  assert.equal(legacyRequests, 1);
+});
+
+test('performance contracts cannot bypass review by removing the visual marker or contract version', async () => {
+  const reviewer = createFilmVisualReviewer({ extract: () => assert.fail('Do not extract an invalid contract'),
+    review: () => assert.fail('Do not infer for an invalid contract') });
+  for (const change of [manifest => { delete manifest.visualContinuity; },
+    manifest => { delete manifest.performance; }, manifest => { manifest.performance.version = 2; }]) {
+    const f = await fixture({ performance: true }); change(f.job.manifest);
+    await assert.rejects(reviewer(f.input));
+  }
+});
 
 test('frame extraction uses local-only ffmpeg protocols, fixed sampling time and bounded photographic output', async () => {
   const f = await fixture(); let called = false;

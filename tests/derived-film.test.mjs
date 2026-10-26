@@ -1,3 +1,4 @@
+import { resolveBrowserTestImports } from './helpers/browser-imports.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -7,7 +8,7 @@ import { buildFilmManifest } from "../api/_lib/film-production.mjs";
 import { prepareStory } from "../api/_lib/story.mjs";
 
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
-const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(resolveBrowserTestImports(source)).toString("base64")}`;
 const modelUrl = moduleUrl(compile(await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8")));
 const libraryUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-library.ts", import.meta.url), "utf8")));
 const derivedSource = compile(await readFile(new URL("../src/studio/derived-film.ts", import.meta.url), "utf8"))

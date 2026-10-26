@@ -4,6 +4,7 @@ import { productionReadiness } from "./_lib/production.mjs";
 import { readPricingSettings } from "./_lib/admin.mjs";
 import { filmProduction, FilmProductionError } from "./_lib/film-production.mjs";
 import { FalProductionPlanError } from "./_lib/fal-production.mjs";
+import { FilmPerformanceError } from './_lib/film-performance.mjs';
 import { createFilmPricingService } from "./_lib/film-pricing.mjs";
 import { payments, PaymentError } from "./_lib/payments.mjs";
 import { hostedCheckout } from "./_lib/hosted-checkout.mjs";
@@ -264,6 +265,7 @@ export function createStudioHandler(overrides={}) {
     if(e instanceof CaptchaError) return json(res,e.status,{code:e.code,message:e.message,charged:null});
     if(e instanceof FilmProductionError) return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof FalProductionPlanError) return json(res,e.status,{code:e.code,message:e.message});
+    if(e instanceof FilmPerformanceError && e.code === 'FILM_PERFORMANCE_INVALID') return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof PaidFilmGenerationError || e instanceof PaidFilmReviewError) return json(res,e.status,{code:e.code,message:e.message});
     if(e instanceof PaymentError) return json(res,e.status,{code:e.code,message:e.message,charged:e.charged});
     return json(res,503,{message:e instanceof Error&&customerValidationMessages.has(e.message)?e.message:storyRequest?storyUnavailable:"The studio could not complete this action. Your saved film is unchanged."});

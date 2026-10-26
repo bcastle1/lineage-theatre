@@ -170,7 +170,9 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       ...(snapshot.stage === "attention" ? { needsAttention: true } : {}),
       ...(snapshot.stage === "queued" ? { status: "queued", preparationOnly: false } : {}),
       ...queueMessage,
-      ...(needsAttention ? { needsAttention: true, message: "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
+      ...(needsAttention ? { needsAttention: true, message: validTicket?.lastFailure?.reason?.startsWith('PERFORMANCE_')
+        ? "The selected voice and mouth movements need review. The original performance and saved payment record are retained."
+        : "Production needs administrator attention. Your payment and saved plan remain recorded." } : {}) };
   }
   async function claim(path) {
     const old = await read(path), value = old?.value;
@@ -247,6 +249,8 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       // Only pre-claim unavailability and confirmed retryable rejection use the
       // existing bounded backoff; a paused claim must never invite a new call.
       const needsReview = (error instanceof FilmProductionError && !retryable) || error?.code==='FILM_SPEECH_REVIEW_REQUIRED'
+        || error?.code === 'FILM_PERFORMANCE_REVIEW_REQUIRED' || error?.code === 'PERFORMANCE_PROVENANCE_INVALID'
+        || failure?.reason?.startsWith('PERFORMANCE_')
         || visualReviewRequired.includes(error?.code) || visualReviewRequired.includes(failure?.reason) || ticket.value.attempts >= 10;
       if (failure) console.warn("FILM_FINISHING_FAILED", failure);
       await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE", failure);

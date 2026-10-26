@@ -18,6 +18,9 @@
 !scripts/paid-film-delivery-worker.mjs
 !scripts/review-film-speech.mjs
 !scripts/review-film-visuals.mjs
+!scripts/review-film-performance.mjs
+!scripts/film-performance-music.mjs
+!scripts/film-performance-music.py
 !scripts/transcribe-film.py
 !scripts/automatic-film-soundtrack.mjs
 !scripts/authored-soundtrack-casting.mjs

@@ -16,7 +16,8 @@ export function productionTimingProfile(job, adapter) {
     music: job.manifest.sound?.musicRequested === true,
     // New finishing checks must learn their own delivery times; omit the key
     // for legacy manifests so their existing history remains usable.
-    ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}) }));
+    ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}),
+    ...(job.manifest.performance ? { performanceVersion: job.manifest.performance.version, performanceRecipe: job.manifest.performance.recipe } : {}) }));
 }
 
 function samples(value, now) {

@@ -18,7 +18,7 @@ import {
   X,
   CheckCircle2,
 } from "lucide-react";
-import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
+import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage, KLING_VOICES, DEFAULT_NARRATOR_VOICE_ID } from "./model";
 import FilmCheckout from "./FilmCheckout";
 import type { FilmOrder } from "./checkout-contract";
 import { getSourceObjectUrl } from "../lib/storage";
@@ -592,6 +592,26 @@ export function CuttingStep({
           onChange={(e) => update({ logline: e.target.value })}
         />
       </label>
+      <div className="coverage-panel">
+        <h3>Voices and performance</h3>
+        {film.performanceControlsVersion !== 1 ? <>
+          <p>This saved draft uses the earlier production plan. Enable the current voice and character controls before preparing a new film.</p>
+          <button className="button secondary small" disabled={!!busy || !!film.paymentReference}
+            onClick={() => update({ performanceControlsVersion: 1, narratorVoiceId: DEFAULT_NARRATOR_VOICE_ID })}>
+            Use current character and voice controls
+          </button>
+          {film.paymentReference && <p className="field-note">Create a new checkout draft to change a film that has already been ordered.</p>}
+        </> : <>
+          <label>Off-screen narrator
+            <select aria-label="Off-screen narrator voice" value={film.narratorVoiceId || DEFAULT_NARRATOR_VOICE_ID} disabled={!!busy}
+              onChange={event => update({ narratorVoiceId: event.target.value })}>
+              {KLING_VOICES.map(voice => <option key={voice.id} value={voice.id}>{voice.label}</option>)}
+            </select>
+          </label>
+          <p className="field-note">Choose a stock voice for each character below. Speaking shots use that voice with lip synchronization; narration stays off screen. Start each dialogue turn with the character’s exact name and a colon.</p>
+          <p className="field-note">Describe varied locations, actions, lighting, and camera views in each scene. Readable titles and captions are added from your saved script. Generated signs and pages must not contain invented lettering.</p>
+        </>}
+      </div>
       <div className="section-subtitle">
         <div>
           <h3>The people in this story</h3>
@@ -623,7 +643,7 @@ export function CuttingStep({
         </button>
       </div>
       <div className="cast-grid">
-        {film.characters.map((character) => (
+        {film.characters.map((character, characterIndex) => (
           <article className="cast-card" key={character.id}>
             <div className="cast-card-heading">
               <span className={`basis-tag ${character.basis}`}>
@@ -657,6 +677,21 @@ export function CuttingStep({
                 onChange={(e) => changeCharacter(character.id, { name: e.target.value })}
               />
             </label>
+            {film.performanceControlsVersion === 1 && <>
+              <label>Speaking voice
+                <select aria-label={`Speaking voice for ${character.name || 'character'}`}
+                  value={character.voiceId || KLING_VOICES[characterIndex % KLING_VOICES.length].id} disabled={!!busy}
+                  onChange={event => changeCharacter(character.id, { voiceId: event.target.value })}>
+                  {KLING_VOICES.map(voice => <option key={voice.id} value={voice.id}>{voice.label}</option>)}
+                </select>
+              </label>
+              <label>Clothing to keep consistent
+                <textarea rows={2} maxLength={1000} value={character.wardrobe || ''}
+                  placeholder="Garments, colors, patterns, layers, and accessories"
+                  onChange={event => changeCharacter(character.id, { wardrobe: event.target.value })} />
+              </label>
+              <p className="field-note">This outfit stays consistent across cuts. Describe any deliberate costume or age change in the relevant scene.</p>
+            </>}
             <label>
               Role or relationship
               <input
