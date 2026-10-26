@@ -5,6 +5,7 @@ import { connections, createStudioHandler } from "../api/studio.mjs";
 import { createFilmProductionService, FilmProductionError } from "../api/_lib/film-production.mjs";
 import { productionReadiness } from "../api/_lib/production.mjs";
 import { FalProductionPlanError } from "../api/_lib/fal-production.mjs";
+import { FilmPerformanceError } from '../api/_lib/film-performance.mjs';
 
 const user = { email: "customer@example.invalid", role: "customer", status: "active" };
 const fixtureAdapter = () => ({ id: "fal", environment: "production", available: true,
@@ -77,4 +78,18 @@ test("unsupported Kling scenes return actionable validation before payment and d
     filmPricing:{price:async()=>{throw Object.assign(new Error("private provider request"),{status:422,code:"FILM_PROMPT_TOO_LONG"});}}});
   const denied=await request(generic,"price",{preparedId:"fixture"});
   assert.equal(denied.status,503);assert.doesNotMatch(JSON.stringify(denied.result),/private provider request/);
+});
+
+test('speaking-plan corrections are actionable before payment without exposing final-output internals', async () => {
+  for (const [error, expected] of [
+    [new FilmPerformanceError('Label each dialogue turn with its character name before preparing production.'), 422],
+    [new FilmPerformanceError('Private media binding detail.', 'PERFORMANCE_PROVENANCE_INVALID'), 503],
+  ]) {
+    const handler = createStudioHandler({ captcha: captchaStub, getSession: async () => ({ user }), limitAction: async () => true,
+      filmPricing: { price: async () => { throw error; } } });
+    const response = await request(handler, 'price', { preparedId: 'fixture' });
+    assert.equal(response.status, expected);
+    if (expected === 422) assert.equal(response.result.message, error.message);
+    else assert.doesNotMatch(JSON.stringify(response.result), /Private media/);
+  }
 });

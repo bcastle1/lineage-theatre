@@ -167,7 +167,8 @@ async function verifyAdjacentScene({result,manifest,shot,previous,currentAudio,n
   if(!isDeepStrictEqual(tokens(fullNormal),tokens(fullContext)))throw failure('SPEECH_SCRIPT_MISMATCH');
   return structuredClone(proof);
 }
-export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences,resolveAdjacentSpeechContext,speakerAliases}){
+export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env.PYTHON_PATH||'python3',transcribe,resolveSpeechDifferences,resolveAdjacentSpeechContext,speakerAliases,allowAudioEdits=true}){
+  if(typeof allowAudioEdits!=='boolean')throw failure('SPEECH_REVIEW_REQUIRED');
   const reviews=[],reviewedSources=new Map(),adjacentEnabled=typeof resolveAdjacentSpeechContext==='function';
   for(const clip of clips){
     const shot=manifest.shots.find(s=>s.id===clip.shotId);if(!shot)throw failure('SPEECH_SHOT_INVALID');
@@ -231,6 +232,7 @@ export async function reviewFilmSpeech({manifest,clips,ffmpeg,python=process.env
       }
     }
     if(edit){
+      if(!allowAudioEdits)throw failure('SPEECH_UNEXPECTED');
       const output=join(clip.path.replace(/[^\\/]+$/,''),`${clip.shotId}-reviewed.wav`);
       await run(ffmpeg,['-hide_banner','-loglevel','error','-nostdin','-n','-i',audioPath,'-map','0:a:0','-af',
         `atrim=duration=${edit.cut},afade=t=out:st=${edit.fadeStart}:d=${edit.fadeDuration},apad,atrim=duration=${Math.max(transcript.duration,shot.targetDurationMs/1000)}`,

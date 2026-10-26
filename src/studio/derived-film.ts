@@ -1,4 +1,4 @@
-import { newFilm, productionInputHash, type Film } from "./model";
+import { newFilm, productionInputHash, KLING_VOICES, type Film } from "./model";
 import { normalizeLibraryEntry, type LibraryDetail } from "./film-library";
 
 const MAX_SOURCE_CHARACTERS = 1_000_000;
@@ -46,8 +46,11 @@ export async function createDerivedFilmDraft(detail: LibraryDetail): Promise<Fil
     plot: text(theme.plot), climax: text(theme.climax), reason: text(theme.reason) }));
   const characters = rows(screenplay.characters, 16).map(character => {
     if (!["documented", "inferred", "invented"].includes(String(character.basis))) throw invalid();
+    if (character.voiceId !== undefined && !KLING_VOICES.some(voice => voice.id === character.voiceId)) throw invalid();
     return { id: text(character.id), name: text(character.name), role: text(character.role), description: text(character.description),
-      basis: character.basis as Film["characters"][number]["basis"], sourceIds: sourceRefs(character.sourceIds) };
+      basis: character.basis as Film["characters"][number]["basis"], sourceIds: sourceRefs(character.sourceIds),
+      ...(character.voiceId !== undefined ? { voiceId: String(character.voiceId) } : {}),
+      ...(character.wardrobe !== undefined ? { wardrobe: text(character.wardrobe, 1000) } : {}) };
   });
   const characterIds = new Set(characters.map(character => character.id));
   if (characterIds.size !== characters.length || characters.some(character => !character.id.trim())) throw invalid();
@@ -83,6 +86,12 @@ export async function createDerivedFilmDraft(detail: LibraryDetail): Promise<Fil
     sources: [{ id: sourceId, name: "Saved screenplay (derived source)", type: "text/plain", size: new TextEncoder().encode(sourceText).byteLength,
       text: sourceText, extraction: "Saved screenplay copied as a derived text source. Original uploads and family narrative were not copied; review their evidence before regenerating." }],
   };
+  if (manifest.performance !== undefined) {
+    const performance = manifest.performance;
+    if (!object(performance) || performance.version !== 1
+      || !KLING_VOICES.some(voice => voice.id === performance.narratorVoiceId)) throw invalid();
+    draft.narratorVoiceId = String(performance.narratorVoiceId);
+  }
   // Match story preparation's metadata boundary before writing a draft that
   // would immediately fail to regenerate. No source is silently shortened.
   const metadata = { title: draft.title, ancestor: draft.ancestor, era: draft.era, script: "", duration: draft.duration,

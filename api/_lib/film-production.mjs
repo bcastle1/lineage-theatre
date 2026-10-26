@@ -7,6 +7,8 @@ import { createProductionProgress, productionTimingProfile } from "./production-
 import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-production.mjs";
 import { planKlingShots } from "./kling-film-plan.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
+import { DEFAULT_NARRATOR_VOICE_ID, FILM_PERFORMANCE_RECIPE, KLING_VOICES, isKlingVoice, validatePerformanceReceiptShape, validatePerformanceOutput } from './film-performance.mjs';
+import { validatePerformanceReviewProof } from './film-performance-review.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -29,6 +31,7 @@ const authorizationExpired = () => new FilmProductionError("Production authoriza
 const invalid = message => { throw new FilmProductionError(message); };
 const clone = value => structuredClone(value);
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const adapterRecipe = (adapter, manifest) => adapter.recipeForManifest?.(manifest) || adapter.modelVersion || null;
 function owner(email) {
   if (typeof email !== "string" || email.length > 254 || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(email)) invalid("Sign in to prepare this film.");
   return email.toLowerCase();
@@ -91,6 +94,18 @@ export function buildFilmManifest(project) {
       invalid("Choose a photo from this film's sources and link it to the character before preparing production.");
     character.referencePhotoId = sourceId;
   });
+  if (project.performanceControlsVersion !== undefined && project.performanceControlsVersion !== 1) invalid('Choose the current character and voice controls before preparing production.');
+  const performance = project.performanceControlsVersion === 1;
+  const narratorVoiceId = project.narratorVoiceId || DEFAULT_NARRATOR_VOICE_ID;
+  if (performance) {
+    if (!isKlingVoice(narratorVoiceId)) invalid('Choose a supported narrator voice.');
+    screenplay.characters.forEach((character, index) => {
+      const input = project.characters[index];
+      character.voiceId = input.voiceId || KLING_VOICES[index % KLING_VOICES.length].id;
+      character.wardrobe = input.wardrobe === undefined ? '' : textField(input.wardrobe, 'The character wardrobe', 1000).trim();
+      if (!isKlingVoice(character.voiceId)) invalid('Choose a supported voice for each character.');
+    });
+  }
   const safeScreenplay = clone(screenplay);
   if (Buffer.byteLength(JSON.stringify(safeScreenplay)) > MAX_MANIFEST_BYTES) invalid("This screenplay is too large for a single production plan.");
   const weights = safeScreenplay.scenes.map(s => Math.max(1, `${s.narration} ${s.dialogue}`.trim().split(/\s+/).filter(Boolean).length));
@@ -115,6 +130,7 @@ export function buildFilmManifest(project) {
     sound: { musicRequested: project.music === true, narration: "requires-voice-and-timing-verification", dialogue: "requires-voice-and-timing-verification", captions: "derive-from-reviewed-spoken-script" },
     continuity: safeScreenplay.characters.map(c => ({ characterId: c.id, appearance: c.description, sourceIds: [...c.sourceIds], referenceStatus: "requires-verification", voiceStatus: "requires-verification" })),
     review: { screenplay: "required", characterReferences: "required", audioAndTiming: "required", shotDurations: "requires-capability-verification" },
+    ...(performance ? { performance: { version: 1, recipe: FILM_PERFORMANCE_RECIPE, narratorVoiceId } } : {}),
   };
   return { manifest, manifestHash: hash(manifest) };
 }
@@ -153,7 +169,8 @@ export function validateProviderAudio(output, allowedHosts = []) {
 }
 export function validateProviderOutput(output, allowedHosts = []) {
   const video = validateProviderMedia(output, allowedHosts, ["video/mp4", "video/webm"]);
-  return { ...video, ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}) };
+  return { ...video, ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}),
+    ...(output.performance !== undefined ? { performance: validatePerformanceReceiptShape(output.performance) } : {}) };
 }
 
 function customerJob(job) {
@@ -290,7 +307,7 @@ export function createFilmProductionService(dependencies = {}) {
     // Public checkout repricing still rejects every already-started film.
     if (started && (!["processing", "uncertain", "awaiting-assembly"].includes(job.status)
       || adapter.id !== "fal" || adapter.model !== "kling" || !adapter.modelVersion
-      || job.provider?.id !== adapter.id || job.provider.model !== adapter.model || job.provider.recipe !== adapter.modelVersion
+      || job.provider?.id !== adapter.id || job.provider.model !== adapter.model || job.provider.recipe !== adapterRecipe(adapter, job.manifest)
       || job.authorization?.environment !== environment || job.authorization.manifestHash !== manifestHash
       || !Number.isSafeInteger(job.authorization.budgetCents) || job.authorization.budgetCents < 1 || job.authorization.budgetCents > budgetCents
       || typeof job.authorization.quoteReference !== "string" || !job.authorization.quoteReference.trim() || job.authorization.quoteReference.length > 200
@@ -336,7 +353,7 @@ export function createFilmProductionService(dependencies = {}) {
     let job = clone(record.value);
     let runAdapter = adapter;
     if (job.provider && (job.provider.id !== adapter.id || job.provider.model !== (adapter.model || null)
-      || job.provider.recipe !== (adapter.modelVersion || null))) {
+      || job.provider.recipe !== adapterRecipe(adapter, job.manifest))) {
       // Existing provider requests may be polled with their exact old binding.
       // The legacy adapter refuses any new render/reference submissions.
       if (adapter.id !== "fal" || adapter.model !== "kling" || job.provider.id !== "fal"
@@ -374,7 +391,7 @@ export function createFilmProductionService(dependencies = {}) {
       if (Date.parse(grant.expiresAt) <= now()) throw authorizationExpired();
       job.authorization = { ...select(grant, ["manifestHash", "environment", "budgetCents", "quoteReference"]), authorizedAt: stamp(),
         ...(grant.correctionId ? { correctionId: grant.correctionId, originalOrderId: grant.originalOrderId } : {}) };
-      job.provider ||= { id: adapter.id, model: adapter.model || null, recipe: adapter.modelVersion || null };
+      job.provider ||= { id: adapter.id, model: adapter.model || null, recipe: adapterRecipe(adapter, job.manifest) };
     }
     // Status reads continue after a grant expires. A multi-stage provider must
     // call authorizeSpend before submitting any new paid operation.
@@ -446,7 +463,8 @@ export function createFilmProductionService(dependencies = {}) {
     }
     if (["queued", "processing", "completed"].includes(current.status) && !current.providerJobId) current.status = "uncertain";
     if (current.status === "completed") {
-      try { current.output = validateProviderOutput(result.output, runAdapter.outputHosts); }
+      try { current.output = validateProviderOutput(result.output, runAdapter.outputHosts);
+        validatePerformanceOutput(job.manifest, job.manifest.shots.find(candidate => candidate.id === current.id), current.output); }
       catch { current.status = "uncertain"; }
     }
     job.lastCheckedAt = stamp();
@@ -482,9 +500,12 @@ export function createFilmProductionService(dependencies = {}) {
     let profile;
     try { profile = verifiedMediaProfile(verified); }
     catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
+    const performanceReview = validatePerformanceReviewProof({ manifest: job.manifest, manifestHash,
+      ownerHash: digest(owner(email)), id, artifactSha256: verified.sha256, review: verified.performanceReview });
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     if(verified.speechReview?.passed===true)job.speechReview=verified.speechReview;
     if(verified.visualReview?.passed===true)job.visualReview=verified.visualReview;
+    if(performanceReview)job.performanceReview=performanceReview;
     job.status = "completed";
     job.completedAt = stamp();
     await save(productionJobPath(email, id), job, record.etag);

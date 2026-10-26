@@ -25,14 +25,16 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       || !timingSafeEqual(Buffer.from(digest(header)), Buffer.from(digest(`Bearer ${secret}`))))
       return json(res, 401, { code: 'WORKER_AUTH_REQUIRED' });
     try {
-      const body = await readBody(req, 1_500_000);
+      // Six bounded JPEG samples (five current, one preceding) fit below this
+      // cap. The review service checks exact positions and count per contract.
+      const body = await readBody(req, 2_100_000);
       if (body?.action === 'review-film-visuals') {
         if (Object.keys(body).sort().join(',') !== 'action,email,frames,manifestHash,preparedId,shotId'
           || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
           || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
           || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId || '')
           || !/^[a-f0-9]{64}$/.test(body.manifestHash || '') || !/^shot-\d{3}$/.test(body.shotId || '')
-          || !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 4)
+          || !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 6)
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         const path = productionJobPath(body.email, body.preparedId), job = (await read(path))?.value;
         let paymentPermission = null, pinnedLease = null, pinnedGrant = null;
@@ -109,7 +111,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           ...('previousArtifactSha256' in body ? { previousArtifactSha256: body.previousArtifactSha256 } : {}) }));
       }
       if (!body || Object.keys(body).sort().join(',') !== 'email,manifestHash,model,orderId,preparedId,recipe'
-        || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
+        || body.model !== adapter.model || typeof body.recipe !== 'string' || !adapter.available
         || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim()
         || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.manifestHash || ''))
         return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
@@ -117,6 +119,14 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       if (ticket?.state !== 'pending' || ticket.email !== body.email || ticket.id !== body.preparedId
         || ticket.orderId !== body.orderId || ticket.manifestHash !== body.manifestHash || !(ticket.lease?.expiresAt > now()))
         return json(res, 409, { code: 'WORKER_QUEUE_REQUIRED' });
+      if (typeof adapter.recipeForManifest === 'function') {
+        const job = (await read(productionJobPath(body.email, body.preparedId)))?.value;
+        if (!job || job.id !== body.preparedId || job.ownerHash !== digest(body.email) || job.manifestHash !== body.manifestHash
+          || digest(JSON.stringify(job.manifest)) !== body.manifestHash
+          || body.recipe !== adapter.recipeForManifest(job.manifest)
+          || job.provider && (job.provider.model !== body.model || job.provider.recipe !== body.recipe))
+          return json(res, 409, { code: 'WORKER_PLAN_REQUIRED' });
+      } else if (body.recipe !== adapter.modelVersion) return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
       if (!await limiter('production-worker:authorize', 120, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
       const { email, preparedId, manifestHash, orderId } = body;
       return json(res, 200, await paymentService.authorizeProduction({ email, preparedId, manifestHash, orderId }));

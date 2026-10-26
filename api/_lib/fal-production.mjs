@@ -7,6 +7,8 @@ import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from './film-visual-style.mjs';
 import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoDataUrl } from './production-photo-reference.mjs';
 import { validateVisualContinuity, VISUAL_CONTINUITY_DIRECTION } from './film-visual-continuity.mjs';
+import { FILM_PERFORMANCE_RECIPE, validateFilmPerformance, validatePerformanceOutput } from './film-performance.mjs';
+import { stripFilmOverlayDirectives } from './film-overlay-directives.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
@@ -23,6 +25,8 @@ function productionPlan(manifest, model, validatePrompts = true) {
   if (!['kling', 'seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
     || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > (model === 'kling' ? 200 : 30)
     || !Array.isArray(manifest.screenplay?.characters) || manifest.screenplay.characters.length > 16) invalid();
+  const performance = validateFilmPerformance(manifest);
+  if (performance && model !== 'kling') invalid();
   let position = 0;
   const shots = manifest.shots.map(shot => {
     if (!Number.isSafeInteger(shot.targetDurationMs) || shot.targetDurationMs < 1000 || shot.targetDurationMs > 30_000
@@ -52,7 +56,11 @@ function productionPlan(manifest, model, validatePrompts = true) {
     for (const shot of shots) klingPrompt(manifest, shot, characters);
   }
   return { model, endpoint: FAL_MODELS[model], shots, characters,
-    generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length };
+    generatedSeconds: shots.reduce((sum, shot) => sum + shot.seconds, 0), referenceCount: characters.filter(c => c.referencePhotoId === undefined).length,
+    ...(performance ? { referenceEditCount: characters.length,
+      narrationCount: shots.filter(shot => shot.performance.mode === 'narration').length,
+      lipsyncBillableSeconds: shots.filter(shot => shot.performance.mode === 'dialogue')
+        .reduce((sum, shot) => sum + Math.ceil(shot.seconds / 5) * 5, 0) } : {}) };
 }
 
 export function falPlan(manifest, model) { return productionPlan(manifest, model); }
@@ -64,6 +72,7 @@ const klingPromptBytes = prompt => Math.max(Buffer.byteLength(prompt, 'utf8'), B
 const klingPromptFits = prompt => klingPromptBytes(prompt) < 2400;
 
 function klingPrompt(manifest, shot, characters) {
+  if (manifest.performance) return performanceKlingPrompt(manifest, shot, characters);
   if (manifest.visualContinuity) return continuityKlingPrompt(manifest, shot, characters);
   const cast = shot.characterIds.map((id, index) => {
     const character = characters.find(value => value.id === id);
@@ -127,6 +136,46 @@ function klingPrompt(manifest, shot, characters) {
   return concise;
 }
 
+function performanceKlingPrompt(manifest, shot, characters) {
+  const cast = shot.characterIds.map((id, index) => {
+    const character = characters.find(value => value.id === id);
+    if (!character || typeof character.name !== 'string' || typeof character.description !== 'string') invalid();
+    return `@Element${index + 1} ${character.name}: ${realisticCreativeText(character.description)}. Approved wardrobe: ${realisticCreativeText(character.wardrobe)}`;
+  });
+  const direction = realisticCreativeText(stripFilmOverlayDirectives(shot.visual));
+  const dialogue = shot.performance.mode === 'dialogue';
+  const camera = [
+    'Wide establishing view of the approved setting, with layered depth and the described action readable in its surroundings.',
+    'Medium action view of the approved people using only objects and actions already described in this scene.',
+    'Environmental or hand-detail insert of an object, material or action explicitly described in this scene; no invented prop or new face.',
+    'Restrained lateral camera view within the same approved location, revealing its existing depth while following the described action.'
+  ][(Number.isSafeInteger(shot.scenePart) && shot.scenePart > 0 ? shot.scenePart - 1 : 0) % 4];
+  const lines = [...cast,
+    `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'}; era:${manifest.era}.`,
+    manifest.screenplay.logline, VISUAL_CONTINUITY_DIRECTION,
+    'Explicit scene wardrobe changes take priority; otherwise the approved wardrobe overrides reference clothing. Preserve every other appearance and garment detail.',
+    `Scene:${direction}`,
+    `Limits:${shot.dramatization || 'No undocumented claims.'}`,
+    'Begin inside the finished location. Compose foreground, middle distance and background with period-appropriate materials, depth, motivated light and restrained environmental motion. Use the supplied scene, never invent biographical facts.',
+    dialogue ? 'One continuous medium close-up of the named speaker alone; only this face is visible. Other characters mentioned in the scene stay offscreen. Keep face and mouth clear, front or gentle three-quarter view, stable camera, natural restrained expression. No cuts, other faces, hands over mouth or large head turns. The exact voice is added by the lip-sync stage.'
+      : `${camera} No new location or person. People remain silent with relaxed closed mouths; narration is offscreen. No talking performance.`,
+    `Hold a natural scene through ${shot.seconds}s.`,
+    'No generated writing anywhere: pages, signs and background surfaces have no readable letters or invented glyphs. No captions, logos, reference cards, collages, duplicate people, facial or wardrobe drift.'
+  ];
+  let prompt = lines.join('\n');
+  if (klingPromptFits(prompt)) return prompt;
+  // Shorten generic direction only. Saved character, scene, continuity and
+  // historical constraints remain complete and are never silently truncated.
+  prompt = [...cast, `Photorealistic ${manifest.style};${manifest.era}.`, manifest.screenplay.logline,
+    VISUAL_CONTINUITY_DIRECTION, 'Scene wardrobe changes override approved wardrobe; approved wardrobe overrides reference clothes.', direction, shot.dramatization || 'No undocumented claims.',
+    'Finished period location; layered foreground/background, motivated light, subtle environmental motion. No invented biography.',
+    dialogue ? 'Single continuous medium close-up, only speaker face visible, mouth unobstructed, front/three-quarter view, stable camera, no cuts. Exact voice added afterward.'
+      : `${camera} No new location/person. People silent, mouths closed; narration offscreen.`,
+    `Hold${shot.seconds}s. No text/glyphs on pages/signs, reference cards, duplicate people, facial/wardrobe drift.`].join('\n');
+  if (!klingPromptFits(prompt)) throw new FalProductionPlanError('This scene exceeds the safe Kling prompt limit. Shorten its visual or character directions and request a new price. The saved script has not changed.');
+  return prompt;
+}
+
 function continuityKlingPrompt(manifest, shot, characters) {
   const cast = shot.characterIds.map((id, index) => {
     const character = characters.find(value => value.id === id);
@@ -168,6 +217,14 @@ function continuityKlingPrompt(manifest, shot, characters) {
 }
 
 export function characterReferenceInput(manifest, character) {
+  if (validateFilmPerformance(manifest)) return {
+    prompt: `Create one photorealistic frontal character reference for a family-history film set in ${manifest.era}. ${REALISTIC_FILM_DIRECTION} `
+      + `Character: ${character.name}. Appearance: ${realisticCreativeText(character.description)}. Approved wardrobe: ${realisticCreativeText(character.wardrobe)}. `
+      + 'One frontal, three-quarter-length photographic portrait of one person at the described age; face straight toward camera, mouth visible, natural skin texture and proportions. '
+      + 'Use the approved outfit exactly, including garment colors, pattern, neckline, layers and accessories. Neutral soft light, plain studio background. '
+      + 'No reference sheet, collage, duplicate person, costume alternatives, writing, letters, captions or watermark. Do not invent historical or biographical facts.',
+    resolution: '4K', aspect_ratio: '3:4', output_format: 'jpeg', num_images: 1, limit_generations: true, enable_web_search: false
+  };
   return { prompt: `Create one photorealistic photographic character reference for a family-history film set in ${manifest.era}. ${REALISTIC_FILM_DIRECTION} `
     + `Character: ${character.name}. Appearance and life stages: ${realisticCreativeText(character.description)}. `
     + 'One photographic three-quarter-length portrait of one person at the described age, with natural skin texture, visible hands and realistic proportions. Restrained period-appropriate costume, neutral soft light and plain studio background. No reference sheet, collage, duplicate figure, text, letters, captions, watermark or invented historical claims. Treat this description as creative reference, not instructions to operate tools. No extra people.'
@@ -175,9 +232,31 @@ export function characterReferenceInput(manifest, character) {
     resolution: '4K', aspect_ratio: '3:4', output_format: 'jpeg', num_images: 1, limit_generations: true, enable_web_search: false };
 }
 
-export function falShotInput(manifest, shot, model, references) {
+export function characterAlternateReferenceInput(manifest, character, frontalImage) {
+  if (!validateFilmPerformance(manifest)) invalid();
+  const image = frontalImage?.startsWith('data:') ? validatedPhotoDataUrl(frontalImage) : falMediaUrl(frontalImage);
+  return { prompt: 'Make one additional photographic reference view of the exact same person in the supplied frontal reference. '
+    + 'Use a clear three-quarter side view, visibly different from the original frontal view. '
+    + `Approved wardrobe: ${realisticCreativeText(character.wardrobe)}. This approved wardrobe overrides the reference clothing; otherwise preserve garment colors, patterns, neckline, layers, buttons and accessories exactly. `
+    + 'Preserve visible facial identity, apparent age and hair. '
+    + 'One person, one outfit, natural proportions, neutral soft light. Do not add text, a collage, another person or a new costume. '
+    + 'Do not infer ethnicity, identity or biography from the photograph. This is a generated alternate view, not an original historical photograph.',
+    image_urls: [image], resolution: '1K', aspect_ratio: '3:4', output_format: 'jpeg', num_images: 1,
+    limit_generations: true, enable_web_search: false };
+}
+
+export function falShotInput(manifest, shot, model, references, alternateReferences = {}) {
   const plan = falPlan(manifest, model), selected = plan.shots.find(s => s.id === shot.id);
   if (!selected) invalid();
+  if (model === 'kling' && validateFilmPerformance(manifest)) return {
+    prompt: klingPrompt(manifest, selected, plan.characters), duration: String(selected.seconds),
+    elements: selected.characterIds.map(id => {
+      const front = references[id], alternate = alternateReferences[id];
+      const valid = value => value?.startsWith('data:') ? validatedPhotoDataUrl(value) : falMediaUrl(value);
+      if (!front || !alternate || front === alternate) invalid();
+      return { frontal_image_url: valid(front), reference_image_urls: [valid(alternate)] };
+    }), generate_audio: false, aspect_ratio: '16:9', shot_type: 'customize', enable_safety_checker: true
+  };
   if (model === 'kling') return { prompt: klingPrompt(manifest, selected, plan.characters), duration: String(selected.seconds),
     image_urls: selected.characterIds.map(id => plan.characters.find(c => c.id === id).referencePhotoId
       ? validatedPhotoDataUrl(references[id]) : falMediaUrl(references[id])),
@@ -242,28 +321,45 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
   pricing = createFalPricing({ key, fetchImpl, now }), normalizeReference = falReferenceData, read = readRecord, requireWorker = false,
   selectedPhoto = productionPhotoData, normalizeKlingReference = klingReferenceData } = {}) {
   if (!['kling', 'wan', 'seedance'].includes(model)) invalid();
-  const recipe = falRecipeVersion(model);
+  const legacyRecipe = falRecipeVersion(model);
+  const recipeForManifest = manifest => {
+    const performance = validateFilmPerformance(manifest);
+    if (performance && model !== 'kling') invalid();
+    return performance ? FILM_PERFORMANCE_RECIPE : legacyRecipe;
+  };
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
   const maximumCost = async manifest => {
     const plan = falPlan(manifest, model);
+    const performance = recipeForManifest(manifest) === FILM_PERFORMANCE_RECIPE;
     if (!qualified()) invalid();
     if(requireWorker){
-      const heartbeat=(await read('production/worker-health.json'))?.value;
-      if(heartbeat?.recipe!==FAL_RECIPE_VERSION||heartbeat.model!==model||heartbeat.ready!==true||heartbeat.deliveryChecksVersion!==1
+      const heartbeat=(await read(performance ? 'production/worker-health-performance-v1.json' : 'production/worker-health.json'))?.value;
+      if(heartbeat?.recipe!==(performance ? FILM_PERFORMANCE_RECIPE : FAL_RECIPE_VERSION)||heartbeat.model!==model||heartbeat.ready!==true||heartbeat.deliveryChecksVersion!==1
         ||!Number.isFinite(Date.parse(heartbeat.checkedAt))||now()-Date.parse(heartbeat.checkedAt)>180000||Date.parse(heartbeat.checkedAt)>now())
         throw new Error('Film production is temporarily unavailable. Please try again shortly.');
       if (plan.characters.some(character => character.referencePhotoId) && heartbeat.referencePhotoVersion !== 1)
         throw new Error('Character photo production is being updated. Please try again shortly.');
-      if (manifest.visualContinuity && heartbeat.visualChecksVersion !== 1)
+      if (manifest.visualContinuity && !(Number.isSafeInteger(heartbeat.visualChecksVersion) && heartbeat.visualChecksVersion >= 1))
         throw new Error('Film appearance and wardrobe checks are being updated. Please try again shortly.');
+      if (performance && (heartbeat.filmPerformanceVersion !== 1 || heartbeat.visualChecksVersion < 2))
+        throw new Error('Character voice and lip-sync delivery checks are being updated. Please try again shortly.');
+      if (performance && manifest.sound?.musicRequested === true && heartbeat.performanceMusicVersion !== 1)
+        throw new Error('Film music production is being updated. Please try again shortly.');
     }
-    const rates = await pricing(model);
+    const rates = await pricing(model, { performance });
     if (!Number.isSafeInteger(rates.videoMicroUsdPerSecond) || rates.videoMicroUsdPerSecond <= 0
       || !Number.isSafeInteger(rates.referenceMicroUsd) || rates.referenceMicroUsd <= 0
       || !Number.isFinite(Date.parse(rates.expiresAt)) || Date.parse(rates.expiresAt) <= now()) invalid();
+    let added = 0;
+    if (performance) {
+      if (['referenceEditMicroUsd', 'speechMicroUsd', 'lipsyncMicroUsdPerSecond'].some(name => !Number.isSafeInteger(rates[name]) || rates[name] <= 0)
+        || rates.lipsyncBillingIncrementSeconds !== 5 || typeof rates.pricingVersion !== 'string' || !rates.pricingVersion) invalid();
+      added = plan.referenceEditCount * rates.referenceEditMicroUsd + plan.narrationCount * rates.speechMicroUsd
+        + plan.lipsyncBillableSeconds * rates.lipsyncMicroUsdPerSecond;
+    }
     return { rates, cents: Math.ceil((plan.generatedSeconds * rates.videoMicroUsdPerSecond
-      + plan.referenceCount * rates.referenceMicroUsd) / 10_000) };
+      + plan.referenceCount * rates.referenceMicroUsd + added) / 10_000) };
   };
   async function step(input) {
     const { manifest, manifestHash, shot, idempotencyKey, productionId, authorizeSpend } = input;
@@ -271,7 +367,8 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
     // Reconcile durable requests using their original provider identity even
     // when a newer prompt preflight would reject a fresh submission. The full
     // prompt validation runs in falShotInput before any new video submission.
-    const plan = productionPlan(manifest, model, false), references = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
+    const recipe = recipeForManifest(manifest), performance = recipe === FILM_PERFORMANCE_RECIPE;
+    const plan = productionPlan(manifest, model, false), references = {}, alternateReferences = {}, selected = plan.shots.find(candidate => candidate.id === shot?.id);
     if (!selected) invalid();
     const identity = digest(`${recipe}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
     if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
@@ -295,6 +392,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
     let prior = await existingOperation(identity, plan.endpoint);
     const choice = (await read(`production/fal/choices/${identity}.json`))?.value;
     if (choice) {
+      // A legacy editorial replacement has no separately priced/bound sync
+      // operation. Never reuse speech from the old source or buy another sync.
+      if (performance) invalid();
       const reviewer = (await read(userPath(OWNER_EMAIL)))?.value;
       if (choice.version !== 1 || choice.originalIdentity !== identity || choice.productionId !== productionId
         || choice.manifestHash !== manifestHash || choice.model !== model || choice.approvedBy !== OWNER_EMAIL
@@ -344,23 +444,84 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
       references[character.id] = falMediaUrl(result.result.images[0].url);
     }
     if (pendingReferences) return { providerJobId, status: 'processing' };
-    const request = falShotInput(manifest, shot, model, references);
+    if (performance) {
+      let pendingAlternates = 0;
+      for (const character of plan.characters) {
+        const alternateId = digest(`${recipe}:cast-view:${productionId}:${manifestHash}:${character.id}`);
+        // Normalize only when a request has not already been journaled. A
+        // completed alternate never depends on a fresh download of its source.
+        let alternate = await existingOperation(alternateId, FAL_MODELS.referenceEdit);
+        if (!alternate) {
+          const frontal = await normalizeKlingReference(references[character.id], { fetchImpl });
+          alternate = await operation(alternateId, FAL_MODELS.referenceEdit, characterAlternateReferenceInput(manifest, character, frontal));
+        }
+        if (['failed', 'submitting', 'uncertain'].includes(alternate.state)) return { providerJobId, status: alternate.state === 'failed' ? 'failed' : 'uncertain' };
+        if (alternate.state !== 'completed') { if (++pendingAlternates >= 4) break; continue; }
+        if (alternate.result?.images?.length !== 1) invalid();
+        alternateReferences[character.id] = falMediaUrl(alternate.result.images[0].url);
+        if (alternateReferences[character.id] === references[character.id]) invalid();
+      }
+      if (pendingAlternates) return { providerJobId, status: 'processing' };
+    }
+    const request = falShotInput(manifest, shot, model, references, alternateReferences);
     if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url =>
       url.startsWith('data:') ? validatedPhotoDataUrl(url) : normalizeReference(url, { fetchImpl })));
-    if (model === 'kling') request.image_urls = await Promise.all(request.image_urls.map(url => normalizeKlingReference(url, { fetchImpl })));
+    if (model === 'kling' && performance) {
+      for (const element of request.elements) {
+        element.frontal_image_url = await normalizeKlingReference(element.frontal_image_url, { fetchImpl });
+        element.reference_image_urls = await Promise.all(element.reference_image_urls.map(url => normalizeKlingReference(url, { fetchImpl })));
+        if (element.reference_image_urls.includes(element.frontal_image_url)) invalid();
+      }
+    } else if (model === 'kling') request.image_urls = await Promise.all(request.image_urls.map(url => normalizeKlingReference(url, { fetchImpl })));
     result = await operation(renderIdentity, plan.endpoint, request);
     }
     if (result.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(result.state) ? 'uncertain' : result.state };
-    const url = falMediaUrl(result.result?.video?.url);
+    const sourceVideoUrl = falMediaUrl(result.result?.video?.url);
+    let url = sourceVideoUrl, audio, speechOperationId = null;
+    if (performance && selected.performance.mode !== 'silent') {
+      const mode = selected.performance.mode;
+      speechOperationId = digest(`${identity}:speech:${mode}:v1`);
+      const speechInput = mode === 'dialogue'
+        ? { video_url: sourceVideoUrl, text: selected.performance.text, voice_id: selected.performance.voiceId,
+          voice_language: 'en', voice_speed: 1, enable_safety_checker: true }
+        : { text: selected.performance.text, voice_id: selected.performance.voiceId, voice_speed: 1, enable_safety_checker: true };
+      // Validate a source clip before authorizing its paid sync. This prevents
+      // oversized media from consuming a second request, and never truncates it.
+      const endpoint = mode === 'dialogue' ? FAL_MODELS.lipsync : FAL_MODELS.speech;
+      let spoken = await existingOperation(speechOperationId, endpoint);
+      if (!spoken) {
+        if (mode === 'dialogue') await checkedMedia(sourceVideoUrl, ['video/mp4'], 100 * 1024 * 1024);
+        spoken = await operation(speechOperationId, endpoint, speechInput);
+      }
+      if (spoken.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(spoken.state) ? 'uncertain' : spoken.state };
+      if (mode === 'dialogue') url = falMediaUrl(spoken.result?.video?.url);
+      else {
+        const audioUrl = falMediaUrl(spoken.result?.audio?.url);
+        audio = { url: audioUrl, ...await checkedMedia(audioUrl, ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/webm'], 5 * 1024 * 1024),
+          durationSeconds: selected.targetDurationMs / 1000 };
+      }
+    }
     // The media worker later fully decodes and hashes the body. Here a bounded
     // HEAD verifies the destination and size without trusting result metadata.
-    const response = await fetchImpl(url, { method: 'HEAD', redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(20_000) });
+    const metadata = await checkedMedia(url, ['video/mp4'], 250 * 1024 * 1024);
+    const output = { url, ...metadata, durationSeconds: selected.seconds, ...(audio ? { audio } : {}),
+      ...(performance ? { performance: { version: 1, recipe, mode: selected.performance.mode,
+        speakerId: selected.performance.speakerId, voiceId: selected.performance.voiceId,
+        textSha256: digest(selected.performance.text), videoOperationId: renderIdentity, speechOperationId,
+        sourceVideoUrlSha256: digest(sourceVideoUrl), outputVideoUrlSha256: digest(url),
+        audioUrlSha256: audio ? digest(audio.url) : null } } : {}) };
+    if (performance) validatePerformanceOutput(manifest, selected, output);
+    return { status: 'completed', providerJobId, reviewedReuse: Boolean(choice), output };
+  }
+  async function checkedMedia(url, types, maxBytes) {
+    const response = await fetchImpl(falMediaUrl(url), { method: 'HEAD', redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(20_000) });
     const sizeBytes = Number(response.headers.get('content-length')), contentType = response.headers.get('content-type')?.split(';')[0];
-    if (!response.ok || contentType !== 'video/mp4' || !Number.isSafeInteger(sizeBytes) || sizeBytes < 16 || sizeBytes > 250 * 1024 * 1024) invalid();
-    return { status: 'completed', providerJobId, reviewedReuse: Boolean(choice), output: { url, sizeBytes, contentType, durationSeconds: selected.seconds } };
+    await response.body?.cancel();
+    if (!response.ok || !types.includes(contentType) || !Number.isSafeInteger(sizeBytes) || sizeBytes < 16 || sizeBytes > maxBytes) invalid();
+    return { sizeBytes, contentType };
   }
   return {
-    id: 'fal', model, modelVersion: recipe, timingVersion: `${model}:${recipe}:parallel4`, maxConcurrentShots: 4,
+    id: 'fal', model, modelVersion: legacyRecipe, recipeForManifest, timingVersion: `${model}:${legacyRecipe}:parallel4`, maxConcurrentShots: 4,
     environment: 'production', outputHosts: FAL_MEDIA_HOSTS,
     get available() { return hasKey() && qualified(); },
     // The shared readiness contract uses qualityVerified for the technical
@@ -372,7 +533,12 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
     quote: async ({ manifest, manifestHash }) => {
       const { rates, cents } = await maximumCost(manifest);
       return { manifestHash, currency: 'USD', providerCostCents: cents,
-        quoteReference: digest(`${FAL_RECIPE_VERSION}:${model}:${manifestHash}:${rates.videoMicroUsdPerSecond}:${rates.referenceMicroUsd}`),
+        quoteReference: recipeForManifest(manifest) === FILM_PERFORMANCE_RECIPE
+          ? digest(JSON.stringify({ recipe: FILM_PERFORMANCE_RECIPE, model, manifestHash,
+            pricingVersion: rates.pricingVersion, video: rates.videoMicroUsdPerSecond, reference: rates.referenceMicroUsd,
+            referenceEdit: rates.referenceEditMicroUsd, speech: rates.speechMicroUsd,
+            lipsync: rates.lipsyncMicroUsdPerSecond, increment: rates.lipsyncBillingIncrementSeconds }))
+          : digest(`${FAL_RECIPE_VERSION}:${model}:${manifestHash}:${rates.videoMicroUsdPerSecond}:${rates.referenceMicroUsd}`),
         expiresAt: rates.expiresAt };
     },
     submitShot: step, pollShot: step, reconcileShot: step,
@@ -383,7 +549,8 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
 // retain that binding; unavailable legacy adapters reconcile only saved tasks.
 export function falAdapterForSavedProvider(provider, dependencies = {}) {
   if (provider?.id !== 'fal' || !['kling', 'wan', 'seedance'].includes(provider.model)
-    || provider.recipe !== falRecipeVersion(provider.model)) invalid();
+    || !(provider.recipe === falRecipeVersion(provider.model)
+      || provider.model === 'kling' && provider.recipe === FILM_PERFORMANCE_RECIPE)) invalid();
   return createFalProductionAdapter({ ...dependencies, model: provider.model });
 }
 

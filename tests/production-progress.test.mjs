@@ -11,6 +11,14 @@ function job() { return { id: 'saved-film', ownerHash: digest(email), manifestHa
   shots: [{ id: 'one', status: 'processing', submittedAt: at(-200) }, { id: 'two', status: 'prepared' }] }; }
 const pending = film => ({ version: 1, email, id: film.id, manifestHash: film.manifestHash,
   orderId: digest(`${email}:production:${film.manifestHash}`), state: 'pending', attempts: 1, nextAttemptAt: NOW + 10000 });
+test('character and voice processing learns its own timing history without changing legacy profile identities', () => {
+  const film = job(), adapter = { id: 'fal', environment: 'production', timingVersion: 'legacy' };
+  const old = productionTimingProfile(film, adapter);
+  film.manifest.performance = { version: 1, recipe: 'kling-elements-stock-voice-lipsync-v1' };
+  assert.notEqual(productionTimingProfile(film, adapter), old);
+  delete film.manifest.performance;
+  assert.equal(productionTimingProfile(film, adapter), old);
+});
 test('an uncertain request in its bound automatic queue shows reconciliation without progress or ETA', () => {
   const film = { ...job(), status: 'uncertain' }, queue = pending(film);
   for (const orderId of [queue.orderId, digest(`${email}:${film.manifestHash}`)]) {

@@ -1,9 +1,10 @@
+import { resolveBrowserTestImports } from './helpers/browser-imports.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import ts from "typescript";
 const compile=async path=>ts.transpileModule(await readFile(new URL(path,import.meta.url),"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
-const url=source=>`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const url=source=>`data:text/javascript;base64,${Buffer.from(resolveBrowserTestImports(source)).toString("base64")}`;
 const model=url(await compile("../src/studio/model.ts"));
 const library=url(await compile("../src/studio/film-library.ts"));
 const {prepareFilmPrice,normalizeFilmPrice}=await import(url((await compile("../src/studio/film-pricing.ts"))

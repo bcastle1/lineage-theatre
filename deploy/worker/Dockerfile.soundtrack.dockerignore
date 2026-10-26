@@ -8,6 +8,9 @@
 !scripts/assemble-film.mjs
 !scripts/review-film-speech.mjs
 !scripts/review-film-visuals.mjs
+!scripts/review-film-performance.mjs
+!scripts/film-performance-music.mjs
+!scripts/film-performance-music.py
 !scripts/transcribe-film.py
 !scripts/rebuild-film-soundtrack.mjs
 !scripts/rebuild-film-soundtrack.py
@@ -22,6 +25,8 @@
 !scripts/diagnose-authored-scene-context.mjs
 !scripts/approve-film-soundtrack-casting.mjs
 !scripts/inspect-film-soundtrack-fit.mjs
+!shared/
+!shared/*.json
 !deploy/
 !deploy/worker/
 !deploy/worker/Dockerfile.soundtrack

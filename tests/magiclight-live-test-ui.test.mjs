@@ -1,3 +1,4 @@
+import { resolveBrowserTestImports } from './helpers/browser-imports.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -10,7 +11,7 @@ import { MAGICLIGHT_LIVE_TEST_FIXTURE } from "../api/_lib/magiclight-live-test.m
 
 const require = createRequire(import.meta.url);
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const dataUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+const dataUrl = source => `data:text/javascript;base64,${Buffer.from(resolveBrowserTestImports(source)).toString("base64")}`;
 const dependency = name => pathToFileURL(require.resolve(name)).href;
 const modelUrl = dataUrl(compile(await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8")));
 const rawSource = await readFile(new URL("../src/admin/MagicLightLiveTest.tsx", import.meta.url), "utf8");

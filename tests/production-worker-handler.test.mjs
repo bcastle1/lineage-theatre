@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProductionWorkerHandler } from '../api/production-worker.mjs';
 import { createRemoteProductionAuthorization } from '../api/_lib/remote-production-authorization.mjs';
+import { digest } from '../api/_lib/auth.mjs';
+import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
+import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
+import { FILM_PERFORMANCE_RECIPE, validateFilmPerformance } from '../api/_lib/film-performance.mjs';
 
 const secret='a'.repeat(64), at=1792372000000;
 const input={email:'family@example.invalid',preparedId:'11111111-1111-4111-8111-111111111111',manifestHash:'b'.repeat(64),orderId:'c'.repeat(64)};
@@ -35,6 +39,36 @@ test('remote authorization uses a fixed origin, no redirects and bounded respons
   }});assert.equal((await service.authorizeProduction(input)).allowed,true);
   for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
     await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
+});
+
+test('both worker and web authorize the exact saved performance recipe, rejecting mismatched job bindings before payment calls', async () => {
+  const manifest = planKlingShots(buildFilmManifest({ ...fictionalOperatorProject(), performanceControlsVersion: 1 }).manifest);
+  const request = { ...input, manifestHash: digest(JSON.stringify(manifest)) };
+  const provider = { model: 'kling', modelVersion: 'legacy-recipe', available: true,
+    recipeForManifest: value => validateFilmPerformance(value) ? FILM_PERFORMANCE_RECIPE : 'legacy-recipe' };
+  const job = { id: request.preparedId, ownerHash: digest(request.email), manifestHash: request.manifestHash, manifest,
+    provider: { id: 'fal', model: 'kling', recipe: FILM_PERFORMANCE_RECIPE } };
+  let observed, grants = 0;
+  const read = async path => ({ value: path.startsWith('production/jobs/') ? job : { ...request, id: request.preparedId,
+    state: 'pending', lease: { expiresAt: at + 10000 } } });
+  const web = createProductionWorkerHandler({ env: { LINEAGE_WORKER_SECRET: secret }, adapter: provider, read,
+    now: () => at, limiter: async () => true, paymentService: { authorizeProduction: async value => {
+      grants++; assert.deepEqual(value, request); return { allowed: true, manifestHash: request.manifestHash };
+    } } });
+  const remote = createRemoteProductionAuthorization({ adapter: provider, env: { LINEAGE_WORKER_SECRET: secret }, read,
+    fetchImpl: async (url, options) => {
+      observed = JSON.parse(options.body);
+      const res = { setHeader() {}, end(body) { this.body = body; } };
+      await web({ method: 'POST', headers: { authorization: `Bearer ${secret}` }, body: observed }, res);
+      return new Response(res.body, { status: res.statusCode });
+    } });
+  assert.equal((await remote.authorizeProduction(request)).allowed, true);
+  assert.equal(observed.recipe, FILM_PERFORMANCE_RECIPE); assert.equal(grants, 1);
+  const denied = { setHeader() {}, end(body) { this.body = JSON.parse(body); } };
+  await web({ method: 'POST', headers: { authorization: `Bearer ${secret}` }, body: { ...observed, recipe: provider.modelVersion } }, denied);
+  assert.equal(denied.statusCode, 409); assert.equal(grants, 1);
+  job.manifestHash = 'd'.repeat(64);
+  await assert.rejects(remote.authorizeProduction(request), /binding/); assert.equal(grants, 1);
 });
 test('reviewed delivery uses the worker credential, exact artifact binding and separate service even while generation is unqualified',async()=>{
   let delivered=0;const f=fixture({adapter:{...adapter,available:false},delivery:{deliver:async value=>{delivered++;assert.deepEqual(value,{orderId:input.orderId,artifactSha256:'d'.repeat(64)});return {status:'completed'};}}});

@@ -11,20 +11,27 @@ import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
 import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { FILM_PERFORMANCE_RECIPE } from '../api/_lib/film-performance.mjs';
 
 // Exercise the real route, reference lookup, JPEG validation, receipt writing,
 // and authorization callbacks. Only private storage/payment/model IO is fake.
 const secret = 'a'.repeat(64), now = 1_800_000_000_000, id = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
-async function fixture({ operator = false, changeManifest } = {}) {
+async function fixture({ operator = false, changeManifest, performance = false, shotIndex = 0 } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
-  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+  const project = fictionalOperatorProject();
+  if (performance) {
+    project.performanceControlsVersion = 1; project.duration = 30; project.scenes = project.scenes.slice(0, 1);
+    project.scenes[0].narration = 'A fictional garden.';
+    project.scenes[0].dialogue = 'Ada: Let us plant together.\nAlice: There is room for both.';
+  }
+  const manifest = planKlingShots(buildFilmManifest(project).manifest);
   if (changeManifest) changeManifest(manifest);
   const manifestHash = digest(JSON.stringify(manifest));
   const job = { id, filmId: manifest.filmId, ownerHash: digest(email), mode: operator ? 'operator-test' : 'customer',
     status: 'awaiting-assembly', manifest, manifestHash,
-    provider: { id: 'fal', model: 'kling', recipe: FAL_RECIPE_VERSION },
+    provider: { id: 'fal', model: 'kling', recipe: performance ? FILM_PERFORMANCE_RECIPE : FAL_RECIPE_VERSION },
     authorization: { environment: 'production', manifestHash, budgetCents: 300, quoteReference: 'b'.repeat(64) },
     shots: manifest.shots.map(shot => ({ id: shot.id, status: 'completed', requestKey: digest(`${id}:${manifestHash}:${shot.id}`),
       output: { url: `https://v3.fal.media/${shot.id}.mp4`, contentType: 'video/mp4', sizeBytes: 1024, durationSeconds: shot.targetDurationMs / 1000 } })) };
@@ -48,13 +55,16 @@ async function fixture({ operator = false, changeManifest } = {}) {
     [grantPath, grant], [leasePath, { token: 'owned-operator-claim', expiresAt: now + 600_000, manifestHash }]])
     records.set(path, { value: clone(value), etag: 'initial' });
   for (const character of manifest.screenplay.characters) {
-    const identity = digest(`${FAL_RECIPE_VERSION}:cast:${id}:${manifestHash}:${character.id}`);
+    const identity = digest(`${job.provider.recipe}:cast:${id}:${manifestHash}:${character.id}`);
     records.set(falRequestPath(identity), { value: { identity, state: 'completed', endpoint: FAL_MODELS.reference,
       result: { images: [{ url: `https://v3.fal.media/${character.id}.jpg` }] } }, etag: 'reference' });
   }
   const image = `data:image/jpeg;base64,${(await sharp({ create: { width: 96, height: 96, channels: 3, background: '#63574a' } }).jpeg().toBuffer()).toString('base64')}`;
-  const frames = visualSampleTimes(manifest.shots[0]).map(atMs => ({ shotId: manifest.shots[0].id, atMs, dataUrl: image }));
-  const body = { action: 'review-film-visuals', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
+  const selected = manifest.shots[shotIndex], previous = manifest.shots[shotIndex - 1];
+  const frames = visualSampleTimes(selected, performance ? 2 : 1).map(atMs => ({ shotId: selected.id, atMs, dataUrl: image }));
+  if (previous?.sceneIndex === selected.sceneIndex) frames.push({ shotId: previous.id,
+    atMs: visualSampleTimes(previous, performance ? 2 : 1).at(-1), dataUrl: image });
+  const body = { action: 'review-film-visuals', email, preparedId: id, manifestHash, shotId: selected.id, frames };
   const env = { LINEAGE_WORKER_SECRET: secret, OPENAI_API_KEY: 'synthetic-visual-key' };
   let modelCalls = 0, paymentCalls = 0, reviewCalls = 0, limiterCalls = 0, afterInference, afterReference;
   const read = async path => { reads.push(path); return clone(records.get(path) ?? null); };
@@ -84,7 +94,8 @@ async function fixture({ operator = false, changeManifest } = {}) {
           assert.equal(JSON.parse(request.body).store, false);
           if (afterInference) await afterInference();
           return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
-            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }));
+            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(performance
+              ? { ...decision, textIntegrity: 'consistent', speakerStaging: 'consistent' } : decision) }] }] }));
         } });
     } });
   const invoke = async changes => {
@@ -106,6 +117,45 @@ test('visual route completes an owned paid film review and returns only the boun
   assert.ok(!JSON.stringify(f.writes).includes(f.env.OPENAI_API_KEY));
   const repeated = await f.invoke(); assert.equal(repeated.statusCode, 200); assert.deepEqual(repeated.body, result.body);
   assert.equal(f.counts().modelCalls, 1);
+});
+
+test('performance route accepts five current samples and the sixth same-scene boundary sample', async () => {
+  for (const shotIndex of [0, 1]) {
+    const f = await fixture({ performance: true, shotIndex }), result = await f.invoke();
+    assert.equal(f.body.frames.length, shotIndex === 0 ? 5 : 6);
+    assert.equal(result.statusCode, 200); assert.equal(result.body.version, 2);
+    const receipt = f.records.get(result.body.receiptPath).value;
+    assert.equal(receipt.binding.version, 2); assert.equal(receipt.binding.frameHashes.length, f.body.frames.length);
+    assert.equal(receipt.decision.textIntegrity, 'consistent'); assert.equal(receipt.decision.speakerStaging, 'consistent');
+  }
+});
+
+test('six bounded JPEG frames can exceed the old transport cap but oversized payloads fail before private reads', async () => {
+  const f = await fixture({ performance: true, shotIndex: 1 });
+  const rgb = Buffer.alloc(512 * 512 * 3); let seed = 173;
+  for (let index = 0; index < rgb.length; index++) { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; rgb[index] = seed >>> 24; }
+  const jpeg = await sharp(rgb, { raw: { width: 512, height: 512, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
+  assert.ok(jpeg.length <= 250_000);
+  const dataUrl = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+  f.body.frames.forEach(frame => { frame.dataUrl = dataUrl; });
+  const size = Buffer.byteLength(JSON.stringify(f.body)); assert.ok(size > 1_500_000 && size < 2_100_000);
+  assert.equal((await f.invoke()).statusCode, 200);
+  const oversized = await fixture({ performance: true });
+  oversized.body.frames[0].dataUrl = 'a'.repeat(2_100_001);
+  assert.notEqual((await oversized.invoke()).statusCode, 200);
+  assert.equal(oversized.reads.length, 0); assert.equal(oversized.counts().modelCalls, 0);
+});
+
+test('route widening does not let legacy counts approve new cuts or new counts approve legacy cuts', async () => {
+  for (const performance of [false, true]) {
+    const f = await fixture({ performance });
+    if (performance) f.body.frames = f.body.frames.slice(1, 4);
+    else f.body.frames.push(...structuredClone(f.body.frames.slice(0, 2)));
+    assert.notEqual((await f.invoke()).statusCode, 200); assert.equal(f.counts().modelCalls, 0);
+  }
+  const f = await fixture({ performance: true });
+  f.body.frames.push(...structuredClone(f.body.frames.slice(0, 2)));
+  assert.equal((await f.invoke()).statusCode, 400); assert.equal(f.reads.length, 0);
 });
 
 test('wrong worker secrets and malformed route bodies cannot read private data or invoke a reviewer', async () => {

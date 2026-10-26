@@ -10,6 +10,7 @@ import { accessStatusForUser } from '../api/_lib/access.mjs';
 import { productionJobPath } from '../api/_lib/film-production.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
+import { validateFilmPerformance } from '../api/_lib/film-performance.mjs';
 import { rebuildFilmSoundtrack, soundtrackPlan, soundtrackFailureDiagnostic, validateBoundarySilence, inspectFilmSoundtrackFit } from './rebuild-film-soundtrack.mjs';
 import { createRepairSpeechResolver } from './repair-name-proof.mjs';
 import { reviewFilmSpeech } from './review-film-speech.mjs';
@@ -188,6 +189,10 @@ export function createAutomaticSoundtrackFallback({ read = readRecord, write = w
   build = rebuildFilmSoundtrack, inspectFit = inspectFilmSoundtrackFit,
   reviewSpeech = reviewFilmSpeech, transcribe = transcribeAuthored, now = Date.now } = {}) {
   return async ({ email, id, job, clips, work, ffmpeg, stillOwned }) => {
+    // A selected voice synchronized on the provider video cannot be replaced
+    // by this legacy dubbing path, even through an explicit operator hook.
+    if (validateFilmPerformance(job?.manifest)) throw markFinishingFailure(Object.assign(new Error('The selected voice and mouth movements need review. The original performance is retained.'),
+      { code: 'FILM_PERFORMANCE_REVIEW_REQUIRED' }), 'speech-review', 'PERFORMANCE_REVIEW_REQUIRED');
     let saved;
     try {
       requireValue(typeof stillOwned === 'function' && job?.id === id && job.mode === 'customer'

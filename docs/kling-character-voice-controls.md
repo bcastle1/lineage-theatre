@@ -1,0 +1,19 @@
+# Kling character and voice controls
+
+New drafts use the versioned `kling-elements-stock-voice-lipsync-v1` plan. Existing prepared and paid manifests keep their original recipe, bytes, provider identities, payment references and delivery proofs. An older draft can explicitly enable the new controls; a purchased film requires a new checkout draft.
+
+The cast editor saves a selected stock English voice and base wardrobe per character, plus an off-screen narrator voice. Appearance photos remain explicit source selections. Voice, wardrobe, narrator and screenplay edits change the preparation fingerprint and require a new price. All reference, speech and synchronization stages are included in the provider ceiling before checkout.
+
+The planner preserves every approved spoken word and separates narration from labeled character turns. A dialogue cut contains one visible speaker, lasts 3–10 whole seconds, and has at most 120 characters/18 words. Insufficient runtime or ambiguous speakers fails before payment. Additional runtime uses silent action cuts within approved scenes. Scenes keep their source-grounded locations; new story instructions and filming directions vary framing, environmental detail and camera movement.
+
+Kling O3 receives character elements with a frontal image and one distinct alternate view. The selected photo is never silently replaced. New dialogue uses the selected stock voice through Kling's text-to-video lip-sync endpoint; the original visual render alone cannot complete a speaking shot. Narration uses selected stock TTS off screen. Each charged operation has its own durable claim and saved provider request; uncertain responses are reconciled rather than resubmitted.
+
+The worker fully decodes the final derivative, checks exact duration and script, and records selected-voice/output provenance plus downloaded-byte hashes. It cannot replace a new dialogue soundtrack or apply ASR audio edits. Narration may receive trailing silence only; silent cuts get deterministic silence. Requested instrumental music uses the existing local composer and pinned FluidSynth assets, mixed after speech review at fixed gains with no speech offset. Final artifact and music hashes are bound to the private delivery receipt.
+
+Visual review v2 samples the opening, 15%, 50%, 85% and closing frames, plus the preceding same-scene boundary. It requires appearance, wardrobe, scene action, image integrity, text integrity and speaker staging to pass. Generated lettering on signs/pages is rejected; approved titles and captions are rendered from saved text by the application. These are sampled checks, not a claim to have inspected every frame or heard the performance.
+
+Delivery requires the final private file's checksum readback, current payment authorization, and matching visual, speech and performance receipts. Missing or stale proof holds delivery without another invoice or automatic paid render. New jobs use a dedicated readiness record; the ordinary heartbeat and historical recipe remain compatible.
+
+## Release acceptance
+
+Local unit/service tests and synthetic payment-to-private-download integration establish contract behavior, not actual provider quality. Before public release, build the exact worker source, exercise its real instrumental runtime, then complete a fresh authorized hosted checkout and automatic production with actual provider media. Inspect continuous playback and audible dialogue/lip synchronization, likeness, clothing, scene variety, readable text, authenticated download and mobile/desktop behavior. Promote only the verified web/worker pair. Preserve the previous release and all payment/provider records; do not automatically roll back to an old worker after a new-contract job has begun.

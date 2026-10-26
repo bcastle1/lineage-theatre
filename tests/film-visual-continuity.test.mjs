@@ -9,14 +9,68 @@ import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
 
 const references = manifest => Object.fromEntries(manifest.screenplay.characters.map(character => [character.id,
   character.referencePhotoId ? 'data:image/jpeg;base64,ZmFrZQ==' : `https://v3.fal.media/${character.id}.jpg`]));
-function fixture() {
+function fixture({ performance = false } = {}) {
   const project = fictionalOperatorProject();
+  if (performance) {
+    project.performanceControlsVersion = 1;
+    project.characters[0].wardrobe = 'Green apron over a white shirt and narrow black tie.';
+    project.characters[1].wardrobe = 'Blue apron over a cream blouse.';
+  }
   project.duration = 60;
   project.scenes = project.scenes.slice(0, 2);
+  if (performance) project.scenes.forEach(scene => {
+    scene.narration = 'This is a fictional garden scene.';
+    scene.dialogue = 'Ada: Let us plant together.\nAlice: There is room for both of us.';
+  });
   project.scenes[0].visual = 'Fictional Ada and Alice stand in the garden; Ada wears her green apron over a white shirt and narrow black tie.';
   project.scenes[1].visual = 'Years later in the kitchen, Ada explicitly changes to a blue coat over a yellow blouse, without a tie. Alice retains her blue apron.';
   return buildFilmManifest(project).manifest;
 }
+
+test('performance cuts preserve full scene wardrobe and references while showing only the intended speaker', () => {
+  const original = fixture({ performance: true }), planned = planKlingShots(original);
+  assert.equal(validateVisualContinuity(planned), planned.visualContinuity);
+  assert.deepEqual(planned.screenplay, original.screenplay);
+  const dialogue = planned.shots.filter(shot => shot.performance.mode === 'dialogue');
+  assert.ok(dialogue.length > 0);
+  for (const shot of dialogue) {
+    assert.deepEqual(shot.characterIds, [shot.performance.speakerId]);
+    const contract = planned.visualContinuity.scenes.find(scene => scene.sceneId === shot.continuity.sourceSceneId);
+    assert.deepEqual(contract.characterIds, original.screenplay.scenes[shot.sceneIndex].characterIds);
+    assert.equal(shot.visual, contract.direction);
+  }
+  assert.deepEqual(planned.visualContinuity.characters.map(character => character.characterId), ['ada', 'alice']);
+  assert.deepEqual(planned.visualContinuity.characters.map(character => character.wardrobe),
+    original.screenplay.characters.map(character => character.wardrobe));
+  assert.equal(planned.visualContinuity.characters[0].wardrobe, 'Green apron over a white shirt and narrow black tie.');
+  const narration = planned.shots.find(shot => shot.performance.mode === 'narration');
+  assert.ok(narration);
+  narration.characterIds = [];
+  assert.equal(validateVisualContinuity(planned), planned.visualContinuity, 'A narration cut may show a scene detail without a visible face');
+});
+
+test('performance scene subsets cannot discard original cast, invent directions or downgrade paid contracts', () => {
+  for (const change of [
+    manifest => { manifest.visualContinuity.scenes[0].characterIds = ['ada']; },
+    manifest => { manifest.visualContinuity.scenes[0].direction = 'An invented landmark.'; },
+    manifest => { manifest.visualContinuity.characters.pop(); },
+    manifest => { manifest.visualContinuity.characters[0].wardrobe = 'A new red coat.'; },
+    manifest => { manifest.screenplay.characters[0].wardrobe = 'A new red coat.'; },
+    manifest => { manifest.shots[0].characterIds = ['somebody-else']; },
+    manifest => { manifest.shots[0].characterIds = ['ada', 'ada']; },
+    manifest => { delete manifest.performance; },
+    manifest => { delete manifest.shots[0].performance; },
+    manifest => { manifest.performance.version = 2; },
+    manifest => { delete manifest.visualContinuity; },
+  ]) {
+    const planned = planKlingShots(fixture({ performance: true })); change(planned);
+    assert.throws(() => validateVisualContinuity(planned));
+  }
+  const legacy = planKlingShots(fixture());
+  assert.ok(legacy.visualContinuity.characters.every(character => !Object.hasOwn(character, 'wardrobe')));
+  legacy.shots[0].characterIds = ['ada'];
+  assert.throws(() => validateVisualContinuity(legacy), VisualContinuityPlanError);
+});
 
 test('new plans bind appearance and wardrobe before pricing, preserving scripted scene changes across every cut', () => {
   const original = fixture(), before = JSON.stringify(original), planned = planKlingShots(original);

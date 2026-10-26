@@ -18,6 +18,8 @@ import { createFilmVisualReviewer } from '../scripts/review-film-visuals.mjs';
 import { STORY_MODEL } from '../api/_lib/story.mjs';
 import { verifyPublishedFilm } from '../scripts/production-worker.mjs';
 import { streamProductionMedia } from '../api/_lib/production-media.mjs';
+import { FILM_PERFORMANCE_RECIPE, KLING_VOICES, validateFilmPerformance, validatePerformanceOutput } from '../api/_lib/film-performance.mjs';
+import { performanceReceiptPath, validatePerformanceReviewBinding, validatePerformanceReviewProof } from '../api/_lib/film-performance-review.mjs';
 
 const NOW = Date.parse('2026-10-22T12:00:00Z');
 const actor = { email: 'fictional-customer@example.invalid', role: 'customer', status: 'active',
@@ -29,7 +31,7 @@ const clone = value => structuredClone(value), json = value => new Response(JSON
 // queue, film service, private-byte verifier and download authorization. Only
 // external Accounting/provider/storage transports and media construction are
 // synthetic. This test performs no network requests, real charges or generation.
-async function fixture({ eager = true, corruptStoredMedia = false, visualResult = 'passed' } = {}) {
+async function fixture({ eager = true, corruptStoredMedia = false, visualResult = 'passed', performance = false, performanceFailure } = {}) {
   let time = NOW, serial = 0, invoice, customer, order, hosted, automatic, payments;
   let cost = 1000, maximumCost = 1000, priceRevision = 0, credits = 100, quoteEffect;
   const records = new Map(), blobs = new Map(), operations = new Map();
@@ -50,9 +52,11 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
     deliveryTerms: 'Your film will be delivered after production and verification.', refundTerms: 'Contact the administrator about refunds.',
     merchantConfirmed: true, pciAcknowledged: true, automaticInvoiceEmailDisabled: true, merchantBinding: binding });
   const adapter = { id: 'fal', model: 'kling', modelVersion: FAL_RECIPE_VERSION, environment: 'production', available: true,
+    recipeForManifest: manifest => validateFilmPerformance(manifest) ? FILM_PERFORMANCE_RECIPE : FAL_RECIPE_VERSION,
     timingVersion: 'synthetic-kling-flow-v1', maxConcurrentShots: 4, outputHosts: ['media.example.invalid'],
     evidence: { apiVerified: true, qualityVerified: true, commercialTermsVerified: true, reconciliationVerified: true },
-    validateManifest: async () => ({ ready: true, maximumCostCents: maximumCost }),
+    validateManifest: async manifest => { if (performance) assert.equal(validateFilmPerformance(manifest), true);
+      return { ready: true, maximumCostCents: maximumCost }; },
     quote: async request => {
       calls.quotes.push(clone(request));
       await quoteEffect?.();
@@ -68,9 +72,21 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
     },
     pollShot: async request => {
       assert.ok(operations.has(request.idempotencyKey)); calls.polls.push(request.idempotencyKey);
-      return { ...operations.get(request.idempotencyKey), status: 'completed', output: {
-        url: `https://media.example.invalid/${request.shot.id}.mp4`, contentType: 'video/mp4', sizeBytes: 128,
-        durationSeconds: request.shot.targetDurationMs / 1000 } };
+      const output = { url: `https://media.example.invalid/${request.shot.id}${performance ? '-final' : ''}.mp4`, contentType: 'video/mp4', sizeBytes: 128,
+        durationSeconds: request.shot.targetDurationMs / 1000 };
+      if (performance) {
+        const p = request.shot.performance;
+        if (p.mode === 'narration') output.audio = { url: `https://media.example.invalid/${request.shot.id}.mp3`,
+          contentType: 'audio/mpeg', sizeBytes: 128, durationSeconds: request.shot.targetDurationMs / 1000 };
+        output.performance = { version: 1, recipe: FILM_PERFORMANCE_RECIPE, mode: p.mode, speakerId: p.speakerId, voiceId: p.voiceId,
+          textSha256: digest(p.text), videoOperationId: digest(`synthetic-video:${request.idempotencyKey}`),
+          speechOperationId: p.mode === 'silent' ? null : digest(`synthetic-speech:${request.idempotencyKey}`),
+          sourceVideoUrlSha256: digest(`https://media.example.invalid/${request.shot.id}-source.mp4`),
+          outputVideoUrlSha256: digest(output.url), audioUrlSha256: output.audio ? digest(output.audio.url) : null };
+        validatePerformanceOutput(request.manifest, request.shot, output);
+        if (performanceFailure === 'tampered-voice' && p.mode === 'dialogue') output.performance.voiceId = KLING_VOICES.find(voice => voice.id !== p.voiceId).id;
+      }
+      return { ...operations.get(request.idempotencyKey), status: 'completed', output };
     },
     reconcileShot: async () => assert.fail('No uncertain response is present in this fixture'),
   };
@@ -123,6 +139,14 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
   const queue = createProductionQueue(queueDependencies);
   automatic = createAutomaticProduction({ read, write, listBlobs, now, queue, eager });
   const project = fictionalOperatorProject();
+  if (performance) {
+    project.performanceControlsVersion = 1; project.narratorVoiceId = KLING_VOICES[0].id;
+    project.characters.forEach((character, index) => { character.voiceId = KLING_VOICES[index].id;
+      character.wardrobe = index ? 'Blue apron over a cream shirt.' : 'Green apron over a cream shirt.'; });
+    project.scenes[0].narration = 'Two fictional sisters tend a garden.';
+    project.scenes[1].narration = ''; project.scenes[1].dialogue = 'Fictional Ada: Let us plant two rows.';
+    project.scenes[2].narration = ''; project.scenes[2].dialogue = 'Fictional Alice: We will share the harvest.';
+  }
   const plan = await film.prepare({ email: actor.email, project, preparationConsent: true, idempotencyKey: 'fictional-integrated-plan-001' });
   const quote = await hosted.quote(actor, { project, preparedId: plan.id, idempotencyKey: 'fictional-integrated-quote-001' });
   const path = productionQueuePath(actor.email, plan.id), jobPath = productionJobPath(actor.email, plan.id);
@@ -140,7 +164,8 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
       assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(JSON.parse(options.body).model, STORY_MODEL); calls.visualReviews++;
       if (visualResult === 'uncertain') throw new Error('synthetic lost model response');
       const decision = { appearance: visualResult === 'mismatch' ? 'mismatch' : 'consistent', wardrobe: 'consistent',
-        sceneAction: 'consistent', imageIntegrity: 'consistent', findings: visualResult === 'mismatch' ? ['appearance-drift'] : [] };
+        sceneAction: 'consistent', imageIntegrity: 'consistent', ...(performance ? { textIntegrity: 'consistent', speakerStaging: 'consistent' } : {}),
+        findings: visualResult === 'mismatch' ? ['appearance-drift'] : [] };
       return json({ status: 'completed', model: STORY_MODEL, output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
     } });
   const reviewVisuals = createFilmVisualReviewer({ extract: async () => imageData,
@@ -158,9 +183,38 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
     const bytes = Buffer.from('Synthetic assembly boundary: full FFmpeg/media tests run separately. '.repeat(4));
     const sha256 = digest(bytes), pathname = `production/media/${digest(actor.email)}/${id}/${sha256}.mp4`;
     blobs.set(pathname, bytes);
+    let speechReview, performanceReview;
+    if (performance) {
+      // Synthetic media-measurement and transcription results, validated by the
+      // real shared proof contract and later re-read by verifyPublishedFilm.
+      speechReview = { version: 1, method: 'local-speech-transcription', passed: true,
+        shots: job.manifest.shots.map(shot => ({ shotId: shot.id, scriptMatched: true })) };
+      const observations = job.manifest.shots.map((shot, index) => {
+        const saved = job.shots[index], mode = shot.performance.mode, videoHash = digest(`synthetic-video-bytes:${shot.id}`);
+        return { shotId: shot.id, outputHash: digest(JSON.stringify(saved.output)), provenance: validatePerformanceOutput(job.manifest, shot, saved.output),
+          videoSha256: videoHash, videoBytes: saved.output.sizeBytes, videoDurationSeconds: shot.targetDurationMs / 1000, videoFrameRate: 24,
+          selectedAudioContainerSha256: mode === 'dialogue' ? videoHash : digest(`synthetic-selected-audio:${shot.id}`),
+          selectedAudioContainerBytes: 128, selectedAudioDurationSeconds: shot.targetDurationMs / 1000,
+          providerAudioSha256: mode === 'narration' ? digest(`synthetic-provider-audio:${shot.id}`) : null,
+          providerAudioBytes: mode === 'narration' ? saved.output.audio.sizeBytes : null,
+          sourceAudioDurationSeconds: mode === 'silent' ? null : shot.targetDurationMs / 1000,
+          audioSelection: mode === 'dialogue' ? 'embedded-synchronized' : mode === 'narration' ? 'stock-narration-silence-padded' : 'planned-silence' };
+      });
+      const ownerHash = digest(actor.email), binding = { version: 1, recipe: FILM_PERFORMANCE_RECIPE, ownerHash, id,
+        manifestHash: job.manifestHash, artifactSha256: sha256, speechReviewSha256: digest(JSON.stringify(speechReview)),
+        music: { requested: false }, shots: observations };
+      validatePerformanceReviewBinding(binding, { job, ownerHash, id, artifactSha256: sha256, speechReview });
+      const bindingHash = digest(JSON.stringify(binding)), receiptPath = performanceReceiptPath(ownerHash, id, bindingHash);
+      seed(receiptPath, { version: 1, state: 'verified', bindingHash, binding });
+      performanceReview = validatePerformanceReviewProof({ manifest: job.manifest, manifestHash: job.manifestHash, ownerHash, id, artifactSha256: sha256,
+        review: { version: 1, recipe: FILM_PERFORMANCE_RECIPE, manifestHash: job.manifestHash, artifactSha256: sha256,
+          passed: true, bindingHash, receiptPath, shotCount: observations.length } });
+      if (performanceFailure === 'missing-proof') performanceReview = undefined;
+    }
     return { pathname, sha256, sizeBytes: bytes.length, contentType: 'video/mp4', manifestHash: job.manifestHash,
       durationSeconds: job.manifest.targetDurationSeconds, width: 1920, height: 1080, frameRate: 24,
-      playable: true, hasAudio: true, technicalSample: false, visualReview };
+      playable: true, hasAudio: true, technicalSample: false, visualReview,
+      ...(performance ? { speechReview, ...(performanceReview ? { performanceReview } : {}) } : {}) };
   };
   const checkout = async () => (order = await hosted.checkout(actor, { quoteId: quote.id, idempotencyKey: 'fictional-integrated-checkout-001', consent: true, productionConsent: true }));
   return { records, calls, read, write, seed, film, hosted, payments, queue, automatic, quote, plan, path, jobPath, assemble, getBlob, blobs, now,
@@ -210,6 +264,70 @@ test('hosted payment flows through restartable automatic production and verified
   // newer verified job read must make the public status agree with ready100.
   const crossed = f.restartQueue({ film: { ...f.film, status: async input => ({ ...await f.film.status(input), status: 'processing', mediaReady: false }) } });
   assert.equal((await crossed.status({ email: actor.email, id: f.plan.id })).status, 'completed');
+});
+
+test('selected voices flow from one hosted payment through automatic production, v2 checks, private proof and authenticated download', async () => {
+  const f = await fixture({ performance: true, eager: false }), order = await f.checkout();
+  assert.equal(order.status, 'awaiting-payment'); assert.equal(f.calls.submits.length, 0);
+  await f.confirmPayment(); await f.confirmPayment();
+  assert.equal((await f.automatic.run()).queued, 1);
+  assert.equal((await f.finish()).state, 'completed');
+  const job = (await f.read(f.jobPath)).value;
+  assert.equal(job.provider.recipe, FILM_PERFORMANCE_RECIPE); assert.equal(validateFilmPerformance(job.manifest), true);
+  assert.equal(job.visualReview.version, 2); assert.equal(job.performanceReview.passed, true);
+  const receipt = (await f.read(job.performanceReview.receiptPath)).value;
+  assert.equal(receipt.state, 'verified'); assert.equal(receipt.bindingHash, digest(JSON.stringify(receipt.binding)));
+  assert.equal(receipt.binding.artifactSha256, job.media.sha256);
+  for (const [index, shot] of job.manifest.shots.entries()) {
+    const output = job.shots[index].output, p = shot.performance;
+    validatePerformanceOutput(job.manifest, shot, output);
+    assert.equal(output.performance.voiceId, p.voiceId); assert.equal(output.performance.textSha256, digest(p.text));
+    assert.equal(output.performance.outputVideoUrlSha256, digest(output.url)); assert.match(output.url, /-final\.mp4$/);
+    if (p.mode === 'dialogue') { assert.equal(output.audio, undefined); assert.equal(receipt.binding.shots[index].audioSelection, 'embedded-synchronized'); }
+    if (p.mode === 'narration') assert.equal(output.audio.url, `https://media.example.invalid/${shot.id}.mp3`);
+  }
+  const visualReceipts = [...f.records.entries()].filter(([path]) => path.startsWith('production/visual-reviews/'));
+  assert.equal(visualReceipts.length, f.plan.shotCount);
+  for (const [, { value }] of visualReceipts) {
+    assert.equal(value.binding.version, 2); assert.equal(value.binding.frameHashes.length, 5);
+    assert.equal(value.decision.textIntegrity, 'consistent'); assert.equal(value.decision.speakerStaging, 'consistent');
+  }
+  assert.equal((await f.status()).mediaReady, true); assert.equal((await f.status()).progress.percent, 100);
+  assert.equal(f.calls.privateReads, 1); assert.equal(f.calls.assemblies, 1); assert.equal(f.calls.submits.length, f.plan.shotCount);
+  await f.confirmPayment(); await f.automatic.run(); await f.step();
+  assert.equal(f.calls.accounting.filter(op => op.method === 'POST' && op.path === '/invoice').length, 1);
+  assert.equal(f.calls.submits.length, f.plan.shotCount); assert.equal(f.calls.assemblies, 1);
+  const response = () => new class extends Writable {
+    headers = {}; chunks = []; statusCode = 200;
+    setHeader(name, value) { this.headers[name.toLowerCase()] = value; }
+    removeHeader(name) { delete this.headers[name.toLowerCase()]; }
+    _write(chunk, encoding, callback) { this.chunks.push(Buffer.from(chunk)); callback(); }
+  }();
+  const res = response();
+  await streamProductionMedia({ req: { method: 'GET', headers: {} }, res, email: actor.email, actor, id: f.plan.id,
+    filmProduction: f.film, read: f.read, now: f.now, getBlob: f.getBlob, download: true });
+  assert.equal(res.statusCode, 200); assert.match(res.headers['content-disposition'], /^attachment/);
+  assert.equal(digest(Buffer.concat(res.chunks)), job.media.sha256);
+  const stranger = { ...actor, email: 'different-customer@example.invalid' };
+  const denied = response(), reads = f.calls.privateReads;
+  await streamProductionMedia({ req: { method: 'GET', headers: {} }, res: denied, email: stranger.email, actor: stranger,
+    id: f.plan.id, filmProduction: f.film, read: f.read, now: f.now, getBlob: f.getBlob, download: true });
+  assert.equal(denied.statusCode, 404); assert.equal(f.calls.privateReads, reads);
+});
+
+test('paid performance films hold delivery for missing private proof or tampered selected voice without charging or submitting again', async () => {
+  for (const performanceFailure of ['missing-proof', 'tampered-voice']) {
+    const f = await fixture({ performance: true, performanceFailure }); await f.checkout(); await f.confirmPayment();
+    for (let i = 0; i < 14; i++) await f.step();
+    const job = (await f.read(f.jobPath)).value, submitted = f.calls.submits.length;
+    assert.notEqual(job.status, 'completed'); assert.equal(job.media, undefined);
+    assert.equal((await f.status()).mediaReady, false); assert.notEqual((await f.status()).progress.percent, 100);
+    if (performanceFailure === 'missing-proof') { assert.equal(job.status, 'awaiting-assembly'); assert.equal(f.calls.assemblies, 1); }
+    else { assert.equal(job.status, 'uncertain'); assert.equal(f.calls.assemblies, 0); }
+    await f.confirmPayment(); await f.automatic.run(); await f.step();
+    assert.equal(f.calls.accounting.filter(op => op.method === 'POST' && op.path === '/invoice').length, 1);
+    assert.equal(f.calls.submits.length, submitted);
+  }
 });
 
 test('an ongoing Kling film renews expired pricing within its fixed execution ceiling without another invoice', async () => {
