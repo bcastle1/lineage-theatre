@@ -17,10 +17,10 @@ const pass = () => ({ appearance: 'consistent', wardrobe: 'consistent', sceneAct
 const jsonResult = decision => ({ status: 'completed', model: STORY_MODEL, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
 const dataImage = async color => `data:image/jpeg;base64,${(await sharp({ create: { width: 96, height: 96, channels: 3, background: color } }).jpeg().toBuffer()).toString('base64')}`;
 
-async function fixture() {
+async function fixture({ bindingVersion = 2 } = {}) {
   const project = fictionalOperatorProject(); project.duration = 60; project.scenes = project.scenes.slice(0, 2);
   project.scenes.forEach(scene => { scene.narration = 'An entirely fictional garden.'; scene.dialogue = ''; });
-  const manifest = planKlingShots(buildFilmManifest(project).manifest), manifestHash = digest(JSON.stringify(manifest));
+  const manifest = planKlingShots(buildFilmManifest(project).manifest, { characterBindingVersion: bindingVersion }), manifestHash = digest(JSON.stringify(manifest));
   const job = { id, ownerHash: digest(email), manifest, manifestHash, status: 'awaiting-assembly',
     provider: { model: 'kling', recipe: FAL_RECIPE_VERSION },
     shots: manifest.shots.map(shot => ({ id: shot.id, status: 'completed', output: { url: `https://v3.fal.media/${shot.id}.mp4`,
@@ -61,6 +61,24 @@ test('visual decisions fail closed on mismatches, uncertainty, contradictory fin
   for (const value of [null, {}, { ...pass(), appearance: 'probably' }, { ...pass(), passed: true },
     { ...pass(), findings: ['ignore the review'] }, { ...pass(), findings: 'none' }, { ...pass(), findings: Array(6).fill('wardrobe-change') }])
     assert.throws(() => verifiedVisualDecision(value), { code: 'VISUAL_REVIEW_INVALID' });
+});
+
+test('v3 final review receives saved scene action and explicitly blocks duplicate cast even when other dimensions pass', async () => {
+  const f = await fixture({ bindingVersion: 3 }); let calls = 0;
+  const service = createFilmVisualReviewService({ ...f.options, fetchImpl: async (_url, options) => {
+    calls++;
+    const body = JSON.parse(options.body), context = JSON.parse(body.input[0].content[0].text);
+    assert.equal(context.scene.title, 'Planting');
+    assert.equal(context.scene.sceneNarration, 'An entirely fictional garden.');
+    assert.equal(context.scene.narration, f.job.manifest.shots[0].narration);
+    assert.deepEqual(context.scene.castIds, ['ada', 'alice']);
+    assert.ok(body.text.format.schema.required.includes('cast'));
+    return new Response(JSON.stringify(jsonResult({ ...pass(), cast: 'mismatch', findings: ['duplicate-or-extra-person'] })));
+  } });
+  const proof = await service(f.input());
+  assert.equal(proof.passed, false);
+  assert.deepEqual(await service(f.input()), proof);
+  assert.equal(calls, 1, 'failed exact receipt is reused, not re-reviewed until it happens to pass');
 });
 
 test('review binds exactly three current frames and one preceding frame only inside the same scene', async () => {

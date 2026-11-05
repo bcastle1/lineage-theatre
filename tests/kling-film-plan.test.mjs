@@ -54,7 +54,7 @@ test("new Kling preparation binds its provider plan before hashing and pricing",
   const result = await service.prepare({ email: "fixture@example.invalid", project,
     idempotencyKey: "kling-plan-test-001", preparationConsent: true });
   const saved = await service.getPrepared({ email: "fixture@example.invalid", id: result.id });
-  assert.deepEqual(saved.manifest.productionPlan, { provider: "kling", version: 1, visualContinuityVersion: 1, characterBindingVersion: 2 });
+  assert.deepEqual(saved.manifest.productionPlan, { provider: "kling", version: 1, visualContinuityVersion: 1, characterBindingVersion: 3 });
   assert.equal(saved.manifest.visualContinuity.version, 1);
   assert.ok(saved.manifest.shots.length > project.scenes.length);
   assert.equal(saved.provider, undefined);

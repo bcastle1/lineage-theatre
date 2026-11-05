@@ -2,7 +2,7 @@ import { digest, readRecord, writeRecord, userPath } from './auth.mjs';
 import { OWNER_EMAIL, isOwner } from './access.mjs';
 import { readPaidFilmCorrection } from './paid-film-correction.mjs';
 import { createFalClient, falRequestPath, falRequestUrl, falMediaUrl, FAL_MODELS } from './fal-client.mjs';
-import { falPlan, characterViewIdentity, FAL_RECIPE_VERSION } from './fal-production.mjs';
+import { falPlan, characterViewIdentity, startFrameIdentity, FAL_RECIPE_VERSION } from './fal-production.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { klingReferenceData } from './fal-reference.mjs';
 import { normalizeKlingInputReferences, klingCharacterBindingVersion, requireActiveKlingCharacterBinding } from './kling-character-binding.mjs';
@@ -77,6 +77,7 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
   client = createFalClient({ key: () => process.env.FAL_KLING_KEY, read, write, now }),
   correctionContext = input => readPaidFilmCorrection({ ...input, read, now }), authorize = remoteAuthorize,
   verifyRejected = receipt => verifyPromptRejectedReceipt(receipt), fetchImpl = fetch,
+  verifyStartFrame = async (input, options) => (await import('./film-start-frame-review.mjs')).verifyStartFrameReceipt(input, options),
   buildInput = async (job, shot, plan) => {
     const refs = {};
     for (const character of plan.characters.filter(character => shot.characterIds.includes(character.id))) {
@@ -84,14 +85,20 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
       else { const receipt = await client.get(digest(`${FAL_RECIPE_VERSION}:cast:${job.id}:${job.manifestHash}:${character.id}`));
         requireValue(receipt?.state === 'completed' && receipt.endpoint === FAL_MODELS.reference && receipt.result?.images?.length === 1);
         refs[character.id] = falMediaUrl(receipt.result.images[0].url); }
-      if (klingCharacterBindingVersion(job.manifest) === 2) {
+      if (klingCharacterBindingVersion(job.manifest) >= 2) {
         const view = await client.get(characterViewIdentity(job.id, job.manifestHash, character.id));
         requireValue(view?.state === 'completed' && view.endpoint === FAL_MODELS.reference && view.result?.images?.length === 1);
         refs[character.id] = { frontalImageUrl: refs[character.id], referenceImageUrls: [falMediaUrl(view.result.images[0].url)] };
       }
     }
+    let startImageUrl;
+    if (klingCharacterBindingVersion(job.manifest) === 3) {
+      const start = await client.get(startFrameIdentity(job.id, job.manifestHash, shot.id));
+      requireValue(start?.state === 'completed' && start.endpoint === FAL_MODELS.reference && start.result?.images?.length === 1);
+      startImageUrl = falMediaUrl(start.result.images[0].url);
+    }
     const { falRecoveryShotInput } = await import('./fal-production.mjs');
-    const input = falRecoveryShotInput(job.manifest, shot, refs);
+    const input = falRecoveryShotInput(job.manifest, shot, refs, startImageUrl);
     return normalizeKlingInputReferences(job.manifest, input, value => klingReferenceData(value, { fetchImpl }));
   } } = {}) {
   async function immutable(path, value) {
@@ -218,8 +225,19 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
       stage = 'reconcile';
       await recheck(c); await verifyRejected(row.receipt);
       stage = 'claim';
-      await immutable(failedShotRecoveryPath(claim.recoveryId), claim);
       let replacement = await client.get(claim.replacementIdentity);
+      if (!replacement && klingCharacterBindingVersion(c.job.manifest) === 3) {
+        const heartbeat = (await read('production/worker-health.json'))?.value;
+        requireValue(heartbeat?.ready === true && heartbeat.model === 'kling' && heartbeat.recipe === FAL_RECIPE_VERSION
+          && heartbeat.characterBindingVersion === 3 && heartbeat.visualChecksVersion === 1 && heartbeat.deliveryChecksVersion === 1
+          && Number.isFinite(Date.parse(heartbeat.checkedAt)) && Date.parse(heartbeat.checkedAt) <= now()
+          && now() - Date.parse(heartbeat.checkedAt) <= 180000);
+        const verified = await verifyStartFrame({ email: input.email, manifest: c.job.manifest, productionId: input.preparedId,
+          manifestHash: input.manifestHash, shotId: row.shot.id,
+          referenceIdentity: startFrameIdentity(input.preparedId, input.manifestHash, row.shot.id), normalizedImageData: body.start_image_url }, { read });
+        requireValue(verified?.passed === true);
+      }
+      await immutable(failedShotRecoveryPath(claim.recoveryId), claim);
       if (!replacement) {
         stage = 'auth';
         const grant = await authorize({ email: input.email, preparedId: input.preparedId, manifestHash: input.manifestHash, correctionId: input.correctionId,

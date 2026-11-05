@@ -15,7 +15,7 @@ export function planKlingShots(manifest, { visualContinuity = true, characterBin
     return manifest;
   }
   if (characterBinding && !visualContinuity) throw new KlingCharacterBindingError();
-  if (characterBinding && ![1, KLING_CHARACTER_BINDING_VERSION].includes(characterBindingVersion)) throw new KlingCharacterBindingError();
+  if (characterBinding && ![1, 2, KLING_CHARACTER_BINDING_VERSION].includes(characterBindingVersion)) throw new KlingCharacterBindingError();
   const contract = visualContinuity ? createVisualContinuity(manifest) : null;
   const shots = [];
   for (const [scenePosition, original] of manifest.shots.entries()) {

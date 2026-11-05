@@ -12,7 +12,7 @@ function job() { return { id: 'saved-film', ownerHash: digest(email), manifestHa
 const pending = film => ({ version: 1, email, id: film.id, manifestHash: film.manifestHash,
   orderId: digest(`${email}:production:${film.manifestHash}`), state: 'pending', attempts: 1, nextAttemptAt: NOW + 10000 });
 
-test('version 2 learns separate delivery timing without changing absent or version 1 history keys', () => {
+test('versions 2 and 3 learn separate delivery timing without changing any earlier history key', () => {
   const film = job(), adapter = { id: 'fal', environment: 'production', timingVersion: 'kling:parallel4' };
   film.manifest.visualContinuity = { version: 1 };
   const original = digest(JSON.stringify({ version: 1, renderer: 'fal', environment: 'production', timingVersion: 'kling:parallel4',
@@ -22,6 +22,12 @@ test('version 2 learns separate delivery timing without changing absent or versi
   assert.equal(productionTimingProfile(film, adapter), original);
   film.manifest.productionPlan.characterBindingVersion = 2;
   assert.notEqual(productionTimingProfile(film, adapter), original);
+  const v2 = productionTimingProfile(film, adapter);
+  const expectedV2 = digest(JSON.stringify({ version: 1, renderer: 'fal', environment: 'production', timingVersion: 'kling:parallel4',
+    duration: 60, shots: 2, style: 'Cinematic', quality: 'highest', music: true, visualChecksVersion: 1, characterBindingVersion: 2 }));
+  assert.equal(v2, expectedV2);
+  film.manifest.productionPlan.characterBindingVersion = 3;
+  assert.notEqual(productionTimingProfile(film, adapter), v2); assert.notEqual(productionTimingProfile(film, adapter), original);
 });
 test('an uncertain request in its bound automatic queue shows reconciliation without progress or ETA', () => {
   const film = { ...job(), status: 'uncertain' }, queue = pending(film);

@@ -27,7 +27,7 @@ const requireValue = (value, code) => { if (!value) fail(code); };
 const emit = value => { const observed = { observedAt: new Date().toISOString(), ...value }; process.stdout.write(JSON.stringify(observed) + '\n'); return observed; };
 const stamp = () => new Date().toISOString();
 export function candidateCanaryProfile() {
-  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: 2 });
   const plan = falPlan(manifest, 'kling'), fixedHash = digest(JSON.stringify(manifest));
   requireValue(fixedHash === FIXED_HASH && manifest.productionPlan?.characterBindingVersion === 2
     && manifest.visualContinuity?.version === 1 && manifest.targetDurationSeconds === 15
@@ -271,6 +271,11 @@ export async function runDatedCanary(args = process.argv.slice(2)) {
       libraryUrl: 'https://lineagetheater.com/#library?film=' + id, ...timing(completed),
       readyObservedAt: stamp(), sha256: artifact.sha256, sizeBytes: artifact.sizeBytes,
       durationSeconds: artifact.durationSeconds, speechPassed: artifact.speechReview?.passed === true, privateReadbackVerified: true });
+  } catch (error) {
+    const failure = finishingFailure(error);
+    if (failure) await film.recordFinishingFailure({ email, id, manifestHash: fixedHash, failure,
+      needsAttention: true, stillOwned }).catch(() => false);
+    throw error;
   } finally {
     const lock = await readRecord(lockPath);
     if (lock?.value.token === token) await writeRecord(lockPath, { ...lock.value, token: null, expiresAt: 0 }, lock.etag);

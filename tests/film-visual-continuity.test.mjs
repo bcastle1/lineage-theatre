@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { digest } from '../api/_lib/auth.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
-import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
+import { planKlingShots as planShots } from '../api/_lib/kling-film-plan.mjs';
 import { validateVisualContinuity, VisualContinuityPlanError, VISUAL_CONTINUITY_DIRECTION } from '../api/_lib/film-visual-continuity.mjs';
 import { KlingCharacterBindingError } from '../api/_lib/kling-character-binding.mjs';
 import { falPlan, falShotInput, characterReferenceInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
+
+const planKlingShots = (manifest, options = {}) => planShots(manifest, { characterBindingVersion: 2, ...options });
 
 const references = manifest => Object.fromEntries(manifest.screenplay.characters.map(character => [character.id,
   manifest.productionPlan?.characterBindingVersion === 2

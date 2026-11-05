@@ -139,7 +139,7 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
     fetchImpl: async (url, options) => {
       assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(JSON.parse(options.body).model, STORY_MODEL); calls.visualReviews++;
       if (visualResult === 'uncertain') throw new Error('synthetic lost model response');
-      const decision = { appearance: visualResult === 'mismatch' ? 'mismatch' : 'consistent', wardrobe: 'consistent',
+      const decision = { cast: 'consistent', appearance: visualResult === 'mismatch' ? 'mismatch' : 'consistent', wardrobe: 'consistent',
         sceneAction: 'consistent', imageIntegrity: 'consistent', findings: visualResult === 'mismatch' ? ['appearance-drift'] : [] };
       return json({ status: 'completed', model: STORY_MODEL, output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
     } });
