@@ -7,6 +7,7 @@ import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { REALISTIC_FILM_DIRECTION, realisticCreativeText } from './film-visual-style.mjs';
 import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoDataUrl } from './production-photo-reference.mjs';
 import { validateVisualContinuity, VISUAL_CONTINUITY_DIRECTION } from './film-visual-continuity.mjs';
+import { hasKlingCharacterBinding, klingCharacterBindings, normalizeKlingInputReferences, KLING_CAST_BINDING_DIRECTION, KLING_CHARACTER_BINDING_VERSION } from './kling-character-binding.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
@@ -20,6 +21,8 @@ export class FalProductionPlanError extends Error {
 }
 
 function productionPlan(manifest, model, validatePrompts = true) {
+  const characterBinding = hasKlingCharacterBinding(manifest);
+  if (characterBinding && model !== 'kling') invalid();
   if (!['kling', 'seedance', 'wan'].includes(model) || !manifest || manifest.version !== 1
     || !Array.isArray(manifest.shots) || manifest.shots.length < 1 || manifest.shots.length > (model === 'kling' ? 200 : 30)
     || !Array.isArray(manifest.screenplay?.characters) || manifest.screenplay.characters.length > 16) invalid();
@@ -64,6 +67,7 @@ const klingPromptBytes = prompt => Math.max(Buffer.byteLength(prompt, 'utf8'), B
 const klingPromptFits = prompt => klingPromptBytes(prompt) < 2400;
 
 function klingPrompt(manifest, shot, characters) {
+  if (hasKlingCharacterBinding(manifest)) return characterBoundKlingPrompt(manifest, shot, characters);
   if (manifest.visualContinuity) return continuityKlingPrompt(manifest, shot, characters);
   const cast = shot.characterIds.map((id, index) => {
     const character = characters.find(value => value.id === id);
@@ -127,6 +131,39 @@ function klingPrompt(manifest, shot, characters) {
   return concise;
 }
 
+function characterBoundKlingPrompt(manifest, shot, characters) {
+  const cast = klingCharacterBindings(shot, characters).map(({ character, token }) => `${token} ${character.name}: ${realisticCreativeText(character.description)}`);
+  if (typeof shot.title !== 'string') invalid();
+  const direction = realisticCreativeText(shot.visual).replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[“"][^”"]*[”"]/gi, '');
+  // Retain the existing photographic-style/caption translation without changing
+  // the saved screenplay or any spoken words. Only generic filming wording
+  // may be shortened to fit the provider's transport limit.
+  const creative = [
+    ...cast,
+    `Film context only (not this cut's action): ${manifest.screenplay.logline}`,
+    ...(cast.length ? [KLING_CAST_BINDING_DIRECTION, VISUAL_CONTINUITY_DIRECTION] : []),
+    `Scene title: ${shot.title}`, `Scene: ${direction}`,
+    `Limits: ${shot.dramatization || 'No undocumented claims.'}`,
+    `Narrator: ${shot.narration || '(none)'}`, `Dialogue: ${shot.dialogue || '(none)'}`,
+  ];
+  const prompt = [`Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'}; ${manifest.era}.`, ...creative,
+    `Verbatim once; same warm adult English narrator, distinct fixed character voices, lip sync; finish before ${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s; hold through ${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Low instrumental score under clear speech; no vocals.' : 'Ambience; no music.',
+    'No text, logos, watermarks, facial drift, modern props or abrupt cuts.',
+  ].join('\n');
+  if (klingPromptFits(prompt)) return prompt;
+  const compact = [`Photorealistic;${manifest.era}.`, ...creative,
+    `Verbatim once;fixed narrator/voices;lipsync;<${(shot.targetDurationMs / 1000 - .2).toFixed(2)}s;hold${shot.seconds}s.`,
+    manifest.sound?.musicRequested ? 'Low instrumental;no vocals.' : 'Ambience;no music.',
+    'No text/logos/drift/modern props.',
+  ].join('\n');
+  if (!klingPromptFits(compact)) {
+    const index = manifest.shots.findIndex(value => value.id === shot.id) + 1;
+    throw new FalProductionPlanError(`Scene ${index} exceeds the safe Kling prompt limit by ${klingPromptBytes(compact) - 2399} UTF-8 bytes. Shorten this scene's visual directions or cast descriptions, then request a new price. Your saved script has not changed.`);
+  }
+  return compact;
+}
+
 function continuityKlingPrompt(manifest, shot, characters) {
   const cast = shot.characterIds.map((id, index) => {
     const character = characters.find(value => value.id === id);
@@ -178,6 +215,13 @@ export function characterReferenceInput(manifest, character) {
 export function falShotInput(manifest, shot, model, references) {
   const plan = falPlan(manifest, model), selected = plan.shots.find(s => s.id === shot.id);
   if (!selected) invalid();
+  if (model === 'kling' && hasKlingCharacterBinding(manifest)) {
+    const bindings = klingCharacterBindings(selected, plan.characters);
+    return { prompt: klingPrompt(manifest, selected, plan.characters), duration: String(selected.seconds),
+      ...(bindings.length ? { elements: bindings.map(({ character }) => ({ reference_image_urls: [character.referencePhotoId
+        ? validatedPhotoDataUrl(references[character.id]) : falMediaUrl(references[character.id])] })) } : {}),
+      generate_audio: true, aspect_ratio: '16:9', shot_type: 'customize', enable_safety_checker: true };
+  }
   if (model === 'kling') return { prompt: klingPrompt(manifest, selected, plan.characters), duration: String(selected.seconds),
     image_urls: selected.characterIds.map(id => plan.characters.find(c => c.id === id).referencePhotoId
       ? validatedPhotoDataUrl(references[id]) : falMediaUrl(references[id])),
@@ -245,10 +289,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
   const recipe = falRecipeVersion(model);
   const qualified = () => qualifiedFalRelease(qualification, model);
   const hasKey = () => Boolean(typeof key === 'function' ? key() : key);
-  const maximumCost = async manifest => {
-    const plan = falPlan(manifest, model);
-    if (!qualified()) invalid();
-    if(requireWorker){
+  const checkWorker = async (manifest, plan) => {
+    const bound = hasKlingCharacterBinding(manifest);
+    if(requireWorker || bound){
       const heartbeat=(await read('production/worker-health.json'))?.value;
       if(heartbeat?.recipe!==FAL_RECIPE_VERSION||heartbeat.model!==model||heartbeat.ready!==true||heartbeat.deliveryChecksVersion!==1
         ||!Number.isFinite(Date.parse(heartbeat.checkedAt))||now()-Date.parse(heartbeat.checkedAt)>180000||Date.parse(heartbeat.checkedAt)>now())
@@ -257,7 +300,14 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
         throw new Error('Character photo production is being updated. Please try again shortly.');
       if (manifest.visualContinuity && heartbeat.visualChecksVersion !== 1)
         throw new Error('Film appearance and wardrobe checks are being updated. Please try again shortly.');
+      if (bound && heartbeat.characterBindingVersion !== KLING_CHARACTER_BINDING_VERSION)
+        throw new Error('Film character binding is being updated. Please try again shortly.');
     }
+  };
+  const maximumCost = async manifest => {
+    const plan = falPlan(manifest, model);
+    if (!qualified()) invalid();
+    await checkWorker(manifest, plan);
     const rates = await pricing(model);
     if (!Number.isSafeInteger(rates.videoMicroUsdPerSecond) || rates.videoMicroUsdPerSecond <= 0
       || !Number.isSafeInteger(rates.referenceMicroUsd) || rates.referenceMicroUsd <= 0
@@ -286,6 +336,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
       let saved = await existingOperation(operationId, endpoint);
       if (!saved) {
         if (model !== 'kling' || !qualified()) throw new Error('Only qualified Kling requests may start new production.');
+        // New element-bound plans cannot be submitted by an older worker.
+        // Reconciliation of existing identities does not depend on a new gate.
+        if (hasKlingCharacterBinding(manifest)) await checkWorker(manifest, plan);
         if (typeof authorizeSpend !== 'function' || await authorizeSpend() !== true) throw new Error('Production spending is not authorized.');
         saved = await client.submit({ identity: operationId, endpoint, input: body });
       }
@@ -344,10 +397,10 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
       references[character.id] = falMediaUrl(result.result.images[0].url);
     }
     if (pendingReferences) return { providerJobId, status: 'processing' };
-    const request = falShotInput(manifest, shot, model, references);
+    let request = falShotInput(manifest, shot, model, references);
     if (model === 'wan') request.reference_image_urls = await Promise.all(request.reference_image_urls.map(url =>
       url.startsWith('data:') ? validatedPhotoDataUrl(url) : normalizeReference(url, { fetchImpl })));
-    if (model === 'kling') request.image_urls = await Promise.all(request.image_urls.map(url => normalizeKlingReference(url, { fetchImpl })));
+    if (model === 'kling') request = await normalizeKlingInputReferences(manifest, request, url => normalizeKlingReference(url, { fetchImpl }));
     result = await operation(renderIdentity, plan.endpoint, request);
     }
     if (result.state !== 'completed') return { providerJobId, status: ['submitting', 'uncertain'].includes(result.state) ? 'uncertain' : result.state };

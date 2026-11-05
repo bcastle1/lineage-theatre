@@ -5,6 +5,7 @@ import { createFalClient, falRequestPath, falRequestUrl, falMediaUrl, FAL_MODELS
 import { falPlan, FAL_RECIPE_VERSION } from './fal-production.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { klingReferenceData } from './fal-reference.mjs';
+import { normalizeKlingInputReferences } from './kling-character-binding.mjs';
 
 const HASH = /^[a-f0-9]{64}$/, REQUEST = /^[A-Za-z0-9_-]{8,100}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -86,8 +87,7 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
     }
     const { falRecoveryShotInput } = await import('./fal-production.mjs');
     const input = falRecoveryShotInput(job.manifest, shot, refs);
-    input.image_urls = await Promise.all(input.image_urls.map(value => klingReferenceData(value, { fetchImpl })));
-    return input;
+    return normalizeKlingInputReferences(job.manifest, input, value => klingReferenceData(value, { fetchImpl }));
   } } = {}) {
   async function immutable(path, value) {
     const old = await read(path);

@@ -28,7 +28,7 @@ export function klingCanaryProfile({ quality = false } = {}) {
   requireValue(typeof quality === 'boolean', 'CANARY_USAGE');
   const runKey = quality ? 'kling-quality-canary-20261022-v1' : RUN_KEY;
   const fixedHash = quality ? 'c6d95029a8578bbb140acea253346116cf86040ab82932f629d30e61e965627b' : FIXED_HASH;
-  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { visualContinuity: quality });
+  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { visualContinuity: quality, characterBinding: false });
   const plan = falPlan(manifest, 'kling'), manifestHash = digest(JSON.stringify(manifest));
   requireValue(manifestHash === fixedHash && manifest.targetDurationSeconds === 15 && plan.shots.length === 3
     && plan.generatedSeconds === 16 && plan.referenceCount === 2 && plan.characters.length === 2
@@ -186,7 +186,7 @@ export async function runKlingCanary(args = process.argv.slice(2), { quality = f
     const quote = await adapter.quote({ manifest, manifestHash: fixedHash });
     requireValue(quote.currency === 'USD' && quote.providerCostCents > 0 && quote.providerCostCents <= MAX_CENTS, 'CANARY_PRICE_EXCEEDS_APPROVAL');
     requireValue(Math.ceil((16 * rates.videoMicroUsdPerSecond + 2 * rates.referenceMicroUsd) / 10000) <= MAX_CENTS, 'CANARY_PRICE_EXCEEDS_APPROVAL');
-    const prepared = await film.prepareOperatorTest({ actor, idempotencyKey: runKey });
+    const prepared = await film.prepareOperatorTest({ actor, idempotencyKey: runKey, characterBinding: false });
     requireValue(prepared.id === id && prepared.manifestHash === fixedHash, 'CANARY_PREPARATION_CHANGED');
     if (!(await readRecord(grantPath))) {
       const job = exactJob((await readRecord(jobPath))?.value);

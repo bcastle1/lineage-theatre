@@ -5,6 +5,7 @@ import { digest, readRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { buildFilmManifest, fictionalOperatorProject } from "./film-production.mjs";
 import { planKlingShots } from "./kling-film-plan.mjs";
+import { hasKlingCharacterBinding } from "./kling-character-binding.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
 import { readPaidFilmCorrection } from "./paid-film-correction.mjs";
 
@@ -45,7 +46,8 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
     const current = (await read(userPath(email)))?.value;
     const built = buildFilmManifest(fictionalOperatorProject());
     const fixedManifest = job.provider?.id === "fal" && job.provider.model === "kling"
-      ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity) }) : built.manifest;
+      ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity),
+        characterBinding: hasKlingCharacterBinding(job.manifest) }) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: digest(JSON.stringify(fixedManifest)) };
     if (!isOwner(actor) || actor.email !== email || actor.mustChangePassword || !isOwner(current)
       || current.email !== email || current.mustChangePassword || job.manifestHash !== fixed.manifestHash

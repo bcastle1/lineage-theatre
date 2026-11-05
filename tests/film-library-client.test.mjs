@@ -13,6 +13,7 @@ const compile = source => ts.transpileModule(source, { compilerOptions: { target
 const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 const modelUrl = moduleUrl(compile(await readFile(new URL("../src/studio/model.ts", import.meta.url), "utf8")));
 const helperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-library.ts", import.meta.url), "utf8")));
+const refreshUrl = moduleUrl(compile(await readFile(new URL("../src/studio/library-refresh.ts", import.meta.url), "utf8")));
 const contractUrl = moduleUrl(compile(await readFile(new URL("../src/studio/checkout-contract.ts", import.meta.url), "utf8"))
   .replaceAll('"./hosted-invoice-url.mjs"', JSON.stringify(new URL("../src/studio/hosted-invoice-url.mjs", import.meta.url).href)));
 const receiptUrl = moduleUrl(compile(await readFile(new URL("../src/studio/payment-receipt.ts", import.meta.url), "utf8"))
@@ -163,6 +164,7 @@ async function libraryComponents() {
   source = source.replaceAll('from "./FilmProductionProgress"', `from "${progressComponentUrl}"`);
   source = source.replaceAll('from "./LtxFilmLibrary"', `from "${ltxLibraryUrl}"`);
   source = source.replaceAll('from "./OriginalPaymentReceipt"', `from "${originalReceiptUrl}"`);
+  source = source.replaceAll('from "./library-refresh"', `from "${refreshUrl}"`);
   return import(moduleUrl(source));
 }
 

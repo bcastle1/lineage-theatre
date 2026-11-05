@@ -1,15 +1,19 @@
 import { createVisualContinuity, validateVisualContinuity } from './film-visual-continuity.mjs';
+import { hasKlingCharacterBinding, KLING_CHARACTER_BINDING_VERSION, KlingCharacterBindingError } from './kling-character-binding.mjs';
 
 // Plan new films before pricing/payment. Never rewrite an already-paid manifest.
 // The reviewed screenplay remains intact; these are consecutive production cuts.
 // visualContinuity:false is only for reproducing historical immutable plans.
-export function planKlingShots(manifest, { visualContinuity = true } = {}) {
+export function planKlingShots(manifest, { visualContinuity = true, characterBinding = visualContinuity } = {}) {
+  if (typeof visualContinuity !== 'boolean' || typeof characterBinding !== 'boolean') throw new KlingCharacterBindingError();
   // A prepared/paid plan is already an immutable contract. In particular, do
   // not upgrade a legacy plan or turn the cuts of one scene into new scenes.
   if (manifest.productionPlan?.provider === 'kling') {
     validateVisualContinuity(manifest);
+    hasKlingCharacterBinding(manifest);
     return manifest;
   }
+  if (characterBinding && !visualContinuity) throw new KlingCharacterBindingError();
   const contract = visualContinuity ? createVisualContinuity(manifest) : null;
   const shots = [];
   for (const [scenePosition, original] of manifest.shots.entries()) {
@@ -50,7 +54,8 @@ export function planKlingShots(manifest, { visualContinuity = true } = {}) {
   // A 600-second film can contain at most 200 three-second cuts.
   if (shots.length > 200) throw new Error("This film has too many production cuts.");
   return { ...manifest, ...(contract ? { visualContinuity: contract } : {}),
-    productionPlan: { provider: "kling", version: 1, ...(contract ? { visualContinuityVersion: 1 } : {}) },
+    productionPlan: { provider: "kling", version: 1, ...(contract ? { visualContinuityVersion: 1 } : {}),
+      ...(characterBinding ? { characterBindingVersion: KLING_CHARACTER_BINDING_VERSION } : {}) },
     shots: shots.map((shot, index) => ({ ...shot, id: `shot-${String(index + 1).padStart(3, "0")}`,
       continuity: { ...shot.continuity, precedingShotId: index ? `shot-${String(index).padStart(3, "0")}` : null } })) };
 }

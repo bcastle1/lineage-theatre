@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Archive, Download, Film as FilmIcon, Loader2, Plus, RefreshCw, RotateCcw, Trash2, X } from "lucide-react";
 import { api, formatDuration, type Film } from "./model";
-import { libraryActionRequest, libraryCanWatch, libraryCoveredDraft, libraryFilmLink, libraryGenerationOrder, libraryKey, loadLibraryLinkedFilm, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
+import { libraryActionRequest, libraryCanWatch, libraryCoveredDraft, libraryFilmLink, libraryGenerationOrder, libraryKey, libraryRefreshDelay, loadLibraryLinkedFilm, loadLibraryWindow, localLibraryState, mergeLibraryPages, normalizeLibraryAction, normalizeLibraryPage,
   parseLibraryFilmLink, paymentLabel, productionLabel, verifyLibraryDetail, type LibraryAction, type LibraryDetail, type LibraryEntry, type LibraryView } from "./film-library";
 import type { ProductionStatus } from "./film-fulfillment";
 import "./film-library.css";
 import FilmProductionProgress from "./FilmProductionProgress";
 import LtxFilmLibrary from "./LtxFilmLibrary";
 import OriginalPaymentReceipt from "./OriginalPaymentReceipt";
+import { startLibraryRefresh } from "./library-refresh";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
@@ -94,6 +95,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const detailSequence = useRef(0);
   const automaticallyOpenedPlayer = useRef("");
   const pageCursors = useRef(new Set<string>());
+  const loadedPageCount = useRef(1), backgroundRead = useRef(false);
   const linkedFilm = parseLibraryFilmLink(libraryHash)?.id;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; sequence.current++; detailSequence.current++; }; }, []);
   useEffect(() => {
@@ -105,19 +107,11 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   useEffect(() => () => onBusyChange(false), [onBusyChange]);
   useEffect(() => {
     const request = ++sequence.current;
-    setLoading(true); setEntries([]); setCursor(undefined); setError(""); setDetail(null); setPlaying(""); pageCursors.current.clear();
-    void (async () => {
-      let page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}`), view);
-      // An empty plan page may precede delivered films. Continue to the first
-      // visible page so a newly delivered film never hides behind "Load more".
-      for (let count = 0; !page.entries.length && page.cursor && count < 20; count++) {
-        if (pageCursors.current.has(page.cursor)) throw new Error("The library page repeated. Refresh to continue.");
-        pageCursors.current.add(page.cursor);
-        page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}&cursor=${encodeURIComponent(page.cursor)}`), view);
-      }
-      return page;
-    })()
-      .then(value => { const page = normalizeLibraryPage(value, view); if (request === sequence.current) { setEntries(page.entries); setCursor(page.cursor); } })
+    setLoading(true); setEntries([]); setCursor(undefined); setError(""); setDetail(null); setPlaying(""); pageCursors.current.clear(); loadedPageCount.current = 1;
+    void loadLibraryWindow(view, api)
+      .then(page => { if (request === sequence.current) {
+        setEntries(page.entries); setCursor(page.cursor); pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
+      } })
       .catch(cause => { if (request === sequence.current) setError(errorText(cause)); })
       .finally(() => { if (request === sequence.current) setLoading(false); });
   }, [view, reload]);
@@ -136,11 +130,29 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       .finally(() => { if (!cancelled && request === detailSequence.current) { lock.current = false; setBusy(""); } });
     return () => { cancelled = true; lock.current = false; };
   }, [linkedFilm, libraryHash, reload]);
+  const listRefreshInterval = libraryRefreshDelay(entries);
   useEffect(() => {
     if (disabled || busy || loading || playing || detail || confirmation) return;
-    const timer = setInterval(() => { if (document.visibilityState === "visible") setReload(value => value + 1); }, 60_000);
-    return () => clearInterval(timer);
-  }, [disabled, busy, loading, playing, detail, confirmation]);
+    let cancelled = false;
+    const request = sequence.current;
+    const stop = startLibraryRefresh({ intervalMs: listRefreshInterval, focusTarget: window, visibilityTarget: document,
+      canRefresh: () => document.visibilityState === "visible" && !lock.current && !backgroundRead.current,
+      refresh: async () => {
+        backgroundRead.current = true;
+        try {
+          // Preserve the visible cards and loaded pages until their replacement
+          // is verified. Background checks never close a detail or video player.
+          const page = await loadLibraryWindow(view, api, loadedPageCount.current);
+          if (!cancelled && request === sequence.current && !lock.current) {
+            setEntries(page.entries); setCursor(page.cursor); setError("");
+            pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
+          }
+        } catch { if (!cancelled && request === sequence.current) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh films to try again."); }
+        finally { backgroundRead.current = false; }
+      },
+    });
+    return () => { cancelled = true; stop(); };
+  }, [disabled, busy, loading, playing, detail, confirmation, listRefreshInterval, view, reload]);
   useEffect(() => {
     if (confirmation && dialog.current && !dialog.current.open) dialog.current.showModal();
   }, [confirmation]);
@@ -159,11 +171,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   }, [detail]);
   useEffect(() => {
     if (!detail || disabled || busy || playing || confirmation) return;
-    let cancelled = false, checking = false;
+    let cancelled = false;
     const expected = detail.entry;
     const refresh = async () => {
-      if (document.visibilityState !== "visible" || checking || lock.current) return;
-      checking = true;
+      backgroundRead.current = true;
       try {
         const value = await verifyLibraryDetail(await api<unknown>(`/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
         if (!cancelled) {
@@ -172,12 +183,14 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
         }
       } catch { if (!cancelled) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); }
-      finally { checking = false; }
+      finally { backgroundRead.current = false; }
     };
-    const timer = setInterval(() => void refresh(), 30_000);
-    const onReturn = () => void refresh();
-    window.addEventListener("focus", onReturn); document.addEventListener("visibilitychange", onReturn);
-    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("focus", onReturn); document.removeEventListener("visibilitychange", onReturn); };
+    const stop = startLibraryRefresh({ intervalMs: libraryRefreshDelay([expected], 30_000),
+      focusTarget: window, visibilityTarget: document,
+      canRefresh: () => document.visibilityState === "visible" && !lock.current && !backgroundRead.current,
+      refresh,
+    });
+    return () => { cancelled = true; stop(); };
   }, [detail, disabled, busy, playing, confirmation]);
   async function loadMore() {
     if (!cursor || lock.current || loading || disabled) return;
@@ -187,7 +200,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       if (pageCursors.current.has(next)) throw new Error("The next library page could not be verified. Refresh the library to continue.");
       const page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}&cursor=${encodeURIComponent(next)}`), view);
       if (request === sequence.current) {
-        pageCursors.current.add(next); setEntries(current => mergeLibraryPages(current, page.entries)); setCursor(page.cursor);
+        pageCursors.current.add(next); loadedPageCount.current++; setEntries(current => mergeLibraryPages(current, page.entries)); setCursor(page.cursor);
       }
     } catch (cause) { if (mounted.current) setError(errorText(cause)); }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
