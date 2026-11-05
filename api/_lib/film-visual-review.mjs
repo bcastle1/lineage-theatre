@@ -4,6 +4,7 @@ import { STORY_MODEL } from './story.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { falReferenceData } from './fal-reference.mjs';
 import { falRequestPath, FAL_MODELS } from './fal-client.mjs';
+import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const VISUAL_REVIEW_VERSION = 1;
@@ -82,7 +83,8 @@ export async function visualReferenceImages(job, shot, { read, selectedPhoto = p
     if (character.referencePhotoId) data = await selectedPhoto(job.manifest, character, { read });
     else {
       const identity = digest(`${job.provider.recipe}:cast:${job.id}:${job.manifestHash}:${id}`);
-      const record = (await read(falRequestPath(identity)))?.value;
+      const selected = await resolveReferenceChoice({ productionId: job.id, manifestHash: job.manifestHash, identity, ownerHash: job.ownerHash }, { read });
+      const record = selected?.receipt || (await read(falRequestPath(identity)))?.value;
       requireValue(record?.state === 'completed' && record.endpoint === FAL_MODELS.reference && record.result?.images?.length === 1);
       data = await generatedPhoto(record.result.images[0].url);
     }

@@ -3,6 +3,7 @@ import { falRequestPath, FAL_MODELS, falMediaUrl } from './fal-client.mjs';
 import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { validatedPhotoDataUrl } from './production-photo-reference.mjs';
 import { STORY_MODEL } from './story.mjs';
+import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 import { boundedVisualJson, imageData, visualReferenceImages, visualSceneContext,
   castVisualReviewSchema, verifiedVisualDecision, CAST_REVIEW_DIRECTION } from './film-visual-review.mjs';
 
@@ -34,11 +35,13 @@ export async function startFrameReviewContext({ email, productionId, manifestHas
     if (character.referencePhotoId) originals.push({ id, selectedPhotoId: character.referencePhotoId });
     else {
       const identity = digest(`${job.provider.recipe}:cast:${productionId}:${manifestHash}:${id}`);
-      const record = (await read(falRequestPath(identity)))?.value;
-      requireValue(record?.identity === identity && record.state === 'completed'
+      const selected = await resolveReferenceChoice({ productionId, manifestHash, identity, ownerHash: job.ownerHash }, { read });
+      const record = selected?.receipt || (await read(falRequestPath(identity)))?.value;
+      requireValue(record?.identity === (selected ? selected.receipt.identity : identity) && record.state === 'completed'
         && record.endpoint === FAL_MODELS.reference && record.result?.images?.length === 1);
       falMediaUrl(record.result.images[0].url);
-      originals.push({ id, identity, resultHash: digest(JSON.stringify(record.result)) });
+      originals.push({ id, identity, resultHash: digest(JSON.stringify(record.result)),
+        ...(selected ? { replacement: selected.proof } : {}) });
     }
   }
   const binding = { version: 1, manifestHash, shotId, referenceIdentity,
