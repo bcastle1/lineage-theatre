@@ -118,7 +118,7 @@ export function createReferenceRecovery({ read = readRecord, write = writeRecord
   async function recover(input, { execute = false } = {}) {
     let c = await context(input);
     const selected = await resolveReferenceChoice({ productionId: S.id, manifestHash: S.manifestHash, identity: originalIdentity, ownerHash: S.ownerHash }, { read });
-    if (selected) return { status: 'reference-choice-ready', generationSubmitted: false, replacementIdentity,
+    if (selected) return { status: 'reference-choice-ready', generationSubmitted: false, replacementIdentity: selected.receipt.identity,
       choiceHash: selected.proof.choiceHash, maximumTotalCostCents: c.claim.maximumTotalCostCents };
     let child = await client.get(replacementIdentity);
     requireValue(!child || c.claim);
