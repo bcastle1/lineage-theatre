@@ -1,4 +1,4 @@
-export const KLING_CHARACTER_BINDING_VERSION = 2;
+export const KLING_CHARACTER_BINDING_VERSION = 3;
 
 export class KlingCharacterBindingError extends Error {
   constructor() {
@@ -12,7 +12,7 @@ const requireValue = value => { if (!value) throw new KlingCharacterBindingError
 export function klingCharacterBindingVersion(manifest) {
   const plan = manifest?.productionPlan, version = plan?.characterBindingVersion;
   if (version === undefined) return undefined;
-  requireValue([1, KLING_CHARACTER_BINDING_VERSION].includes(version) && plan.provider === 'kling' && plan.version === 1
+  requireValue([1, 2, KLING_CHARACTER_BINDING_VERSION].includes(version) && plan.provider === 'kling' && plan.version === 1
     && plan.visualContinuityVersion === 1 && manifest.visualContinuity?.version === 1);
   return version;
 }
@@ -64,8 +64,12 @@ export function validateKlingImageElement(element) {
 // An empty cast has no reference field; historical images retain their order.
 export async function normalizeKlingInputReferences(manifest, input, normalize) {
   if (!hasKlingCharacterBinding(manifest)) return { ...input, image_urls: await Promise.all(input.image_urls.map(normalize)) };
+  if (klingCharacterBindingVersion(manifest) === 3) {
+    requireValue(typeof input.start_image_url === 'string' && input.start_image_url.length > 0);
+    input = { ...input, start_image_url: await normalize(input.start_image_url) };
+  }
   if (!input.elements) return input;
-  if (klingCharacterBindingVersion(manifest) === 2) return { ...input, elements: await Promise.all(input.elements.map(async element => {
+  if (klingCharacterBindingVersion(manifest) >= 2) return { ...input, elements: await Promise.all(input.elements.map(async element => {
     validateKlingImageElement(element);
     const [frontal, ...references] = await Promise.all([element.frontal_image_url, ...element.reference_image_urls].map(normalize));
     // Different URLs may still return identical bytes. Normalization produces

@@ -8,6 +8,7 @@ import { productionAuthorizationDiagnostic } from './_lib/production-authorizati
 import { paidFilmCorrections } from './_lib/paid-film-correction.mjs';
 import { productionJobPath } from './_lib/film-production.mjs';
 import { createFilmVisualReviewService } from './_lib/film-visual-review.mjs';
+import { createStartFrameReviewService } from './_lib/film-start-frame-review.mjs';
 import { accessStatusForUser, isOwner } from './_lib/access.mjs';
 import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 
@@ -16,7 +17,8 @@ import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 // allocation, recorded-reversal, owner, manifest and full-film budget checks.
 export function createProductionWorkerHandler({ env = process.env, paymentService = payments,
   adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
-  corrections = paidFilmCorrections, visualReviewFactory = createFilmVisualReviewService } = {}) {
+  corrections = paidFilmCorrections, visualReviewFactory = createFilmVisualReviewService,
+  startFrameReviewFactory = createStartFrameReviewService } = {}) {
   return async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); }
     const secret = env.LINEAGE_WORKER_SECRET, header = req.headers?.authorization;
@@ -26,36 +28,47 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       return json(res, 401, { code: 'WORKER_AUTH_REQUIRED' });
     try {
       const body = await readBody(req, 1_500_000);
-      if (body?.action === 'review-film-visuals') {
-        if (Object.keys(body).sort().join(',') !== 'action,email,frames,manifestHash,preparedId,shotId'
+      if (['review-film-visuals', 'review-start-frame'].includes(body?.action)) {
+        const startFrame = body.action === 'review-start-frame';
+        if (Object.keys(body).sort().join(',') !== (startFrame
+          ? 'action,email,manifestHash,preparedId,referenceIdentity,shotId' : 'action,email,frames,manifestHash,preparedId,shotId')
           || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
           || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
           || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId || '')
           || !/^[a-f0-9]{64}$/.test(body.manifestHash || '') || !/^shot-\d{3}$/.test(body.shotId || '')
-          || !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 4)
+          || (startFrame ? !/^[a-f0-9]{64}$/.test(body.referenceIdentity || '')
+            : !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 4))
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         const path = productionJobPath(body.email, body.preparedId), job = (await read(path))?.value;
         let paymentPermission = null, pinnedLease = null, pinnedGrant = null;
         const authorize = async () => {
           const current = (await read(path))?.value, actor = (await read(userPath(body.email)))?.value;
           if (!current || current.id !== body.preparedId || current.ownerHash !== digest(body.email) || current.manifestHash !== body.manifestHash
-            || digest(JSON.stringify(current.manifest)) !== body.manifestHash || current.status !== 'awaiting-assembly'
+            || digest(JSON.stringify(current.manifest)) !== body.manifestHash
+            || (startFrame ? !['processing', 'uncertain'].includes(current.status) : current.status !== 'awaiting-assembly')
             || current.manifest?.visualContinuity?.version !== 1 || current.provider?.model !== 'kling'
             || digest(JSON.stringify(current.shots)) !== digest(JSON.stringify(job?.shots))
             || digest(JSON.stringify(current.provider)) !== digest(JSON.stringify(job.provider)) || current.mode !== job.mode
             || digest(JSON.stringify(current.authorization || null)) !== digest(JSON.stringify(job.authorization || null))
             || accessStatusForUser(actor) !== 'approved' || actor.email !== body.email || actor.mustChangePassword) return false;
+          if (startFrame && (current.manifest.productionPlan?.characterBindingVersion !== 3
+            || !['submitting', 'queued', 'processing', 'uncertain'].includes(current.shots.find(s => s.id === body.shotId)?.status)
+            || !(current.lease?.expiresAt > now()) || typeof current.lease.token !== 'string' || !current.lease.token)) return false;
           try { await requireFinishedFilmPayment({ job: current, email: body.email, actor, read, now }); }
           catch { return false; }
           if (current.mode === 'operator-test') {
             const grant = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/grant.json`))?.value;
-            const lease = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/finishing-lease.json`))?.value;
+            const lease = startFrame ? { ...current.lease, manifestHash: current.manifestHash }
+              : (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/finishing-lease.json`))?.value;
             const grantHash = digest(JSON.stringify(grant || null));
             const bindingVersion = current.manifest.productionPlan?.characterBindingVersion;
             // The fixed fictional manifest was verified above. Version 2 adds
             // one separately priced view per character; historical grants keep
             // their original two-reference ceiling and cannot fund this plan.
-            const boundedCanary = bindingVersion === 2
+            const boundedCanary = bindingVersion === 3
+              ? current.manifestHash === '601d70f77e912b17cd1f76ee1522f6c42109f693d09b352b524284e6dd6c270f'
+                && grant?.characterBindingVersion === 3 && grant.maximumCostCents === 450 && grant.maximumReferenceRequests === 7
+              : bindingVersion === 2
               ? current.manifestHash === '242696e7d84c765468f5e33717b32480326da65488f0d7ff8573b2938ad70358'
                 && grant?.characterBindingVersion === 2 && grant.maximumCostCents === 360 && grant.maximumReferenceRequests === 4
               : [undefined, 1].includes(bindingVersion) && grant?.maximumCostCents === 300 && grant.maximumReferenceRequests === 2;
@@ -66,7 +79,9 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
               && boundedCanary && grant.maximumVideoRequests === 3
               && Date.parse(grant.expiresAt) > now() && typeof lease?.token === 'string' && lease.token.length > 0
               && lease.manifestHash === body.manifestHash && lease.expiresAt > now()
-              && (!pinnedLease || lease.token === pinnedLease) && (!pinnedGrant || pinnedGrant === grantHash);
+              && (!pinnedLease || lease.token === pinnedLease) && (!pinnedGrant || pinnedGrant === grantHash)
+              && (!startFrame || current.authorization?.manifestHash === body.manifestHash
+                && current.authorization.quoteReference === grant.quoteReference && current.authorization.budgetCents === grant.maximumCostCents);
             if (valid) { pinnedLease = lease.token; pinnedGrant = grantHash; }
             return valid;
           }
@@ -74,8 +89,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           if (ticket?.state !== 'pending' || ticket.email !== body.email || ticket.manifestHash !== body.manifestHash
             || ticket.id !== body.preparedId || !(ticket.lease?.expiresAt > now())
             || typeof ticket.lease.token !== 'string' || !ticket.lease.token
-            || pinnedLease && pinnedLease !== digest(`${ticket.orderId}:${ticket.lease.token}`)) return false;
-          pinnedLease = digest(`${ticket.orderId}:${ticket.lease.token}`);
+            || pinnedLease && pinnedLease !== digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`)) return false;
+          pinnedLease = digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`);
           if (!paymentPermission || Date.parse(paymentPermission.expiresAt) <= now()) {
             const permission = await paymentService.authorizeProduction({ email: body.email, preparedId: body.preparedId,
               manifestHash: body.manifestHash, orderId: ticket.orderId });
@@ -87,8 +102,10 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         };
         if (!await authorize()) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
         if (!await limiter(`production-worker:visual-review:${body.preparedId}`, 240, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
-        const review = visualReviewFactory({ read, key: () => env.OPENAI_API_KEY, authorize, now });
-        return json(res, 200, await review({ email: body.email, id: body.preparedId, job, shotId: body.shotId, frames: body.frames }));
+        const review = (startFrame ? startFrameReviewFactory : visualReviewFactory)({ read, key: () => env.OPENAI_API_KEY, authorize, now });
+        return json(res, 200, await review(startFrame
+          ? { email: body.email, productionId: body.preparedId, manifestHash: body.manifestHash, shotId: body.shotId, referenceIdentity: body.referenceIdentity }
+          : { email: body.email, id: body.preparedId, job, shotId: body.shotId, frames: body.frames }));
       }
       if (body?.action === 'authorize-failed-shot-recovery') {
         const fields = ['action', 'email', 'preparedId', 'manifestHash', 'correctionId', 'recoveryId',
@@ -129,7 +146,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       const { email, preparedId, manifestHash, orderId } = body;
       return json(res, 200, await paymentService.authorizeProduction({ email, preparedId, manifestHash, orderId }));
     } catch (error) {
-      if (['VISUAL_REVIEW_UNCERTAIN', 'VISUAL_REVIEW_INVALID', 'VISUAL_REVIEW_AUTH_REQUIRED', 'VISUAL_REVIEW_UNAVAILABLE', 'VISUAL_REVIEW_RATE_LIMITED'].includes(error?.code))
+      if (['VISUAL_REVIEW_UNCERTAIN', 'VISUAL_REVIEW_REQUIRED', 'VISUAL_REVIEW_INVALID', 'VISUAL_REVIEW_AUTH_REQUIRED', 'VISUAL_REVIEW_UNAVAILABLE', 'VISUAL_REVIEW_RATE_LIMITED'].includes(error?.code))
         return json(res, error.code === 'VISUAL_REVIEW_RATE_LIMITED' ? 429 : error.code === 'VISUAL_REVIEW_UNAVAILABLE' ? 503 : 409, { code: error.code });
       console.warn('PRODUCTION_AUTHORIZATION_UNAVAILABLE', productionAuthorizationDiagnostic(error));
       return json(res, 503, { code: 'PRODUCTION_AUTHORIZATION_UNAVAILABLE' });

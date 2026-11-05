@@ -6,18 +6,19 @@ import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { buildFilmManifest, fictionalOperatorProject, productionJobPath } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
-import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { FAL_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
 import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { createStartFrameReviewService } from '../api/_lib/film-start-frame-review.mjs';
 
 // Exercise the real route, reference lookup, JPEG validation, receipt writing,
 // and authorization callbacks. Only private storage/payment/model IO is fake.
 const secret = 'a'.repeat(64), now = 1_800_000_000_000, id = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
-async function fixture({ operator = false, changeManifest, bindingVersion = 2 } = {}) {
+async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
   const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, {
     characterBinding: bindingVersion !== null, ...(bindingVersion === null ? {} : { characterBindingVersion: bindingVersion }),
@@ -25,10 +26,11 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2 } 
   if (changeManifest) changeManifest(manifest);
   const manifestHash = digest(JSON.stringify(manifest));
   const job = { id, filmId: manifest.filmId, ownerHash: digest(email), mode: operator ? 'operator-test' : 'customer',
-    status: 'awaiting-assembly', manifest, manifestHash,
+    status: startFrame ? 'processing' : 'awaiting-assembly', manifest, manifestHash,
+    ...(startFrame ? { lease: { token: 'current-generation-lease', expiresAt: now + 90_000 } } : {}),
     provider: { id: 'fal', model: 'kling', recipe: FAL_RECIPE_VERSION },
-    authorization: { environment: 'production', manifestHash, budgetCents: 300, quoteReference: 'b'.repeat(64) },
-    shots: manifest.shots.map(shot => ({ id: shot.id, status: 'completed', requestKey: digest(`${id}:${manifestHash}:${shot.id}`),
+    authorization: { environment: 'production', manifestHash, budgetCents: bindingVersion === 3 ? 450 : 300, quoteReference: 'b'.repeat(64) },
+    shots: manifest.shots.map(shot => ({ id: shot.id, status: startFrame ? 'processing' : 'completed', requestKey: digest(`${id}:${manifestHash}:${shot.id}`),
       output: { url: `https://v3.fal.media/${shot.id}.mp4`, contentType: 'video/mp4', sizeBytes: 1024, durationSeconds: shot.targetDurationMs / 1000 } })) };
   const orderId = digest(`${email}:production:${manifestHash}`), orderPath = `payments/orders/${orderId}.json`;
   const jobPath = productionJobPath(email, id), ticketPath = productionQueuePath(email, id);
@@ -42,9 +44,10 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2 } 
   const ticket = { version: 1, state: 'pending', email, id, orderId, manifestHash, lease: { token: 'owned-queue-claim', expiresAt: now + 600_000 } };
   const grant = { version: 1, kind: 'fictional-kling-quality-canary-v1', ownerHash: job.ownerHash, preparedId: id,
     manifestHash, recipe: FAL_RECIPE_VERSION, funding: 'existing-merchant-provider-credit', fictionalOnly: true,
-    ...(bindingVersion === 2 ? { characterBindingVersion: 2 } : {}),
-    maximumCostCents: bindingVersion === 2 ? 360 : 300, maximumVideoRequests: 3, maximumReferenceRequests: bindingVersion === 2 ? 4 : 2, videoMicroUsdPerSecond: 140_000,
-    referenceMicroUsd: 300_000, quoteReference: 'b'.repeat(64), quotedCostCents: bindingVersion === 2 ? 344 : 284,
+    ...([2, 3].includes(bindingVersion) ? { characterBindingVersion: bindingVersion } : {}),
+    maximumCostCents: bindingVersion === 3 ? 450 : bindingVersion === 2 ? 360 : 300,
+    maximumVideoRequests: 3, maximumReferenceRequests: bindingVersion === 3 ? 7 : bindingVersion === 2 ? 4 : 2, videoMicroUsdPerSecond: 140_000,
+    referenceMicroUsd: 300_000, quoteReference: 'b'.repeat(64), quotedCostCents: bindingVersion === 3 ? 434 : bindingVersion === 2 ? 344 : 284,
     approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString() };
   const records = new Map(), reads = [], writes = [];
   for (const [path, value] of [[jobPath, job], [userPath(email), user], [orderPath, order], [ticketPath, ticket],
@@ -57,7 +60,12 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2 } 
   }
   const image = `data:image/jpeg;base64,${(await sharp({ create: { width: 96, height: 96, channels: 3, background: '#63574a' } }).jpeg().toBuffer()).toString('base64')}`;
   const frames = visualSampleTimes(manifest.shots[0]).map(atMs => ({ shotId: manifest.shots[0].id, atMs, dataUrl: image }));
-  const body = { action: 'review-film-visuals', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
+  const referenceIdentity = startFrameIdentity(id, manifestHash, manifest.shots[0].id);
+  records.set(falRequestPath(referenceIdentity), { value: { identity: referenceIdentity, state: 'completed', endpoint: FAL_MODELS.reference,
+    result: { images: [{ url: 'https://v3.fal.media/start-frame.jpg' }] } }, etag: 'starting-frame' });
+  const body = startFrame
+    ? { action: 'review-start-frame', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, referenceIdentity }
+    : { action: 'review-film-visuals', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
   const env = { LINEAGE_WORKER_SECRET: secret, OPENAI_API_KEY: 'synthetic-visual-key' };
   let modelCalls = 0, paymentCalls = 0, reviewCalls = 0, limiterCalls = 0, afterInference, afterReference;
   const read = async path => { reads.push(path); return clone(records.get(path) ?? null); };
@@ -87,7 +95,18 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2 } 
           assert.equal(JSON.parse(request.body).store, false);
           if (afterInference) await afterInference();
           return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
-            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }));
+            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(bindingVersion === 3 ? { ...decision, cast: 'consistent' } : decision) }] }] }));
+        } });
+    },
+    startFrameReviewFactory: options => {
+      reviewCalls++;
+      return createStartFrameReviewService({ ...options, write,
+        generatedPhoto: async () => image,
+        normalizeStartImage: async () => { if (afterReference) await afterReference(); return image; },
+        fetchImpl: async () => {
+          modelCalls++; if (afterInference) await afterInference();
+          return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+            output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ...decision, cast: 'consistent' }) }] }] }));
         } });
     } });
   const invoke = async changes => {
@@ -109,6 +128,56 @@ test('visual route completes an owned paid film review and returns only the boun
   assert.ok(!JSON.stringify(f.writes).includes(f.env.OPENAI_API_KEY));
   const repeated = await f.invoke(); assert.equal(repeated.statusCode, 200); assert.deepEqual(repeated.body, result.body);
   assert.equal(f.counts().modelCalls, 1);
+});
+
+test('v3 starting-frame review uses the ordinary paid worker or exact separate fictional grant before rendering', async () => {
+  for (const operator of [false, true]) {
+    const f = await fixture({ operator, bindingVersion: 3, startFrame: true });
+    const result = await f.invoke(); assert.equal(result.statusCode, 200); assert.equal(result.body.passed, true);
+    assert.equal(result.body.referenceIdentity, f.body.referenceIdentity); assert.match(result.body.normalizedImageHash, /^[a-f0-9]{64}$/);
+    assert.equal(f.counts().modelCalls, 1);
+    assert.ok(f.writes.every(w => w.path.startsWith('production/start-frame-reviews/')));
+    assert.ok(!JSON.stringify(f.writes).includes('data:image'));
+    assert.deepEqual((await f.invoke()).body, result.body); assert.equal(f.counts().modelCalls, 1);
+  }
+  const finalReview = await fixture({ operator: true, bindingVersion: 3 });
+  assert.equal((await finalReview.invoke()).statusCode, 200);
+});
+
+test('v3 preflight rejects expired, replaced, completed, foreign and expanded authorizations before spending', async () => {
+  const changes = [f => { delete f.records.get(f.jobPath).value.lease; },
+    f => { f.records.get(f.jobPath).value.lease.expiresAt = now; },
+    f => { f.records.get(f.jobPath).value.status = 'completed'; },
+    f => { f.records.get(f.jobPath).value.shots[0].status = 'completed'; },
+    f => { f.records.get(f.grantPath).value.maximumReferenceRequests = 8; },
+    f => { f.records.get(f.grantPath).value.maximumCostCents = 451; },
+    f => { f.records.get(f.grantPath).value.maximumCostCents = 360; f.records.get(f.grantPath).value.maximumReferenceRequests = 4; },
+    f => { f.records.get(f.grantPath).value.quoteReference = 'c'.repeat(64); },
+    f => { f.records.get(f.jobPath).value.authorization.budgetCents = 900; },
+    f => { f.records.get(f.userPath).value.status = 'suspended'; },
+    f => { f.records.get(falRequestPath(f.body.referenceIdentity)).value.state = 'queued'; }];
+  for (const change of changes) {
+    const f = await fixture({ operator: true, bindingVersion: 3, startFrame: true }); change(f);
+    assert.notEqual((await f.invoke()).statusCode, 200); assert.equal(f.counts().modelCalls, 0);
+  }
+  for (const extra of [{ image: 'data:image/jpeg;base64,AAAA' }, { passed: true }]) {
+    const f = await fixture({ operator: true, bindingVersion: 3, startFrame: true });
+    assert.equal((await f.invoke({ body: { ...f.body, ...extra } })).statusCode, 400); assert.equal(f.counts().modelCalls, 0);
+  }
+});
+
+test('preflight generation-lease takeover, refund and grant mutation during inference cannot publish a pass', async () => {
+  for (const operator of [false, true]) {
+    const mutations = [f => { f.records.get(f.jobPath).value.lease.token = 'takeover'; },
+      f => { f.records.get(f.jobPath).value.lease.expiresAt = now; },
+      operator ? f => { f.records.get(f.grantPath).value.expiresAt = new Date(now - 1).toISOString(); }
+        : f => { f.records.get(f.orderPath).value.refundedCents = 1; }];
+    for (const mutate of mutations) {
+      const f = await fixture({ operator, bindingVersion: 3, startFrame: true }); f.setAfterInference(() => mutate(f));
+      assert.notEqual((await f.invoke()).statusCode, 200); assert.equal(f.counts().modelCalls, 1);
+      assert.ok(f.writes.every(w => w.value.state !== 'reviewed'));
+    }
+  }
 });
 
 test('wrong worker secrets and malformed route bodies cannot read private data or invoke a reviewer', async () => {

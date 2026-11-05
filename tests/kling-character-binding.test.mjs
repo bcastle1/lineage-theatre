@@ -5,12 +5,14 @@ import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { buildFilmManifest, fictionalOperatorProject, createFilmProductionService, productionJobPath } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { KlingCharacterBindingError, KLING_CAST_BINDING_DIRECTION, normalizeKlingInputReferences, validateKlingImageElement } from '../api/_lib/kling-character-binding.mjs';
-import { falPlan, falShotInput, characterViewIdentity, characterViewInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
+import { falPlan, falShotInput, characterReferenceInput, characterViewIdentity, characterViewInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { klingCanaryProfile } from '../scripts/test-kling-production.mjs';
 
-const build = project => planKlingShots(buildFilmManifest(project || fictionalOperatorProject()).manifest);
+// Version-2 regression coverage remains pinned while version 3 is tested in
+// kling-start-frame.test.mjs. Existing saved payloads must never be upgraded.
+const build = project => planKlingShots(buildFilmManifest(project || fictionalOperatorProject()).manifest, { characterBindingVersion: 2 });
 const frontRefs = manifest => Object.fromEntries(manifest.screenplay.characters.map(c => [c.id, `https://v3.fal.media/${c.id}.jpg`]));
 const refs = manifest => Object.fromEntries(Object.entries(frontRefs(manifest)).map(([id, url]) => [id,
   manifest.productionPlan?.characterBindingVersion === 2 ? { frontalImageUrl: url, referenceImageUrls: [`https://v3.fal.media/${id}-side.jpg`] } : url]));
@@ -60,7 +62,7 @@ test('observed provider 422 image-element condition rejects reference-only, empt
 });
 
 test('unknown or inconsistent binding versions fail instead of silently reverting to images', () => {
-  for (const version of [null, false, true, 0, 3, '1', '2']) {
+  for (const version of [null, false, true, 0, 4, '1', '2', '3']) {
     const manifest = build(); manifest.productionPlan.characterBindingVersion = version;
     assert.throws(() => payload(manifest), KlingCharacterBindingError);
     assert.throws(() => planKlingShots(manifest), KlingCharacterBindingError);
@@ -88,8 +90,12 @@ historical.push({ binding: 1, manifestHash: 'd6985ce486f09c921345bc96443c831f39f
   '301152e45bf2085c513d8b94a30a093139c64a89fa59d5742a1b327f51e4124e',
   'a412b42a4dd84b3f3b004a8f8b2b0b89d4bbb6d2a2d71c92b328de5df9b4b886',
   '7713538f952f078d701e5ec3bd1448cdb5b27459ae63d7f523eb1149d9b3449b'] });
-const historicalManifest = old => old.binding === 1
-  ? planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: 1 })
+historical.push({ binding: 2, manifestHash: '242696e7d84c765468f5e33717b32480326da65488f0d7ff8573b2938ad70358', hashes: [
+  '27d88ee3835fb918d49616d8357d643846041d323ee97cc129ef48d129ed08b5',
+  'c721df37bc0c18276ad2e172471894023bcfbcd0f1907c699cf6767eea9ab775',
+  'e7702c486cb463add5fe4262cc0bffe570868a9af5314b9c42df1f86ea3f493e'] });
+const historicalManifest = old => old.binding
+  ? planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: old.binding })
   : klingCanaryProfile({ quality: old.quality }).manifest;
 
 test('all historical canaries retain every original manifest and request byte', () => {
@@ -100,6 +106,14 @@ test('all historical canaries retain every original manifest and request byte', 
     assert.equal(JSON.stringify(planKlingShots(manifest, { characterBinding: true })), before);
     assert.deepEqual(manifest.shots.map(shot => digest(JSON.stringify(falShotInput(manifest, shot, 'kling', refs(manifest))))), old.hashes);
   }
+});
+
+test('version 2 preserves its exact original portrait and additional-view request bytes', () => {
+  const manifest = build();
+  assert.deepEqual(manifest.screenplay.characters.map(c => digest(JSON.stringify(characterReferenceInput(manifest, c)))), [
+    '4960d5bc62b076d7c54df50959aeefce3283a3abcbbafe89fe0e4d00fea1ea6a', '13b865e66a71833f45f2ec909e134db18727f9755e0519667af6545d5a435916']);
+  assert.deepEqual(manifest.screenplay.characters.map(c => digest(JSON.stringify(characterViewInput(manifest, c, refs(manifest)[c.id].frontalImageUrl)))), [
+    'b01a7d7b2779ba130c92ba352bf937ce9efc3f9cab680bad60f1a32c38b4d232', '208f3eb325719a68d96d054dd3706f4fc49e75ceac5141e3ce6dec71d11a9e0d']);
 });
 
 test('new payload preserves established render translations, exact speech and the saved screenplay', () => {
@@ -249,7 +263,7 @@ test('a selected photo remains the main image and only its conditioned additiona
   character.referencePhotoId = sourceId; character.sourceIds.push(sourceId); original.sources.push({ id: sourceId, type: 'image/jpeg' });
   character.referencePhoto = { version: 1, sourceId, ownerHash: 'a'.repeat(64), sha256: 'b'.repeat(64),
     normalizedSha256: 'c'.repeat(64), contentType: 'image/jpeg', sizeBytes: 100, etag: 'fixture-etag', normalization: 'jpeg-1600-q90-v1' };
-  const manifest = planKlingShots(original), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-photo-production';
+  const manifest = planKlingShots(original, { characterBindingVersion: 2 }), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-photo-production';
   assert.equal(falPlan(manifest, 'kling').referenceCount, 3);
   const records = new Map(), submissions = [];
   const other = manifest.screenplay.characters[1];

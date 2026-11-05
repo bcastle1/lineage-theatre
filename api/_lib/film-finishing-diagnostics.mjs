@@ -30,3 +30,14 @@ export function finishingFailure(error, stage) {
 export function sanitizeFinishingFailure(value) {
   return stages.has(value?.stage) && reasons.has(value?.reason) ? { stage: value.stage, reason: value.reason } : null;
 }
+
+// A diagnostic belongs to one unfinished immutable plan. It is never playback
+// evidence, and stale/foreign markers cannot override a completed film.
+export function storedFinishingFailure(job) {
+  const value = job?.finishingFailure, failure = sanitizeFinishingFailure(value);
+  return job?.status === 'awaiting-assembly' && value?.version === 1 && failure
+    && /^[a-f0-9]{64}$/.test(value.manifestHash || '') && value.manifestHash === job.manifestHash
+    && ['attention', 'retrying'].includes(value.state)
+    && typeof value.recordedAt === 'string' && Number.isFinite(Date.parse(value.recordedAt))
+    ? { ...failure, state: value.state, recordedAt: value.recordedAt } : null;
+}

@@ -8,6 +8,7 @@ import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-producti
 import { planKlingShots } from "./kling-film-plan.mjs";
 import { savedKlingPlanningOptions, klingCharacterBindingVersion } from "./kling-character-binding.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
+import { sanitizeFinishingFailure, storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -163,6 +164,7 @@ function customerJob(job) {
     durationSeconds: job.manifest.targetDurationSeconds, completedShots: job.shots.filter(s => s.status === "completed").length,
     createdAt: job.createdAt, updatedAt: job.updatedAt, preparationOnly: job.status === "prepared",
     ...(job.media ? { mediaReady: true } : {}),
+    ...(storedFinishingFailure(job)?.state === "attention" ? { needsAttention: true } : {}),
     issues: job.status === "prepared" ? ["Review the cast's appearance and voices.", "Film quality and scene timing need confirmation before production."] : [],
   };
 }
@@ -425,7 +427,7 @@ export function createFilmProductionService(dependencies = {}) {
       }
       throw authorizationExpired();
     }
-    const request = { productionId: id, manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+    const request = { email, productionId: id, manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
       // A provider pipeline may need reference images before the scene render.
       // Each new paid operation obtains a current grant; status GETs do not.
       authorizeSpend: async () => {
@@ -455,6 +457,8 @@ export function createFilmProductionService(dependencies = {}) {
     const statuses = new Set(["queued", "processing", "completed", "failed", "uncertain"]);
     // A missing/unknown reconciliation result never causes automatic resubmission.
     current.status = statuses.has(result?.status) ? result.status : "uncertain";
+    if (current.status === "failed" && ["CAST_START_FRAME_MISMATCH", "CAST_START_FRAME_GENERATION_FAILED"].includes(result?.failureCode))
+      current.failureCode = result.failureCode;
     if (result?.providerJobId !== undefined) {
       if (typeof result.providerJobId !== "string" || !result.providerJobId || result.providerJobId.length > 200 || (current.providerJobId && current.providerJobId !== result.providerJobId)) current.status = "uncertain";
       else current.providerJobId = result.providerJobId;
@@ -476,6 +480,21 @@ export function createFilmProductionService(dependencies = {}) {
     catch (error) { if (!conflict(error)) throw error; }
     if (bindingRetirement) throw retiredError();
     return customerJob((await get(email, id)).value);
+  }
+  async function recordFinishingFailure({ email, id, manifestHash, failure, needsAttention, stillOwned }) {
+    const diagnostic = sanitizeFinishingFailure(failure);
+    if (!diagnostic || typeof needsAttention !== "boolean" || typeof stillOwned !== "function") return false;
+    const record = await get(email, id), job = clone(record.value);
+    if (job.id !== id || job.status !== "awaiting-assembly" || job.media
+      || job.manifestHash !== manifestHash || !HASH.test(manifestHash || "")
+      || hash(job.manifest) !== manifestHash || storedFinishingFailure(job)?.state === "attention") return false;
+    // Ownership can expire while private data is read. The job etag also
+    // prevents a late failure from overwriting concurrent media completion.
+    if (!await stillOwned()) return false;
+    job.finishingFailure = { version: 1, manifestHash, ...diagnostic,
+      state: needsAttention ? "attention" : "retrying", recordedAt: stamp() };
+    try { await save(productionJobPath(email, id), job, record.etag); return true; }
+    catch (error) { if (conflict(error)) return false; throw error; }
   }
   // A media worker must verify the actual private file before this transition.
   async function acceptAssembly({ email, id, manifestHash, artifact, stillOwned = async () => true }) {
@@ -501,6 +520,7 @@ export function createFilmProductionService(dependencies = {}) {
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     if(verified.speechReview?.passed===true)job.speechReview=verified.speechReview;
     if(verified.visualReview?.passed===true)job.visualReview=verified.visualReview;
+    delete job.finishingFailure;
     job.status = "completed";
     job.completedAt = stamp();
     await save(productionJobPath(email, id), job, record.etag);
@@ -508,7 +528,7 @@ export function createFilmProductionService(dependencies = {}) {
     return customerJob(job);
   }
   return {
-    prepare, prepareOperatorTest, quoteForPayment, quoteForProductionBudget, advance, acceptAssembly,
+    prepare, prepareOperatorTest, quoteForPayment, quoteForProductionBudget, advance, acceptAssembly, recordFinishingFailure,
     status: async ({ email, id }) => customerJob((await get(email, id)).value),
     manifest: async ({ email, id }) => { const job = (await get(email, id)).value; return { id: job.id, manifestHash: job.manifestHash, manifest: clone(job.manifest) }; },
     getPrepared: async ({ email, id }) => clone((await get(email, id)).value),

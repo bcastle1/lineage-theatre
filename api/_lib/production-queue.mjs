@@ -6,7 +6,7 @@ import { filmProduction, productionJobPath, FilmProductionError } from "./film-p
 import { payments } from "./payments.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
 import { FAL_RECIPE_VERSION } from "./fal-production.mjs";
-import { finishingFailure, sanitizeFinishingFailure } from "./film-finishing-diagnostics.mjs";
+import { finishingFailure, sanitizeFinishingFailure, storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
 import { validateStoredProductionMedia, requireFinishedFilmPayment } from "./production-media.mjs";
 
 const prefix = "production/queue/";
@@ -63,7 +63,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
     if (old) {
       if (old.value.email !== actor.email || old.value.id !== id || old.value.orderId !== orderId || old.value.manifestHash !== job.manifestHash)
         throw new FilmProductionError("This film already has a different production request.", 409, "PRODUCTION_CONFLICT");
-      if (old.value.state === "attention" && job.status !== "failed") {
+      if (old.value.state === "attention" && job.status !== "failed" && storedFinishingFailure(job)?.state !== "attention") {
         if (film.readiness().available !== true) throw blocked();
         const grant = await paymentService.authorizeProduction({ email: actor.email, orderId, manifestHash: job.manifestHash, preparedId: id });
         if (grant?.allowed !== true || grant.manifestHash !== job.manifestHash) throw blocked();
@@ -160,7 +160,8 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
         mediaReady = true;
       } catch { /* Keep playback unavailable while its saved evidence needs review. */ }
     }
-    const needsAttention = !mediaReady && (validTicket?.state === "attention" || saved.status === "completed");
+    const needsAttention = !mediaReady && (validTicket?.state === "attention" || saved.status === "completed"
+      || storedFinishingFailure(saved)?.state === "attention");
     const snapshot = await progress.snapshot({ job: saved, email, queue: queued, mediaReady, needsAttention });
     const health = snapshot.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
     const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health, now: now() });
@@ -210,18 +211,22 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
   async function runTicket(path, { assemble } = {}) {
     const ticket = await claim(path);
     if (!ticket) return { state: "skipped" };
-    let renewal = Promise.resolve(), finishingStage = null;
+    let renewal = Promise.resolve(), finishingStage = null, finishingManifestHash = null;
+    const input = { email: ticket.value.email, id: ticket.value.id };
     const timer = setIntervalImpl(() => (renewal = renewal.then(() => renew(ticket)).catch(() => false)), 30_000);
     timer?.unref?.();
     const finishTicket = async (state, code, failure) => { clearIntervalImpl(timer); await renewal; return finish(ticket, state, code, failure); };
     try {
       const actor = await currentAccount(ticket.value.email);
-      const input = { email: ticket.value.email, id: ticket.value.id };
       const job = await film.getPrepared(input);
       if (job.manifestHash !== ticket.value.manifestHash) throw new FilmProductionError("The saved production plan changed.", 409, "PRODUCTION_CONFLICT");
       if (job.status === "completed") { await finishTicket("completed", "COMPLETED"); return { state: "completed" }; }
       if (job.status === "failed") { await finishTicket("attention", "PROVIDER_FAILED"); return { state: "attention" }; }
+      if (storedFinishingFailure(job)?.state === "attention") {
+        await finishTicket("attention", "REVIEW_REQUIRED", storedFinishingFailure(job)); return { state: "attention" };
+      }
       if (job.status === "awaiting-assembly") {
+        finishingManifestHash = job.manifestHash;
         finishingStage = 'assembly';
         if (typeof assemble !== "function") throw blocked();
         const artifact = await assemble({ ...input, job, stillOwned: () => owns(ticket) });
@@ -249,6 +254,16 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       const needsReview = (error instanceof FilmProductionError && !retryable) || error?.code==='FILM_SPEECH_REVIEW_REQUIRED'
         || visualReviewRequired.includes(error?.code) || visualReviewRequired.includes(failure?.reason) || ticket.value.attempts >= 10;
       if (failure) console.warn("FILM_FINISHING_FAILED", failure);
+      if (failure && finishingManifestHash) {
+        if (!await owns(ticket)) return { state: "skipped" };
+        try { await film.recordFinishingFailure({ ...input, manifestHash: finishingManifestHash,
+          failure, needsAttention: needsReview, stillOwned: () => owns(ticket) }); }
+        catch { console.warn("FILM_FINISHING_FAILURE_NOT_RECORDED"); }
+        const current = await film.getPrepared(input);
+        if (current.manifestHash === finishingManifestHash && current.status === "completed") {
+          await finishTicket("completed", "COMPLETED"); return { state: "completed" };
+        }
+      }
       await finishTicket(needsReview ? "attention" : "pending", needsReview ? "REVIEW_REQUIRED" : "RETRYABLE_FAILURE", failure);
       return { state: needsReview ? "attention" : "pending" };
     } finally { clearIntervalImpl(timer); await renewal; }

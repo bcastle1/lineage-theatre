@@ -35,6 +35,23 @@ function adapter(overrides = {}) {
 const grant = async ({ manifestHash }) => ({ allowed: true, manifestHash, environment: "production", budgetCents: 300, expiresAt: new Date(at + 600_000).toISOString(), fictionalOnly: false });
 const prepare = (service, overrides = {}) => service.prepare({ email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, ...overrides });
 
+test('cast preflight rejection remains terminal and preserves only fixed diagnostics without another submission', async () => {
+  for (const failureCode of ['CAST_START_FRAME_MISMATCH', 'CAST_START_FRAME_GENERATION_FAILED', 'private-provider-response']) {
+    const data = store(); let calls = 0;
+    const service = createFilmProductionService({ ...data, now: () => at, authorize: grant,
+      adapter: adapter({ submitShot: async input => {
+        assert.equal(input.email, email); calls++; return { status: 'failed', failureCode };
+      } }) });
+    const prepared = await prepare(service);
+    const result = await service.advance({ email, id: prepared.id });
+    assert.equal(result.status, 'failed');
+    const saved = await service.getPrepared({ email, id: prepared.id });
+    assert.equal(saved.shots[0].failureCode, failureCode.startsWith('CAST_') ? failureCode : undefined);
+    assert.doesNotMatch(JSON.stringify(result), /CAST_START_FRAME|private-provider-response/);
+    await service.advance({ email, id: prepared.id }); assert.equal(calls, 1);
+  }
+});
+
 test('parallel-capable providers admit distinct authorized scenes before polling, without duplicating a shot', async()=>{
   const data=store(),submitted=[],polled=[];let clock=at;
   const service=createFilmProductionService({...data,now:()=>clock,authorize:grant,

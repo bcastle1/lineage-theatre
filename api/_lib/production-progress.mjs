@@ -1,4 +1,5 @@
 import { digest, readRecord, writeRecord } from "./auth.mjs";
+import { storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
 
 const HASH = /^[a-f0-9]{64}$/;
 const STALE_MS = 10 * 60_000;
@@ -17,9 +18,10 @@ export function productionTimingProfile(job, adapter) {
     // New finishing checks must learn their own delivery times; omit the key
     // for legacy manifests so their existing history remains usable.
     ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}),
-    // Version 2 adds a dependent image operation for every cast member. Keep
-    // its delivery samples separate without changing any historical key.
-    ...(job.manifest.productionPlan?.characterBindingVersion === 2 ? { characterBindingVersion: 2 } : {}) }));
+    // Each new reference/finishing contract learns its own delivery timing.
+    // Preserve the legacy and version 2 keys while version 3 adds cast review.
+    ...([2, 3].includes(job.manifest.productionPlan?.characterBindingVersion)
+      ? { characterBindingVersion: job.manifest.productionPlan.characterBindingVersion } : {}) }));
 }
 
 function samples(value, now) {
@@ -67,7 +69,8 @@ export function productionProgressSnapshot({ job, queue, attempt, history = [], 
   const completedMs = legacy ? 0 : manifestShots.reduce((n, s) => n + (shots.find(row => row.id === s.id)?.status === "completed" ? s.targetDurationMs : 0), 0);
   const fraction = total > 0 ? Math.min(1, completedMs / total) : 0;
   const reconciling = !legacy && pendingReconciliation(job, queue);
-  const attention = needsAttention || queue?.state === "attention" || status === "failed" || status === "uncertain" && !reconciling;
+  const attention = needsAttention || storedFinishingFailure(job)?.state === "attention"
+    || queue?.state === "attention" || status === "failed" || status === "uncertain" && !reconciling;
   const stage = mediaReady ? "ready" : attention ? "attention" : reconciling ? "reconciling" : ["completed", "verifying", "awaiting-assembly"].includes(status)
     ? "finishing" : ["processing", "submitting", "submitted"].includes(status) ? "creating" : status === "queued" ? "queued" : "waiting";
   const result = { version: 1, stage, percent: mediaReady ? 100 : attention || reconciling ? null : stage === "finishing" ? 90
