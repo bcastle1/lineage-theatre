@@ -9,6 +9,7 @@ import { productionPhotoData, validateProductionPhotoBinding, validatedPhotoData
 import { validateVisualContinuity, VISUAL_CONTINUITY_DIRECTION } from './film-visual-continuity.mjs';
 import { hasKlingCharacterBinding, klingCharacterBindingVersion, klingCharacterBindings, normalizeKlingInputReferences, validateKlingImageElement, requireActiveKlingCharacterBinding, KLING_CAST_BINDING_DIRECTION, KLING_CHARACTER_BINDING_VERSION } from './kling-character-binding.mjs';
 import { createRemoteStartFrameReview } from './film-start-frame-client.mjs';
+import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
@@ -465,7 +466,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
         .map(c => digest(`${recipe}:cast:${productionId}:${manifestHash}:${c.id}`)),
         ...plan.characters.map(c => characterViewIdentity(productionId, manifestHash, c.id)),
         startFrameIdentity(productionId, manifestHash, selected.id)];
-      const known = await Promise.all(identities.map(identity => client.get(identity)));
+      const known = await Promise.all(identities.map(async identity =>
+        (await resolveReferenceChoice({ productionId, manifestHash, identity,
+          ownerHash: typeof input.email === 'string' ? digest(input.email) : null }, { read }))?.receipt || client.get(identity)));
       if (known.some(saved => saved && saved.endpoint !== FAL_MODELS.reference)) invalid();
       const failedIndex = known.findIndex(saved => saved?.state === 'failed');
       if (failedIndex !== -1) return { providerJobId, status: 'failed',
@@ -482,7 +485,9 @@ export function createFalProductionAdapter({ model = 'kling', qualification = fa
     for (const character of plan.characters) {
       if (character.referencePhotoId !== undefined) continue;
       const referenceId = digest(`${recipe}:cast:${productionId}:${manifestHash}:${character.id}`);
-      const result = await operation(referenceId, FAL_MODELS.reference, characterReferenceInput(manifest, character));
+      const chosen = await resolveReferenceChoice({ productionId, manifestHash, identity: referenceId,
+        ownerHash: typeof input.email === 'string' ? digest(input.email) : null }, { read });
+      const result = chosen?.receipt || await operation(referenceId, FAL_MODELS.reference, characterReferenceInput(manifest, character));
       if (['failed','submitting','uncertain'].includes(result.state)) return { providerJobId, status: result.state === 'failed' ? 'failed' : 'uncertain' };
       if (result.state !== 'completed') { if (++pendingReferences >= 4) break; continue; }
       if (result.result?.images?.length !== 1) invalid();

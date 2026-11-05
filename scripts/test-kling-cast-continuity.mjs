@@ -13,6 +13,7 @@ const { buildFilmManifest, fictionalOperatorProject, createFilmProductionService
 const { planKlingShots } = await load('api/_lib/kling-film-plan.mjs');
 const { createFalProductionAdapter, FAL_RECIPE_VERSION, falPlan, falShotInput, characterReferenceInput, characterViewInput, characterViewIdentity, startFrameIdentity, startFrameInput } = await load('api/_lib/fal-production.mjs');
 const { createFalClient, FAL_MODELS, falMediaUrl } = await load('api/_lib/fal-client.mjs');
+const { resolveReferenceChoice } = await load('api/_lib/fal-reference-choice.mjs');
 const { klingReferenceData } = await load('api/_lib/fal-reference.mjs');
 const { normalizeKlingInputReferences } = await load('api/_lib/kling-character-binding.mjs');
 const { createFalPricing } = await load('api/_lib/fal-pricing.mjs');
@@ -72,13 +73,14 @@ export function verifyCandidateGrant(grant, { ownerHash, id, now = Date.now() })
     'CANARY_GRANT_REQUIRED');
   return grant;
 }
-export function createGuardedCandidateClient({ id, ownerHash, grantContext, client, pricing, now = Date.now,
+export function createGuardedCandidateClient({ id, ownerHash, grantContext, client, pricing, now = Date.now, read = readRecord,
   normalizeReference = klingReferenceData }) {
   const { manifest, fixedHash, plan } = candidateCanaryProfile(), bounds = candidateOperationBounds(id);
   const same = (actual, expected, code) => requireValue(digest(JSON.stringify(actual)) === digest(JSON.stringify(expected)), code);
   async function completedImage(identity) {
-    const record = await client.get(identity);
-    requireValue(record?.identity === identity && record.endpoint === FAL_MODELS.reference
+    const selected = await resolveReferenceChoice({ productionId: id, manifestHash: fixedHash, identity, ownerHash }, { read });
+    const record = selected?.receipt || await client.get(identity);
+    requireValue(record?.identity === (selected ? selected.receipt.identity : identity) && record.endpoint === FAL_MODELS.reference
       && record.state === 'completed' && record.result?.images?.length === 1, 'CANARY_REFERENCE_NOT_COMPLETED');
     return falMediaUrl(record.result.images[0].url);
   }

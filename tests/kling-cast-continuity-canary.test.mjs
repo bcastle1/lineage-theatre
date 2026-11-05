@@ -38,7 +38,7 @@ function requests() {
       : falShotInput(profile.manifest, bound.shot, 'kling', refs, `https://v3.fal.media/${bound.shot.id}-start-frame.jpg`) }));
 }
 function guarded(overrides = {}) {
-  return createGuardedCandidateClient({ id, ownerHash, now: () => at, grantContext: async () => ({ grant: grantFixture() }),
+  return createGuardedCandidateClient({ id, ownerHash, now: () => at, read: async () => null, grantContext: async () => ({ grant: grantFixture() }),
     pricing: async () => rates, normalizeReference: async value => value, ...overrides,
     client: { get: async identity => completedReference(identity), poll: async () => null,
       submit: async request => request, ...overrides.client } });

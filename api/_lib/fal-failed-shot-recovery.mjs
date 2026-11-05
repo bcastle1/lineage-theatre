@@ -2,6 +2,7 @@ import { digest, readRecord, writeRecord, userPath } from './auth.mjs';
 import { OWNER_EMAIL, isOwner } from './access.mjs';
 import { readPaidFilmCorrection } from './paid-film-correction.mjs';
 import { createFalClient, falRequestPath, falRequestUrl, falMediaUrl, FAL_MODELS } from './fal-client.mjs';
+import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 import { falPlan, characterViewIdentity, startFrameIdentity, FAL_RECIPE_VERSION } from './fal-production.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { klingReferenceData } from './fal-reference.mjs';
@@ -82,7 +83,9 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
     const refs = {};
     for (const character of plan.characters.filter(character => shot.characterIds.includes(character.id))) {
       if (character.referencePhotoId !== undefined) refs[character.id] = await productionPhotoData(job.manifest, character, { read });
-      else { const receipt = await client.get(digest(`${FAL_RECIPE_VERSION}:cast:${job.id}:${job.manifestHash}:${character.id}`));
+      else { const identity = digest(`${FAL_RECIPE_VERSION}:cast:${job.id}:${job.manifestHash}:${character.id}`);
+        const selected = await resolveReferenceChoice({ productionId: job.id, manifestHash: job.manifestHash, identity, ownerHash: job.ownerHash }, { read });
+        const receipt = selected?.receipt || await client.get(identity);
         requireValue(receipt?.state === 'completed' && receipt.endpoint === FAL_MODELS.reference && receipt.result?.images?.length === 1);
         refs[character.id] = falMediaUrl(receipt.result.images[0].url); }
       if (klingCharacterBindingVersion(job.manifest) >= 2) {
