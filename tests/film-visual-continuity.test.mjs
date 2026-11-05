@@ -4,6 +4,7 @@ import { digest } from '../api/_lib/auth.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { validateVisualContinuity, VisualContinuityPlanError, VISUAL_CONTINUITY_DIRECTION } from '../api/_lib/film-visual-continuity.mjs';
+import { KlingCharacterBindingError } from '../api/_lib/kling-character-binding.mjs';
 import { falPlan, falShotInput, characterReferenceInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
 
@@ -40,12 +41,12 @@ test('new plans bind appearance and wardrobe before pricing, preserving scripted
       assert.ok(input.prompt.includes(VISUAL_CONTINUITY_DIRECTION));
       assert.ok(input.prompt.includes(scene.direction));
       assert.doesNotMatch(input.prompt, /References guide identity only/);
-      assert.deepEqual(input.image_urls, shot.characterIds.map(id => references(planned)[id]));
+      assert.deepEqual(input.elements, shot.characterIds.map(id => ({ reference_image_urls: [references(planned)[id]] })));
       assert.ok(Buffer.byteLength(JSON.stringify(input.prompt), 'utf8') < 2400);
     }
   }
   // Continuity is anchored by the same already-priced portrait per character.
-  assert.equal(falPlan(planned, 'kling').referenceCount, falPlan(planKlingShots(original, { visualContinuity: false }), 'kling').referenceCount);
+  assert.equal(falPlan(planned, 'kling').referenceCount, falPlan(planKlingShots(original, { visualContinuity: false, characterBinding: false }), 'kling').referenceCount);
   assert.match(characterReferenceInput(planned, planned.screenplay.characters[0]).prompt, /one clearly visible outfit/);
 });
 
@@ -60,7 +61,7 @@ test('selected photos retain their exact source and binding instead of becoming 
   assert.deepEqual(planned.visualContinuity.characters[0].reference, { kind: 'selected-photo', sourceId });
   assert.deepEqual(planned.screenplay.characters[0].referencePhoto, character.referencePhoto);
   assert.equal(falPlan(planned, 'kling').referenceCount, 1);
-  assert.equal(falShotInput(planned, planned.shots[0], 'kling', references(planned)).image_urls[0], 'data:image/jpeg;base64,ZmFrZQ==');
+  assert.equal(falShotInput(planned, planned.shots[0], 'kling', references(planned)).elements[0].reference_image_urls[0], 'data:image/jpeg;base64,ZmFrZQ==');
   assert.throws(() => falShotInput(planned, planned.shots[0], 'kling', {}));
 });
 
@@ -76,7 +77,7 @@ test('missing or altered continuity contracts cannot silently fall back to legac
     manifest => { manifest.visualContinuity.version = 2; },
   ]) {
     const planned = planKlingShots(fixture()); change(planned);
-    assert.throws(() => falPlan(planned, 'kling'), VisualContinuityPlanError);
+    assert.throws(() => falPlan(planned, 'kling'), error => error instanceof VisualContinuityPlanError || error instanceof KlingCharacterBindingError);
   }
 });
 
@@ -109,7 +110,7 @@ test('compact continuity prompts retain all approved creative fields and wardrob
 });
 
 test('legacy plans retain their exact shape and remain independent of the new appearance checks', () => {
-  const legacy = planKlingShots(fixture(), { visualContinuity: false });
+  const legacy = planKlingShots(fixture(), { visualContinuity: false, characterBinding: false });
   assert.equal(legacy.visualContinuity, undefined);
   assert.deepEqual(planKlingShots(legacy), legacy, 'Already prepared legacy plans never upgrade implicitly');
   assert.deepEqual(legacy.productionPlan, { provider: 'kling', version: 1 });
@@ -133,7 +134,8 @@ test('new continuity quotes require a ready appearance-checking worker while old
       referenceMicroUsd: 300000, expiresAt: new Date(now + 3600000).toISOString() }; } });
   await assert.rejects(adapter.validateManifest(planKlingShots(fixture())), /appearance and wardrobe checks/);
   assert.equal(prices, 0);
-  assert.equal((await adapter.validateManifest(planKlingShots(fixture(), { visualContinuity: false }))).ready, true);
+  assert.equal((await adapter.validateManifest(planKlingShots(fixture(), { visualContinuity: false, characterBinding: false }))).ready, true);
   heartbeat.visualChecksVersion = 1;
+  heartbeat.characterBindingVersion = 1;
   assert.equal((await adapter.validateManifest(planKlingShots(fixture()))).ready, true);
 });

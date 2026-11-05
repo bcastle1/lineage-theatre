@@ -116,6 +116,33 @@ export function mergeLibraryPages(current: LibraryEntry[], incoming: LibraryEntr
   for (const entry of incoming) next.set(libraryKey(entry), entry);
   return [...next.values()];
 }
+export async function loadLibraryWindow(view: LibraryView, request: (path: string) => Promise<unknown>, minimumPages = 1) {
+  const cursors = new Set<string>();
+  let entries: LibraryEntry[] = [], cursor: string | undefined, pageCount = 0;
+  do {
+    const page = normalizeLibraryPage(await request(`/api/library?view=${view}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`), view);
+    entries = mergeLibraryPages(entries, page.entries);
+    pageCount++;
+    cursor = page.cursor;
+    if (!cursor || pageCount >= minimumPages && (entries.length > 0 || pageCount >= 21)) break;
+    if (cursors.has(cursor)) throw new Error("The library page repeated. Refresh to continue.");
+    cursors.add(cursor);
+  } while (cursor);
+  return { entries, cursor, pageCount, cursors };
+}
+function libraryProgressStage(entry: LibraryEntry): unknown {
+  const progress = entry.production.progress;
+  return object(progress) && progress.version === 1 ? progress.stage : null;
+}
+export function libraryProductionActive(entry: LibraryEntry): boolean {
+  if (entry.kind !== "plan" || libraryCanWatch(entry) || entry.production.needsAttention
+    || entry.production.status === "failed" || libraryProgressStage(entry) === "attention") return false;
+  if (["queued", "submitting", "processing", "uncertain", "completed", "uploaded"].includes(entry.production.status)) return true;
+  return entry.production.status === "prepared" && Boolean(entry.coverage || libraryGenerationOrder(entry));
+}
+export function libraryRefreshDelay(entries: LibraryEntry[], idleDelay = 60_000): number {
+  return entries.some(libraryProductionActive) ? 10_000 : idleDelay;
+}
 export function libraryActionRequest(entry: LibraryEntry, action: LibraryAction) {
   if (!(["archive", "trash", "restore"] as string[]).includes(action)
     || action === "archive" && entry.libraryState !== "active"
@@ -179,6 +206,11 @@ export function paymentLabel(payment: LibraryPayment): string {
 }
 export function productionLabel(entry: LibraryEntry): string {
   if (libraryCanWatch(entry)) return "Ready to watch";
+  const stage = libraryProgressStage(entry);
+  if (entry.production.needsAttention || stage === "attention") return "Needs attention";
+  if (entry.production.status === "failed") return "Failed";
+  if (stage === "reconciling") return "Checking status";
+  if (stage === "finishing") return "Finishing checks";
   const labels: Record<string, string> = { prepared: "Not started", queued: "Queued", submitting: "Starting", processing: "Rendering",
     uncertain: "Status needs review", failed: "Failed", completed: "Delivery pending", uploaded: "Delivery pending" };
   return labels[entry.production.status] || "Status unavailable";

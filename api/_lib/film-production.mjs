@@ -6,6 +6,7 @@ import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
 import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-production.mjs";
 import { planKlingShots } from "./kling-film-plan.mjs";
+import { hasKlingCharacterBinding } from "./kling-character-binding.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -185,10 +186,10 @@ export function createFilmProductionService(dependencies = {}) {
   const uuid = dependencies.uuid || randomUUID;
   const stamp = () => new Date(now()).toISOString();
   const progress = createProductionProgress({ read, write, now });
-  async function preparedManifest(project, email) {
+  async function preparedManifest(project, email, planningOptions = {}) {
     const built = buildFilmManifest(project);
     try {
-      const planned = adapter.model === "kling" ? planKlingShots(built.manifest) : built.manifest;
+      const planned = adapter.model === "kling" ? planKlingShots(built.manifest, planningOptions) : built.manifest;
       const manifest = await bindProductionPhotos(planned, owner(email), { read,
         ...(dependencies.getSourceBlob ? { getBlob: dependencies.getSourceBlob } : {}) });
       return { manifest, manifestHash: hash(manifest) };
@@ -220,7 +221,8 @@ export function createFilmProductionService(dependencies = {}) {
     // sandbox test. Verify the saved content against the fixed server sample.
     const built = buildFilmManifest(fictionalOperatorProject());
     const savedModel = job.provider?.model || adapter.model;
-    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity) }) : built.manifest;
+    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity),
+      characterBinding: hasKlingCharacterBinding(job.manifest) }) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: hash(fixedManifest) };
     if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
         || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
@@ -228,10 +230,11 @@ export function createFilmProductionService(dependencies = {}) {
         || job.shots.some((shot, index) => shot.id !== fixed.manifest.shots[index].id))
       throw new FilmProductionError("Prepare a new fixed fictional production test from Administration.", 403, "OPERATOR_PLAN_REQUIRED");
   }
-  async function prepare({ email, project, idempotencyKey, preparationConsent, mode = "customer" }) {
+  async function prepare({ email, project, idempotencyKey, preparationConsent, mode = "customer" }, planningOptions = {}) {
+    if (mode !== "operator-test" && Object.keys(planningOptions).length) invalid("Customer preparation uses the current production plan.");
     email = owner(email); key(idempotencyKey);
     if (preparationConsent !== true) invalid("Allow your screenplay, cast, and production plan to be saved privately before preparing your film.");
-    const { manifest, manifestHash } = await preparedManifest(project, email);
+    const { manifest, manifestHash } = await preparedManifest(project, email, planningOptions);
     // Deterministic request identity makes a lost response safe to retry.
     const seed = digest(`${email}:${idempotencyKey}`);
     const id = `${seed.slice(0, 8)}-${seed.slice(8, 12)}-${seed.slice(12, 16)}-${seed.slice(16, 20)}-${seed.slice(20, 32)}`;
@@ -245,7 +248,7 @@ export function createFilmProductionService(dependencies = {}) {
       status: "prepared", createdAt: stamp(), updatedAt: stamp(), preparationConsentAt: stamp(),
       shots: manifest.shots.map(s => ({ id: s.id, status: "prepared", requestKey: digest(`${id}:${manifestHash}:${s.id}`) })), revision: 1 };
     try { await write(path, job); }
-    catch (error) { if (conflict(error)) return prepare({ email, project, idempotencyKey, preparationConsent, mode }); throw error; }
+    catch (error) { if (conflict(error)) return prepare({ email, project, idempotencyKey, preparationConsent, mode }, planningOptions); throw error; }
     return customerJob(job);
   }
   async function quoteForPayment(project, actor, { idempotencyKey, preparedId, manifestHash } = {}) {
@@ -258,7 +261,11 @@ export function createFilmProductionService(dependencies = {}) {
       : customerJob((await get(actor?.email, preparedId)).value);
     const record = await get(actor.email, prepared.id);
     const job = record.value;
-    if ((await preparedManifest(project, actor.email)).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
+    // Compare edits using the saved plan's recipe. A newly introduced planning
+    // version must not make an unchanged historical screenplay look edited.
+    const comparisonOptions = adapter.model === "kling" && job.manifest.productionPlan?.provider === "kling"
+      ? { visualContinuity: Boolean(job.manifest.visualContinuity), characterBinding: hasKlingCharacterBinding(job.manifest) } : {};
+    if ((await preparedManifest(project, actor.email, comparisonOptions)).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
       throw new FilmProductionError("This screenplay has changed. Prepare the current version before requesting a price.", 409, "PRODUCTION_PLAN_CHANGED");
     }
     if (job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared")) {
@@ -323,9 +330,12 @@ export function createFilmProductionService(dependencies = {}) {
       ...(started ? { providerQuoteReference: quote.quoteReference } : {}), expiresAt: quote.expiresAt,
       apiVerified: true, qualityVerified: true, commercialTermsVerified: true };
   }
-  async function prepareOperatorTest({ actor, idempotencyKey }) {
+  async function prepareOperatorTest({ actor, idempotencyKey, characterBinding = true }) {
     await requireOperator(actor, actor?.email);
-    return prepare({ email: actor.email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, mode: "operator-test" });
+    if (typeof characterBinding !== "boolean") invalid("Choose a supported operator character binding plan.");
+    // Only trusted server callers select the historical recipe. Administration
+    // does not forward a browser-supplied planning option to this method.
+    return prepare({ email: actor.email, project: fictionalOperatorProject(), idempotencyKey, preparationConsent: true, mode: "operator-test" }, { characterBinding });
   }
   async function save(path, job, etag) { await write(path, { ...job, revision: job.revision + 1, updatedAt: stamp() }, etag); }
   // One external operation per invocation. A scheduler/owner can resume safely.
