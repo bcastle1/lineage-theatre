@@ -17,9 +17,11 @@ import { STORY_MODEL } from '../api/_lib/story.mjs';
 const secret = 'a'.repeat(64), now = 1_800_000_000_000, id = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
-async function fixture({ operator = false, changeManifest } = {}) {
+async function fixture({ operator = false, changeManifest, bindingVersion = 2 } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
-  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, {
+    characterBinding: bindingVersion !== null, ...(bindingVersion === null ? {} : { characterBindingVersion: bindingVersion }),
+  });
   if (changeManifest) changeManifest(manifest);
   const manifestHash = digest(JSON.stringify(manifest));
   const job = { id, filmId: manifest.filmId, ownerHash: digest(email), mode: operator ? 'operator-test' : 'customer',
@@ -40,8 +42,9 @@ async function fixture({ operator = false, changeManifest } = {}) {
   const ticket = { version: 1, state: 'pending', email, id, orderId, manifestHash, lease: { token: 'owned-queue-claim', expiresAt: now + 600_000 } };
   const grant = { version: 1, kind: 'fictional-kling-quality-canary-v1', ownerHash: job.ownerHash, preparedId: id,
     manifestHash, recipe: FAL_RECIPE_VERSION, funding: 'existing-merchant-provider-credit', fictionalOnly: true,
-    maximumCostCents: 300, maximumVideoRequests: 3, maximumReferenceRequests: 2, videoMicroUsdPerSecond: 140_000,
-    referenceMicroUsd: 300_000, quoteReference: 'b'.repeat(64), quotedCostCents: 284,
+    ...(bindingVersion === 2 ? { characterBindingVersion: 2 } : {}),
+    maximumCostCents: bindingVersion === 2 ? 360 : 300, maximumVideoRequests: 3, maximumReferenceRequests: bindingVersion === 2 ? 4 : 2, videoMicroUsdPerSecond: 140_000,
+    referenceMicroUsd: 300_000, quoteReference: 'b'.repeat(64), quotedCostCents: bindingVersion === 2 ? 344 : 284,
     approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString() };
   const records = new Map(), reads = [], writes = [];
   for (const [path, value] of [[jobPath, job], [userPath(email), user], [orderPath, order], [ticketPath, ticket],
@@ -182,6 +185,33 @@ test('operator visual review requires the exact fixed fictional film, current ow
   for (const change of changes) {
     const g = await fixture({ operator: true }); change(g);
     assert.notEqual((await g.invoke()).statusCode, 200); assert.equal(g.counts().modelCalls, 0);
+  }
+});
+
+test('historical absent and v1 character bindings retain exactly their original operator grant limits', async () => {
+  for (const bindingVersion of [null, 1]) {
+    const f = await fixture({ operator: true, bindingVersion });
+    assert.equal((await f.invoke()).statusCode, 200); assert.equal(f.counts().paymentCalls, 0);
+    for (const changes of [{ maximumCostCents: 360, maximumReferenceRequests: 4, characterBindingVersion: 2 },
+      { maximumCostCents: 301 }, { maximumReferenceRequests: 3 }]) {
+      const rejected = await fixture({ operator: true, bindingVersion });
+      Object.assign(rejected.records.get(rejected.grantPath).value, changes);
+      assert.equal((await rejected.invoke()).statusCode, 409); assert.equal(rejected.counts().modelCalls, 0);
+    }
+  }
+});
+
+test('v2 fixed operator review requires the separate 360-cent four-reference grant and cannot expand it', async () => {
+  const f = await fixture({ operator: true });
+  assert.equal(f.job.manifestHash, '242696e7d84c765468f5e33717b32480326da65488f0d7ff8573b2938ad70358');
+  assert.equal((await f.invoke()).statusCode, 200); assert.equal(f.counts().paymentCalls, 0);
+  for (const change of [grant => { delete grant.characterBindingVersion; }, grant => { grant.characterBindingVersion = 1; },
+    grant => { grant.maximumCostCents = 300; grant.maximumReferenceRequests = 2; },
+    grant => { grant.maximumCostCents = 361; }, grant => { grant.maximumCostCents = 400; },
+    grant => { grant.maximumReferenceRequests = 5; }, grant => { grant.maximumVideoRequests = 4; }]) {
+    const rejected = await fixture({ operator: true }); change(rejected.records.get(rejected.grantPath).value);
+    assert.equal((await rejected.invoke()).statusCode, 409); assert.equal(rejected.counts().modelCalls, 0);
+    assert.equal(rejected.writes.length, 0);
   }
 });
 

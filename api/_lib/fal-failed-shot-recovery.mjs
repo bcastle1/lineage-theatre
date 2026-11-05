@@ -2,10 +2,10 @@ import { digest, readRecord, writeRecord, userPath } from './auth.mjs';
 import { OWNER_EMAIL, isOwner } from './access.mjs';
 import { readPaidFilmCorrection } from './paid-film-correction.mjs';
 import { createFalClient, falRequestPath, falRequestUrl, falMediaUrl, FAL_MODELS } from './fal-client.mjs';
-import { falPlan, FAL_RECIPE_VERSION } from './fal-production.mjs';
+import { falPlan, characterViewIdentity, FAL_RECIPE_VERSION } from './fal-production.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { klingReferenceData } from './fal-reference.mjs';
-import { normalizeKlingInputReferences } from './kling-character-binding.mjs';
+import { normalizeKlingInputReferences, klingCharacterBindingVersion, requireActiveKlingCharacterBinding } from './kling-character-binding.mjs';
 
 const HASH = /^[a-f0-9]{64}$/, REQUEST = /^[A-Za-z0-9_-]{8,100}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -84,6 +84,11 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
       else { const receipt = await client.get(digest(`${FAL_RECIPE_VERSION}:cast:${job.id}:${job.manifestHash}:${character.id}`));
         requireValue(receipt?.state === 'completed' && receipt.endpoint === FAL_MODELS.reference && receipt.result?.images?.length === 1);
         refs[character.id] = falMediaUrl(receipt.result.images[0].url); }
+      if (klingCharacterBindingVersion(job.manifest) === 2) {
+        const view = await client.get(characterViewIdentity(job.id, job.manifestHash, character.id));
+        requireValue(view?.state === 'completed' && view.endpoint === FAL_MODELS.reference && view.result?.images?.length === 1);
+        refs[character.id] = { frontalImageUrl: refs[character.id], referenceImageUrls: [falMediaUrl(view.result.images[0].url)] };
+      }
     }
     const { falRecoveryShotInput } = await import('./fal-production.mjs');
     const input = falRecoveryShotInput(job.manifest, shot, refs);
@@ -177,6 +182,7 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
     for (const row of c.selected) {
       stage = 'input-validation';
       const recoveryId = failedShotRecoveryId(row.identity, row.receipt.requestId), replacementIdentity = digest(`${recoveryId}:replacement-v1`);
+      if (!await client.get(replacementIdentity)) requireActiveKlingCharacterBinding(c.job.manifest);
       const body = await buildInput(c.job, c.plan.shots[row.index], c.plan);
       requireValue(typeof body.prompt === 'string' && Buffer.byteLength(body.prompt) < 2400 && Buffer.byteLength(JSON.stringify(body.prompt)) < 2400
         && body.duration === String(c.plan.shots[row.index].seconds) && body.generate_audio === true);

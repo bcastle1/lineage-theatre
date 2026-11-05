@@ -16,7 +16,10 @@ export function productionTimingProfile(job, adapter) {
     music: job.manifest.sound?.musicRequested === true,
     // New finishing checks must learn their own delivery times; omit the key
     // for legacy manifests so their existing history remains usable.
-    ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}) }));
+    ...(job.manifest.visualContinuity ? { visualChecksVersion: job.manifest.visualContinuity.version } : {}),
+    // Version 2 adds a dependent image operation for every cast member. Keep
+    // its delivery samples separate without changing any historical key.
+    ...(job.manifest.productionPlan?.characterBindingVersion === 2 ? { characterBindingVersion: 2 } : {}) }));
 }
 
 function samples(value, now) {

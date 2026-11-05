@@ -6,7 +6,7 @@ import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
 import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-production.mjs";
 import { planKlingShots } from "./kling-film-plan.mjs";
-import { hasKlingCharacterBinding } from "./kling-character-binding.mjs";
+import { savedKlingPlanningOptions, klingCharacterBindingVersion } from "./kling-character-binding.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -221,8 +221,7 @@ export function createFilmProductionService(dependencies = {}) {
     // sandbox test. Verify the saved content against the fixed server sample.
     const built = buildFilmManifest(fictionalOperatorProject());
     const savedModel = job.provider?.model || adapter.model;
-    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, { visualContinuity: Boolean(job.manifest.visualContinuity),
-      characterBinding: hasKlingCharacterBinding(job.manifest) }) : built.manifest;
+    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, savedKlingPlanningOptions(job.manifest)) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: hash(fixedManifest) };
     if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
         || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
@@ -264,7 +263,7 @@ export function createFilmProductionService(dependencies = {}) {
     // Compare edits using the saved plan's recipe. A newly introduced planning
     // version must not make an unchanged historical screenplay look edited.
     const comparisonOptions = adapter.model === "kling" && job.manifest.productionPlan?.provider === "kling"
-      ? { visualContinuity: Boolean(job.manifest.visualContinuity), characterBinding: hasKlingCharacterBinding(job.manifest) } : {};
+      ? savedKlingPlanningOptions(job.manifest) : {};
     if ((await preparedManifest(project, actor.email, comparisonOptions)).manifestHash !== job.manifestHash || (manifestHash !== undefined && manifestHash !== job.manifestHash)) {
       throw new FilmProductionError("This screenplay has changed. Prepare the current version before requesting a price.", 409, "PRODUCTION_PLAN_CHANGED");
     }
@@ -360,13 +359,16 @@ export function createFilmProductionService(dependencies = {}) {
     if (job.lease && job.lease.expiresAt > now()) return customerJob(job);
     const inflight = job.shots.filter(s => ['queued', 'processing', 'submitting', 'uncertain'].includes(s.status));
     const legacyRun = runAdapter !== adapter;
+    const retiredBinding = klingCharacterBindingVersion(job.manifest) === 1;
+    const retiredError = () => new FilmProductionError('This saved character binding cannot start new provider requests and needs review.', 409, 'FILM_CHARACTER_BINDING_RETIRED');
     const concurrent = Number.isSafeInteger(runAdapter.maxConcurrentShots) && runAdapter.maxConcurrentShots > 1
       ? Math.min(4, runAdapter.maxConcurrentShots) : 1;
-    const shot = concurrent === 1 ? job.shots.find(s => s.status !== 'completed')
+    const shot = concurrent === 1 && !retiredBinding ? job.shots.find(s => s.status !== 'completed')
       : inflight.find(s => ['submitting', 'uncertain'].includes(s.status))
-        || (!legacyRun && inflight.length < concurrent && job.shots.find(s => s.status === 'prepared'))
+        || (!legacyRun && !retiredBinding && inflight.length < concurrent && job.shots.find(s => s.status === 'prepared'))
         || [...inflight].sort((a,b) => Date.parse(a.lastCheckedAt || a.submittedAt) - Date.parse(b.lastCheckedAt || b.submittedAt))[0];
     if (!shot) {
+      if (retiredBinding && job.shots.some(s => s.status === 'prepared')) throw retiredError();
       if (legacyRun && job.shots.some(s => s.status === "prepared")) throw new FilmProductionError("This earlier production has unstarted scenes that need review before conversion to Kling.", 409, "PRODUCTION_PROVIDER_MISMATCH");
       return customerJob(job);
     }
@@ -427,7 +429,7 @@ export function createFilmProductionService(dependencies = {}) {
       // A provider pipeline may need reference images before the scene render.
       // Each new paid operation obtains a current grant; status GETs do not.
       authorizeSpend: async () => {
-        if (legacyRun) return false;
+        if (legacyRun || retiredBinding) return false;
         const current = Date.parse(grant.expiresAt) > now() ? grant
           : await authorize({ email, id, manifestHash: job.manifestHash, mode: job.mode, authorizationReference });
         return current?.allowed === true && current.manifestHash === job.manifestHash && current.environment === adapter.environment
@@ -437,12 +439,15 @@ export function createFilmProductionService(dependencies = {}) {
       ...(shot.providerJobId ? { providerJobId: shot.providerJobId } : {}), budgetCents: grant.budgetCents, quoteReference: grant.quoteReference };
     // Storage and request preparation can outlast the short-lived grant too.
     if (previousStatus === "prepared" && Date.parse(grant.expiresAt) <= now()) await releaseUnsubmittedClaim();
-    let result;
+    let result, bindingRetirement = false;
     try {
       if (previousStatus === "prepared") result = await runAdapter.submitShot(request);
       else if (["submitting", "uncertain"].includes(previousStatus)) result = await runAdapter.reconcileShot(request);
       else result = await runAdapter.pollShot(request);
-    } catch { result = { status: "uncertain" }; }
+    } catch (error) {
+      bindingRetirement = error?.code === 'FILM_CHARACTER_BINDING_RETIRED';
+      result = { status: bindingRetirement ? previousStatus : 'uncertain' };
+    }
     record = await get(email, id);
     job = clone(record.value);
     if (job.lease?.token !== token) return customerJob(job);
@@ -469,6 +474,7 @@ export function createFilmProductionService(dependencies = {}) {
     if (job.status === "awaiting-assembly") job.finishingStartedAt ||= stamp();
     try { await save(productionJobPath(email, id), job, record.etag); }
     catch (error) { if (!conflict(error)) throw error; }
+    if (bindingRetirement) throw retiredError();
     return customerJob((await get(email, id)).value);
   }
   // A media worker must verify the actual private file before this transition.

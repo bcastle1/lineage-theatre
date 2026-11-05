@@ -51,11 +51,19 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
             const grant = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/grant.json`))?.value;
             const lease = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/finishing-lease.json`))?.value;
             const grantHash = digest(JSON.stringify(grant || null));
+            const bindingVersion = current.manifest.productionPlan?.characterBindingVersion;
+            // The fixed fictional manifest was verified above. Version 2 adds
+            // one separately priced view per character; historical grants keep
+            // their original two-reference ceiling and cannot fund this plan.
+            const boundedCanary = bindingVersion === 2
+              ? current.manifestHash === '242696e7d84c765468f5e33717b32480326da65488f0d7ff8573b2938ad70358'
+                && grant?.characterBindingVersion === 2 && grant.maximumCostCents === 360 && grant.maximumReferenceRequests === 4
+              : [undefined, 1].includes(bindingVersion) && grant?.maximumCostCents === 300 && grant.maximumReferenceRequests === 2;
             const valid = isOwner(actor) && grant?.version === 1 && grant.kind === 'fictional-kling-quality-canary-v1'
               && grant.ownerHash === current.ownerHash && grant.preparedId === current.id
               && grant.manifestHash === body.manifestHash && grant.recipe === current.provider.recipe
               && grant.fictionalOnly === true && grant.funding === 'existing-merchant-provider-credit'
-              && grant.maximumCostCents === 300 && grant.maximumVideoRequests === 3 && grant.maximumReferenceRequests === 2
+              && boundedCanary && grant.maximumVideoRequests === 3
               && Date.parse(grant.expiresAt) > now() && typeof lease?.token === 'string' && lease.token.length > 0
               && lease.manifestHash === body.manifestHash && lease.expiresAt > now()
               && (!pinnedLease || lease.token === pinnedLease) && (!pinnedGrant || pinnedGrant === grantHash);
