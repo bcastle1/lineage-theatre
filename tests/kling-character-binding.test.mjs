@@ -4,23 +4,25 @@ import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { buildFilmManifest, fictionalOperatorProject, createFilmProductionService, productionJobPath } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
-import { KlingCharacterBindingError, KLING_CAST_BINDING_DIRECTION, normalizeKlingInputReferences } from '../api/_lib/kling-character-binding.mjs';
-import { falPlan, falShotInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
+import { KlingCharacterBindingError, KLING_CAST_BINDING_DIRECTION, normalizeKlingInputReferences, validateKlingImageElement } from '../api/_lib/kling-character-binding.mjs';
+import { falPlan, falShotInput, characterViewIdentity, characterViewInput, createFalProductionAdapter, FAL_RECIPE_VERSION, FalProductionPlanError } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
 import { klingCanaryProfile } from '../scripts/test-kling-production.mjs';
 
 const build = project => planKlingShots(buildFilmManifest(project || fictionalOperatorProject()).manifest);
-const refs = manifest => Object.fromEntries(manifest.screenplay.characters.map(c => [c.id, `https://v3.fal.media/${c.id}.jpg`]));
+const frontRefs = manifest => Object.fromEntries(manifest.screenplay.characters.map(c => [c.id, `https://v3.fal.media/${c.id}.jpg`]));
+const refs = manifest => Object.fromEntries(Object.entries(frontRefs(manifest)).map(([id, url]) => [id,
+  manifest.productionPlan?.characterBindingVersion === 2 ? { frontalImageUrl: url, referenceImageUrls: [`https://v3.fal.media/${id}-side.jpg`] } : url]));
 const payload = manifest => falShotInput(manifest, manifest.shots[0], 'kling', refs(manifest));
 
 test('new plans bind cast elements in exact shot order, including reversed screenplay order', () => {
   const project = fictionalOperatorProject();
   project.scenes.forEach(scene => scene.characterIds.reverse());
   const manifest = build(project), before = JSON.stringify(manifest), input = payload(manifest);
-  assert.equal(manifest.productionPlan.characterBindingVersion, 1);
-  assert.deepEqual(input.elements, [{ reference_image_urls: ['https://v3.fal.media/alice.jpg'] },
-    { reference_image_urls: ['https://v3.fal.media/ada.jpg'] }]);
+  assert.equal(manifest.productionPlan.characterBindingVersion, 2);
+  assert.deepEqual(input.elements, [{ frontal_image_url: 'https://v3.fal.media/alice.jpg', reference_image_urls: ['https://v3.fal.media/alice-side.jpg'] },
+    { frontal_image_url: 'https://v3.fal.media/ada.jpg', reference_image_urls: ['https://v3.fal.media/ada-side.jpg'] }]);
   assert.match(input.prompt, /@Element1 Fictional Alice: Adult wearing a blue apron\./);
   assert.match(input.prompt, /@Element2 Fictional Ada: Adult wearing a green apron\./);
   assert.ok(input.prompt.includes(KLING_CAST_BINDING_DIRECTION));
@@ -40,8 +42,25 @@ test('empty cast uses no fabricated elements, reference images or casting direct
   assert.equal(falPlan(manifest, 'kling').referenceCount, 0);
 });
 
+test('observed provider 422 image-element condition rejects reference-only, empty and duplicate views', async () => {
+  // Production returned HTTP 422 on 2026-11-05: "Either frontal_image_url
+  // and reference_image_urls or video_url must be provided". The official
+  // O3 API also specifies 1-3 additional views. Test that external condition,
+  // including the old request that our former payload-only tests accepted.
+  const front = 'https://v3.fal.media/front.jpg', side = 'https://v3.fal.media/side.jpg';
+  const oldRequest = { reference_image_urls: [front] };
+  for (const element of [oldRequest, { frontal_image_url: front }, { frontal_image_url: front, reference_image_urls: [] },
+    { frontal_image_url: front, reference_image_urls: [front] }, { frontal_image_url: front, reference_image_urls: [side, side] },
+    { frontal_image_url: front, reference_image_urls: ['1', '2', '3', '4'] }])
+    assert.throws(() => validateKlingImageElement(element), KlingCharacterBindingError);
+  assert.deepEqual(validateKlingImageElement({ frontal_image_url: front, reference_image_urls: [side] }),
+    { frontal_image_url: front, reference_image_urls: [side] });
+  await assert.rejects(normalizeKlingInputReferences(build(), { elements: [{ frontal_image_url: front, reference_image_urls: [side] }] },
+    async () => 'data:image/jpeg;base64,same-normalized-pixels'), KlingCharacterBindingError);
+});
+
 test('unknown or inconsistent binding versions fail instead of silently reverting to images', () => {
-  for (const version of [null, false, true, 0, 2, '1']) {
+  for (const version of [null, false, true, 0, 3, '1', '2']) {
     const manifest = build(); manifest.productionPlan.characterBindingVersion = version;
     assert.throws(() => payload(manifest), KlingCharacterBindingError);
     assert.throws(() => planKlingShots(manifest), KlingCharacterBindingError);
@@ -64,9 +83,18 @@ const historical = [
     'fdf9d504c7274c7f5affa3c98e5348328cd5a312bb16e898c8802abbcd57eef4',
     'eb546cc126924cec2bf776783254bb2f7f72279f8b72db6a24458dc4bc423d58'] },
 ];
-test('both historical canaries retain every original manifest and request byte', () => {
+// Independently recorded from deployed 37916f5 before the version-2 change.
+historical.push({ binding: 1, manifestHash: 'd6985ce486f09c921345bc96443c831f39f6c984408280cb44aed45e26323701', hashes: [
+  '301152e45bf2085c513d8b94a30a093139c64a89fa59d5742a1b327f51e4124e',
+  'a412b42a4dd84b3f3b004a8f8b2b0b89d4bbb6d2a2d71c92b328de5df9b4b886',
+  '7713538f952f078d701e5ec3bd1448cdb5b27459ae63d7f523eb1149d9b3449b'] });
+const historicalManifest = old => old.binding === 1
+  ? planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: 1 })
+  : klingCanaryProfile({ quality: old.quality }).manifest;
+
+test('all historical canaries retain every original manifest and request byte', () => {
   for (const old of historical) {
-    const { manifest } = klingCanaryProfile({ quality: old.quality }), before = JSON.stringify(manifest);
+    const manifest = historicalManifest(old), before = JSON.stringify(manifest);
     assert.equal(digest(before), old.manifestHash);
     assert.equal(planKlingShots(manifest), manifest);
     assert.equal(JSON.stringify(planKlingShots(manifest, { characterBinding: true })), before);
@@ -122,7 +150,122 @@ test('split cuts retain their source scene, title and stable per-character bindi
 
 const NOW = Date.parse('2026-11-05T12:00:00Z');
 const healthy = () => ({ ready: true, model: 'kling', recipe: FAL_RECIPE_VERSION, deliveryChecksVersion: 1,
-  visualChecksVersion: 1, characterBindingVersion: 1, checkedAt: new Date(NOW).toISOString() });
+  visualChecksVersion: 1, characterBindingVersion: 2, checkedAt: new Date(NOW).toISOString() });
+
+test('retired version 1 never reprices or creates another request but its original operations still reconcile', async () => {
+  const manifest = historicalManifest(historical[2]), manifestHash = digest(JSON.stringify(manifest));
+  const idempotencyKey = digest('fixture-production:' + manifestHash + ':' + manifest.shots[0].id);
+  const identity = digest(`${FAL_RECIPE_VERSION}:kling:${idempotencyKey}`); let saved, polled = 0;
+  assert.equal(identity, '5d5593f5df8ec1506ebd268206e0c860ba3424158afb4ae424c845e8a4a9b5be');
+  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW, read: async () => null,
+    pricing: () => assert.fail('No pricing for retired contracts'),
+    client: { get: async id => id === identity ? saved : null,
+      poll: async id => { assert.equal(id, identity); polled++; return saved; }, submit: () => assert.fail('No new provider operations') } });
+  const request = { manifest, manifestHash, shot: manifest.shots[0], productionId: 'fixture-production', idempotencyKey,
+    authorizeSpend: () => assert.fail('No spending authorization') };
+  await assert.rejects(adapter.quote({ manifest, manifestHash }), { code: 'FILM_CHARACTER_BINDING_RETIRED' });
+  await assert.rejects(adapter.submitShot(request), { code: 'FILM_CHARACTER_BINDING_RETIRED' });
+  saved = { state: 'queued', endpoint: FAL_MODELS.kling, requestId: 'original-fixture-request' };
+  assert.equal((await adapter.reconcileShot(request)).status, 'queued'); assert.equal(polled, 1);
+  saved = { ...saved, state: 'failed' };
+  assert.equal((await adapter.reconcileShot(request)).status, 'failed'); assert.equal(polled, 1);
+});
+
+test('retired version 1 finishes polling an existing reference even when another reference was never submitted', async () => {
+  const manifest = historicalManifest(historical[2]), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production';
+  const identity = digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${manifest.screenplay.characters[0].id}`);
+  let saved = { endpoint: FAL_MODELS.reference, state: 'queued', requestId: 'original-reference-request' }, polls = 0;
+  const adapter = createFalProductionAdapter({ key: 'synthetic-key', read: async () => null,
+    selectedPhoto: () => assert.fail('No photo read for retired work'),
+    client: { get: async id => id === identity ? saved : null,
+      poll: async id => { assert.equal(id, identity); polls++; return saved; }, submit: () => assert.fail('No POST') } });
+  const request = { manifest, manifestHash, productionId, shot: manifest.shots[0], idempotencyKey: digest('retired-reference-sweep'),
+    authorizeSpend: () => assert.fail('No spending authorization') };
+  assert.equal((await adapter.reconcileShot(request)).status, 'processing'); assert.equal(polls, 1);
+  saved = { ...saved, state: 'completed', result: { images: [{ url: 'https://v3.fal.media/existing.jpg' }] } };
+  await assert.rejects(adapter.reconcileShot(request), { code: 'FILM_CHARACTER_BINDING_RETIRED' }); assert.equal(polls, 1);
+});
+
+test('additional views depend on the exact completed main image and all seven operations retain stable identities', async () => {
+  const manifest = build(), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production';
+  const records = new Map(), submissions = []; let health = healthy();
+  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+    read: async path => path === 'production/worker-health.json' ? { value: health } : null,
+    normalizeKlingReference: async url => 'normalized:' + url,
+    client: { get: async id => records.get(id), poll: async id => records.get(id), submit: async request => {
+      assert.equal(records.has(request.identity), false); submissions.push(request);
+      const saved = { state: 'queued', endpoint: request.endpoint, requestId: request.identity }; records.set(request.identity, saved); return saved;
+    } } });
+  const request = shot => ({ manifest, manifestHash, shot, productionId,
+    idempotencyKey: digest(`${productionId}:${manifestHash}:${shot.id}`), authorizeSpend: async () => true });
+  await adapter.submitShot(request(manifest.shots[0])); await adapter.submitShot(request(manifest.shots[0]));
+  assert.equal(submissions.length, 2); assert.ok(submissions.every(s => !s.input.context));
+  for (const character of manifest.screenplay.characters) records.set(digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`),
+    { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: frontRefs(manifest)[character.id] }] } });
+  health = { ...healthy(), characterBindingVersion: 1 };
+  await assert.rejects(adapter.submitShot(request(manifest.shots[0]))); assert.equal(submissions.length, 2);
+  health = healthy();
+  await adapter.submitShot(request(manifest.shots[0])); await adapter.submitShot(request(manifest.shots[0]));
+  assert.equal(submissions.length, 4);
+  for (const character of manifest.screenplay.characters) {
+    const identity = characterViewIdentity(productionId, manifestHash, character.id), sent = submissions.find(s => s.identity === identity);
+    assert.equal(sent.endpoint, FAL_MODELS.reference);
+    assert.deepEqual(sent.input, characterViewInput(manifest, character, frontRefs(manifest)[character.id]));
+    assert.deepEqual(sent.input.context, [{ type: 'image', image_url: frontRefs(manifest)[character.id] }]);
+    records.set(identity, { state: 'completed', endpoint: FAL_MODELS.reference,
+      result: { images: [{ url: refs(manifest)[character.id].referenceImageUrls[0] }] } });
+  }
+  for (const shot of manifest.shots) { await adapter.submitShot(request(shot)); await adapter.submitShot(request(shot)); }
+  assert.equal(submissions.length, 7); assert.equal(new Set(submissions.map(s => s.identity)).size, 7);
+  assert.equal(submissions.filter(s => s.endpoint === FAL_MODELS.kling).length, 3);
+});
+
+test('uncertain additional views never retry and duplicate returned images cannot submit a video', async () => {
+  for (const outcome of ['uncertain', 'duplicate-url', 'duplicate-bytes']) {
+    const manifest = build(), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production', records = new Map();
+    for (const character of manifest.screenplay.characters) {
+      records.set(digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`),
+        { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: frontRefs(manifest)[character.id] }] } });
+      records.set(characterViewIdentity(productionId, manifestHash, character.id), outcome === 'uncertain'
+        ? { state: 'uncertain', endpoint: FAL_MODELS.reference }
+        : { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: outcome === 'duplicate-url'
+          ? frontRefs(manifest)[character.id] : refs(manifest)[character.id].referenceImageUrls[0] }] } });
+    }
+    const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+      read: async path => path === 'production/worker-health.json' ? { value: healthy() } : null,
+      normalizeKlingReference: async url => outcome === 'duplicate-bytes' ? 'same-normalized-image' : url,
+      client: { get: async id => records.get(id), submit: () => assert.fail('No new POST') } });
+    const request = { manifest, manifestHash, shot: manifest.shots[0], productionId, idempotencyKey: digest('blocked-view'),
+      authorizeSpend: () => assert.fail('No spending authorization') };
+    if (outcome === 'uncertain') {
+      assert.equal((await adapter.submitShot(request)).status, 'uncertain'); assert.equal((await adapter.submitShot(request)).status, 'uncertain');
+    } else await assert.rejects(adapter.submitShot(request), KlingCharacterBindingError);
+  }
+});
+
+test('a selected photo remains the main image and only its conditioned additional view is generated', async () => {
+  const original = buildFilmManifest(fictionalOperatorProject()).manifest, character = original.screenplay.characters[0];
+  const sourceId = '11111111-1111-4111-8111-111111111111', photo = 'data:image/jpeg;base64,ZmFrZQ==';
+  character.referencePhotoId = sourceId; character.sourceIds.push(sourceId); original.sources.push({ id: sourceId, type: 'image/jpeg' });
+  character.referencePhoto = { version: 1, sourceId, ownerHash: 'a'.repeat(64), sha256: 'b'.repeat(64),
+    normalizedSha256: 'c'.repeat(64), contentType: 'image/jpeg', sizeBytes: 100, etag: 'fixture-etag', normalization: 'jpeg-1600-q90-v1' };
+  const manifest = planKlingShots(original), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-photo-production';
+  assert.equal(falPlan(manifest, 'kling').referenceCount, 3);
+  const records = new Map(), submissions = [];
+  const other = manifest.screenplay.characters[1];
+  records.set(digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${other.id}`),
+    { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: frontRefs(manifest)[other.id] }] } });
+  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+    read: async path => path === 'production/worker-health.json' ? { value: { ...healthy(), referencePhotoVersion: 1 } } : null,
+    selectedPhoto: async (saved, cast) => { assert.equal(saved, manifest); assert.equal(cast.id, character.id); return photo; },
+    client: { get: async id => records.get(id), submit: async request => { submissions.push(request); return { state: 'queued' }; } } });
+  await adapter.submitShot({ manifest, manifestHash, productionId, shot: manifest.shots[0], idempotencyKey: digest('photo-view'), authorizeSpend: async () => true });
+  assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions.find(s => s.identity === characterViewIdentity(productionId, manifestHash, character.id)).input.context,
+    [{ type: 'image', image_url: photo }]);
+  assert.ok(submissions.every(s => s.input.context && s.endpoint === FAL_MODELS.reference));
+  assert.ok(!submissions.some(s => s.identity === digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`)));
+});
 test('new binding requires a fresh capable worker before quotes or any new reference or video request', async () => {
   const manifest = build(), manifestHash = digest(JSON.stringify(manifest)); let health, prices = 0, submissions = 0;
   const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
@@ -131,21 +274,23 @@ test('new binding requires a fresh capable worker before quotes or any new refer
     client: { get: async () => null, submit: () => { submissions++; return { state: 'queued' }; } } });
   const request = { manifest, manifestHash, shot: manifest.shots[0], productionId: 'fixture-production',
     idempotencyKey: digest('binding-capability'), authorizeSpend: async () => true };
-  for (const value of [undefined, { ...healthy(), characterBindingVersion: undefined }, { ...healthy(), characterBindingVersion: 2 },
+  for (const value of [undefined, { ...healthy(), characterBindingVersion: undefined }, { ...healthy(), characterBindingVersion: 1 },
     { ...healthy(), checkedAt: new Date(NOW - 180001).toISOString() }]) {
     health = value;
     await assert.rejects(adapter.quote({ manifest, manifestHash })); await assert.rejects(adapter.submitShot(request));
     assert.equal(prices, 0); assert.equal(submissions, 0);
   }
   health = healthy();
-  const quote = await adapter.quote({ manifest, manifestHash }); assert.equal(quote.providerCostCents, 300);
+  const quote = await adapter.quote({ manifest, manifestHash }); assert.equal(quote.providerCostCents, 360);
   assert.equal((await adapter.submitShot(request)).status, 'processing'); assert.equal(submissions, 2);
 });
 
 test('provider dispatch normalizes each element image once and keeps completed reference identities', async () => {
   const manifest = build(), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production';
   const records = new Map(manifest.screenplay.characters.map(character => [digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${character.id}`),
-    { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: refs(manifest)[character.id] }] } }]));
+    { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: frontRefs(manifest)[character.id] }] } }]));
+  for (const character of manifest.screenplay.characters) records.set(characterViewIdentity(productionId, manifestHash, character.id),
+    { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: refs(manifest)[character.id].referenceImageUrls[0] }] } });
   let submitted; const normalized = [];
   const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' ? { value: healthy() } : null,
@@ -153,28 +298,32 @@ test('provider dispatch normalizes each element image once and keeps completed r
     client: { get: async id => records.get(id), submit: async request => { submitted = request; return { state: 'queued' }; } } });
   await adapter.submitShot({ manifest, manifestHash, shot: manifest.shots[0], productionId,
     idempotencyKey: digest('dispatch-binding'), authorizeSpend: async () => true });
-  assert.deepEqual(normalized, manifest.shots[0].characterIds.map(id => refs(manifest)[id]));
-  assert.deepEqual(submitted.input.elements, normalized.map(url => ({ reference_image_urls: ['normalized:' + url] })));
+  assert.deepEqual(normalized, manifest.shots[0].characterIds.flatMap(id => [refs(manifest)[id].frontalImageUrl, ...refs(manifest)[id].referenceImageUrls]));
+  assert.deepEqual(submitted.input.elements, manifest.shots[0].characterIds.map(id => ({ frontal_image_url: 'normalized:' + refs(manifest)[id].frontalImageUrl,
+    reference_image_urls: refs(manifest)[id].referenceImageUrls.map(url => 'normalized:' + url) })));
   assert.equal(submitted.endpoint, FAL_MODELS.kling); assert.equal('image_urls' in submitted.input, false);
 });
 
 test('shared render and recovery normalization supports new, historical and empty casts without changing prompts', async () => {
   const empty = fictionalOperatorProject(); empty.characters = []; empty.scenes.forEach(scene => { scene.characterIds = []; });
-  for (const manifest of [build(), klingCanaryProfile({ quality: true }).manifest, build(empty)]) {
+  for (const manifest of [build(), ...historical.map(historicalManifest), build(empty)]) {
     const input = payload(manifest), before = JSON.stringify(input), calls = [];
     const normalized = await normalizeKlingInputReferences(manifest, input, async url => { calls.push(url); return 'normalized:' + url; });
     assert.equal(JSON.stringify(input), before); assert.equal(normalized.prompt, input.prompt);
-    assert.deepEqual(calls, manifest.shots[0].characterIds.map(id => refs(manifest)[id]));
-    if (input.elements) assert.deepEqual(normalized.elements, calls.map(url => ({ reference_image_urls: ['normalized:' + url] })));
+    const v2 = manifest.productionPlan.characterBindingVersion === 2;
+    assert.deepEqual(calls, manifest.shots[0].characterIds.flatMap(id => v2 ? [refs(manifest)[id].frontalImageUrl, ...refs(manifest)[id].referenceImageUrls] : [refs(manifest)[id]]));
+    if (v2 && input.elements) assert.deepEqual(normalized.elements, input.elements.map(element => ({ frontal_image_url: 'normalized:' + element.frontal_image_url,
+      reference_image_urls: element.reference_image_urls.map(url => 'normalized:' + url) })));
+    else if (input.elements) assert.deepEqual(normalized.elements, calls.map(url => ({ reference_image_urls: ['normalized:' + url] })));
     else if (input.image_urls) assert.deepEqual(normalized.image_urls, calls.map(url => 'normalized:' + url));
     else { assert.equal('elements' in normalized, false); assert.equal('image_urls' in normalized, false); }
   }
 });
 
-test('operator playback preserves all three fixed manifests and preparation cannot silently reuse an old identity', async () => {
+test('operator playback preserves all four fixed manifests and preparation cannot silently reuse an old identity', async () => {
   const actor = { email: OWNER_EMAIL, role: 'owner', status: 'active' }, records = new Map([[userPath(OWNER_EMAIL), { value: actor, etag: 'owner' }]]);
   const read = async path => records.get(path);
-  for (const manifest of [...historical.map(old => klingCanaryProfile({ quality: old.quality }).manifest), build()]) {
+  for (const manifest of [...historical.map(historicalManifest), build()]) {
     const job = { manifest, manifestHash: digest(JSON.stringify(manifest)), mode: 'operator-test',
       provider: { id: 'fal', model: 'kling' }, filmId: manifest.filmId, shots: manifest.shots.map(shot => ({ id: shot.id })) };
     await requireFinishedFilmPayment({ job, email: OWNER_EMAIL, actor, read, now: () => NOW });
@@ -191,7 +340,7 @@ test('operator playback preserves all three fixed manifests and preparation cann
 
 test('unchanged historical and new Kling plans reprice under their saved recipe without changing job or quote identity', async () => {
   const email = 'customer@example.invalid', actor = { email }, project = fictionalOperatorProject();
-  for (const manifest of [...historical.map(old => klingCanaryProfile({ quality: old.quality }).manifest), build()]) {
+  for (const manifest of [...historical.map(historicalManifest), build()]) {
     const records = new Map(), quotes = [];
     const service = createFilmProductionService({ now: () => NOW,
       readRecordImpl: async path => structuredClone(records.get(path) || null),

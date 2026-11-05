@@ -9,7 +9,10 @@ import { falPlan, falShotInput, characterReferenceInput, createFalProductionAdap
 import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
 
 const references = manifest => Object.fromEntries(manifest.screenplay.characters.map(character => [character.id,
-  character.referencePhotoId ? 'data:image/jpeg;base64,ZmFrZQ==' : `https://v3.fal.media/${character.id}.jpg`]));
+  manifest.productionPlan?.characterBindingVersion === 2
+    ? { frontalImageUrl: character.referencePhotoId ? 'data:image/jpeg;base64,ZmFrZQ==' : `https://v3.fal.media/${character.id}.jpg`,
+      referenceImageUrls: [`https://v3.fal.media/${character.id}-side.jpg`] }
+    : character.referencePhotoId ? 'data:image/jpeg;base64,ZmFrZQ==' : `https://v3.fal.media/${character.id}.jpg`]));
 function fixture() {
   const project = fictionalOperatorProject();
   project.duration = 60;
@@ -41,12 +44,13 @@ test('new plans bind appearance and wardrobe before pricing, preserving scripted
       assert.ok(input.prompt.includes(VISUAL_CONTINUITY_DIRECTION));
       assert.ok(input.prompt.includes(scene.direction));
       assert.doesNotMatch(input.prompt, /References guide identity only/);
-      assert.deepEqual(input.elements, shot.characterIds.map(id => ({ reference_image_urls: [references(planned)[id]] })));
+      assert.deepEqual(input.elements, shot.characterIds.map(id => ({ frontal_image_url: references(planned)[id].frontalImageUrl,
+        reference_image_urls: references(planned)[id].referenceImageUrls })));
       assert.ok(Buffer.byteLength(JSON.stringify(input.prompt), 'utf8') < 2400);
     }
   }
-  // Continuity is anchored by the same already-priced portrait per character.
-  assert.equal(falPlan(planned, 'kling').referenceCount, falPlan(planKlingShots(original, { visualContinuity: false, characterBinding: false }), 'kling').referenceCount);
+  // The original identity anchor is retained; its additional view is priced too.
+  assert.equal(falPlan(planned, 'kling').referenceCount, 4);
   assert.match(characterReferenceInput(planned, planned.screenplay.characters[0]).prompt, /one clearly visible outfit/);
 });
 
@@ -60,8 +64,8 @@ test('selected photos retain their exact source and binding instead of becoming 
   const planned = planKlingShots(original);
   assert.deepEqual(planned.visualContinuity.characters[0].reference, { kind: 'selected-photo', sourceId });
   assert.deepEqual(planned.screenplay.characters[0].referencePhoto, character.referencePhoto);
-  assert.equal(falPlan(planned, 'kling').referenceCount, 1);
-  assert.equal(falShotInput(planned, planned.shots[0], 'kling', references(planned)).elements[0].reference_image_urls[0], 'data:image/jpeg;base64,ZmFrZQ==');
+  assert.equal(falPlan(planned, 'kling').referenceCount, 3);
+  assert.equal(falShotInput(planned, planned.shots[0], 'kling', references(planned)).elements[0].frontal_image_url, 'data:image/jpeg;base64,ZmFrZQ==');
   assert.throws(() => falShotInput(planned, planned.shots[0], 'kling', {}));
 });
 
@@ -136,6 +140,6 @@ test('new continuity quotes require a ready appearance-checking worker while old
   assert.equal(prices, 0);
   assert.equal((await adapter.validateManifest(planKlingShots(fixture(), { visualContinuity: false, characterBinding: false }))).ready, true);
   heartbeat.visualChecksVersion = 1;
-  heartbeat.characterBindingVersion = 1;
+  heartbeat.characterBindingVersion = 2;
   assert.equal((await adapter.validateManifest(planKlingShots(fixture()))).ready, true);
 });

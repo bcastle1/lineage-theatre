@@ -11,6 +11,18 @@ function job() { return { id: 'saved-film', ownerHash: digest(email), manifestHa
   shots: [{ id: 'one', status: 'processing', submittedAt: at(-200) }, { id: 'two', status: 'prepared' }] }; }
 const pending = film => ({ version: 1, email, id: film.id, manifestHash: film.manifestHash,
   orderId: digest(`${email}:production:${film.manifestHash}`), state: 'pending', attempts: 1, nextAttemptAt: NOW + 10000 });
+
+test('version 2 learns separate delivery timing without changing absent or version 1 history keys', () => {
+  const film = job(), adapter = { id: 'fal', environment: 'production', timingVersion: 'kling:parallel4' };
+  film.manifest.visualContinuity = { version: 1 };
+  const original = digest(JSON.stringify({ version: 1, renderer: 'fal', environment: 'production', timingVersion: 'kling:parallel4',
+    duration: 60, shots: 2, style: 'Cinematic', quality: 'highest', music: true, visualChecksVersion: 1 }));
+  assert.equal(productionTimingProfile(film, adapter), original);
+  film.manifest.productionPlan = { characterBindingVersion: 1 };
+  assert.equal(productionTimingProfile(film, adapter), original);
+  film.manifest.productionPlan.characterBindingVersion = 2;
+  assert.notEqual(productionTimingProfile(film, adapter), original);
+});
 test('an uncertain request in its bound automatic queue shows reconciliation without progress or ETA', () => {
   const film = { ...job(), status: 'uncertain' }, queue = pending(film);
   for (const orderId of [queue.orderId, digest(`${email}:${film.manifestHash}`)]) {

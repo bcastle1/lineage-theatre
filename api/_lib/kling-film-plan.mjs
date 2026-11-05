@@ -4,7 +4,8 @@ import { hasKlingCharacterBinding, KLING_CHARACTER_BINDING_VERSION, KlingCharact
 // Plan new films before pricing/payment. Never rewrite an already-paid manifest.
 // The reviewed screenplay remains intact; these are consecutive production cuts.
 // visualContinuity:false is only for reproducing historical immutable plans.
-export function planKlingShots(manifest, { visualContinuity = true, characterBinding = visualContinuity } = {}) {
+export function planKlingShots(manifest, { visualContinuity = true, characterBinding = visualContinuity,
+  characterBindingVersion = KLING_CHARACTER_BINDING_VERSION } = {}) {
   if (typeof visualContinuity !== 'boolean' || typeof characterBinding !== 'boolean') throw new KlingCharacterBindingError();
   // A prepared/paid plan is already an immutable contract. In particular, do
   // not upgrade a legacy plan or turn the cuts of one scene into new scenes.
@@ -14,6 +15,7 @@ export function planKlingShots(manifest, { visualContinuity = true, characterBin
     return manifest;
   }
   if (characterBinding && !visualContinuity) throw new KlingCharacterBindingError();
+  if (characterBinding && ![1, KLING_CHARACTER_BINDING_VERSION].includes(characterBindingVersion)) throw new KlingCharacterBindingError();
   const contract = visualContinuity ? createVisualContinuity(manifest) : null;
   const shots = [];
   for (const [scenePosition, original] of manifest.shots.entries()) {
@@ -55,7 +57,7 @@ export function planKlingShots(manifest, { visualContinuity = true, characterBin
   if (shots.length > 200) throw new Error("This film has too many production cuts.");
   return { ...manifest, ...(contract ? { visualContinuity: contract } : {}),
     productionPlan: { provider: "kling", version: 1, ...(contract ? { visualContinuityVersion: 1 } : {}),
-      ...(characterBinding ? { characterBindingVersion: KLING_CHARACTER_BINDING_VERSION } : {}) },
+      ...(characterBinding ? { characterBindingVersion } : {}) },
     shots: shots.map((shot, index) => ({ ...shot, id: `shot-${String(index + 1).padStart(3, "0")}`,
       continuity: { ...shot.continuity, precedingShotId: index ? `shot-${String(index).padStart(3, "0")}` : null } })) };
 }

@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildFilmManifest, createFilmProductionService, fictionalOperatorProject, productionJobPath, validateProviderOutput } from "../api/_lib/film-production.mjs";
-import { userPath } from "../api/_lib/auth.mjs";
+import { userPath, digest } from "../api/_lib/auth.mjs";
+import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
+import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 
 const email = "customer@example.invalid";
 const owner = { email: "erik@brocotech.ai", role: "owner", status: "active" };
@@ -43,6 +45,36 @@ test('parallel-capable providers admit distinct authorized scenes before polling
   assert.equal(new Set(submitted).size,job.shotCount);assert.equal(polled.length,0);
   for(let n=0;n<job.shotCount;n++){clock+=1000;await service.advance({email,id:job.id});}
   assert.equal(submitted.length,job.shotCount);assert.deepEqual(polled,submitted);
+});
+
+test('retired v1 plans reconcile in-flight scenes before surfacing unstarted scenes for review', async () => {
+  for (const maxConcurrentShots of [1, 4]) {
+    const data = store(), polled = [];
+    const service = createFilmProductionService({ ...data, now: () => at,
+      authorize: () => assert.fail('Retired plans cannot request another spending grant'),
+      adapter: adapter({ id: 'fal', model: 'kling', modelVersion: FAL_RECIPE_VERSION, maxConcurrentShots,
+        validateManifest: () => assert.fail('Do not validate another new request'), submitShot: () => assert.fail('No submission'),
+        pollShot: async ({ shot, providerJobId, authorizeSpend }) => {
+          polled.push(shot.id); assert.equal(await authorizeSpend(), false);
+          return { status: 'completed', providerJobId, output: { url: 'https://media.example.invalid/existing.mp4',
+            contentType: 'video/mp4', sizeBytes: 200, durationSeconds: 5 } };
+        } }) });
+    const prepared = await prepare(service), path = productionJobPath(email, prepared.id), saved = data.records.get(path);
+    const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: 1 });
+    saved.value.manifest = manifest; saved.value.manifestHash = digest(JSON.stringify(manifest));
+    saved.value.provider = { id: 'fal', model: 'kling', recipe: FAL_RECIPE_VERSION }; saved.value.status = 'processing';
+    saved.value.shots.forEach((shot, index) => { shot.requestKey = digest(`${prepared.id}:${saved.value.manifestHash}:${shot.id}`);
+      if (index === 0) Object.assign(shot, { status: 'queued', providerJobId: 'existing-fixture-request', submittedAt: new Date(at - 5000).toISOString() }); });
+    await service.advance({ email, id: prepared.id });
+    assert.deepEqual(polled, [manifest.shots[0].id]);
+    const before = JSON.stringify(data.records.get(path));
+    await assert.rejects(service.advance({ email, id: prepared.id }), { code: 'FILM_CHARACTER_BINDING_RETIRED' });
+    assert.equal(JSON.stringify(data.records.get(path)), before);
+    data.records.get(path).value.status = 'failed';
+    const failed = JSON.stringify(data.records.get(path));
+    assert.equal((await service.advance({ email, id: prepared.id })).status, 'failed');
+    assert.equal(JSON.stringify(data.records.get(path)), failed);
+  }
 });
 
 test("manifest preserves reviewed screenplay, hashes evidence, sets exact target timing and excludes client provider flags", () => {
