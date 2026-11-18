@@ -612,8 +612,17 @@ export function CuttingStep({
     // An ignored press does nothing at all: it does not take the focus from where the
     // mode change put it (the field of a card that has just opened, the Edit button of
     // one that has just closed), place a caret, select a word, or open a list of options.
+    // A press is seen first as a pointer going down, which does not know its click count
+    // yet, then (unless that was ignored) as a mouse button going down, which does.
+    const ignorePointer = (event: PointerEvent) => {
+      const now = performance.now();
+      pressIgnored = isQuiet(1, now);
+      // A control that is switched off sends nothing further, but would take the focus.
+      if (pressIgnored || (isQuiet(2, now) && (event.target as Element).closest?.(":disabled")))
+        event.preventDefault();
+    };
     const ignorePress = (event: MouseEvent) => {
-      pressIgnored = isQuiet(event.detail, performance.now());
+      pressIgnored = pressIgnored || isQuiet(event.detail, performance.now());
       if (pressIgnored) event.preventDefault();
     };
     const ignoreClick = (event: MouseEvent) => {
@@ -632,9 +641,11 @@ export function CuttingStep({
     };
     // On the document, before anything else sees the press: what arrives under the
     // pointer can be outside this step.
+    document.addEventListener("pointerdown", ignorePointer, true);
     document.addEventListener("mousedown", ignorePress, true);
     document.addEventListener("click", ignoreClick, true);
     return () => {
+      document.removeEventListener("pointerdown", ignorePointer, true);
       document.removeEventListener("mousedown", ignorePress, true);
       document.removeEventListener("click", ignoreClick, true);
       quiet.current = { any: 0, multi: 0, pending: false };
