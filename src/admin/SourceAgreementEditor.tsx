@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type MutableRefObject } from "react";
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Save } from "lucide-react";
+import { AlertCircle, CheckCircle2, ExternalLink, Loader2, RefreshCw, Save } from "lucide-react";
 import { api, ApiError } from "../studio/model";
 import { normalizeSourceAgreement, type SourceAgreement } from "../source-agreement";
 
@@ -96,7 +96,7 @@ export default function SourceAgreementEditor({ disabled, actionLock, onBusyChan
       <div className="admin-card admin-source-agreement-meta">
         <p><strong>Saved revision:</strong> {saved.revision} · <strong>Updated:</strong> {saved.updatedAt ? new Date(saved.updatedAt).toLocaleString() : "Initial agreement"}</p>
         <p><strong>Version:</strong> <span>{saved.version}</span></p>
-        <a href={`/source-agreement.html?version=${encodeURIComponent(saved.version)}`} target="_blank" rel="noopener noreferrer">Read this saved version</a>
+        <a className="text-button" href={`/source-agreement.html?version=${encodeURIComponent(saved.version)}`} target="_blank" rel="noopener noreferrer">Read this saved version<ExternalLink size={14} aria-hidden="true" /></a>
       </div>
       <div className="admin-source-agreement-columns">
         <form className="admin-card admin-source-agreement-form" onSubmit={save}>

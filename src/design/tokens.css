@@ -1,0 +1,281 @@
+/*
+  Lineage Theatre design tokens — "Screening Room".
+  Dark, cinematic chrome frames a luminous, legible content canvas.
+  Every colour, size, space, radius, shadow, duration and layer in the app
+  comes from this file. public/site.css duplicates the few values the static
+  legal pages need, because those pages cannot import from src/.
+*/
+:root {
+  /* ---- Colour: brand (forest) ------------------------------------------- */
+  /* 700 is the brand green. 950 to 800 are the chrome: deep forest, clearly
+     green on any screen, never near-black. 650 is a raised surface on chrome. */
+  --brand-950: #0c241d;
+  --brand-900: #112f26;
+  --brand-850: #14352b;
+  --brand-800: #163a2f;
+  --brand-700: #183e33;
+  --brand-650: #1d483c;
+  --brand-600: #23524a;
+  --brand-500: #3a6b5c;
+  --brand-400: #5f8a7b;
+  --brand-300: #93b3a6;
+  --brand-200: #c5d8cf;
+  --brand-100: #e2ede7;
+  --brand-50: #f0f6f2;
+
+  /* ---- Colour: neutral (warm paper) ------------------------------------- */
+  --neutral-0: #ffffff;
+  --neutral-25: #fdfcfa;
+  --neutral-50: #faf8f4;
+  --neutral-100: #f4f1ea;
+  --neutral-150: #ece8df;
+  --neutral-200: #e4dfd4;
+  --neutral-300: #d2ccbe;
+  --neutral-400: #948f82;
+  --neutral-500: #6b6d64;
+  --neutral-600: #5d6159;
+  --neutral-700: #40453e;
+  --neutral-800: #2a2f2a;
+  --neutral-900: #1a211d;
+
+  /* ---- Colour: accent (brass / gold) ------------------------------------ */
+  --gold-50: #fbf6ea;
+  --gold-100: #f6eedd;
+  --gold-200: #ecdcb8;
+  --gold-300: #e6cf9f;
+  --gold-400: #d4b377;
+  --gold-500: #b8935a;
+  --gold-600: #8a6a33;
+  --gold-700: #7a5c2a;
+
+  /* ---- Colour: cream (text and controls on dark chrome) ------------------ */
+  --cream-50: #fbf7ee;
+  --cream-100: #f5efe2;
+  --cream-200: #ebe2cf;
+
+  /* ---- Colour: semantic sets -------------------------------------------- */
+  --success-bg: #edf5ef;
+  --success-border: #c4dccb;
+  --success-text: #24613c;
+  --success-solid: #2f7a4d;
+  --warning-bg: #fbf3e0;
+  --warning-border: #ecd9a8;
+  --warning-text: #7a5510;
+  --warning-solid: #b0832a;
+  --danger-bg: #fcf0ee;
+  --danger-border: #efcbc5;
+  --danger-text: #9a2f2a;
+  --danger-solid: #a3342e;
+  --danger-solid-hover: #8a2924;
+  --info-bg: #eef3f7;
+  --info-border: #cddbe6;
+  --info-text: #2f5270;
+  --info-solid: #3d6a8f;
+
+  /* ---- Colour: semantic aliases (light canvas) --------------------------- */
+  --color-page: var(--neutral-50);
+  --color-surface: var(--neutral-0);
+  --color-surface-raised: var(--neutral-0);
+  --color-surface-sunken: var(--neutral-100);
+  --color-surface-tint: var(--brand-50);
+  --color-border: var(--neutral-200);
+  --color-border-strong: var(--neutral-300);
+  --color-border-control: var(--neutral-400);
+  --color-text: var(--neutral-900);
+  --color-text-muted: var(--neutral-600);
+  --color-text-subtle: var(--neutral-500);
+  --color-text-brand: var(--brand-700);
+  --color-primary: var(--brand-700);
+  --color-primary-hover: var(--brand-600);
+  --color-primary-active: var(--brand-800);
+  --color-on-primary: var(--cream-50);
+  --color-accent: var(--gold-500);
+  --color-accent-text: var(--gold-700);
+  --color-link: var(--brand-700);
+  --color-selection: var(--gold-200);
+  --color-focus-ring: var(--gold-600);
+  --color-focus-glow: rgb(184 147 90 / 0.32);
+  --color-scrim: rgb(9 28 22 / 0.72);
+
+  /* ---- Colour: semantic aliases (dark chrome) ---------------------------- */
+  /* Contrast on --chrome-bg: text 10.8:1, muted 6.9:1, subtle 5.5:1, accent 6.2:1.
+     On --chrome-raised the subtle text is still 4.6:1 and the accent 5.1:1. */
+  --chrome-deep-rgb: 12 36 29; /* brand-950 as channels, for scrims and image fades */
+  --chrome-bg: var(--brand-800);
+  --chrome-bg-deep: var(--brand-900);
+  --chrome-raised: var(--brand-650);
+  --chrome-border: rgb(230 207 159 / 0.16);
+  --chrome-border-strong: rgb(230 207 159 / 0.32);
+  --chrome-hairline: rgb(212 179 119 / 0.55);
+  --chrome-text: var(--cream-100);
+  --chrome-text-muted: #b6c2b9;
+  --chrome-text-subtle: #a3b0a7;
+  --chrome-accent: var(--gold-400);
+  --chrome-success: #9fd3b0;
+  --chrome-danger: #f2aaa2;
+  --chrome-info: #a9c7e0;
+  --chrome-hover: rgb(245 239 226 / 0.07);
+  --chrome-selected: rgb(245 239 226 / 0.1);
+  --chrome-focus-ring: var(--gold-300);
+  --chrome-vignette: radial-gradient(120% 90% at 50% 0%, rgb(58 107 92 / 0.36), transparent 62%);
+
+  /* ---- Typography -------------------------------------------------------- */
+  --font-ui: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
+  /* Fraunces, with the optical-size axis. Rules for the display face:
+     page titles, marketing headlines, panel and section titles at 20px or
+     larger, and large numerals only. Anything under 20px (card and list titles,
+     file names, labels, table data) uses --font-ui. Italic only at 18px or more.
+     Weights 300 to 400. */
+  --font-display: "Fraunces Variable", "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+  /* Raw interface sizes. Nothing in the product renders under --text-xs. */
+  --text-xs: 0.75rem; /* 12 */
+  --text-sm: 0.8125rem; /* 13 */
+  --text-md: 0.875rem; /* 14 */
+  --text-base: 0.9375rem; /* 15 */
+  --text-lg: 1rem; /* 16 */
+  --text-xl: 1.125rem; /* 18 */
+
+  /* Role sizes: use these, not the raw sizes, for running interface text.
+     Customer-facing screens (public pages and the studio) read at 16 / 14 / 13,
+     with 15px field labels. The compact scope further down steps them to
+     15 / 13 / 12 (13px labels) for administration. */
+  --text-body: var(--text-lg); /* body copy, button labels */
+  --text-control: var(--text-lg); /* text typed into inputs, selects, textareas */
+  --text-label: var(--text-base); /* field labels, legends */
+  --text-secondary: var(--text-md); /* hints, descriptions, secondary lines */
+  --text-caption: var(--text-sm); /* captions, meta, eyebrows, badges */
+
+  /* Display sizes, tuned for Fraunces (a wide face: these are about a fifth
+     smaller than the sizes the condensed serif needed for the same footprint). */
+  --display-2xs: 1.25rem; /* 20: panel and section titles (the smallest serif) */
+  --display-xs: 1.375rem; /* 22 */
+  --display-sm: 1.625rem; /* 26 */
+  --display-md: 2rem; /* 32: page titles */
+  --display-lg: 2.625rem; /* 42 */
+  --display-xl: 3.5rem; /* 56 */
+  --display-2xl: 4.5rem; /* 72 */
+
+  --leading-none: 1;
+  --leading-tight: 1.1; /* display type at 40px and above */
+  --leading-heading: 1.2; /* display type from 20px to 32px */
+  --leading-snug: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --tracking-display: -0.022em; /* display type at 40px and above */
+  --tracking-heading: -0.012em; /* display type from 20px to 32px */
+  --tracking-tight: -0.011em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+  --tracking-caps: 0.12em;
+
+  /* ---- Spacing (4px steps) ----------------------------------------------- */
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 1.75rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-14: 3.5rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+  --space-32: 8rem;
+
+  /* ---- Radii -------------------------------------------------------------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 999px;
+
+  /* ---- Shadows ------------------------------------------------------------ */
+  --shadow-xs: 0 1px 2px rgb(26 33 29 / 0.06);
+  --shadow-sm: 0 1px 2px rgb(26 33 29 / 0.05), 0 2px 6px rgb(26 33 29 / 0.05);
+  --shadow-md: 0 1px 2px rgb(26 33 29 / 0.05), 0 8px 24px -6px rgb(26 33 29 / 0.12);
+  --shadow-lg: 0 2px 4px rgb(26 33 29 / 0.05), 0 20px 48px -12px rgb(26 33 29 / 0.2);
+  --shadow-xl: 0 4px 8px rgb(6 19 15 / 0.08), 0 36px 80px -20px rgb(6 19 15 / 0.42);
+  --shadow-screen: 0 0 0 1px var(--chrome-border-strong), 0 40px 90px -24px rgb(0 0 0 / 0.7);
+  --shadow-inset-top: inset 0 1px 0 rgb(255 255 255 / 0.12);
+  --shadow-cream: inset 0 1px 0 rgb(255 255 255 / 0.6), 0 10px 30px -10px rgb(0 0 0 / 0.6);
+  --shadow-cream-hover: inset 0 1px 0 rgb(255 255 255 / 0.6), 0 14px 36px -10px rgb(230 207 159 / 0.35);
+  --shadow-dock: 0 -8px 24px rgb(6 19 15 / 0.18);
+  --glow-projector: rgb(212 179 119 / 0.12);
+  --shadow-focus: 0 0 0 4px var(--color-focus-glow);
+
+  /* ---- Control glyphs (data URIs cannot read custom properties) ---------- */
+  --icon-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fbf7ee' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.4l3 3 6-6.8'/%3E%3C/svg%3E");
+  --icon-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%235d6159' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+
+  /* ---- Motion ------------------------------------------------------------- */
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 240ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- Layers ------------------------------------------------------------- */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-sticky: 40;
+  --z-nav: 50;
+  --z-toast: 90;
+  --z-busy: 100;
+  --z-modal: 110;
+
+  /* ---- Layout measures ---------------------------------------------------- */
+  --sidebar-width: 15.5rem;
+  --topbar-height: 4rem;
+  --mobile-nav-height: 4rem;
+  /* Space the fixed mobile navigation takes from the bottom of the viewport. */
+  --mobile-nav-offset: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+  --content-max: 77.5rem;
+  --landing-max: 80rem;
+  --gutter: var(--space-8);
+  --gutter-mobile: var(--space-4);
+  --measure: 68ch;
+  --control-height: 2.75rem;
+  --control-height-sm: 2.5rem;
+  --control-height-lg: 3.25rem;
+  --hairline: 1px;
+
+  /* ---- Legacy aliases: existing rules across the app still read these ---- */
+  --forest: var(--brand-700);
+  --ink: var(--color-text);
+  --muted: var(--color-text-muted);
+  --line: var(--color-border);
+  --paper: var(--color-surface);
+  --soft: var(--color-surface-tint);
+  --danger: var(--danger-text);
+  --radius: var(--radius-lg);
+}
+
+/*
+  Compact scope: administration is a dense working tool, so it steps the role
+  sizes down one notch (15px body, 13px secondary, 12px captions). Customer
+  screens never use it. Apply it with data-density="compact" on a container;
+  the administration root (.admin-page) opts in here so that it holds from the
+  first paint. :where() keeps the specificity at zero, so any rule can override.
+*/
+:where(.admin-page, [data-density="compact"]) {
+  --text-body: var(--text-base);
+  --text-control: var(--text-base);
+  --text-label: var(--text-sm);
+  --text-secondary: var(--text-sm);
+  --text-caption: var(--text-xs);
+  font-size: var(--text-body);
+}
+/* Typed text stays at 16px on phones in every scope (smaller text makes iOS zoom the page). */
+@media (max-width: 680px) {
+  :where(.admin-page, [data-density="compact"]) {
+    --text-control: var(--text-lg);
+  }
+}

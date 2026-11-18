@@ -312,7 +312,7 @@ export default function App() {
         />
         <div className="art-caption">
           <p>
-            Every great film begins
+            Every great film begins{" "}
             <br />
             with something real.
           </p>
@@ -341,7 +341,7 @@ export default function App() {
                 : "Sign in to turn photographs, records, and family memories into a film worth keeping."}
           </p>
           {!user && !mfaRequired && (
-            <div className="action-group" aria-label="Account access">
+            <div className="action-group" role="group" aria-label="Account access">
               <button
                 type="button"
                 className={`button ${mode === "login" ? "primary" : "secondary"} small`}

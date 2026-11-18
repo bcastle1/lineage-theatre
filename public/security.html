@@ -1,105 +1,118 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#112f26" />
     <title>Lineage Theatre Security</title>
-    <style>
-      * {
-        font-weight: 400 !important;
-      }
-      body {
-        max-width: 760px;
-        margin: auto;
-        padding: 40px 20px;
-        color: #182c25;
-        background: #f8f8f5;
-        font:
-          15px/1.65 Arial,
-          sans-serif;
-      }
-      h1 {
-        font: 32px Georgia;
-      }
-      h2 {
-        font: 23px Georgia;
-      }
-      a {
-        color: #214e3f;
-      }
-    </style>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/fraunces-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
   </head>
-  <body>
-    <a href="/">Return to Lineage Theatre</a>
-    <h1>Security at Lineage Theatre</h1>
-    <p>
-      Public registration creates a customer account with a personal password
-      of 12–128 characters and explicit terms/privacy consent. Registration
-      cannot grant an administrator role or claim a verified email address.
-      Passwords are stored as salted scrypt hashes in private Vercel Blob
-      storage. Sessions use signed, secure, HTTP-only cookies with expiry.
-      Changing a password invalidates older sessions, and suspended accounts
-      cannot sign in or continue using a session. Existing temporary passwords
-      must be changed before the studio can be used.
-    </p>
-    <p>
-      Family working projects and original source files are stored in your
-      browser. Use a trusted device and keep independent copies. A separate,
-      optional cloud archive stores selected finished films and limited film
-      details in private Vercel Blob storage. Archive access is checked on the
-      server for the film owner or an authorized administrator; it is not a
-      public sharing link or an automatic backup of all your materials.
-    </p>
-    <p>
-      The service owner delegates administrator access through private,
-      expiring invitations. Roles come from stored server records. Registration,
-      sign-in, archive uploads, and administrative changes have request limits;
-      app mutations check their origin. New account records are created without
-      overwriting an existing account. Administrative changes are logged in
-      private storage.
-    </p>
-    <p>
-      Google reCAPTCHA protects sign-in, registration, and payment submission.
-      Verification happens on the server before a protected action proceeds.
-      The payment flow checks for automated abuse before card tokenization,
-      then requires a short-lived, single-use verification tied to the signed-in
-      customer and selected quote. Failed or unavailable checks prevent a new
-      payment request. Customers can still check an existing order's status.
-    </p>
-    <p>
-      Provider credentials stay on the server. Film generation and QuickBooks
-      charges and refunds require verified service connections; entering a
-      credential or pricing setting does not activate them. The initial markup
-      is 50% when no prior setting exists. Administrators can edit markup and
-      planning rates for future prices. A server-calculated checkout total and
-      customer approval are required before a charge. That fixed total may use
-      a planning estimate when an exact provider cost is unavailable.
-    </p>
-    <p>
-      New registrations separately accept the
-      <a href="/source-agreement.html">source ownership and use agreement</a>.
-      Its text, version, hash, acceptance time and electronic-signature name are
-      retained with the account. The server rejects missing or stale acceptance.
-      Administrator edits create new versions and do not rewrite signed records
-      or authorize retroactive use of earlier materials.
-    </p>
-    <p>
-      Only the service owner can connect or disconnect the QuickBooks business
-      authorization. The authorization return uses a short-lived, single-use
-      browser verification and rechecks the owner's account. Saved Intuit tokens
-      use authenticated encryption in private server storage and never appear
-      in the browser or administrator listings. Connection status alone does
-      not confirm merchant capabilities, payment capture, or refund completion.
-    </p>
-    <p>
-      Read our <a href="/privacy.html">privacy information</a> for the material
-      stored locally, saved to the optional cloud archive, or supplied to a
-      connected AI provider with your consent.
-    </p>
-    <p>
-      Report security concerns or request account help at
-      <a href="mailto:admin@brocotech.ai">admin@brocotech.ai</a>. Do not include
-      passwords or private family documents in a security report.
-    </p>
+  <body class="site">
+    <a class="site-skip" href="#content">Skip to content</a>
+    <header class="site-header">
+      <a class="site-brand" href="/" aria-label="Lineage Theatre home">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m14.31 8 5.74 9.94" /><path d="M9.69 8h11.48" /><path d="m7.38 12 5.74-9.94" /><path d="M9.69 16 3.95 6.06" /><path d="M14.31 16H2.83" /><path d="m16.62 12-5.74 9.94" /></svg>
+        <span>Lineage Theatre</span>
+      </a>
+      <a class="site-back" href="/">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></svg>
+        Return to Lineage Theatre
+      </a>
+    </header>
+    <div class="site-hero">
+      <p class="site-eyebrow">Security</p>
+      <h1>Security at Lineage Theatre</h1>
+    </div>
+    <main id="content" class="site-main site-main-single">
+      <article class="site-article">
+        <p>
+          Public registration creates a customer account with a personal password
+          of 12–128 characters and explicit terms/privacy consent. Registration
+          cannot grant an administrator role or claim a verified email address.
+          Passwords are stored as salted scrypt hashes in private Vercel Blob
+          storage. Sessions use signed, secure, HTTP-only cookies with expiry.
+          Changing a password invalidates older sessions, and suspended accounts
+          cannot sign in or continue using a session. Existing temporary passwords
+          must be changed before the studio can be used.
+        </p>
+        <p>
+          Family working projects and original source files are stored in your
+          browser. Use a trusted device and keep independent copies. A separate,
+          optional cloud archive stores selected finished films and limited film
+          details in private Vercel Blob storage. Archive access is checked on the
+          server for the film owner or an authorized administrator; it is not a
+          public sharing link or an automatic backup of all your materials.
+        </p>
+        <p>
+          The service owner delegates administrator access through private,
+          expiring invitations. Roles come from stored server records. Registration,
+          sign-in, archive uploads, and administrative changes have request limits;
+          app mutations check their origin. New account records are created without
+          overwriting an existing account. Administrative changes are logged in
+          private storage.
+        </p>
+        <p>
+          Google reCAPTCHA protects sign-in, registration, and payment submission.
+          Verification happens on the server before a protected action proceeds.
+          The payment flow checks for automated abuse before card tokenization,
+          then requires a short-lived, single-use verification tied to the signed-in
+          customer and selected quote. Failed or unavailable checks prevent a new
+          payment request. Customers can still check an existing order's status.
+        </p>
+        <p>
+          Provider credentials stay on the server. Film generation and QuickBooks
+          charges and refunds require verified service connections; entering a
+          credential or pricing setting does not activate them. The initial markup
+          is 50% when no prior setting exists. Administrators can edit markup and
+          planning rates for future prices. A server-calculated checkout total and
+          customer approval are required before a charge. That fixed total may use
+          a planning estimate when an exact provider cost is unavailable.
+        </p>
+        <p>
+          New registrations separately accept the
+          <a href="/source-agreement.html">source ownership and use agreement</a>.
+          Its text, version, hash, acceptance time and electronic-signature name are
+          retained with the account. The server rejects missing or stale acceptance.
+          Administrator edits create new versions and do not rewrite signed records
+          or authorize retroactive use of earlier materials.
+        </p>
+        <p>
+          Only the service owner can connect or disconnect the QuickBooks business
+          authorization. The authorization return uses a short-lived, single-use
+          browser verification and rechecks the owner's account. Saved Intuit tokens
+          use authenticated encryption in private server storage and never appear
+          in the browser or administrator listings. Connection status alone does
+          not confirm merchant capabilities, payment capture, or refund completion.
+        </p>
+        <p>
+          Read our <a href="/privacy.html">privacy information</a> for the material
+          stored locally, saved to the optional cloud archive, or supplied to a
+          connected AI provider with your consent.
+        </p>
+        <p>
+          Report security concerns or request account help at
+          <a href="mailto:admin@brocotech.ai">admin@brocotech.ai</a>. Do not include
+          passwords or private family documents in a security report.
+        </p>
+  
+      </article>
+    </main>
+    <footer class="site-footer">
+      <a class="site-brand" href="/" aria-label="Lineage Theatre home">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m14.31 8 5.74 9.94" /><path d="M9.69 8h11.48" /><path d="m7.38 12 5.74-9.94" /><path d="M9.69 16 3.95 6.06" /><path d="M14.31 16H2.83" /><path d="m16.62 12-5.74 9.94" /></svg>
+        <span>Lineage Theatre</span>
+      </a>
+      <p>Stories across generations.</p>
+      <nav aria-label="Legal">
+        <a href="/privacy.html">Privacy</a>
+        <a href="/terms.html">Terms</a>
+        <a href="/source-agreement.html">Source agreement</a>
+        <a href="/security.html" aria-current="page">Security</a>
+      </nav>
+    </footer>
   </body>
 </html>

@@ -1,13 +1,104 @@
-.film-delivery { margin: 20px 0; }
-.film-delivery .admin-section-heading { align-items: flex-start; gap: 16px; flex-wrap: wrap; }
-.film-delivery-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
-.film-delivery-fields label { display: grid; gap: 7px; min-width: 0; }
-.film-delivery-fields input { width: 100%; min-width: 0; box-sizing: border-box; padding: 10px 12px; border: 1px solid #cbd5d9; border-radius: 8px; font: inherit; }
-.film-delivery-wide { grid-column: 1 / -1; }
-.film-delivery label.film-delivery-confirm { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; }
-.film-delivery label.film-delivery-confirm input { flex: 0 0 auto; width: auto; margin-top: 4px; }
-.film-delivery h2, .film-delivery h3 { font-weight: 400; }
-.film-delivery-jobs article { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-top: 1px solid #dde2e3; padding: 18px 0; margin-top: 14px; overflow-wrap: anywhere; }
-.film-delivery-jobs h3, .film-delivery-jobs p { margin: 0 0 7px; }
-.film-delivery small { color: #596b73; }
-@media(max-width: 620px) { .film-delivery-fields { grid-template-columns: minmax(0, 1fr); } .film-delivery-jobs article { flex-direction: column; } }
+/*
+  Film delivery panel (administration). Sits on the shared .admin-card surface
+  and uses the administration tokens; see admin.css for the card, heading and
+  message styles it inherits.
+*/
+.film-delivery .admin-section-heading {
+  flex-wrap: wrap;
+}
+.film-delivery form {
+  display: grid;
+  gap: var(--space-4);
+  justify-items: start;
+  max-width: 52rem;
+  margin-top: var(--space-5);
+}
+.film-delivery-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-5);
+  justify-self: stretch;
+}
+.film-delivery-fields label {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.film-delivery-wide {
+  grid-column: 1 / -1;
+}
+.film-delivery label.film-delivery-confirm {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: var(--space-8);
+  padding-block: var(--space-1);
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.film-delivery label.film-delivery-confirm input {
+  flex: 0 0 auto;
+  margin-top: 0.125rem;
+}
+.film-delivery > p:not([class], [role]) {
+  margin-top: var(--space-4);
+  color: var(--color-text-muted);
+}
+.film-delivery-jobs {
+  margin-top: var(--space-6);
+}
+.film-delivery-jobs article {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+  border-top: var(--hairline) solid var(--color-border);
+  padding: var(--space-4) 0;
+  overflow-wrap: anywhere;
+}
+.film-delivery-jobs article > div:first-child {
+  min-width: 0;
+}
+.film-delivery-jobs article > div:last-child {
+  flex-shrink: 0;
+}
+.film-delivery-jobs h3 {
+  margin: 0 0 var(--space-1);
+}
+.film-delivery-jobs p {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-md);
+  color: var(--neutral-700);
+}
+.film-delivery-jobs p[role="alert"] {
+  margin: var(--space-3) 0 0;
+}
+.film-delivery small {
+  font-size: var(--text-secondary);
+  color: var(--color-text-muted);
+}
+.film-delivery-jobs a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height-sm);
+  font-size: var(--text-md);
+  color: var(--color-link);
+  text-decoration-color: var(--color-accent);
+}
+@media (max-width: 700px) {
+  .film-delivery-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .film-delivery-jobs article {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .film-delivery form > .button {
+    width: 100%;
+    justify-self: stretch;
+  }
+}

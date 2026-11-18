@@ -13,6 +13,9 @@ import {
   X,
   CloudOff,
   ShieldCheck,
+  Clapperboard,
+  Images,
+  UserRound,
 } from "lucide-react";
 import {
   api,
@@ -673,8 +676,8 @@ export default function Workspace({
   }
   function openMediaLibrary() { setView("media"); window.history.replaceState(null, "", "#media"); }
   const nav = [
-    { id: "library" as const, label: "Film library", icon: Library },
-    { id: "media" as const, label: "Media library", icon: Library },
+    { id: "library" as const, label: "Film library", icon: Clapperboard },
+    { id: "media" as const, label: "Media library", icon: Images },
     { id: "create" as const, label: "Create a film", icon: Video },
     ...(user.role === "owner" || user.role === "admin"
       ? [{ id: "admin" as const, label: "Administration", icon: ShieldCheck }]
@@ -687,7 +690,7 @@ export default function Workspace({
         <a className="brand" href="/" aria-label="Lineage Theatre home">
           <Aperture size={44} strokeWidth={1.1} />
           <span>
-            Lineage
+            Lineage{" "}
             <br />
             Theatre
           </span>
@@ -697,6 +700,7 @@ export default function Workspace({
             <button
               key={n.id}
               className={view === n.id ? "nav-item selected" : "nav-item"}
+              aria-current={view === n.id ? "page" : undefined}
               disabled={!!busy || libraryBusy}
               onClick={() => {
                 if (n.id === "create") { create(); return; }
@@ -754,7 +758,7 @@ export default function Workspace({
             {saved}
           </span>
           <div className="user-menu">
-            <button className="text-button" aria-label="Account security" disabled={!!busy || libraryBusy || accountBusy} onClick={() => setAccountOpen(true)}>{user.name}</button>
+            <button className="text-button" aria-label="Account security" disabled={!!busy || libraryBusy || accountBusy} onClick={() => setAccountOpen(true)}><UserRound size={17} aria-hidden="true" /><span>{user.name}</span></button>
             <button
               className="icon-button"
               aria-label="Sign out"
@@ -810,11 +814,12 @@ export default function Workspace({
                 </div>
                 <button
                   className="button small secondary"
+                  aria-label="New film"
                   disabled={!!busy}
                   onClick={create}
                 >
-                  <Plus size={16} />
-                  New film
+                  <Plus size={16} aria-hidden="true" />
+                  <span>New film</span>
                 </button>
               </div>
               <nav className="stepper" aria-label="Film creation steps">
@@ -901,7 +906,7 @@ export default function Workspace({
                   />
                   <div>
                     <p>
-                      Every great film begins
+                      Every great film begins{" "}
                       <br />
                       with something real.
                     </p>

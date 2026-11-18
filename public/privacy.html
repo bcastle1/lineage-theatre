@@ -3,168 +3,194 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#112f26" />
     <title>Lineage Theatre Privacy</title>
-    <style>
-      * {
-        font-weight: 400;
-      }
-      body {
-        max-width: 760px;
-        margin: 40px auto;
-        padding: 0 24px;
-        font:
-          15px/1.7 Arial,
-          sans-serif;
-        background: #f8f7f4;
-        color: #29332e;
-      }
-      h1,
-      h2 {
-        font-family: Georgia, serif;
-      }
-      a {
-        color: #183e33;
-      }
-    </style>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/fraunces-latin-opsz-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/site.css" />
   </head>
-  <body>
-    <a href="/">Return to Lineage Theatre</a>
-    <h1>Privacy at Lineage Theatre</h1>
-    <p>
-      You can create an account with your name, email address, password, and
-      acceptance of the terms, privacy information and Source Materials Ownership
-      and Use Agreement. For new registrations we retain the accepted source
-      agreement text, version, content hash, acceptance time and your entered name
-      and account email as the electronic-signature record. New accounts receive
-      customer access; registration does not verify your email address or grant
-      administrator access. Account details, salted password hashes, and consent
-      records are kept in private Vercel Blob storage. Session cookies are
-      secure, HTTP-only, and expire. Accounts issued temporary passwords must
-      replace them before using the studio.
-    </p>
-    <h2>Source ownership, reuse and third-party sharing</h2>
-    <p>
-      New customers must read and expressly accept the
-      <a href="/source-agreement.html">Source Materials Ownership and Use Agreement</a>
-      before registration. It transfers the source rights they own or have
-      authority to transfer and authorizes reuse beyond their requested film,
-      including commercial publication, promotion, adaptation, licensing and
-      sharing with third-party companies. These may include service providers,
-      AI and media-production companies, publishers, distributors, commercial
-      licensees, business partners and successors, including outside the United
-      States. Read the full accepted version for its scope and limitations.
-    </p>
-    <p>
-      Private storage and account controls do not cancel the rights expressly
-      granted in that agreement. Submitted material may be used or published as
-      authorized; do not submit it on the assumption that it must remain
-      confidential. We do not acquire ownership of a person's identity or waive
-      mandatory personal-data rights. Account passwords and payment credentials
-      are excluded from the source-ownership grant. Additional consent and legal
-      requirements continue to apply where required.
-    </p>
-    <p>
-      This agreement is prospective. Existing customers and earlier materials
-      retain the terms under which they were supplied unless separate agreement
-      is obtained. Publishing an updated statement does not retroactively change
-      an earlier acceptance or authorize broader sharing of earlier submissions.
-    </p>
-    <h2>Protection against automated abuse</h2>
-    <p>
-      Sign-in, account creation, and payment submission use Google reCAPTCHA
-      to detect automated activity. When you submit these actions, Google's
-      script processes browser and device signals under the
-      <a href="https://policies.google.com/privacy">Google Privacy Policy</a>
-      and <a href="https://policies.google.com/terms">Terms of Service</a>.
-      Our server checks the resulting token before allowing the action.
-      We do not send your password, family materials, or payment card details
-      to the reCAPTCHA verification endpoint. A short-lived payment verification
-      record links your account and quote; reCAPTCHA response tokens are not
-      retained in that record.
-    </p>
-    <h2>Your family archive</h2>
-    <p>
-      New source uploads are saved in your private media library in Vercel Blob
-      storage, with access for your account and authorized administrators.
-      They are available when you sign in on another device. Archiving media or
-      moving it to your trash does not remove the administrator's copy.
-      Administrators have a separate archive and can permanently delete the
-      stored original from it. Previously downloaded copies are not erased.
-      Working project drafts and local source copies remain in this browser;
-      drafts do not automatically sync to another device. Earlier browser-only
-      sources can be copied to the media library using Copy browser sources.
-      Files no longer present in that browser must be supplied again. Someone
-      with access to this browser profile or device may access its local files.
-    </p>
-    <p>
-      Saving a finished film to the private cloud archive is optional and
-      requires a separate confirmation. It saves the film title, ancestor name,
-      duration, account reference, and the finished video you choose to upload
-      in private Vercel Blob storage. The cloud archive does not upload your
-      source documents or full working screenplay. You and authorized Lineage
-      Theatre administrators can view the saved film details and video. Other
-      customers cannot access them. You can sign in on another device to view
-      films that you have saved to this archive.
-    </p>
-    <p>
-      Text, PDF, and DOCX files are read locally. Legacy DOC files under 2.5 MB
-      are sent to this app's authenticated server for text extraction. Uploaded
-      originals are retained separately in the media library. Scanned PDFs may
-      need a transcription.
-    </p>
-    <h2>AI assistance and film production</h2>
-    <p>
-      Story development uses OpenAI. Your explicit AI consent and a story request authorize
-      sending the family narrative, extracted text, context notes, and selected
-      reference photos to OpenAI. Source files without readable text, supplied
-      context, or an included reference photo cannot contribute their unseen
-      details. OpenAI's processing and retention terms apply to the materials
-      it receives.
-    </p>
-    <p>
-      MagicLight is the selected video-generation provider for production within
-      Lineage Theatre. Its film-generation connection is pending; source material
-      is not currently submitted for a MagicLight production. A connected
-      production flow must identify the material being sent and obtain your
-      confirmation before submission.
-    </p>
-    <h2>Administration and payments</h2>
-    <p>
-      The service owner can delegate administrator access through private,
-      expiring invitations. Authorized administrators can review customer
-      account information, uploaded source media, opted-in cloud films, saved pricing settings, and
-      any recorded payment history. Administrative changes are recorded in a
-      private activity log. Password hashes and server credentials are not
-      included in administrator account listings.
-    </p>
-    <p>
-      QuickBooks is selected for payments. When checkout becomes available,
-      payment processing will be provided by Intuit Payments Inc.
-      The service owner can manage the
-      business authorization in Administration; it is separate from customer
-      accounts and does not activate checkout. If authorized, Intuit access and
-      refresh tokens are encrypted in private server storage. Administrators
-      can view connection status but cannot retrieve those tokens. QuickBooks
-      data is not sent to the film-generation providers or used to train AI.
-      Checkout availability is shown in the studio. A verified production quote
-      or planning estimate plus the saved markup determines the film price. The
-      initial markup is 50% if no earlier setting exists. A displayed checkout
-      total and your approval are required before a charge, and a completed
-      purchase keeps that fixed amount.
-    </p>
-    <h2>Account help</h2>
-    <p>
-      Contact <a href="mailto:admin@brocotech.ai">admin@brocotech.ai</a> for
-      account access, password reset, or deletion requests. Clearing this site's
-      browser data removes locally saved projects, sources, and films; it does
-      not delete account records, media library originals, or films saved in the cloud.
-      Contact the administrator to request deletion of those records. Accepted
-      agreements and necessary records may be retained to establish rights,
-      satisfy legal duties or resolve disputes. Closing an account does not by
-      itself undo a valid source-rights transfer or recall material lawfully
-      distributed; mandatory deletion and other statutory rights remain intact.
-      Download anything you want to retain first.
-    </p>
-    <p>Policy version: source-agreement-registration-2026-09-22. Earlier accepted terms are not expanded retroactively.</p>
+  <body class="site">
+    <a class="site-skip" href="#content">Skip to content</a>
+    <header class="site-header">
+      <a class="site-brand" href="/" aria-label="Lineage Theatre home">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m14.31 8 5.74 9.94" /><path d="M9.69 8h11.48" /><path d="m7.38 12 5.74-9.94" /><path d="M9.69 16 3.95 6.06" /><path d="M14.31 16H2.83" /><path d="m16.62 12-5.74 9.94" /></svg>
+        <span>Lineage Theatre</span>
+      </a>
+      <a class="site-back" href="/">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></svg>
+        Return to Lineage Theatre
+      </a>
+    </header>
+    <div class="site-hero">
+      <p class="site-eyebrow">Privacy</p>
+      <h1>Privacy at Lineage Theatre</h1>
+    </div>
+    <main id="content" class="site-main">
+      <nav class="site-toc" aria-label="On this page">
+        <p>On this page</p>
+        <ol>
+            <li><a href="#source-ownership-reuse-and-third-party-sharing">Source ownership, reuse and third-party sharing</a></li>
+            <li><a href="#protection-against-automated-abuse">Protection against automated abuse</a></li>
+            <li><a href="#your-family-archive">Your family archive</a></li>
+            <li><a href="#ai-assistance-and-film-production">AI assistance and film production</a></li>
+            <li><a href="#administration-and-payments">Administration and payments</a></li>
+            <li><a href="#account-help">Account help</a></li>
+        </ol>
+      </nav>
+      <article class="site-article">
+        <p>
+          You can create an account with your name, email address, password, and
+          acceptance of the terms, privacy information and Source Materials Ownership
+          and Use Agreement. For new registrations we retain the accepted source
+          agreement text, version, content hash, acceptance time and your entered name
+          and account email as the electronic-signature record. New accounts receive
+          customer access; registration does not verify your email address or grant
+          administrator access. Account details, salted password hashes, and consent
+          records are kept in private Vercel Blob storage. Session cookies are
+          secure, HTTP-only, and expire. Accounts issued temporary passwords must
+          replace them before using the studio.
+        </p>
+        <h2 id="source-ownership-reuse-and-third-party-sharing">Source ownership, reuse and third-party sharing</h2>
+        <p>
+          New customers must read and expressly accept the
+          <a href="/source-agreement.html">Source Materials Ownership and Use Agreement</a>
+          before registration. It transfers the source rights they own or have
+          authority to transfer and authorizes reuse beyond their requested film,
+          including commercial publication, promotion, adaptation, licensing and
+          sharing with third-party companies. These may include service providers,
+          AI and media-production companies, publishers, distributors, commercial
+          licensees, business partners and successors, including outside the United
+          States. Read the full accepted version for its scope and limitations.
+        </p>
+        <p>
+          Private storage and account controls do not cancel the rights expressly
+          granted in that agreement. Submitted material may be used or published as
+          authorized; do not submit it on the assumption that it must remain
+          confidential. We do not acquire ownership of a person's identity or waive
+          mandatory personal-data rights. Account passwords and payment credentials
+          are excluded from the source-ownership grant. Additional consent and legal
+          requirements continue to apply where required.
+        </p>
+        <p>
+          This agreement is prospective. Existing customers and earlier materials
+          retain the terms under which they were supplied unless separate agreement
+          is obtained. Publishing an updated statement does not retroactively change
+          an earlier acceptance or authorize broader sharing of earlier submissions.
+        </p>
+        <h2 id="protection-against-automated-abuse">Protection against automated abuse</h2>
+        <p>
+          Sign-in, account creation, and payment submission use Google reCAPTCHA
+          to detect automated activity. When you submit these actions, Google's
+          script processes browser and device signals under the
+          <a href="https://policies.google.com/privacy">Google Privacy Policy</a>
+          and <a href="https://policies.google.com/terms">Terms of Service</a>.
+          Our server checks the resulting token before allowing the action.
+          We do not send your password, family materials, or payment card details
+          to the reCAPTCHA verification endpoint. A short-lived payment verification
+          record links your account and quote; reCAPTCHA response tokens are not
+          retained in that record.
+        </p>
+        <h2 id="your-family-archive">Your family archive</h2>
+        <p>
+          New source uploads are saved in your private media library in Vercel Blob
+          storage, with access for your account and authorized administrators.
+          They are available when you sign in on another device. Archiving media or
+          moving it to your trash does not remove the administrator's copy.
+          Administrators have a separate archive and can permanently delete the
+          stored original from it. Previously downloaded copies are not erased.
+          Working project drafts and local source copies remain in this browser;
+          drafts do not automatically sync to another device. Earlier browser-only
+          sources can be copied to the media library using Copy browser sources.
+          Files no longer present in that browser must be supplied again. Someone
+          with access to this browser profile or device may access its local files.
+        </p>
+        <p>
+          Saving a finished film to the private cloud archive is optional and
+          requires a separate confirmation. It saves the film title, ancestor name,
+          duration, account reference, and the finished video you choose to upload
+          in private Vercel Blob storage. The cloud archive does not upload your
+          source documents or full working screenplay. You and authorized Lineage
+          Theatre administrators can view the saved film details and video. Other
+          customers cannot access them. You can sign in on another device to view
+          films that you have saved to this archive.
+        </p>
+        <p>
+          Text, PDF, and DOCX files are read locally. Legacy DOC files under 2.5 MB
+          are sent to this app's authenticated server for text extraction. Uploaded
+          originals are retained separately in the media library. Scanned PDFs may
+          need a transcription.
+        </p>
+        <h2 id="ai-assistance-and-film-production">AI assistance and film production</h2>
+        <p>
+          Story development uses OpenAI. Your explicit AI consent and a story request authorize
+          sending the family narrative, extracted text, context notes, and selected
+          reference photos to OpenAI. Source files without readable text, supplied
+          context, or an included reference photo cannot contribute their unseen
+          details. OpenAI's processing and retention terms apply to the materials
+          it receives.
+        </p>
+        <p>
+          MagicLight is the selected video-generation provider for production within
+          Lineage Theatre. Its film-generation connection is pending; source material
+          is not currently submitted for a MagicLight production. A connected
+          production flow must identify the material being sent and obtain your
+          confirmation before submission.
+        </p>
+        <h2 id="administration-and-payments">Administration and payments</h2>
+        <p>
+          The service owner can delegate administrator access through private,
+          expiring invitations. Authorized administrators can review customer
+          account information, uploaded source media, opted-in cloud films, saved pricing settings, and
+          any recorded payment history. Administrative changes are recorded in a
+          private activity log. Password hashes and server credentials are not
+          included in administrator account listings.
+        </p>
+        <p>
+          QuickBooks is selected for payments. When checkout becomes available,
+          payment processing will be provided by Intuit Payments Inc.
+          The service owner can manage the
+          business authorization in Administration; it is separate from customer
+          accounts and does not activate checkout. If authorized, Intuit access and
+          refresh tokens are encrypted in private server storage. Administrators
+          can view connection status but cannot retrieve those tokens. QuickBooks
+          data is not sent to the film-generation providers or used to train AI.
+          Checkout availability is shown in the studio. A verified production quote
+          or planning estimate plus the saved markup determines the film price. The
+          initial markup is 50% if no earlier setting exists. A displayed checkout
+          total and your approval are required before a charge, and a completed
+          purchase keeps that fixed amount.
+        </p>
+        <h2 id="account-help">Account help</h2>
+        <p>
+          Contact <a href="mailto:admin@brocotech.ai">admin@brocotech.ai</a> for
+          account access, password reset, or deletion requests. Clearing this site's
+          browser data removes locally saved projects, sources, and films; it does
+          not delete account records, media library originals, or films saved in the cloud.
+          Contact the administrator to request deletion of those records. Accepted
+          agreements and necessary records may be retained to establish rights,
+          satisfy legal duties or resolve disputes. Closing an account does not by
+          itself undo a valid source-rights transfer or recall material lawfully
+          distributed; mandatory deletion and other statutory rights remain intact.
+          Download anything you want to retain first.
+        </p>
+        <p class="site-meta">Policy version: source-agreement-registration-2026-09-22. Earlier accepted terms are not expanded retroactively.</p>
+  
+      </article>
+    </main>
+    <footer class="site-footer">
+      <a class="site-brand" href="/" aria-label="Lineage Theatre home">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10" /><path d="m14.31 8 5.74 9.94" /><path d="M9.69 8h11.48" /><path d="m7.38 12 5.74-9.94" /><path d="M9.69 16 3.95 6.06" /><path d="M14.31 16H2.83" /><path d="m16.62 12-5.74 9.94" /></svg>
+        <span>Lineage Theatre</span>
+      </a>
+      <p>Stories across generations.</p>
+      <nav aria-label="Legal">
+        <a href="/privacy.html" aria-current="page">Privacy</a>
+        <a href="/terms.html">Terms</a>
+        <a href="/source-agreement.html">Source agreement</a>
+        <a href="/security.html">Security</a>
+      </nav>
+    </footer>
   </body>
 </html>

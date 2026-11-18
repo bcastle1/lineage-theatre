@@ -23,9 +23,9 @@ export default function LtxFilmLibrary() {
   const current = jobs.find(job => job.id === selected);
   return <section className="ltx-library" aria-labelledby="ltx-library-heading">
     <h2 id="ltx-library-heading">Earlier films</h2><p>Generated footage, your narration, and a saved review. These versions are stored in your account.</p>
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert" className="feedback error">{error}</p>}
     {!loaded && !error && <p role="status">Loading Earlier films…</p>}
-    <ul className="ltx-library-list">{jobs.map(job => <li key={job.id}><button className="button secondary" onClick={() => setSelected(job.id)} aria-pressed={selected === job.id}>{job.title} · {ltxStatus(job)} · {new Date(job.createdAt).toLocaleString()}</button></li>)}</ul>
+    <ul className="ltx-library-list">{jobs.map(job => <li key={job.id}><button className="button secondary" onClick={() => setSelected(job.id)} aria-pressed={selected === job.id}><span className="ltx-library-title">{job.title}</span><span className="ltx-library-sep"> · </span><span className="ltx-library-meta">{ltxStatus(job)} · {new Date(job.createdAt).toLocaleString()}</span></button></li>)}</ul>
     {current && (current.mediaUrl ? <LtxFilmReview key={current.id} job={current} onChange={changed => setJobs(previous => previous.map(job => job.id === changed.id ? changed : job))} />
       : <p role="status">{ltxStatus(current)}{current.message ? ` — ${current.message}` : ". Return here to review the finished render."}</p>)}
   </section>;

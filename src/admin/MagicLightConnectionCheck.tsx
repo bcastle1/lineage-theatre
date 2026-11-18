@@ -26,13 +26,14 @@ export default function MagicLightConnectionCheck({ disabled = false }: { disabl
       if (mounted.current) setError(cause instanceof Error ? cause.message : "The connection check could not complete.");
     } finally { lock.current = false; if (mounted.current) setBusy(false); }
   }
-  return <section className="admin-hosted-checkout" aria-labelledby="magiclight-check-heading">
+  return <section className="admin-hosted-checkout admin-settings" aria-labelledby="magiclight-check-heading">
     <div className="admin-section-heading"><div>
       <h2 id="magiclight-check-heading">MagicLight connection</h2>
       <p>Send a task-status request with the saved production key. The key stays on the server. This check does not create a video.</p>
     </div><button type="button" className="button secondary small" disabled={disabled || busy} onClick={() => void check()}>
       <RefreshCw size={15} aria-hidden="true"/>{busy ? "Checking saved key…" : "Check saved key"}
     </button></div>
+    <div className="admin-settings-body">
     {busy && <p role="status">Checking the production endpoint…</p>}
     {error && <p className="admin-inline-error" role="alert">{error}</p>}
     {result && <div className="admin-feedback info" role="status">
@@ -44,5 +45,6 @@ export default function MagicLightConnectionCheck({ disabled = false }: { disabl
         {Number.isSafeInteger(result.httpStatus) ? ` · HTTP ${result.httpStatus}` : ""}
         {` · Checked ${new Date(result.checkedAt).toLocaleString()}`}</p>
     </div>}
+    </div>
   </section>;
 }

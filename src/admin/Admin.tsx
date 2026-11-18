@@ -14,8 +14,11 @@ import {
   Copy,
   CreditCard,
   Download,
+  ExternalLink,
   Film,
   FileText,
+  Images,
+  Info,
   LayoutDashboard,
   Loader2,
   Percent,
@@ -219,7 +222,7 @@ const tabs = [
   { id: "pricing" as const, name: "Pricing", icon: Percent },
   { id: "agreement" as const, name: "Source agreement", icon: FileText },
   { id: "films" as const, name: "Film archive", icon: Film },
-  { id: "media" as const, name: "Media library", icon: FileText },
+  { id: "media" as const, name: "Media library", icon: Images },
   { id: "activity" as const, name: "Activity", icon: Activity },
 ];
 const money = (cents?: number, currency = "USD") =>
@@ -304,11 +307,32 @@ function auditDetails(details: AuditEvent["details"]) {
 function Badge({
   children,
   tone = "neutral",
+  plain = false,
 }: {
   children: ReactNode;
   tone?: "neutral" | "good" | "pending" | "danger";
+  /** A label, not a status: no leading dot. */
+  plain?: boolean;
 }) {
-  return <span className={`admin-badge ${tone}`}>{children}</span>;
+  return (
+    <span className={`admin-badge ${tone}${plain ? " plain" : ""}`}>
+      {children}
+    </span>
+  );
+}
+/* Placeholder rows shown while a list loads for the first time. Decorative only. */
+function ListSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="admin-skeleton" aria-hidden="true">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index}>
+          <span />
+          <span />
+          <span />
+        </div>
+      ))}
+    </div>
+  );
 }
 function Empty({
   icon: Icon,
@@ -1367,7 +1391,7 @@ export default function Admin({
           <>
             {overview?.statsPartial && (
               <div className="admin-feedback info" role="status">
-                <AlertCircle size={18} />
+                <Info size={18} />
                 <p>
                   Overview totals cover the first 100 records in each category. Additional
                   records are available through the People, Payments, and Film archive
@@ -1423,10 +1447,8 @@ export default function Admin({
               ))}
             </div>
             {(overview?.stats.testOrders ?? 0) > 0 && <p className="admin-fineprint">{overview?.stats.testOrders} test payments are excluded from the live payment and refund totals above.</p>}
-            {isOwner && <ProductionPreparation operator />}
-            {isOwner && <FilmGenerationOperations disabled={busy || loading} />}
             <div className="admin-overview-grid">
-              <section className="admin-card">
+              <section className="admin-card admin-status-card">
                 <div className="admin-section-heading">
                   <div>
                     <h2>Studio status</h2>
@@ -1435,7 +1457,6 @@ export default function Admin({
                       Readiness is reported by the application server.
                     </p>
                   </div>
-                  <ShieldCheck size={23} />
                 </div>
                 {(
                   [
@@ -1449,9 +1470,9 @@ export default function Admin({
                       className={`admin-connection-icon ${connection?.available ? "ready" : "pending"}`}
                     >
                       {connection?.available ? (
-                        <CheckCircle2 size={19} />
+                        <CheckCircle2 size={18} />
                       ) : (
-                        <AlertCircle size={19} />
+                        <AlertCircle size={18} />
                       )}
                     </div>
                     <div>
@@ -1497,6 +1518,7 @@ export default function Admin({
                   </p>
                 </div>
               </section>
+              <div className="admin-overview-side">
               <section className="admin-card admin-price-card">
                 <span className="admin-eyebrow">Film pricing</span>
                 <h2>Provider cost + your markup</h2>
@@ -1524,8 +1546,7 @@ export default function Admin({
                   <ArrowRight size={15} />
                 </button>
               </section>
-            </div>
-            <div className="admin-quick-links">
+            <nav className="admin-quick-links" aria-label="Administration shortcuts">
               {[
                 {
                   tab: "people" as const,
@@ -1547,7 +1568,7 @@ export default function Admin({
                 },
               ].map((item) => (
                 <button key={item.tab} onClick={() => chooseTab(item.tab)}>
-                  <item.icon size={22} />
+                  <span className="admin-quick-link-icon"><item.icon size={18} /></span>
                   <div>
                     <h3>{item.title}</h3>
                     <p>{item.description}</p>
@@ -1555,7 +1576,13 @@ export default function Admin({
                   <ArrowRight size={17} />
                 </button>
               ))}
+            </nav>
+              </div>
             </div>
+            {isOwner && <div className="admin-owner-tools">
+              <ProductionPreparation operator />
+              <FilmGenerationOperations disabled={busy || loading} />
+            </div>}
           </>
         )}{" "}
         {tab === "people" && (
@@ -1591,13 +1618,15 @@ export default function Admin({
             </section>
             {isOwner && (
               <section className="admin-card admin-invite">
-                <div>
-                  <UserPlus size={25} />
-                  <h2>Invite an administrator</h2>
-                  <p>
-                    Grant administration only to teammates who manage the application.
-                    Employees testing films and payments can register normally and be approved below.
-                  </p>
+                <div className="admin-invite-intro">
+                  <span className="admin-icon-tile"><UserPlus size={20} /></span>
+                  <div>
+                    <h2>Invite an administrator</h2>
+                    <p>
+                      Grant administration only to teammates who manage the application.
+                      Employees testing films and payments can register normally and be approved below.
+                    </p>
+                  </div>
                 </div>
                 <form
                   onSubmit={(e) => {
@@ -1688,6 +1717,7 @@ export default function Admin({
                   placeholder="Search loaded people"
                 />
               </div>
+              {!people && !error && <ListSkeleton />}
               {people && !displayedPeople.length ? (
                 <Empty
                   icon={Users}
@@ -1700,29 +1730,29 @@ export default function Admin({
               ) : (
                 people && (
                   <div className="admin-table-wrap">
-                    <table className="admin-table">
-                      <thead>
-                        <tr>
-                          <th>Person</th>
-                          <th>Access</th>
-                          <th>Status</th>
-                          <th>Joined / last sign-in</th>
-                          <th>Actions</th>
+                    <table className="admin-table admin-table-stack admin-people-table" role="table">
+                      <thead role="rowgroup">
+                        <tr role="row">
+                          <th role="columnheader">Person</th>
+                          <th role="columnheader">Access</th>
+                          <th role="columnheader">Status</th>
+                          <th role="columnheader">Joined / last sign-in</th>
+                          <th role="columnheader">Actions</th>
                         </tr>
                       </thead>
-                      <tbody>
+                      <tbody role="rowgroup">
                         {displayedPeople.map((person) => (
-                          <tr key={person.email}>
-                            <td>
+                          <tr key={person.email} role="row">
+                            <td role="cell" data-label="Person">
                               <strong>{person.name || "Name not provided"}</strong>
                               <span>{person.email}</span>
                             </td>
-                            <td>
-                              <Badge tone={person.role === "owner" ? "good" : "neutral"}>
+                            <td role="cell" data-label="Access">
+                              <Badge tone={person.role === "owner" ? "good" : "neutral"} plain>
                                 {humanize(person.role)}
                               </Badge>
                             </td>
-                            <td>
+                            <td role="cell" data-label="Status">
                               <Badge
                                 tone={
                                   person.accessStatus === "approved"
@@ -1735,11 +1765,11 @@ export default function Admin({
                                 {person.accessStatus === "approved" ? "Approved" : person.accessStatus === "suspended" ? "Suspended" : "Awaiting approval"}
                               </Badge>
                             </td>
-                            <td>
-                              <span>{date(person.createdAt)}</span>
+                            <td role="cell" data-label="Joined">
+                              <span><span className="admin-cell-label">Joined </span>{date(person.createdAt)}</span>
                               <small>Last sign-in: {date(person.lastLoginAt)}</small>
                             </td>
-                            <td>
+                            <td role="cell" data-label="Actions">
                               <div className="admin-row-actions">
                                 {person.role === "owner" ? (
                                   <span className="admin-protected">
@@ -1808,14 +1838,14 @@ export default function Admin({
           </>
         )}
         {tab === "payments" && (
-          <section className="admin-card">
+          <>
             <section
-              className="admin-quickbooks-panel"
+              className="admin-card admin-quickbooks-panel"
               aria-labelledby="quickbooks-connection-title"
             >
               <div className="admin-quickbooks-heading">
                 <div className="admin-quickbooks-symbol">
-                  <CreditCard size={25} />
+                  <CreditCard size={20} />
                 </div>
                 <div>
                   <span className="admin-eyebrow">Business authorization</span>
@@ -1915,6 +1945,74 @@ export default function Admin({
                   </small>
                 </div>
               </div>
+              <div className="admin-quickbooks-actions">
+                {isOwner ? (
+                  <>
+                    {canRefreshQuickBooks && (
+                      <button className="button secondary"
+                        disabled={busy || loading || authorizationTracking}
+                        onClick={() => void refreshQuickBooksAuthorization()}>
+                        {refreshingAuthorization && <Loader2 size={16} className="spin" />}
+                        {refreshingAuthorization ? "Renewing authorization…" : "Refresh authorization"}
+                      </button>
+                    )}
+                    <button
+                      className={`button ${hasQuickBooksAuthorization ? "secondary" : "primary"}`}
+                      disabled={
+                        busy ||
+                        loading ||
+                        authorizationTracking ||
+                        quickBooks?.pending ||
+                        (quickBooks?.remoteReviewRequired &&
+                          !hasQuickBooksAuthorization) ||
+                        (!hasQuickBooksAuthorization && !quickBooks?.configured) ||
+                        !Number.isInteger(quickBooks?.revision)
+                      }
+                      onClick={() => {
+                        if (hasQuickBooksAuthorization) {
+                          setActionError("");
+                          setDialog({ kind: "disconnectQuickBooks" });
+                        } else void connectQuickBooks();
+                      }}
+                    >
+                      {busy && !dialog && !verifyingCompany && !refreshingAuthorization ? (
+                        <Loader2 size={16} className="spin" />
+                      ) : (
+                        <ShieldCheck size={16} />
+                      )}
+                      {hasQuickBooksAuthorization
+                        ? "Disconnect before reconnecting"
+                        : needsQuickBooksReconnect
+                          ? "Reconnect QuickBooks"
+                          : "Connect QuickBooks"}
+                    </button>
+                    {!hasQuickBooksAuthorization && quickBooks?.pending && (
+                      <button
+                        className="button secondary"
+                        disabled={busy || loading}
+                        onClick={() => {
+                          setActionError("");
+                          setDialog({ kind: "disconnectQuickBooks" });
+                        }}
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                    <p>
+                      {hasQuickBooksAuthorization
+                        ? canRefreshQuickBooks
+                          ? "Refresh renews the existing authorization without making a payment. Disconnect only to replace this connection. Existing order records stay here."
+                          : "Review the connection status before reconnecting. Existing order records stay here."
+                        : "Complete authorization in the opened Intuit window, then return here."}
+                    </p>
+                  </>
+                ) : (
+                  <p>
+                    The owner manages QuickBooks authorization. Administrators can review
+                    its status here.
+                  </p>
+                )}
+              </div>
               <div className="admin-quickbooks-company">
                 <div className="admin-quickbooks-company-heading">
                   <div>
@@ -1986,74 +2084,6 @@ export default function Admin({
                   </p>
                 )}
               </div>
-              <div className="admin-quickbooks-actions">
-                {isOwner ? (
-                  <>
-                    {canRefreshQuickBooks && (
-                      <button className="button secondary"
-                        disabled={busy || loading || authorizationTracking}
-                        onClick={() => void refreshQuickBooksAuthorization()}>
-                        {refreshingAuthorization && <Loader2 size={16} className="spin" />}
-                        {refreshingAuthorization ? "Renewing authorization…" : "Refresh authorization"}
-                      </button>
-                    )}
-                    <button
-                      className="button primary"
-                      disabled={
-                        busy ||
-                        loading ||
-                        authorizationTracking ||
-                        quickBooks?.pending ||
-                        (quickBooks?.remoteReviewRequired &&
-                          !hasQuickBooksAuthorization) ||
-                        (!hasQuickBooksAuthorization && !quickBooks?.configured) ||
-                        !Number.isInteger(quickBooks?.revision)
-                      }
-                      onClick={() => {
-                        if (hasQuickBooksAuthorization) {
-                          setActionError("");
-                          setDialog({ kind: "disconnectQuickBooks" });
-                        } else void connectQuickBooks();
-                      }}
-                    >
-                      {busy && !dialog && !verifyingCompany && !refreshingAuthorization ? (
-                        <Loader2 size={16} className="spin" />
-                      ) : (
-                        <ShieldCheck size={16} />
-                      )}
-                      {hasQuickBooksAuthorization
-                        ? "Disconnect before reconnecting"
-                        : needsQuickBooksReconnect
-                          ? "Reconnect QuickBooks"
-                          : "Connect QuickBooks"}
-                    </button>
-                    {!hasQuickBooksAuthorization && quickBooks?.pending && (
-                      <button
-                        className="button secondary"
-                        disabled={busy || loading}
-                        onClick={() => {
-                          setActionError("");
-                          setDialog({ kind: "disconnectQuickBooks" });
-                        }}
-                      >
-                        Disconnect
-                      </button>
-                    )}
-                    <p>
-                      {hasQuickBooksAuthorization
-                        ? canRefreshQuickBooks
-                          ? "Refresh renews the existing authorization without making a payment. Disconnect only to replace this connection. Existing order records stay here."
-                          : "Review the connection status before reconnecting. Existing order records stay here."
-                        : "Complete authorization in the opened Intuit window, then return here."}
-                    </p>
-                  </>
-                ) : (
-                  <p>
-                    The owner manages QuickBooks authorization. Administrators can review
-                    its status here.
-                  </p>
-                )}
-              </div>
               {isOwner && <QuickBooksPaymentTest
                 disabled={busy || loading || authorizationTracking}
                 connectionRevision={quickBooks?.revision}
@@ -2064,9 +2094,10 @@ export default function Admin({
             <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} refreshedSettings={hostedCheckoutRefresh} onSaved={() => void refresh()} />
             <ReceiptSettings disabled={busy || loading} />
             {isOwner && <ProductionCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
+            <section className="admin-card admin-orders" aria-labelledby="payment-records-title">
             <div className="admin-section-heading">
               <div>
-                <h2>Payments & refunds</h2>
+                <h2 id="payment-records-title">Payments & refunds</h2>
                 <p>
                   Customer order records. Business authorization and payment readiness are
                   verified separately.
@@ -2084,8 +2115,8 @@ export default function Admin({
                 Export loaded rows
               </button>
             </div>
-            <div className="admin-feedback info">
-              <AlertCircle size={18} />
+            <div className={`admin-feedback info${payments?.connectionReady && payments.connectionStatus !== "renewal-due" && payments.connectionStatus !== "needs-attention" ? "" : " attention"}`}>
+              {payments?.connectionReady && payments.connectionStatus !== "renewal-due" && payments.connectionStatus !== "needs-attention" ? <Info size={18} /> : <AlertCircle size={18} />}
               <div>
                 <strong>{payments?.connectionStatus === "renewal-due" ? "Checkout setup is complete; authorization renewal is due"
                   : payments?.connectionStatus === "needs-attention" ? "The checkout connection needs attention"
@@ -2108,6 +2139,7 @@ export default function Admin({
                 order's currency
               </span>
             </div>
+            {!payments && !error && <ListSkeleton />}
             {payments && !displayedOrders.length ? (
               <Empty
                 icon={CreditCard}
@@ -2120,34 +2152,34 @@ export default function Admin({
             ) : (
               payments && (
                 <div className="admin-table-wrap">
-                  <table className="admin-table">
-                    <thead>
-                      <tr>
-                        <th>Customer / film</th>
-                        <th>Order</th>
-                        <th>Status</th>
-                        <th>Amount / refunded</th>
-                        <th>Created</th>
-                        <th>Action</th>
+                  <table className="admin-table admin-table-stack admin-orders-table" role="table">
+                    <thead role="rowgroup">
+                      <tr role="row">
+                        <th role="columnheader">Customer / film</th>
+                        <th role="columnheader">Order</th>
+                        <th role="columnheader">Status</th>
+                        <th role="columnheader">Amount / refunded</th>
+                        <th role="columnheader">Created</th>
+                        <th role="columnheader">Action</th>
                       </tr>
                     </thead>
-                    <tbody>
+                    <tbody role="rowgroup">
                       {displayedOrders.map((order) => (
-                        <tr key={order.id}>
-                          <td>
+                        <tr key={order.id} role="row">
+                          <td role="cell" data-label="Customer / film">
                             <strong>{order.filmTitle || "Untitled film"}</strong>
                             <span>{order.customerEmail}</span>
-                            {order.sandbox && <Badge tone="pending">Test payment</Badge>}
+                            {order.sandbox && <Badge tone="pending" plain>Test payment</Badge>}
                           </td>
-                          <td>
-                            <span className="admin-record-id">{order.id}</span>
+                          <td role="cell" data-label="Order">
+                            <span className="admin-record-id" title={order.id}>{order.id}</span>
                             <small>
                               {order.provider === "quickbooks"
                                 ? "QuickBooks"
                                 : order.provider}
                             </small>
                           </td>
-                          <td>
+                          <td role="cell" data-label="Status">
                             <Badge
                               tone={
                                 ["paid", "captured"].includes(order.status)
@@ -2160,14 +2192,15 @@ export default function Admin({
                               {order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured" ? "Payment recorded by QuickBooks" : humanize(order.status)}
                             </Badge>
                           </td>
-                          <td>
+                          <td role="cell" data-label="Amount">
                             <strong>{money(order.amountCents, order.currency)}</strong>
                             <small>
                               {order.checkoutMethod === "quickbooks-hosted-invoice" ? "Refunds: check QuickBooks" : `${money(order.refundedCents || 0, order.currency)} refunded`}
                             </small>
                           </td>
-                          <td>{date(order.createdAt)}</td>
-                          <td>
+                          <td role="cell" data-label="Created"><span><span className="admin-cell-label">Created </span>{date(order.createdAt)}</span></td>
+                          <td role="cell" data-label="Action">
+                            <div className="admin-row-actions">
                             <button
                               className="text-button"
                               disabled={
@@ -2184,13 +2217,14 @@ export default function Admin({
                             >
                               {order.sandbox ? "Review test refund" : "Review refund"}
                             </button>
-                            {order.checkoutMethod === "quickbooks-hosted-invoice" && <a className="text-button" href="https://qbo.intuit.com/app/invoices" target="_blank" rel="noopener noreferrer">Manage invoice in QuickBooks</a>}
+                            {order.checkoutMethod === "quickbooks-hosted-invoice" && <a className="text-button" href="https://qbo.intuit.com/app/invoices" target="_blank" rel="noopener noreferrer">Manage invoice in QuickBooks<ExternalLink size={13} aria-hidden="true" /></a>}
                             {order.managedPayment && <>
                               {(order.requiresReview || order.checkoutMethod === "quickbooks-hosted-invoice") && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "reconcilePayment")}>Check saved status</button>}
                               {isOwner && order.checkoutMethod === "quickbooks-hosted-invoice" && order.status === "captured" && <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "checkHostedReversals")}>Check recorded reversals</button>}
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "paymentDiagnostics")}>Download support details</button>
                               <button className="text-button" disabled={busy} onClick={() => void paymentRecordAction(order, "accountingExport")}>Export accounting review</button>
                             </>}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -2199,7 +2233,8 @@ export default function Admin({
                 </div>
               )
             )}
-          </section>
+            </section>
+          </>
         )}
         {tab === "pricing" && (
           <section className="admin-card admin-pricing-editor">
@@ -2210,7 +2245,6 @@ export default function Admin({
                   A verified realistic-production quote plus your saved markup determines the customer's fixed film price.
                 </p>
               </div>
-              <Percent size={24} />
             </div>
             <div className="admin-pricing-columns">
               <form
@@ -2276,7 +2310,7 @@ export default function Admin({
                 </button>
               </form>
               <div className="admin-price-example">
-                <Badge>Price calculation example</Badge>
+                <Badge plain>Price calculation example</Badge>
                 <h3>A $10.00 production cost basis</h3>
                 <div>
                   <span>Verified production quote</span>
@@ -2327,6 +2361,7 @@ export default function Admin({
               {films?.films.length ?? "—"} films loaded. Projects stored only in a
               customer's browser do not appear here.
             </p>
+            {!films && !error && <ListSkeleton rows={3} />}
             {films && !displayedFilms.length ? (
               <Empty
                 icon={Film}
@@ -2349,7 +2384,7 @@ export default function Admin({
                       key={`${film.ownerEmail}:${film.id}`}
                     >
                       <div className="admin-film-art">
-                        <Film size={31} />
+                        <Film size={24} />
                         <Badge tone={film.hasVideo ? "good" : "pending"}>
                           {film.hasVideo ? "Video available" : "Record only"}
                         </Badge>
@@ -2403,6 +2438,7 @@ export default function Admin({
                 placeholder="Search loaded activity"
               />
             </div>
+            {!audit && !error && <ListSkeleton />}
             {audit && !displayedEvents.length ? (
               <Empty
                 icon={Activity}
@@ -2537,7 +2573,7 @@ export default function Admin({
                     Keep connection
                   </button>
                   <button
-                    className="button admin-danger"
+                    className="button danger admin-danger"
                     disabled={busy || !isOwner || !quickBooks}
                     onClick={() => void disconnectQuickBooks()}
                   >
@@ -2594,7 +2630,7 @@ export default function Admin({
                     Cancel
                   </button>
                   <button
-                    className={`button ${dialog.action === "activate" || dialog.action === "approve" ? "primary" : "admin-danger"}`}
+                    className={`button ${dialog.action === "activate" || dialog.action === "approve" ? "primary" : "danger admin-danger"}`}
                     disabled={busy || dialog.person.role === "owner"}
                     onClick={() => void confirmPersonAction(dialog)}
                   >
@@ -2624,7 +2660,7 @@ export default function Admin({
                 </div>
                 {!refundReady && (
                   <div className="admin-feedback info">
-                    <AlertCircle size={18} />
+                    <Info size={18} />
                     <p>
                       Refund submission is not enabled. QuickBooks account authorization
                       alone does not activate customer payments or refunds. No refund will
@@ -2674,7 +2710,7 @@ export default function Admin({
                     Cancel
                   </button>
                   <button
-                    className="button admin-danger"
+                    className="button danger admin-danger"
                     disabled={
                       busy ||
                       !refundReady ||

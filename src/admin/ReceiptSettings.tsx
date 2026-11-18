@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { RefreshCw, Save } from "lucide-react";
+import { CheckCircle2, RefreshCw, Save } from "lucide-react";
 import { api } from "../studio/model";
 
 type Settings = {
@@ -61,16 +61,17 @@ export default function ReceiptSettings({ disabled = false }: { disabled?: boole
     finally { lock.current = false; if (mounted.current && generation.current === request) setBusy(false); }
   }
 
-  return <section className="admin-hosted-checkout" aria-labelledby="receipt-settings-heading">
+  return <section className="admin-hosted-checkout admin-settings" aria-labelledby="receipt-settings-heading">
     <div className="admin-section-heading"><div>
       <h2 id="receipt-settings-heading">Payment receipt emails</h2>
       <p>After QuickBooks confirms payment, send separate receipts to the customer's account email and the merchant email below.</p>
     </div><button type="button" className="button secondary small" disabled={disabled || busy} onClick={() => void reload()}>
       <RefreshCw size={15} aria-hidden="true"/>Reload receipt settings
     </button></div>
+    <div className="admin-settings-body">
     {error && <p className="admin-inline-error" role="alert">{error}</p>}
-    {message && <p className="admin-feedback info" role="status">{message}</p>}
-    {!settings && busy && <p role="status">Loading receipt settings…</p>}
+    {message && <p className="admin-feedback info confirmation" role="status"><CheckCircle2 size={18} aria-hidden="true"/><span>{message}</span></p>}
+    {!settings && busy && <p className="admin-settings-loading" role="status">Loading receipt settings…</p>}
     {settings && <>
       <p className={settings.mailConfigured ? "field-note" : "admin-inline-error"} role="status">{settings.mailStatus}</p>
       {!settings.mailConfigured && <p className="field-note">The deployment needs the dedicated Microsoft Graph mail application's tenant ID, client ID, client secret, and sender mailbox in the LINEAGE_MAIL_* settings. Saving a recipient does not activate email.</p>}
@@ -81,10 +82,11 @@ export default function ReceiptSettings({ disabled = false }: { disabled?: boole
           <input id="merchant-receipt-email" type="email" required maxLength={254} autoComplete="email" value={email}
             aria-describedby="merchant-receipt-help" onChange={event => { setEmail(event.target.value); setMessage(""); }}/>
           <p className="field-note" id="merchant-receipt-help">Any administrator can edit this address. Changes apply to future receipt deliveries; receipts already queued retain the saved address. Customer and merchant addresses are not shared in the other recipient's email.</p>
-          <button type="submit" className="button primary"><Save size={16} aria-hidden="true"/>{busy ? "Saving…" : "Save merchant receipt email"}</button>
+          <div className="admin-form-actions"><button type="submit" className="button primary"><Save size={16} aria-hidden="true"/>{busy ? "Saving…" : "Save merchant receipt email"}</button></div>
         </fieldset>
       </form>
       <p className="field-note">Email accepted for sending is not proof of delivery. Receipts with an uncertain send outcome require review before any resend.</p>
     </>}
+    </div>
   </section>;
 }

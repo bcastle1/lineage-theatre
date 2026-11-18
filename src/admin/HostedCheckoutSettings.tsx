@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, RefreshCw, Save } from "lucide-react";
+import { CheckCircle2, ExternalLink, RefreshCw, Save } from "lucide-react";
 import { api } from "../studio/model";
 import { mergeHostedCheckoutSettings, verifyHostedCheckoutSettings, type HostedCheckoutSettingsValue as Settings } from "./quickbooks-panels";
 
@@ -75,14 +75,15 @@ export default function HostedCheckoutSettings({ isOwner, disabled = false, onSa
     });
   }
   const savedItemMissing = settings?.serviceItemId && !items?.some(item => item.id === settings.serviceItemId);
-  return <section className="admin-hosted-checkout" aria-labelledby="hosted-checkout-heading">
+  return <section className="admin-hosted-checkout admin-settings" aria-labelledby="hosted-checkout-heading">
     <div className="admin-section-heading"><div><h2 id="hosted-checkout-heading">QuickBooks-hosted checkout</h2>
       <p>Customers enter payment details on QuickBooks. Lineage Theatre creates a fixed-price invoice and checks its recorded payment.</p></div></div>
+    <div className="admin-settings-body">
     {error && <p className="admin-inline-error" role="alert">{error}</p>}
-    {message && <p className="admin-feedback info" role="status">{message}</p>}
-    {!settings && !error && <p>Loading checkout settings…</p>}
+    {message && <p className="admin-feedback info confirmation" role="status"><CheckCircle2 size={18} aria-hidden="true"/><span>{message}</span></p>}
+    {!settings && !error && <p className="admin-settings-loading">Loading checkout settings…</p>}
     {settings && <>
-      <p>{settings.reason || (settings.configured ? "Checkout settings are configured." : "Complete the invoice settings before enabling checkout.")}</p>
+      <p className="admin-settings-status">{settings.reason || (settings.configured ? "Checkout settings are configured." : "Complete the invoice settings before enabling checkout.")}</p>
       <fieldset disabled={!isOwner || disabled || busy}>
         <legend>Invoice setup</legend>
         <label>QuickBooks service item
@@ -107,10 +108,11 @@ export default function HostedCheckoutSettings({ isOwner, disabled = false, onSa
         <a className="text-button" href="https://quickbooks.intuit.com/learn-support/en-us/help-article/data-security/quickbooks-pci-service-faqs/L7ipNg7n9_US_en_US" target="_blank" rel="noopener noreferrer">Review Intuit's PCI guidance <ExternalLink size={14}/></a>
         <label className="consent"><input type="checkbox" checked={Boolean(settings.automaticInvoiceEmailDisabled)} onChange={event => update("automaticInvoiceEmailDisabled", event.target.checked)}/>“Automatically send imported invoices” is off in QuickBooks Sales settings and will remain off for this integration.</label>
         <label className="consent"><input type="checkbox" checked={settings.enabled} onChange={event => update("enabled", event.target.checked)}/>Enable hosted checkout after the setup above is complete.</label>
-        <button type="button" className="button primary" onClick={() => void save()}><Save size={16}/>{busy ? "Working…" : "Save checkout settings"}</button>
+        <div className="admin-form-actions"><button type="button" className="button primary" onClick={() => void save()}><Save size={16}/>{busy ? "Working…" : "Save checkout settings"}</button></div>
       </fieldset>
       {!isOwner && <p className="field-note">The owner manages these settings.</p>}
       <p className="field-note">Refunds for hosted invoices are managed in QuickBooks. Recording a payment does not confirm bank settlement or film delivery.</p>
     </>}
+    </div>
   </section>;
 }

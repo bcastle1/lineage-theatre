@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archive,
+  CircleAlert,
+  CircleCheck,
+  Clapperboard,
   Download,
   FileText,
+  FolderInput,
   FolderOpen,
   Image,
   Loader2,
   Music,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Trash2,
+  TriangleAlert,
   Undo2,
   Video,
   X,
@@ -287,9 +294,29 @@ export default function MediaLibrary({
         ["archived", "Archive"],
         ["trash", "Trash"],
       ];
+  /* Presentation only: a class suffix and a type glyph for covers and dialogs. */
+  const kindClass = (item: MediaItem) =>
+    category(item) === "Photos"
+      ? "photo"
+      : category(item) === "Audio"
+        ? "audio"
+        : category(item) === "Video"
+          ? "video"
+          : "document";
+  const kindIcon = (item: MediaItem, size: number) =>
+    category(item) === "Audio" ? (
+      <Music size={size} aria-hidden="true" />
+    ) : category(item) === "Video" ? (
+      <Video size={size} aria-hidden="true" />
+    ) : category(item) === "Photos" ? (
+      <Image size={size} aria-hidden="true" />
+    ) : (
+      <FileText size={size} aria-hidden="true" />
+    );
+  const filtering = Boolean(query) || kind !== "All types";
   return (
     <section
-      className="media-library"
+      className={`media-library${admin ? " media-library-admin" : ""}`}
       aria-label={admin ? "Administrator media library" : "Your media library"}
     >
       <div className="media-heading">
@@ -308,20 +335,20 @@ export default function MediaLibrary({
         </div>
         <div className="media-actions">
           <button
-            className="button secondary small"
+            className="button secondary"
             disabled={locked}
             onClick={() => void refresh()}
           >
-            <RefreshCw size={16} />
+            <RefreshCw size={16} aria-hidden="true" />
             Refresh
           </button>
           {!admin && (
             <button
-              className="button primary small"
+              className="button primary"
               disabled={locked}
               onClick={() => input.current?.click()}
             >
-              <Plus size={16} />
+              <Plus size={16} aria-hidden="true" />
               Add media
             </button>
           )}
@@ -341,93 +368,105 @@ export default function MediaLibrary({
               if (files.length) void add(files);
             }}
           />
-          <p className="media-retention">
-            Uploads are saved with administrator access. Archiving or moving a
-            file to trash hides it from your active library; administrators
-            retain it until they permanently delete it. Up to 100 MB per file.
-          </p>
-          {projects.length > 0 && (
-            <div className="media-legacy">
-              <div>
-                <span>Sources from earlier films</span>
-                <p>
-                  Copy originals still stored in this browser to your private
-                  media library, with administrator access. Sources from other
-                  browsers must be copied there.
-                </p>
+          <div className="media-notes">
+            <p className="media-retention">
+              <ShieldCheck size={20} aria-hidden="true" />
+              <span>
+                Uploads are saved with administrator access. Archiving or moving
+                a file to trash hides it from your active library;
+                administrators retain it until they permanently delete it. Up to
+                100 MB per file.
+              </span>
+            </p>
+            {projects.length > 0 && (
+              <div className="media-legacy">
+                <FolderInput size={20} aria-hidden="true" />
+                <div>
+                  <span>Sources from earlier films</span>
+                  <p>
+                    Copy originals still stored in this browser to your private
+                    media library, with administrator access. Sources from other
+                    browsers must be copied there.
+                  </p>
+                </div>
+                <button
+                  className="button secondary small"
+                  disabled={locked}
+                  onClick={() => void copyLegacy()}
+                >
+                  Copy browser sources
+                </button>
               </div>
-              <button
-                className="button secondary small"
-                disabled={locked}
-                onClick={() => void copyLegacy()}
-              >
-                Copy browser sources
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
-      <nav className="media-tabs" aria-label="Media views">
-        {tabs.map(([id, label]) => (
-          <button
-            key={id}
-            disabled={locked}
-            aria-pressed={view === id}
-            className={view === id ? "selected" : ""}
-            onClick={() => {
-              setView(id);
-              setNotice("");
-            }}
+      <div className="media-toolbar">
+        <nav className="media-tabs" aria-label="Media views">
+          {tabs.map(([id, label]) => (
+            <button
+              key={id}
+              disabled={locked}
+              aria-pressed={view === id}
+              className={view === id ? "selected" : ""}
+              onClick={() => {
+                setView(id);
+                setNotice("");
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+        <div className="media-filters">
+          <label>
+            <Search size={18} aria-hidden="true" />
+            <input
+              aria-label="Search media"
+              placeholder={
+                admin
+                  ? "Search loaded files, customers, or films"
+                  : "Search loaded files or films"
+              }
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </label>
+          <select
+            aria-label="Media type"
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
           >
-            {label}
-          </button>
-        ))}
-      </nav>
-      <div className="media-filters">
-        <label>
-          <Search size={17} />
-          <input
-            aria-label="Search media"
-            placeholder={
-              admin
-                ? "Search loaded files, customers, or films"
-                : "Search loaded files or films"
-            }
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <select
-          aria-label="Media type"
-          value={kind}
-          onChange={(event) => setKind(event.target.value)}
-        >
-          {["All types", "Photos", "Documents", "Audio", "Video"].map(
-            (value) => (
-              <option key={value}>{value}</option>
-            ),
-          )}
-        </select>
+            {["All types", "Photos", "Documents", "Audio", "Video"].map(
+              (value) => (
+                <option key={value}>{value}</option>
+              ),
+            )}
+          </select>
+        </div>
       </div>
       {busy && (
-        <p className="media-feedback" role="status">
-          <Loader2 size={16} className="spin" />
-          {busy}
+        <p className="media-feedback feedback info" role="status">
+          <Loader2 size={18} className="spin" aria-hidden="true" />
+          <span>{busy}</span>
         </p>
       )}
       {notice && (
-        <p className="media-feedback" role="status">
-          {notice}
+        <p className="media-feedback feedback success" role="status">
+          <CircleCheck size={18} aria-hidden="true" />
+          <span>{notice}</span>
         </p>
       )}
       {error && (
-        <p className="media-feedback error-text" role="alert">
-          {error}{" "}
+        <p className="media-feedback feedback error error-text" role="alert">
+          <CircleAlert size={18} aria-hidden="true" />
+          <span>{error}</span>{" "}
           <button
             className="text-button"
             disabled={locked}
             onClick={() => void refresh()}
           >
+            <RefreshCw size={16} aria-hidden="true" />
             Refresh library
           </button>
         </p>
@@ -438,10 +477,28 @@ export default function MediaLibrary({
           ? " · More files available below. Search and filters apply to loaded files."
           : ""}
       </p>
-      {loading && <p role="status">Loading media…</p>}
+      {loading && (
+        <p role="status" className="media-loading">
+          <Loader2 size={18} className="spin" aria-hidden="true" />
+          Loading media…
+        </p>
+      )}
+      {loading && !page.items.length && (
+        <div className="media-skeleton" aria-hidden="true">
+          {[0, 1, 2, 3].map((index) => (
+            <div className="media-skeleton-card" key={index}>
+              <div className="media-skeleton-cover" />
+              <div className="media-skeleton-line" />
+              <div className="media-skeleton-line short" />
+            </div>
+          ))}
+        </div>
+      )}
       {!loading && !filtered.length && !error && (
         <div className="media-empty">
-          <FolderOpen size={32} />
+          <span className="media-empty-icon" aria-hidden="true">
+            {filtering ? <Search size={28} /> : <FolderOpen size={28} />}
+          </span>
           <h2>
             {query || kind !== "All types"
               ? "No matching files"
@@ -452,13 +509,26 @@ export default function MediaLibrary({
               ? "Uploaded originals will appear here, including media customers have archived or moved to trash."
               : "Add media here, upload sources while creating a film, or copy your earlier browser sources."}
           </p>
+          {!admin && !filtering && view === "active" && (
+            <button
+              className="button primary"
+              disabled={locked}
+              onClick={() => input.current?.click()}
+            >
+              <Plus size={16} aria-hidden="true" />
+              Add media
+            </button>
+          )}
         </div>
       )}
       <div className="media-grid">
         {filtered.map((item) => (
-          <article className="media-card" key={`${item.ownerEmail}:${item.id}`}>
+          <article
+            className={`media-card${item.status !== "ready" ? " media-card-attention" : ""}`}
+            key={`${item.ownerEmail}:${item.id}`}
+          >
             <button
-              className="media-cover"
+              className={`media-cover media-cover-${kindClass(item)}`}
               aria-label={`Preview ${item.name}`}
               disabled={locked || !item.mediaUrl}
               onClick={() => setPreview(item)}
@@ -477,8 +547,9 @@ export default function MediaLibrary({
               <span>{category(item)}</span>
             </button>
             <div className="media-card-body">
-              <h2>{item.name}</h2>
-              <p>
+              <div className="media-card-text">
+              <h2 title={item.name}>{item.name}</h2>
+              <p className="media-meta">
                 {sizeLabel(item.size)} ·{" "}
                 {new Date(item.createdAt).toLocaleDateString()}
               </p>
@@ -498,49 +569,23 @@ export default function MediaLibrary({
                 </>
               )}
               {item.status !== "ready" && (
-                <p className="media-badge">
-                  {item.status === "deleting"
-                    ? "Deletion incomplete — retry from archive"
-                    : "Upload incomplete"}
+                <p className="media-badge media-badge-warning">
+                  <TriangleAlert size={16} aria-hidden="true" />
+                  <span>
+                    {item.status === "deleting"
+                      ? "Deletion incomplete — retry from archive"
+                      : "Upload incomplete"}
+                  </span>
                 </p>
               )}
+              </div>
               <div className="media-card-actions">
-                {item.mediaUrl && (
-                  <>
-                    <button
-                      className="text-button"
-                      disabled={locked}
-                      onClick={() => setPreview(item)}
-                    >
-                      Preview
-                    </button>
-                    <a
-                      className="text-button"
-                      href={`${item.mediaUrl}&download=1`}
-                    >
-                      <Download size={14} />
-                      Download
-                    </a>
-                  </>
-                )}
-                {!admin && item.status === "ready" && (
-                  <button
-                    className="text-button"
-                    disabled={locked}
-                    onClick={() => {
-                      setName(item.name);
-                      setDialog({ item, action: "rename" });
-                    }}
-                  >
-                    Rename
-                  </button>
-                )}
                 {!admin &&
                   onUse &&
                   item.status === "ready" &&
                   item.customerState === "active" && (
                     <button
-                      className="text-button"
+                      className="button secondary small media-card-key"
                       disabled={locked}
                       onClick={() =>
                         void run("Adding source to your film…", async () => {
@@ -548,78 +593,23 @@ export default function MediaLibrary({
                         })
                       }
                     >
+                      <Clapperboard size={16} aria-hidden="true" />
                       Use in current film
                     </button>
                   )}
                 {!admin && item.customerState !== "active" && (
                   <button
-                    className="text-button"
+                    className="button secondary small media-card-key"
                     disabled={locked}
                     onClick={() => void act(item, "restore")}
                   >
-                    <Undo2 size={14} />
+                    <Undo2 size={16} aria-hidden="true" />
                     Restore
-                  </button>
-                )}
-                {!admin && item.customerState === "active" && (
-                  <button
-                    className="text-button"
-                    disabled={locked}
-                    onClick={() => void act(item, "archive")}
-                  >
-                    <Archive size={14} />
-                    Archive
-                  </button>
-                )}
-                {!admin && item.customerState !== "trash" && (
-                  <button
-                    className="text-button"
-                    disabled={locked}
-                    onClick={() => setDialog({ item, action: "trash" })}
-                  >
-                    <Trash2 size={14} />
-                    Move to trash
-                  </button>
-                )}
-                {admin && (
-                  <button
-                    className="text-button"
-                    disabled={locked || item.status === "deleting"}
-                    onClick={() =>
-                      void act(
-                        item,
-                        item.adminArchivedAt
-                          ? "admin-restore"
-                          : "admin-archive",
-                      )
-                    }
-                  >
-                    {item.adminArchivedAt ? (
-                      <Undo2 size={14} />
-                    ) : (
-                      <Archive size={14} />
-                    )}
-                    {item.adminArchivedAt
-                      ? "Restore from archive"
-                      : "Archive for administrator"}
-                  </button>
-                )}
-                {admin && view === "archived" && item.adminArchivedAt && (
-                  <button
-                    className="text-button error-text"
-                    disabled={locked}
-                    onClick={() => {
-                      setConfirmation("");
-                      setDialog({ item, action: "purge" });
-                    }}
-                  >
-                    <Trash2 size={14} />
-                    Permanently delete
                   </button>
                 )}
                 {!admin && item.status === "pending" && (
                   <button
-                    className="text-button"
+                    className="button secondary small media-card-key"
                     disabled={locked}
                     onClick={() =>
                       void run("Verifying upload…", async () => {
@@ -632,9 +622,94 @@ export default function MediaLibrary({
                       })
                     }
                   >
+                    <RefreshCw size={16} aria-hidden="true" />
                     Verify upload
                   </button>
                 )}
+                {admin && (
+                  <button
+                    className="button secondary small media-card-key"
+                    disabled={locked || item.status === "deleting"}
+                    onClick={() =>
+                      void act(
+                        item,
+                        item.adminArchivedAt
+                          ? "admin-restore"
+                          : "admin-archive",
+                      )
+                    }
+                  >
+                    {item.adminArchivedAt ? (
+                      <Undo2 size={16} aria-hidden="true" />
+                    ) : (
+                      <Archive size={16} aria-hidden="true" />
+                    )}
+                    {item.adminArchivedAt
+                      ? "Restore from archive"
+                      : "Archive for administrator"}
+                  </button>
+                )}
+                <div className="media-card-links">
+                  {item.mediaUrl && (
+                    <>
+                      <button
+                        className="text-button"
+                        disabled={locked}
+                        onClick={() => setPreview(item)}
+                      >
+                        Preview
+                      </button>
+                      <a
+                        className="text-button"
+                        href={`${item.mediaUrl}&download=1`}
+                      >
+                        Download
+                      </a>
+                    </>
+                  )}
+                  {!admin && item.status === "ready" && (
+                    <button
+                      className="text-button"
+                      disabled={locked}
+                      onClick={() => {
+                        setName(item.name);
+                        setDialog({ item, action: "rename" });
+                      }}
+                    >
+                      Rename
+                    </button>
+                  )}
+                  {!admin && item.customerState === "active" && (
+                    <button
+                      className="text-button"
+                      disabled={locked}
+                      onClick={() => void act(item, "archive")}
+                    >
+                      Archive
+                    </button>
+                  )}
+                  {!admin && item.customerState !== "trash" && (
+                    <button
+                      className="text-button media-link-danger"
+                      disabled={locked}
+                      onClick={() => setDialog({ item, action: "trash" })}
+                    >
+                      Move to trash
+                    </button>
+                  )}
+                  {admin && view === "archived" && item.adminArchivedAt && (
+                    <button
+                      className="text-button error-text media-link-danger"
+                      disabled={locked}
+                      onClick={() => {
+                        setConfirmation("");
+                        setDialog({ item, action: "purge" });
+                      }}
+                    >
+                      Permanently delete
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </article>
@@ -653,7 +728,7 @@ export default function MediaLibrary({
         <div className="media-backdrop">
           <section
             ref={modal}
-            className="media-dialog"
+            className={`media-dialog media-dialog-preview media-dialog-${kindClass(preview)}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="media-preview-title"
@@ -663,28 +738,44 @@ export default function MediaLibrary({
               aria-label="Close preview"
               onClick={() => setPreview(null)}
             >
-              <X size={20} />
+              <X size={20} aria-hidden="true" />
             </button>
             <h2 id="media-preview-title">{preview.name}</h2>
-            {preview.contentType.startsWith("image/") ? (
-              <img
-                className="media-full-image"
-                src={preview.mediaUrl}
-                alt={preview.name}
-              />
-            ) : preview.contentType.startsWith("video/") ? (
-              <video controls src={preview.mediaUrl} />
-            ) : preview.contentType.startsWith("audio/") ? (
-              <audio controls src={preview.mediaUrl} />
-            ) : (
-              <p>
-                Open or download the original document to read its full
-                contents.
-              </p>
-            )}
+            <p className="media-dialog-meta">
+              {category(preview)} · {sizeLabel(preview.size)} ·{" "}
+              {new Date(preview.createdAt).toLocaleDateString()}
+            </p>
+            <div className="media-stage">
+              {preview.contentType.startsWith("image/") ? (
+                <img
+                  className="media-full-image"
+                  src={preview.mediaUrl}
+                  alt={preview.name}
+                />
+              ) : preview.contentType.startsWith("video/") ? (
+                <video controls src={preview.mediaUrl} />
+              ) : preview.contentType.startsWith("audio/") ? (
+                <>
+                  <span className="media-stage-icon" aria-hidden="true">
+                    {kindIcon(preview, 28)}
+                  </span>
+                  <audio controls src={preview.mediaUrl} />
+                </>
+              ) : (
+                <>
+                  <span className="media-stage-icon" aria-hidden="true">
+                    {kindIcon(preview, 28)}
+                  </span>
+                  <p>
+                    Open or download the original document to read its full
+                    contents.
+                  </p>
+                </>
+              )}
+            </div>
             <div className="media-actions">
               <a
-                className="button secondary small"
+                className="button secondary"
                 href={preview.mediaUrl}
                 target="_blank"
                 rel="noreferrer"
@@ -692,9 +783,10 @@ export default function MediaLibrary({
                 Open original
               </a>
               <a
-                className="button primary small"
+                className="button primary"
                 href={`${preview.mediaUrl}&download=1`}
               >
+                <Download size={16} aria-hidden="true" />
                 Download original
               </a>
             </div>
@@ -707,7 +799,7 @@ export default function MediaLibrary({
             ref={(element) => {
               modal.current = element;
             }}
-            className="media-dialog"
+            className={`media-dialog media-dialog-action${dialog.action === "rename" ? "" : " media-dialog-danger"}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="media-action-title"
@@ -720,6 +812,13 @@ export default function MediaLibrary({
               );
             }}
           >
+            <span className="media-dialog-icon" aria-hidden="true">
+              {dialog.action === "rename" ? (
+                <Pencil size={22} />
+              ) : (
+                <Trash2 size={22} />
+              )}
+            </span>
             <h2 id="media-action-title">
               {dialog.action === "purge"
                 ? "Permanently delete this original?"
@@ -727,7 +826,7 @@ export default function MediaLibrary({
                   ? "Rename media"
                   : "Move this file to trash?"}
             </h2>
-            <p>{dialog.item.name}</p>
+            <p className="media-dialog-file">{dialog.item.name}</p>
             {dialog.action === "purge" ? (
               <>
                 <p>
@@ -763,14 +862,15 @@ export default function MediaLibrary({
               </p>
             )}
             {error && (
-              <p role="alert" className="error-text">
-                {error}
+              <p role="alert" className="error-text feedback error">
+                <CircleAlert size={18} aria-hidden="true" />
+                <span>{error}</span>
               </p>
             )}
             <div className="media-actions">
               <button
                 type="button"
-                className="button secondary small"
+                className="button secondary"
                 disabled={!!busy}
                 onClick={() => {
                   setDialog(null);
@@ -780,7 +880,7 @@ export default function MediaLibrary({
                 Cancel
               </button>
               <button
-                className="button primary small"
+                className={`button primary${dialog.action === "rename" ? "" : " danger"}`}
                 disabled={
                   !!busy ||
                   (dialog.action === "purge" && confirmation !== "DELETE")
