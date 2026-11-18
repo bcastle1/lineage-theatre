@@ -17,6 +17,8 @@ const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "
 const scrolling = (): ScrollBehavior => typeof window !== "undefined" && typeof window.matchMedia === "function"
   && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 const inPanel = (at: string) => /^(status|detail|version):/.test(at);
+// How long presses are ignored after the library itself has moved the page (see "quiet" below).
+const QUIET_MS = 500;
 type Line = "message" | "error" | "busy";
 function resumablePayment(detail: LibraryDetail | null) {
   if (!detail?.manifest || !detail.entry.production.needsAttention
@@ -91,7 +93,8 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   // Where each line is shown: a saved film's key (its card), "draft:<id>" (a browser draft's card), a place in
-  // the open film status panel ("status:", "detail:" or "version:" plus the film's key), or "" for the top.
+  // the open film status panel ("status:", "detail:" or "version:" plus the film's key), "more" (under the
+  // "Load more saved films" button), or "" for the top. A place that is not on the page falls back to the top.
   const [busyAt, setBusyAt] = useState("");
   const [errorAt, setErrorAt] = useState("");
   const [messageAt, setMessageAt] = useState("");
@@ -103,7 +106,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const [libraryHash, setLibraryHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
   const [playing, setPlaying] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
-  const detailPanel = useRef<HTMLElement>(null);
+  const detailPanel = useRef<HTMLElement>(null), panelOpen = useRef(false);
   const messageLine = useRef<HTMLParagraphElement>(null), errorLine = useRef<HTMLParagraphElement>(null), busyLine = useRef<HTMLParagraphElement>(null);
   const dialog = useRef<HTMLDialogElement>(null), lock = useRef(false), mounted = useRef(false), sequence = useRef(0);
   const detailSequence = useRef(0);
@@ -117,11 +120,33 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
   }, []);
+  // When the library itself moves the page (it brings a line or the status panel into view, a line appears,
+  // changes or goes, or the status panel closes), whatever arrives under a pointer that has not moved is not
+  // what the customer aimed at. For a moment after each such move, presses are ignored everywhere in the
+  // document. Activation from the keyboard (a click with no press count) is never ignored.
+  const quietUntil = useRef(0);
+  const quiet = () => { quietUntil.current = performance.now() + QUIET_MS; };
+  // Every scroll the library asks for goes through here.
+  const bring = (target: Element | null | undefined, block: ScrollLogicalPosition) => {
+    if (!target || typeof window === "undefined") return;
+    quiet(); target.scrollIntoView({ behavior: scrolling(), block });
+  };
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const ignorePress = (event: MouseEvent) => {
+      if (event.detail > 0 && performance.now() < quietUntil.current) { event.preventDefault(); event.stopPropagation(); }
+    };
+    // While the page is still moving (animated scrolling), the moment starts again.
+    const stillMoving = () => { if (performance.now() < quietUntil.current) quiet(); };
+    document.addEventListener("click", ignorePress, true);
+    window.addEventListener("scroll", stillMoving, { passive: true });
+    return () => { document.removeEventListener("click", ignorePress, true); window.removeEventListener("scroll", stillMoving); quietUntil.current = 0; };
+  }, []);
   useEffect(() => { onBusyChange(Boolean(busy)); }, [busy, onBusyChange]);
   useEffect(() => () => onBusyChange(false), [onBusyChange]);
   useEffect(() => {
     const request = ++sequence.current;
-    setLoading(true); setEntries([]); setCursor(undefined); setError(""); setDetail(null); setPlaying(""); pageCursors.current.clear(); loadedPageCount.current = 1;
+    setLoading(true); setEntries([]); setCursor(undefined); setError(""); leavePanel(); setDetail(null); setPlaying(""); pageCursors.current.clear(); loadedPageCount.current = 1;
     void loadLibraryWindow(view, api)
       .then(page => { if (request === sequence.current) {
         setEntries(page.entries); setCursor(page.cursor); pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
@@ -132,12 +157,12 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   useEffect(() => {
     const request = ++detailSequence.current;
     if (!linkedFilm) {
-      lock.current = false; setDetail(null); setPlaying(""); setBusy("");
+      lock.current = false; leavePanel(); setDetail(null); setPlaying(""); setBusy("");
       if (libraryHash.startsWith("#library?")) { setErrorAt(""); setError("This film link is invalid. Choose a saved film from your library."); }
       return;
     }
     let cancelled = false;
-    lock.current = true; setBusyAt(""); setBusy("Opening your film status…"); setError(""); setDetail(null); setPlaying("");
+    lock.current = true; setBusyAt(""); setBusy("Opening your film status…"); setError(""); leavePanel(); setDetail(null); setPlaying("");
     void loadLibraryLinkedFilm(libraryHash, api)
       .then(value => { if (!cancelled && request === detailSequence.current) setDetail(value); })
       .catch(() => { if (!cancelled && request === detailSequence.current) { setErrorAt(""); setError("This saved film could not be opened. It may be unavailable or belong to another account. Sign in to the account that purchased it, or refresh to try again."); reveal("error"); } })
@@ -174,11 +199,14 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     // The line an action has just produced can be out of sight: under an action row at the foot of the window,
     // at the head of the status panel, or at the top of the library when its card has left the view.
     // Bring it into view without moving focus; no animated scrolling when reduced motion is requested.
-    if (!revealed.count || typeof window === "undefined") return;
-    ({ message: messageLine, error: errorLine, busy: busyLine })[revealed.line].current?.scrollIntoView({ behavior: scrolling(), block: "nearest" });
+    // "nearest" moves the page no further than the line needs.
+    if (!revealed.count) return;
+    bring(({ message: messageLine, error: errorLine, busy: busyLine })[revealed.line].current, "nearest");
   }, [revealed]);
   useEffect(() => {
-    if (detail) { detailPanel.current?.focus({ preventScroll: true }); detailPanel.current?.scrollIntoView({ behavior: scrolling(), block: "start" }); }
+    if (detail) { panelOpen.current = true; detailPanel.current?.focus({ preventScroll: true }); bring(detailPanel.current, "start"); }
+    // The panel has gone, whichever way it was closed: the page under it has moved up.
+    else if (panelOpen.current) { panelOpen.current = false; quiet(); }
   }, [detail?.entry.kind, detail?.entry.id]);
   useEffect(() => {
     if (!detail) { automaticallyOpenedPlayer.current = ""; return; }
@@ -188,7 +216,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     // redirect or a status refresh. A customer can then close it normally.
     automaticallyOpenedPlayer.current = key;
     setPlaying(key);
-    detailPanel.current?.scrollIntoView({ behavior: scrolling(), block: "start" });
+    bring(detailPanel.current, "start");
   }, [detail]);
   useEffect(() => {
     if (!detail || disabled || busy || playing || confirmation) return;
@@ -223,7 +251,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       if (request === sequence.current) {
         pageCursors.current.add(next); loadedPageCount.current++; setEntries(current => mergeLibraryPages(current, page.entries)); setCursor(page.cursor);
       }
-    } catch (cause) { if (mounted.current) { setErrorAt(""); setError(errorText(cause)); } }
+    } catch (cause) { if (mounted.current) { setErrorAt("more"); setError(errorText(cause)); reveal("error"); } }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
   async function openDetail(entry: LibraryEntry, at = libraryKey(entry)) {
@@ -314,28 +342,44 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const leaveConfirmation = () => { setConfirmation(null); if (error) reveal("error"); };
   const closeConfirmation = () => { if (!busy) { dialog.current?.close(); leaveConfirmation(); } };
   const openConfirmation = (value: Confirmation) => { if (!blocked) { setError(""); setConfirmation(value); } };
-  // A line shown inside the status panel goes when the panel is closed or shows another film.
-  const leavePanel = () => { if (inPanel(messageAt)) setMessage(""); if (inPanel(errorAt)) setError(""); };
+  // A line shown inside the status panel goes when that panel is closed, reloaded or shows another film
+  // (the close button, a view switch, "Refresh films", a film link, the browser's Back).
+  const leavePanel = () => { if (inPanel(messagePlace)) setMessage(""); if (inPanel(errorPlace)) setError(""); };
   const closeDetail = (returnToCard = false) => {
     detailSequence.current++;
     leavePanel();
+    if (detail) quiet();
     if (returnToCard && detail && typeof document !== "undefined") {
       // Back to the card the panel belongs to: focus its first action ("View film status") and keep the card in view.
       const card = document.getElementById(`film-${detail.entry.kind}-${detail.entry.id}`)?.closest("article");
       card?.querySelector<HTMLElement>(".film-library-actions button")?.focus({ preventScroll: true });
-      card?.scrollIntoView({ behavior: scrolling(), block: "nearest" });
+      bring(card, "nearest");
     }
     setDetail(null); setPlaying("");
     if (linkedFilm) { window.history.replaceState(null, "", "#library"); setLibraryHash("#library"); }
   };
   const detailKey = detail ? libraryKey(detail.entry) : "";
-  // A line whose card is not on the page (another view, a removed card) is shown at the top. A line that was
-  // shown inside the status panel is not shown anywhere once that panel is gone.
+  // A line is never placed where nothing is rendered: when its card or its panel is not on the page (another
+  // view, a removed card, a panel that closed while the request was running), it is shown at the top.
   const places = new Set([...entries.map(entry => libraryKey(entry)), ...drafts.map(draft => `draft:${draft.id}`),
-    ...(detail ? [`status:${detailKey}`, `detail:${detailKey}`, `version:${detailKey}`] : [])]);
-  const placed = (at: string) => places.has(at) ? at : inPanel(at) ? "closed" : "";
+    ...(detail ? [`status:${detailKey}`, `detail:${detailKey}`, `version:${detailKey}`] : []), ...(cursor ? ["more"] : [])]);
+  const placed = (at: string) => places.has(at) ? at : "";
   const attached = places.has(detailKey);
   const busyPlace = placed(busyAt), errorPlace = placed(errorAt), messagePlace = placed(messageAt);
+  // Which lines are on the page, and where. When one appears, changes or goes, what follows it moves.
+  const lines = [message && `${messagePlace}:${message}`, confirmation ? "" : error && `${errorPlace}:${error}`, busy && `${busyPlace}:${busy}`].join("|");
+  const linesBefore = useRef(lines);
+  useEffect(() => {
+    if (linesBefore.current === lines) return;
+    linesBefore.current = lines;
+    quiet();
+    // In a card the row of lines does not get shorter while it stays (a one-line error after a two-line working
+    // line): the page was scrolled for the taller one, and Archive / Move to trash must not rise to the pointer.
+    for (const line of [messageLine, errorLine, busyLine]) {
+      const row = line.current?.parentElement;
+      if (row?.parentElement?.classList.contains("film-library-actions")) row.style.minHeight = `${row.offsetHeight}px`;
+    }
+  }, [lines]);
   const notices = (at: string) => {
     const done = Boolean(message) && messagePlace === at, failed = Boolean(error) && !confirmation && errorPlace === at, working = Boolean(busy) && busyPlace === at;
     const lines = <>
@@ -407,17 +451,20 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
                 <a className="text-button" href={entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
               </>}
               {local && !entry.coverage && <button type="button" className="text-button" disabled={blocked} onClick={() => onOpenDraft(local.id)}>Open browser draft</button>}
+              {/* The film's line sits under its actions and above Archive / Move to trash: bringing it into view
+                  can put only the line itself, never that row, under a pointer resting on the actions. */}
+              {notices(key)}
               {view === "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ entry, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive</button>}
               {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
               {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
             </div>
-            {notices(key)}
             {isPlaying && libraryCanWatch(entry) && <video controls playsInline preload="metadata" src={entry.mediaUrl} aria-label={`${entry.title || "Family film"} player`}
               onError={() => { setErrorAt(key); setError("This film could not be played. Refresh its status or try the download."); reveal("error"); }} />}
           </div>
         </article>, key === detailKey && detailSection];
       }), !attached && detailSection]}</div>
       {cursor && <button type="button" className="button secondary film-library-more" disabled={blocked || loading} onClick={() => void loadMore()}>Load more saved films</button>}
+      {notices("more")}
     </section>
     <section aria-labelledby="browser-drafts-heading" className="film-library-drafts"><div className="section-title"><div>
       <h2 id="browser-drafts-heading">Browser drafts</h2><p>These editable drafts and original source files are stored on this browser. They are not a backup of your account's saved versions.</p>
@@ -431,13 +478,13 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           <p>{covered ? "This saved corrected version is covered by the original payment. Open its film status to follow production."
             : draft.paymentReference ? "A payment reference is saved. Use the account version above for confirmed payment and production status." : draft.scenes.length ? "Script draft ready to review." : "Story in development."}</p>
           <div className="action-group film-library-actions">
-            {view === "active" && <>{covered ? <a className="button secondary small" href={libraryFilmLink(covered.id)}>View corrected film status</a>
-              : <button type="button" className="button secondary small" disabled={blocked} onClick={() => onOpenDraft(draft.id)}>Continue draft</button>}
-              <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive draft</button></>}
+            {view === "active" && (covered ? <a className="button secondary small" href={libraryFilmLink(covered.id)}>View corrected film status</a>
+              : <button type="button" className="button secondary small" disabled={blocked} onClick={() => onOpenDraft(draft.id)}>Continue draft</button>)}
+            {notices(`draft:${draft.id}`)}
+            {view === "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive draft</button>}
             {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore draft</button>}
             {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ draft, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move draft to trash</button>}
-          </div>
-          {notices(`draft:${draft.id}`)}</div>
+          </div></div>
       </article>; })}</div>
     </section>
     {confirmation && <dialog ref={dialog} className="film-library-dialog" data-action={confirmation.action} aria-labelledby="library-confirm-title" aria-describedby="library-confirm-description"

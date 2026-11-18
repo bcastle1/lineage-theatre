@@ -491,6 +491,10 @@ export function DirectionStep({
 }
 
 type FilmCharacter = import("./model").Character;
+// After a press changes a card's or a section's mode, how long the presses that follow
+// are ignored, in milliseconds: any press, and one counted as part of a double click.
+const QUIET_AFTER_MODE_CHANGE = 500;
+const QUIET_FOR_DOUBLE_CLICK = 1500;
 // Reading view: a value as text, or a quiet note that it is still missing.
 function readValue(value: string, missing = "Not added yet") {
   return value?.trim() ? value : <span className="read-empty">{missing}</span>;
@@ -570,24 +574,78 @@ export function CuttingStep({
     keepInPlace.current = shown.find((card) => card.top >= limit - 1) ?? shown[0] ?? null;
     setCardsEditing(cardIds, edit);
   };
-  // A double click is one decision. The mode buttons act on its first click only
-  // (activation from the keyboard reports a click count of 0), and its second press
-  // does not take the focus from where the first one put it: the field of a card
-  // that has just opened, or the Edit button of one that has just closed.
-  const once =
+  // A double click is one decision, and a change of mode moves the page under a pointer
+  // that stays still: a form closes, the cards after it rise, the page ends sooner. So
+  // after a press that changes a mode, the document is quiet for a moment: the next
+  // presses do nothing, whatever has arrived under the pointer (a remove button, the
+  // way forward, a neighbour's checkbox, the navigation outside this step).
+  //   any:   until then, every press is ignored: half a second after the change, and
+  //          half a second after each ignored press, so that a burst of presses stays
+  //          one decision, but never later than "multi";
+  //   multi: until then, a press the browser counts as part of a double click is
+  //          ignored: a second and a half after the change, for a slow double click.
+  // Only presses start and feel the quiet. Activation from the keyboard, from assistive
+  // technology and from script reports a click count of 0: it is never ignored and
+  // never starts a quiet period.
+  const quiet = useRef({ any: 0, multi: 0, pending: false });
+  const startQuiet = (now: number) => {
+    quiet.current = { any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: false };
+  };
+  const isQuiet = (clickCount: number, at: number) =>
+    clickCount > 0 && at < (clickCount > 1 ? Math.max(quiet.current.any, quiet.current.multi) : quiet.current.any);
+  // Every control that changes a mode goes through here.
+  const changeMode =
     (action: (control: HTMLElement) => void) =>
     (event: { detail: number; currentTarget: HTMLElement }) => {
-      if (event.detail <= 1) action(event.currentTarget);
+      if (event.detail > 0) {
+        startQuiet(performance.now());
+        // Counted again once the page has moved (the effect below).
+        quiet.current.pending = true;
+      }
+      action(event.currentTarget);
     };
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const ignoreWhileQuiet = (event: MouseEvent) => {
+      const now = performance.now();
+      if (isQuiet(event.detail, now)) {
+        event.preventDefault();
+        event.stopPropagation();
+        quiet.current.any = Math.max(quiet.current.any, Math.min(now + QUIET_AFTER_MODE_CHANGE, quiet.current.multi));
+      } else if (event.detail === 1) {
+        // A first click that gets through starts a double click of its own.
+        quiet.current.multi = 0;
+      }
+    };
+    // On the document, before anything else sees the click: what arrives under the
+    // pointer can be outside this step.
+    document.addEventListener("click", ignoreWhileQuiet, true);
+    return () => {
+      document.removeEventListener("click", ignoreWhileQuiet, true);
+      quiet.current = { any: 0, multi: 0, pending: false };
+    };
+  }, []);
+  // A press that is being ignored does nothing at all: it does not take the focus from
+  // where the mode change put it (the field of a card that has just opened, the Edit
+  // button of one that has just closed), place a caret, or open a list of options that
+  // has arrived under the pointer. At any other time, the second press of a double
+  // click leaves the focus where it is, except in a field, where it selects a word.
   const keepFocus = (event: { detail: number; target: EventTarget; preventDefault: () => void }) => {
     if (
-      event.detail > 1 &&
-      document.activeElement !== document.body &&
-      !(event.target as Element).closest("input, textarea, select, summary")
+      isQuiet(event.detail, performance.now()) ||
+      (event.detail > 1 &&
+        document.activeElement !== document.body &&
+        !(event.target as Element).closest("input, textarea, select, summary"))
     )
       event.preventDefault();
   };
+  // A key held down is one press: its repeats do not change the mode again.
+  const oncePerKeyPress = (event: { repeat: boolean; key: string; target: EventTarget; preventDefault: () => void }) => {
+    if (event.repeat && event.key === "Enter" && (event.target as Element).closest(".card-mode, .section-mode"))
+      event.preventDefault();
+  };
   useEffect(() => {
+    if (quiet.current.pending) startQuiet(performance.now());
     const keep = keepInPlace.current;
     keepInPlace.current = null;
     const box = keep && document.getElementById(keep.cardId)?.getBoundingClientRect();
@@ -606,7 +664,7 @@ export function CuttingStep({
   const allCharactersEditing = characterCards.length > 0 && characterCards.every(isEditing);
   const allScenesEditing = sceneCards.length > 0 && sceneCards.every(isEditing);
   return (
-    <section className="panel cutting-panel" onMouseDown={keepFocus}>
+    <section className="panel cutting-panel" onMouseDown={keepFocus} onKeyDown={oncePerKeyPress}>
       <div className="section-title">
         <div>
           <h2>Your film, ready to shape</h2>
@@ -703,7 +761,7 @@ export function CuttingStep({
           <button
             className="button secondary small section-mode"
             aria-label={allCharactersEditing ? "Done editing all characters" : "Edit all characters"}
-            onClick={once((control) => setSectionMode(characterCards, !allCharactersEditing, control))}
+            onClick={changeMode((control) => setSectionMode(characterCards, !allCharactersEditing, control))}
           >
             {allCharactersEditing ? <Check size={15} /> : <Pencil size={15} />}
             {allCharactersEditing ? "Done editing" : "Edit all"}
@@ -712,7 +770,7 @@ export function CuttingStep({
         <button
           className="button secondary small"
           disabled={!!busy}
-          onClick={() => {
+          onClick={changeMode(() => {
             const id = crypto.randomUUID();
             update({
               characters: [
@@ -728,7 +786,7 @@ export function CuttingStep({
               ],
             });
             setCardMode(`character-${id}`, true);
-          }}
+          })}
         >
           <Plus size={15} />
           Add character
@@ -745,7 +803,7 @@ export function CuttingStep({
             <button
               className="button secondary small card-mode"
               aria-label={`${edit ? "Done editing" : "Edit"} ${character.name || `character ${index + 1}`}`}
-              onClick={once(() => setCardMode(cardId, !edit))}
+              onClick={changeMode(() => setCardMode(cardId, !edit))}
             >
               {edit ? <Check size={15} /> : <Pencil size={15} />}
               {edit ? "Done" : "Edit"}
@@ -1003,7 +1061,7 @@ export function CuttingStep({
           <button
             className="button secondary small section-mode"
             aria-label={allScenesEditing ? "Done editing all scenes" : "Edit all scenes"}
-            onClick={once((control) => setSectionMode(sceneCards, !allScenesEditing, control))}
+            onClick={changeMode((control) => setSectionMode(sceneCards, !allScenesEditing, control))}
           >
             {allScenesEditing ? <Check size={15} /> : <Pencil size={15} />}
             {allScenesEditing ? "Done editing" : "Edit all"}
@@ -1055,7 +1113,7 @@ export function CuttingStep({
                       <button
                         className="button secondary small card-mode"
                         aria-label={`Edit scene ${i + 1}`}
-                        onClick={once(() => setCardMode(cardId, true))}
+                        onClick={changeMode(() => setCardMode(cardId, true))}
                       >
                         <Pencil size={15} />
                         Edit
@@ -1215,7 +1273,7 @@ export function CuttingStep({
                     <button
                       className="button secondary small card-mode"
                       aria-label={`Done editing scene ${i + 1}`}
-                      onClick={once(() => setCardMode(cardId, false))}
+                      onClick={changeMode(() => setCardMode(cardId, false))}
                     >
                       <Check size={15} />
                       Done
@@ -1232,7 +1290,7 @@ export function CuttingStep({
       <button
         className="text-button add-scene"
         disabled={!!busy}
-        onClick={() => {
+        onClick={changeMode(() => {
           const id = crypto.randomUUID();
           update({
             scenes: [
@@ -1250,7 +1308,7 @@ export function CuttingStep({
             ],
           });
           setCardMode(`scene-${id}`, true);
-        }}
+        })}
       >
         <Plus size={15} />
         Add a scene
