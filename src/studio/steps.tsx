@@ -584,9 +584,10 @@ export function CuttingStep({
   //          one decision, but never later than "multi";
   //   multi: until then, a press the browser counts as part of a double click is
   //          ignored: a second and a half after the change, for a slow double click.
-  // Only presses start and feel the quiet. Activation from the keyboard, from assistive
-  // technology and from script reports a click count of 0: it is never ignored and
-  // never starts a quiet period.
+  // Only presses start and feel the quiet, and a press is judged when it begins: one
+  // that begins in the quiet period is ignored as a whole, however slowly it is released.
+  // Activation from the keyboard, from assistive technology and from script reports a
+  // click count of 0: it is never ignored and never starts a quiet period.
   const quiet = useRef({ any: 0, multi: 0, pending: false });
   const startQuiet = (now: number) => {
     quiet.current = { any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: false };
@@ -606,9 +607,21 @@ export function CuttingStep({
     };
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const ignoreWhileQuiet = (event: MouseEvent) => {
+    // Whether the press under way began in the quiet period.
+    let pressIgnored = false;
+    // An ignored press does nothing at all: it does not take the focus from where the
+    // mode change put it (the field of a card that has just opened, the Edit button of
+    // one that has just closed), place a caret, select a word, or open a list of options.
+    const ignorePress = (event: MouseEvent) => {
+      pressIgnored = isQuiet(event.detail, performance.now());
+      if (pressIgnored) event.preventDefault();
+    };
+    const ignoreClick = (event: MouseEvent) => {
+      if (event.detail === 0) return;
       const now = performance.now();
-      if (isQuiet(event.detail, now)) {
+      const ignored = pressIgnored || isQuiet(event.detail, now);
+      pressIgnored = false;
+      if (ignored) {
         event.preventDefault();
         event.stopPropagation();
         quiet.current.any = Math.max(quiet.current.any, Math.min(now + QUIET_AFTER_MODE_CHANGE, quiet.current.multi));
@@ -617,25 +630,23 @@ export function CuttingStep({
         quiet.current.multi = 0;
       }
     };
-    // On the document, before anything else sees the click: what arrives under the
+    // On the document, before anything else sees the press: what arrives under the
     // pointer can be outside this step.
-    document.addEventListener("click", ignoreWhileQuiet, true);
+    document.addEventListener("mousedown", ignorePress, true);
+    document.addEventListener("click", ignoreClick, true);
     return () => {
-      document.removeEventListener("click", ignoreWhileQuiet, true);
+      document.removeEventListener("mousedown", ignorePress, true);
+      document.removeEventListener("click", ignoreClick, true);
       quiet.current = { any: 0, multi: 0, pending: false };
     };
   }, []);
-  // A press that is being ignored does nothing at all: it does not take the focus from
-  // where the mode change put it (the field of a card that has just opened, the Edit
-  // button of one that has just closed), place a caret, or open a list of options that
-  // has arrived under the pointer. At any other time, the second press of a double
-  // click leaves the focus where it is, except in a field, where it selects a word.
+  // Outside the quiet period, the second press of a double click leaves the focus where
+  // it is, except in a field, where it selects a word.
   const keepFocus = (event: { detail: number; target: EventTarget; preventDefault: () => void }) => {
     if (
-      isQuiet(event.detail, performance.now()) ||
-      (event.detail > 1 &&
-        document.activeElement !== document.body &&
-        !(event.target as Element).closest("input, textarea, select, summary"))
+      event.detail > 1 &&
+      document.activeElement !== document.body &&
+      !(event.target as Element).closest("input, textarea, select, summary")
     )
       event.preventDefault();
   };

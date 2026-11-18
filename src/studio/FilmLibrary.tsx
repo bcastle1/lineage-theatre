@@ -106,7 +106,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const [libraryHash, setLibraryHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
   const [playing, setPlaying] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
-  const detailPanel = useRef<HTMLElement>(null), panelOpen = useRef(false);
+  const detailPanel = useRef<HTMLElement>(null), panelOpen = useRef(false), errorInList = useRef(false);
   const messageLine = useRef<HTMLParagraphElement>(null), errorLine = useRef<HTMLParagraphElement>(null), busyLine = useRef<HTMLParagraphElement>(null);
   const dialog = useRef<HTMLDialogElement>(null), lock = useRef(false), mounted = useRef(false), sequence = useRef(0);
   const detailSequence = useRef(0);
@@ -124,8 +124,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // changes or goes, or the status panel closes), whatever arrives under a pointer that has not moved is not
   // what the customer aimed at. For a moment after each such move, presses are ignored everywhere in the
   // document. Activation from the keyboard (a click with no press count) is never ignored.
-  const quietUntil = useRef(0);
-  const quiet = () => { quietUntil.current = performance.now() + QUIET_MS; };
+  // While the page is still scrolling the moment is extended, but never past three moments after the move, so
+  // the customer's own scrolling cannot keep presses ignored.
+  const quietUntil = useRef(0), quietLimit = useRef(0);
+  const quiet = () => { const now = performance.now(); quietUntil.current = now + QUIET_MS; quietLimit.current = now + 3 * QUIET_MS; };
   // Every scroll the library asks for goes through here.
   const bring = (target: Element | null | undefined, block: ScrollLogicalPosition) => {
     if (!target || typeof window === "undefined") return;
@@ -136,8 +138,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     const ignorePress = (event: MouseEvent) => {
       if (event.detail > 0 && performance.now() < quietUntil.current) { event.preventDefault(); event.stopPropagation(); }
     };
-    // While the page is still moving (animated scrolling), the moment starts again.
-    const stillMoving = () => { if (performance.now() < quietUntil.current) quiet(); };
+    const stillMoving = () => {
+      const now = performance.now();
+      if (now < quietUntil.current) quietUntil.current = Math.min(now + QUIET_MS, quietLimit.current);
+    };
     document.addEventListener("click", ignorePress, true);
     window.addEventListener("scroll", stillMoving, { passive: true });
     return () => { document.removeEventListener("click", ignorePress, true); window.removeEventListener("scroll", stillMoving); quietUntil.current = 0; };
@@ -170,6 +174,9 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     return () => { cancelled = true; lock.current = false; };
   }, [linkedFilm, libraryHash, reload]);
   const listRefreshInterval = libraryRefreshDelay(entries);
+  // A background refresh, which nobody pressed for, never removes or replaces an error shown in a card or under
+  // "Load more saved films": that row would close under a pointer that the error was brought under, and lift
+  // Archive / Move to trash into its place. The error stays until the customer's next action.
   useEffect(() => {
     if (disabled || busy || loading || playing || detail || confirmation) return;
     let cancelled = false;
@@ -183,10 +190,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           // is verified. Background checks never close a detail or video player.
           const page = await loadLibraryWindow(view, api, loadedPageCount.current);
           if (!cancelled && request === sequence.current && !lock.current) {
-            setEntries(page.entries); setCursor(page.cursor); setError("");
+            setEntries(page.entries); setCursor(page.cursor); if (!errorInList.current) setError("");
             pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
           }
-        } catch { if (!cancelled && request === sequence.current) { setErrorAt(""); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh films to try again."); } }
+        } catch { if (!cancelled && request === sequence.current && !errorInList.current) { setErrorAt(""); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh films to try again."); } }
         finally { backgroundRead.current = false; }
       },
     });
@@ -228,10 +235,10 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         const value = await verifyLibraryDetail(await api<unknown>(`/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
         if (!cancelled) {
           setDetail(value);
-          setError("");
+          if (!errorInList.current) setError("");
           setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
         }
-      } catch { if (!cancelled) { setErrorAt(`detail:${libraryKey(expected)}`); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); } }
+      } catch { if (!cancelled && !errorInList.current) { setErrorAt(`detail:${libraryKey(expected)}`); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); } }
       finally { backgroundRead.current = false; }
     };
     const stop = startLibraryRefresh({ intervalMs: libraryRefreshDelay([expected], 30_000),
@@ -369,16 +376,21 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // Which lines are on the page, and where. When one appears, changes or goes, what follows it moves.
   const lines = [message && `${messagePlace}:${message}`, confirmation ? "" : error && `${errorPlace}:${error}`, busy && `${busyPlace}:${busy}`].join("|");
   const linesBefore = useRef(lines);
+  // In a card the row of lines does not get shorter while it stays (a one-line error after a two-line working
+  // line): the page may have been scrolled for the taller one, and Archive / Move to trash must not rise to the
+  // pointer. Each card row's tallest height so far, by place; a row that goes starts again from nothing.
+  const [rowFloors, setRowFloors] = useState<Record<string, number>>({});
   useEffect(() => {
     if (linesBefore.current === lines) return;
     linesBefore.current = lines;
     quiet();
-    // In a card the row of lines does not get shorter while it stays (a one-line error after a two-line working
-    // line): the page was scrolled for the taller one, and Archive / Move to trash must not rise to the pointer.
-    for (const line of [messageLine, errorLine, busyLine]) {
-      const row = line.current?.parentElement;
-      if (row?.parentElement?.classList.contains("film-library-actions")) row.style.minHeight = `${row.offsetHeight}px`;
+    errorInList.current = Boolean(error) && !confirmation && errorPlace !== "" && !inPanel(errorPlace);
+    const floors: Record<string, number> = {};
+    for (const [place, line] of [[messagePlace, messageLine], [errorPlace, errorLine], [busyPlace, busyLine]] as const) {
+      const height = line.current?.parentElement?.offsetHeight;
+      if (height && place && !inPanel(place) && place !== "more") floors[place] = Math.max(height, floors[place] ?? 0);
     }
+    setRowFloors(current => JSON.stringify(current) === JSON.stringify(floors) ? current : floors);
   }, [lines]);
   const notices = (at: string) => {
     const done = Boolean(message) && messagePlace === at, failed = Boolean(error) && !confirmation && errorPlace === at, working = Boolean(busy) && busyPlace === at;
@@ -387,7 +399,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       {failed && <p ref={errorLine} className="feedback error" role="alert">{error}</p>}
       {working && <p ref={busyLine} role="status"><Loader2 className="spin" size={16} aria-hidden="true" /> {busy}</p>}
     </>;
-    return at ? (done || failed || working) && <div className="film-library-notices">{lines}</div> : lines;
+    return at ? (done || failed || working) && <div className="film-library-notices" style={rowFloors[at] ? { minHeight: rowFloors[at] } : undefined}>{lines}</div> : lines;
   };
   // The film status panel sits in the card list, directly under its film's card. Its key keeps the same
   // element, and so the player and focus, wherever the list places it. Under its card it is marked as attached
