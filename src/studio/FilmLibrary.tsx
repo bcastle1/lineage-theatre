@@ -60,12 +60,12 @@ export function SavedPlanVersionAction({ detail, disabled, onCreateVersion }: {
     <p className="field-note">Create a separate browser draft using this saved screenplay as its source. Original uploads are not copied. {detail.entry.coverage
       ? "The original payment remains with the original paid film. This correction's coverage does not transfer to a new draft."
       : "The original payment stays with this saved plan."} Review the new draft and choose its running time before production.</p>
-    {detail.sourceNames && detail.sourceNames.length > 0 && <details>
+    {detail.sourceNames && detail.sourceNames.length > 0 && <details className="disclosure">
       <summary>Original source filenames ({detail.sourceNames.length})</summary>
       <p className="field-note">These names are references from the saved plan. Add the original files separately if you want them read again.</p>
       <ul>{detail.sourceNames.map((name, index) => <li key={index}>{name || "Unnamed source"}</li>)}</ul>
     </details>}
-    <button type="button" className="button primary small" disabled={disabled} onClick={() => void onCreateVersion(detail.entry)}>
+    <button type="button" className="button secondary small" disabled={disabled} onClick={() => void onCreateVersion(detail.entry)}>
       <Plus size={15} aria-hidden="true" />Create new version
     </button>
   </div>;
@@ -307,8 +307,8 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     {view === "active" && <LtxFilmLibrary />}
     <section aria-labelledby="saved-films-heading" aria-busy={loading}>
       <div className="section-title"><div><h2 id="saved-films-heading">Saved to your account</h2><p>Each card is a saved version. Its payment and production status are shown separately.</p></div></div>
-      {loading && <p role="status">Loading your saved films…</p>}
-      {!loading && !entries.length && !error && <p className="film-library-empty">{cursor ? "No films in this part of the list. Load more to continue." : view === "active" ? "No saved films yet. Create a film, or continue a browser draft below." : "No saved films in this view."}</p>}
+      {loading && <p role="status"><Loader2 className="spin" size={20} aria-hidden="true" />Loading your saved films…</p>}
+      {!loading && !entries.length && !error && <p className="film-library-empty"><FilmIcon size={22} aria-hidden="true" />{cursor ? "No films in this part of the list. Load more to continue." : view === "active" ? "No saved films yet. Create a film, or continue a browser draft below." : "No saved films in this view."}</p>}
       <div className="library-list">{entries.map(entry => {
         const key = libraryKey(entry), local = projects.find(project => project.id === entry.filmId && localLibraryState(project) === "active");
         const isPlaying = playing === key;
@@ -324,9 +324,9 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
                 <a className="text-button" href={entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
               </>}
               {local && !entry.coverage && <button type="button" className="text-button" disabled={blocked} onClick={() => onOpenDraft(local.id)}>Open browser draft</button>}
-              {view === "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive</button>}
-              {view !== "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
-              {view !== "trash" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
+              {view === "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ entry, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive</button>}
+              {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
+              {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
             </div>
             {isPlaying && libraryCanWatch(entry) && <video controls playsInline preload="metadata" src={entry.mediaUrl} aria-label={`${entry.title || "Family film"} player`}
               onError={() => setError("This film could not be played. Refresh its status or try the download.")} />}
@@ -362,7 +362,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     <section aria-labelledby="browser-drafts-heading" className="film-library-drafts"><div className="section-title"><div>
       <h2 id="browser-drafts-heading">Browser drafts</h2><p>These editable drafts and original source files are stored on this browser. They are not a backup of your account's saved versions.</p>
     </div></div>
-      {!drafts.length && <p className="film-library-empty">No browser drafts in this view.</p>}
+      {!drafts.length && <p className="film-library-empty"><FilmIcon size={22} aria-hidden="true" />No browser drafts in this view.</p>}
       <div className="library-list">{drafts.map(draft => {
         const covered = libraryCoveredDraft(detail ? [detail.entry, ...entries] : entries, draft);
         return <article className="library-item film-library-item" key={draft.id}>
@@ -373,13 +373,13 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           <div className="action-group film-library-actions">
             {view === "active" && <>{covered ? <a className="button secondary small" href={libraryFilmLink(covered.id)}>View corrected film status</a>
               : <button type="button" className="button secondary small" disabled={blocked} onClick={() => onOpenDraft(draft.id)}>Continue draft</button>}
-              <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}>Archive draft</button></>}
-            {view !== "active" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "restore" })}>Restore draft</button>}
-            {view !== "trash" && <button type="button" className="text-button" disabled={blocked} onClick={() => openConfirmation({ draft, action: "trash" })}>Move draft to trash</button>}
+              <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive draft</button></>}
+            {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore draft</button>}
+            {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ draft, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move draft to trash</button>}
           </div></div>
       </article>; })}</div>
     </section>
-    {confirmation && <dialog ref={dialog} className="film-library-dialog" aria-labelledby="library-confirm-title" aria-describedby="library-confirm-description"
+    {confirmation && <dialog ref={dialog} className="film-library-dialog" data-action={confirmation.action} aria-labelledby="library-confirm-title" aria-describedby="library-confirm-description"
       onCancel={event => { if (busy) event.preventDefault(); else setConfirmation(null); }}>
       <h2 id="library-confirm-title">{actions[confirmation.action]} {confirmation.entry?.title || confirmation.draft?.title || "Untitled family film"}?</h2>
       <p id="library-confirm-description">{confirmation.action === "restore" ? "Return this item to My films." : confirmation.action === "archive" ? "Move this item to Archived. You can restore it at any time." : "Move this item to Trash. You can restore it at any time; nothing is permanently deleted."}

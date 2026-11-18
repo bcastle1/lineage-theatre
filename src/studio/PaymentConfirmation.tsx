@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { CheckCircle2, CircleAlert, Clock, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { api } from "./model";
 import { paymentStatusMessage, type FilmOrder } from "./checkout-contract";
 import { libraryFilmLink, type LibraryEntry } from "./film-library";
@@ -66,9 +66,9 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
   return <section hidden={!visible} className="payment-confirmation" aria-labelledby="paid-film-heading">
     <p className="eyebrow">LINEAGE THEATRE · PAYMENT & PRODUCTION</p>
     <h1 id="paid-film-heading" tabIndex={-1} ref={heading}>Your paid film</h1>
-    {!orderId ? <p role="alert">This payment link is incomplete. Open your film library to find your saved order.</p> : <>
-      <div className="payment-confirmation-status" role="status">
-        {paid ? <CheckCircle2 size={26} aria-hidden="true" /> : checking ? <Loader2 size={26} className="spin" aria-hidden="true" /> : <RefreshCw size={26} aria-hidden="true" />}
+    {!orderId ? <p className="feedback warning" role="alert">This payment link is incomplete. Open your film library to find your saved order.</p> : <>
+      <div className="payment-confirmation-status" role="status" data-tone={paid ? "paid" : checking ? "checking" : order?.checkoutBlock !== "production-funding" && order?.status === "awaiting-payment" ? "awaiting" : "review"}>
+        {paid ? <CheckCircle2 size={26} aria-hidden="true" /> : checking ? <Loader2 size={26} className="spin" aria-hidden="true" /> : order?.checkoutBlock !== "production-funding" && order?.status === "awaiting-payment" ? <Clock size={26} aria-hidden="true" /> : <CircleAlert size={26} aria-hidden="true" />}
         <div><h2>{paid ? order?.sandbox ? "Test payment confirmed" : "Payment received" : checking ? "Checking your payment" : order?.checkoutBlock === "production-funding" ? "Payment page not created" : order?.status === "awaiting-payment" ? "Waiting for payment confirmation" : "Payment needs review"}</h2>
           {order && <p>{order.filmTitle} · {(order.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" })}{paid ? order.sandbox ? " test payment" : " paid to BROCOTech" : order.checkoutBlock === "production-funding" ? " quoted total" : " invoice total"}</p>}
         </div>
@@ -85,7 +85,7 @@ export default function PaymentConfirmation({ orderId, visible, productionAvaila
         {order?.status === "awaiting-payment" && order.invoiceUrl && !order.requiresReview && <button className="button primary" disabled={opening} onClick={openPayment}><ExternalLink size={16} />Open secure payment page</button>}
         <button className="button secondary" disabled={checking} onClick={() => setReload(value => value + 1)}><RefreshCw size={16} />Check payment status</button>
         {order && <a className={`button ${ready ? "primary" : "secondary"}`} href={libraryFilmLink(order.preparedId)}>{ready ? "Watch your film" : "View saved film"}</a>}
-        <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${orderId}`)}`}>Get help</a>
+        <a className="text-button payment-confirmation-help" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${orderId}`)}`}>Get help</a>
       </div>
       {ready && film?.mediaUrl && <video controls preload="metadata" src={film.mediaUrl} aria-label="Your finished paid film" />}
       {paid && <p className="field-note">Your payment and saved film stay in your account. Watch and download become available here and in your film library when the finished video is verified.</p>}

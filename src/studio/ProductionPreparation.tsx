@@ -56,7 +56,7 @@ export default function ProductionPreparation({film,operator=false,onPrepared,di
     {error && <p className="feedback error" role="alert">{error}</p>}
     {prepared && <div role="status"><p>Plan saved: {prepared.sceneCount} scenes, {prepared.shotCount} planned shots, {prepared.durationSeconds} seconds target.</p>
       <p className="field-note">Saved {new Date(prepared.createdAt).toLocaleString()}. {prepared.status==="prepared"?"Rendering has not started.":"Check your film's production status before starting another request."}</p>
-      {currentInputHash && currentInputHash!==prepared.inputHash && <p className="feedback">Your screenplay has changed since this plan was saved. The download contains the saved version; prepare a new plan to include your edits.</p>}
+      {currentInputHash && currentInputHash!==prepared.inputHash && <p className="feedback warning">Your screenplay has changed since this plan was saved. The download contains the saved version; prepare a new plan to include your edits.</p>}
       {prepared.issues.length>0 && <ul>{prepared.issues.map(issue=><li key={issue}>{issue}</li>)}</ul>}
     </div>}
   </section>;

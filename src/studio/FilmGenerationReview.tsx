@@ -46,7 +46,7 @@ export default function FilmGenerationReview({ onApproved, ...identity }: Genera
   }
   const current = review && Object.entries(identity).every(([key, item]) => review[key as keyof GenerationIdentity] === item) ? review : null;
   return <section aria-label="Generated film review">
-    {!current ? <p>The returned video is waiting for duration, audio, and playback verification.</p> : current.status === "needs-attention" ? <p className="feedback" role="status">{current.message}</p> : current.status === "approved" ? <>
+    {!current ? <p>The returned video is waiting for duration, audio, and playback verification.</p> : current.status === "needs-attention" ? <p className="feedback warning" role="status">{current.message}</p> : current.status === "approved" ? <>
       <p>Your reviewed film is complete. Open its saved library version to watch and download it.</p>
       <a className="button primary small" href={libraryFilmLink(identity.preparedId)}>Open finished film</a>
     </> : <>

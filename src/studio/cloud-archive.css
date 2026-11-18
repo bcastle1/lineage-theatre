@@ -1,0 +1,116 @@
+/*
+  Cloud archive panel ("Save or upload a completed film" in the film library).
+  It is the body of the .film-library-upload disclosure, which draws the card;
+  the form inside is built on the shared primitives.
+*/
+.cloud-archive {
+  --archive-glyph-size: var(--text-xl);
+  /* Glyph shapes for notices, used as masks so they take the text colour. */
+  --archive-glyph-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M12 16h.01'/%3E%3C/svg%3E");
+  --archive-glyph-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E");
+  padding: var(--space-6);
+  font-variant-numeric: tabular-nums;
+}
+.cloud-archive > .section-title {
+  margin-bottom: var(--space-5);
+  padding-bottom: var(--space-5);
+}
+.cloud-archive > .section-title h2 {
+  font-size: var(--display-xs);
+}
+.cloud-archive > .section-title p {
+  font-size: var(--text-body);
+}
+/* Who can see a cloud copy: said once, before the form. */
+.cloud-archive > .field-note {
+  max-width: var(--measure);
+  margin: 0 0 var(--space-6);
+  font-size: var(--text-secondary);
+  line-height: 1.55;
+}
+.cloud-archive > .form-grid + .field-note {
+  margin: var(--space-5) 0 0;
+}
+.cloud-archive .form-grid > label {
+  min-width: 0;
+}
+.cloud-archive .form-grid small {
+  font-size: var(--text-secondary);
+}
+.cloud-archive .form-grid input[type="file"] {
+  width: 100%;
+  min-width: 0;
+}
+/* A long option is cut with an ellipsis, never mid-letter. */
+.cloud-archive .form-grid select {
+  text-overflow: ellipsis;
+}
+/* Disabled fields look the same whether they are text fields or selects. */
+.cloud-archive .form-grid :is(input, select):disabled {
+  opacity: 1;
+}
+/* The permission statement sits in its own box: comfortable to read and to tick. */
+.cloud-archive-consent {
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  border: var(--hairline) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--neutral-25);
+  transition:
+    border-color var(--duration-base) var(--ease-out),
+    background-color var(--duration-base) var(--ease-out);
+}
+.cloud-archive-consent:has(input:checked) {
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+.cloud-archive-consent:has(input:disabled) {
+  border-color: var(--color-border);
+  background: var(--color-surface-sunken);
+}
+.cloud-archive > .panel-actions {
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+}
+.cloud-archive > .panel-actions > .text-button {
+  font-size: var(--text-secondary);
+}
+/* What the save is doing right now. */
+.cloud-archive > .cloud-archive-status {
+  max-width: none;
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-secondary);
+  color: var(--info-text);
+}
+.cloud-archive > .feedback {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  margin-top: var(--space-4);
+  overflow-wrap: anywhere;
+}
+.cloud-archive > .feedback::before {
+  content: "";
+  flex: none;
+  width: var(--archive-glyph-size);
+  height: var(--archive-glyph-size);
+  margin-top: 0.2em;
+  background: currentColor;
+  -webkit-mask: var(--archive-glyph-alert) center / contain no-repeat;
+  mask: var(--archive-glyph-alert) center / contain no-repeat;
+}
+.cloud-archive > .feedback.success::before {
+  -webkit-mask-image: var(--archive-glyph-check);
+  mask-image: var(--archive-glyph-check);
+}
+
+@media (max-width: 700px) {
+  .cloud-archive {
+    padding: var(--space-5) var(--space-4);
+  }
+  .cloud-archive-consent {
+    margin-top: var(--space-5);
+  }
+  .cloud-archive > .panel-actions {
+    margin-top: var(--space-5);
+  }
+}

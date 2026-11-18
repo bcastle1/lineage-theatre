@@ -1,61 +1,809 @@
-.workspace.workspace-library { max-width: 2220px; }
+/*
+  Film library (#library): the page frame with its decorative stills, the view
+  switch, film cards, the film status panel, browser drafts, the confirmation
+  dialog and the "save or upload" disclosure.
+  FilmLibrary.tsx and OriginalPaymentReceipt.tsx are rendered by tests with a
+  closed import list, so their look comes from this file and their existing
+  classes. Everything reads the design tokens; the few measures below are local
+  to this page.
+*/
+.library-layout,
+.film-library,
+.film-library-upload {
+  --library-art-width: clamp(9.5rem, 12vw, 15rem);
+  --library-content-max: 66rem;
+  --library-strip-height: 9.5rem;
+  --library-tile: var(--space-12);
+  --library-glyph-size: var(--text-xl);
+  /* Glyph shapes for notices. They are used as masks, so they take the text colour. */
+  --library-glyph-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M12 16h.01'/%3E%3C/svg%3E");
+  --library-glyph-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E");
+}
+
+/* ---- Page frame: content between two columns of framed stills ------------------- */
+.workspace.workspace-library {
+  max-width: none;
+}
 .library-layout {
   display: grid;
-  grid-template-columns: clamp(170px, 14.5vw, 280px) minmax(0, 1476px) clamp(170px, 14.5vw, 280px);
-  gap: clamp(22px, 2vw, 40px);
+  grid-template-columns: var(--library-art-width) minmax(0, var(--library-content-max)) var(--library-art-width);
+  justify-content: center;
+  gap: clamp(var(--space-6), 2.2vw, var(--space-10));
   align-items: start;
 }
-.library-workspace { min-width: 0; }
-.library-artwork { display: grid; gap: 24px; padding-top: 4px; pointer-events: none; }
-.library-artwork-right { padding-top: 48px; }
+.library-workspace {
+  min-width: 0;
+}
+/* Decorative stills (not the customer's films): each reads as a framed print,
+   a paper mat inside a hairline frame with a thin gold fillet around the image. */
+.library-artwork {
+  display: grid;
+  gap: var(--space-6);
+  padding-top: var(--space-1);
+  pointer-events: none;
+}
+.library-artwork-right {
+  padding-top: var(--space-12);
+}
 .library-artwork-frame {
   aspect-ratio: 3 / 4;
-  overflow: hidden;
-  border-radius: 14px;
-  background: #e6e2d9;
-  box-shadow: 0 8px 24px rgb(38 45 35 / 10%);
+  padding: var(--space-2);
+  border: var(--hairline) solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
 }
-.library-artwork-frame img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.library-artwork-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border: var(--hairline) solid var(--gold-400);
+  border-radius: var(--radius-xs);
+  background: var(--neutral-150);
+}
+
+/* ---- Page header and the view switch --------------------------------------------- */
+.film-library {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.film-library .page-heading {
+  margin-bottom: var(--space-6);
+}
+.film-library .page-heading > div {
+  min-width: 0;
+}
+.film-library .page-heading .button {
+  flex-shrink: 0;
+}
+.film-library-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0 0 var(--space-6);
+}
+/* My films, Archived and Trash are one segmented control. */
+.film-library-toolbar nav {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-sunken);
+}
+.film-library-toolbar nav .button {
+  min-height: var(--control-height-sm);
+  padding: var(--space-2) var(--space-5);
+  border: var(--hairline) solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-body);
+}
+.film-library-toolbar nav .button:hover:not(:disabled, [aria-current="page"]) {
+  background: var(--neutral-150);
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--color-text);
+}
+.film-library-toolbar nav .button[aria-current="page"],
+.film-library-toolbar nav .button[aria-current="page"]:hover:not(:disabled) {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  box-shadow: var(--shadow-sm);
+  color: var(--color-text-brand);
+}
+.film-library-toolbar nav .button:active:not(:disabled) {
+  transform: none;
+}
+.film-library-toolbar nav .button:focus-visible {
+  box-shadow: var(--shadow-focus);
+}
+.film-library-toolbar nav .button:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-subtle);
+}
+.film-library-toolbar nav .button[aria-current="page"]:disabled {
+  background: var(--neutral-25);
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+}
+.film-library-toolbar > .text-button {
+  font-size: var(--text-secondary);
+}
+
+/* ---- Notices above the list --------------------------------------------------------- */
+.film-library .feedback {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  overflow-wrap: anywhere;
+}
+.film-library .feedback::before {
+  content: "";
+  flex: none;
+  width: var(--library-glyph-size);
+  height: var(--library-glyph-size);
+  margin-top: 0.2em;
+  background: currentColor;
+  -webkit-mask: var(--library-glyph-alert) center / contain no-repeat;
+  mask: var(--library-glyph-alert) center / contain no-repeat;
+}
+.film-library .feedback.success::before {
+  -webkit-mask-image: var(--library-glyph-check);
+  mask-image: var(--library-glyph-check);
+}
+.film-library > .feedback {
+  margin: 0 0 var(--space-4);
+}
+/* The working line ("Opening your saved version…"). It stays in view while the
+   list is scrolled, because the action that started it can be far down the page. */
+.film-library > p[role="status"]:not(.feedback) {
+  position: sticky;
+  top: var(--space-3);
+  z-index: var(--z-raised);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: var(--hairline) solid var(--info-border);
+  border-radius: var(--radius-md);
+  background: var(--info-bg);
+  box-shadow: var(--shadow-sm);
+  color: var(--info-text);
+  font-size: var(--text-body);
+  line-height: var(--leading-normal);
+}
+/* What Archived and Trash mean. */
+.film-library > .field-note {
+  max-width: var(--measure);
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-secondary);
+  line-height: 1.55;
+}
+
+/* ---- Sections ------------------------------------------------------------------------- */
+.film-library > section {
+  margin-top: var(--space-8);
+}
+.film-library > .film-library-drafts {
+  margin-top: var(--space-12);
+}
+.film-library > section > .section-title {
+  margin-bottom: var(--space-5);
+  padding-bottom: var(--space-5);
+}
+.film-library > section > .section-title h2 {
+  font-size: var(--display-xs);
+}
+.film-library > section > .section-title p {
+  font-size: var(--text-secondary);
+}
+/* Loading and empty states share one calm placeholder. */
+.film-library > section > p[role="status"],
+.film-library-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-10) var(--space-6);
+  border: var(--hairline) dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--neutral-25);
+  color: var(--color-text-muted);
+  font-size: var(--text-body);
+  line-height: 1.55;
+  text-align: center;
+  text-wrap: balance;
+}
+.film-library-empty > svg {
+  box-sizing: content-box;
+  padding: var(--space-3);
+  border: var(--hairline) solid var(--gold-200);
+  border-radius: var(--radius-full);
+  background: var(--gold-50);
+  color: var(--gold-700);
+}
+.film-library > section > p[role="status"] > svg {
+  color: var(--color-text-brand);
+}
+.library-list:empty {
+  display: none;
+}
+
+/* ---- Film cards ------------------------------------------------------------------------ */
+.library-list {
+  display: grid;
+  gap: var(--space-4);
+}
+/* The header (tile, title, saved line) sits on two columns; everything below
+   it spans the full card, so the status and progress get the whole width. */
+.library-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--space-4);
+  align-items: start;
+  min-width: 0;
+  padding: var(--space-6);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
+}
+.library-art {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: var(--library-tile);
+  height: var(--library-tile);
+  border: var(--hairline) solid var(--brand-100);
+  border-radius: var(--radius-md);
+  background: var(--brand-50);
+  color: var(--brand-500);
+}
+.library-art > svg {
+  width: var(--space-6);
+  height: var(--space-6);
+  stroke-width: 1.5;
+}
+/* A browser draft is not a saved version: its tile is an outline, not a fill. */
+.film-library-drafts .library-art {
+  border: var(--hairline) dashed var(--color-border-control);
+  background: var(--neutral-25);
+  color: var(--color-text-muted);
+}
+.film-library-content {
+  display: contents;
+}
+.film-library-content > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.film-library-content > h3,
+.film-library-content > h3 + p {
+  grid-column: 2;
+}
+.film-library-content > h3 {
+  align-self: end;
+  font-size: var(--text-xl);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.film-library-content > p {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-body);
+  line-height: 1.55;
+  color: var(--neutral-700);
+}
+.film-library-content > h3 + p {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-secondary);
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+/* ---- Status: payment and production, then what is happening ---------------------- */
+.film-library-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+.film-library-statuses {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--neutral-25);
+}
+.film-library-statuses > div {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
+}
+.film-library-statuses > div + div {
+  border-left: var(--hairline) solid var(--color-border);
+}
+.film-library-statuses span {
+  font-size: var(--text-caption);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+.film-library-statuses strong {
+  font-size: var(--text-body);
+  line-height: 1.4;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.film-library-progress > p {
+  max-width: var(--measure);
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: 1.55;
+  color: var(--neutral-700);
+}
+.film-library-progress > p.field-note {
+  font-size: var(--text-secondary);
+  color: var(--color-text-muted);
+}
+.film-library-progress > .film-production-progress {
+  margin: var(--space-1) 0 0;
+}
+/* A corrected film: what the original payment covers, and its receipt. */
+.film-library-progress > div:not(.film-library-statuses) {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border: var(--hairline) solid var(--info-border);
+  border-radius: var(--radius-md);
+  background: var(--info-bg);
+}
+.film-library-progress > div:not(.film-library-statuses) > .field-note {
+  font-size: var(--text-secondary);
+  line-height: 1.55;
+  color: var(--neutral-700);
+  overflow-wrap: anywhere;
+}
+.film-library-progress > div:not(.film-library-statuses) > .field-note:first-child {
+  font-size: var(--text-body);
+  color: var(--color-text);
+}
+.film-library-progress > div:not(.film-library-statuses) .text-button {
+  justify-content: flex-start;
+  padding-inline: 0;
+  font-size: var(--text-secondary);
+  text-align: left;
+}
+/* The original receipt could not be opened: an error, said in words and marked. */
+.film-library-progress .field-note[role="alert"] {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--danger-text);
+  font-size: var(--text-secondary);
+}
+.film-library-progress .field-note[role="alert"]::before {
+  content: "";
+  flex: none;
+  width: var(--library-glyph-size);
+  height: var(--library-glyph-size);
+  margin-top: 0.1em;
+  background: currentColor;
+  -webkit-mask: var(--library-glyph-alert) center / contain no-repeat;
+  mask: var(--library-glyph-alert) center / contain no-repeat;
+}
+
+/* ---- Card actions: what you can do with the film, then where it is kept --------- */
+.film-library-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-5);
+}
+.film-library-actions .text-button {
+  font-size: var(--text-secondary);
+}
+/* Archive, Restore and Move to trash form a quieter footer row under a hairline. */
+.film-library-item .film-library-actions {
+  margin-bottom: calc(var(--space-3) * -1);
+}
+.film-library-item:has(video) .film-library-actions {
+  margin-bottom: 0;
+}
+.film-library-item .film-library-actions::before {
+  content: "";
+  order: 1;
+  flex-basis: 100%;
+  height: 0;
+  margin-top: var(--space-2);
+  border-top: var(--hairline) solid var(--color-border);
+}
+.film-library-actions > .film-library-manage {
+  order: 2;
+  margin: 0 var(--space-2) 0 calc(var(--space-1) * -1);
+  color: var(--color-text-muted);
+}
+.film-library-actions > .film-library-manage:hover:not(:disabled) {
+  color: var(--color-text);
+}
+.film-library-actions > .film-library-trash:hover:not(:disabled) {
+  color: var(--danger-text);
+  text-decoration-color: currentColor;
+}
+.film-library-actions > .film-library-manage:disabled {
+  color: var(--color-text-subtle);
+}
+
+/* ---- The player ---------------------------------------------------------------------------- */
+.film-library video {
+  display: block;
+  width: 100%;
+  max-height: 33.75rem;
+  margin-top: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--chrome-bg-deep);
+  box-shadow: var(--shadow-md);
+}
+.film-library-more {
+  display: flex;
+  margin: var(--space-6) auto 0;
+}
+
+/* ---- Film status panel ------------------------------------------------------------------ */
+.film-library-detail {
+  margin-top: var(--space-8);
+  scroll-margin-top: var(--space-4);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-md);
+}
+.film-library-detail > .section-title {
+  flex-wrap: nowrap;
+  margin-bottom: var(--space-6);
+  padding-bottom: var(--space-5);
+}
+.film-library-detail > .section-title h2 {
+  font-size: var(--display-xs);
+  overflow-wrap: anywhere;
+}
+.film-library-detail > .section-title p {
+  font-size: var(--text-secondary);
+}
+.film-library-detail > .section-title .icon-button {
+  flex-shrink: 0;
+  margin: calc(var(--space-2) * -1) calc(var(--space-2) * -1) 0 0;
+}
+.film-library-detail > .film-library-progress {
+  margin-top: 0;
+}
+.film-library-detail > .field-note {
+  max-width: var(--measure);
+  margin: var(--space-4) 0 0;
+}
+.film-library-detail > .field-note + .field-note {
+  margin-top: var(--space-1);
+}
+.film-library-detail > .film-library-actions {
+  margin-top: var(--space-4);
+}
+.film-library-scene {
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: var(--hairline) solid var(--color-border);
+}
+.film-library-scene h3 {
+  font-size: var(--text-xl);
+  overflow-wrap: anywhere;
+}
+.film-library-scene p {
+  max-width: var(--measure);
+  margin-top: var(--space-2);
+  font-size: var(--text-body);
+  line-height: var(--leading-relaxed);
+  color: var(--neutral-700);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* "Narration:", "Visual:" and "Dialogue:" read as labels. */
+.film-library-scene p strong {
+  margin-right: var(--space-1);
+  font-size: var(--text-caption);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-accent-text);
+}
+.film-library-detail > .button {
+  margin-top: var(--space-6);
+}
+.film-library-version-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  padding: var(--space-5);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--neutral-25);
+}
+.film-library-version-action > .field-note {
+  max-width: var(--measure);
+}
+.film-library-version-action > details {
+  justify-self: stretch;
+  min-width: 0;
+}
+.film-library-version-action > details > summary {
+  font-size: var(--text-body);
+  color: var(--color-text);
+}
+.film-library-version-action > details > .field-note {
+  margin: var(--space-1) 0 0 var(--space-6);
+}
+.film-library-version-action ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 var(--space-1) var(--space-6);
+  padding: 0 0 0 var(--space-5);
+  font-size: var(--text-secondary);
+  line-height: 1.5;
+  color: var(--neutral-700);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Confirmation dialog ------------------------------------------------------------------ */
+.film-library-dialog {
+  width: min(30rem, calc(100vw - var(--space-8)));
+  max-height: calc(100vh - var(--space-8));
+  padding: var(--space-8);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xl);
+  color: var(--color-text);
+}
+.film-library-dialog::backdrop {
+  background: var(--color-scrim);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .film-library-dialog[open] {
+    animation: film-library-rise var(--duration-slow) var(--ease-out);
+  }
+  .film-library-dialog[open]::backdrop {
+    animation: film-library-fade var(--duration-base) var(--ease-out);
+  }
+}
+@keyframes film-library-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes film-library-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-2));
+  }
+}
+.film-library-dialog h2 {
+  font-size: var(--display-xs);
+  line-height: 1.2;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.film-library-dialog p {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+}
+.film-library-dialog .feedback {
+  margin-top: var(--space-4);
+  color: var(--danger-text);
+}
+.film-library-dialog .action-group {
+  justify-content: flex-end;
+  margin-top: var(--space-6);
+}
+/* Moving something to Trash is never confirmed with the brand primary. */
+.film-library-dialog[data-action="trash"] .button.primary {
+  background: var(--danger-solid);
+  border-color: var(--danger-solid-hover);
+  color: var(--neutral-0);
+}
+.film-library-dialog[data-action="trash"] .button.primary:hover:not(:disabled),
+.film-library-dialog[data-action="trash"] .button.primary:active:not(:disabled) {
+  background: var(--danger-solid-hover);
+}
+.film-library-dialog[data-action="trash"] .button.primary:disabled {
+  background: var(--neutral-150);
+  border-color: var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+
+/* ---- "Save or upload a completed film": a disclosure that opens the cloud archive --- */
+.film-library-upload {
+  margin-top: var(--space-8);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xs);
+}
+.film-library-upload > summary {
+  position: relative;
+  min-height: var(--control-height-lg);
+  padding: var(--space-4) var(--space-6) var(--space-4) var(--space-14);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--color-text);
+  list-style: none;
+  transition: background-color var(--duration-base) var(--ease-out);
+}
+.film-library-upload > summary::-webkit-details-marker {
+  display: none;
+}
+.film-library-upload > summary::before {
+  content: "";
+  position: absolute;
+  left: var(--space-6);
+  top: calc(var(--space-4) + (1lh - 1rem) / 2);
+  width: 1rem;
+  height: 1rem;
+  background: var(--icon-chevron) center / 1rem no-repeat;
+  transform: rotate(-90deg);
+  transition: transform var(--duration-base) var(--ease-out);
+}
+.film-library-upload[open] > summary::before {
+  transform: none;
+}
+.film-library-upload > summary:hover {
+  background: var(--neutral-25);
+}
+.film-library-upload[open] > summary {
+  border-bottom: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+/* The panel is the body of this card, not a second card inside it. */
+.film-library-upload > .panel {
+  border: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* ---- Below desktop: the stills become one strip above the content ------------------- */
 @media (max-width: 1279px) {
-  .library-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 14px; }
-  .library-workspace { grid-column: 1 / -1; grid-row: 2; }
-  .library-artwork { grid-row: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding-top: 0; }
-  .library-artwork-frame { aspect-ratio: auto; height: 150px; border-radius: 10px; }
-  .library-artwork-frame img { object-position: center 42%; }
+  .library-layout {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-6) var(--space-3);
+  }
+  .library-workspace {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .library-artwork {
+    grid-row: 1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+    padding-top: 0;
+  }
+  .library-artwork-frame {
+    aspect-ratio: auto;
+    height: var(--library-strip-height);
+    padding: var(--space-1);
+    box-shadow: var(--shadow-sm);
+  }
+  .library-artwork-frame img {
+    object-position: center 42%;
+  }
 }
+
+/* ---- Phone ------------------------------------------------------------------------------- */
 @media (max-width: 700px) {
-  .library-layout { gap: 23px 8px; }
-  .library-artwork { gap: 8px; }
-  .library-artwork-frame { height: 104px; border-radius: 8px; box-shadow: 0 4px 12px rgb(38 45 35 / 8%); }
-}
-.film-library-toolbar, .film-library-toolbar nav { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.film-library-toolbar { justify-content: space-between; margin: 0 0 24px; }
-.film-library > section { margin-top: 28px; }
-.film-library-item { grid-template-columns: 55px minmax(0, 1fr); align-items: start; }
-.film-library-content { min-width: 0; }
-.film-library-content h3 { font-size: 21px; overflow-wrap: anywhere; }
-.film-library-statuses { display: flex; gap: 30px; flex-wrap: wrap; margin: 16px 0 10px; }
-.film-library-statuses > div { display: grid; gap: 5px; }
-.film-library-statuses span { font-size: 11px; color: var(--muted); }
-.film-library-statuses strong { font-size: 13px; color: var(--forest); font-weight: 400; }
-.film-library-progress > p { margin-top: 10px; line-height: 1.6; }
-.film-library-detail:focus { outline: 2px solid var(--forest); outline-offset: 5px; }
-.film-library-actions { margin-top: 15px; flex-wrap: wrap; gap: 13px; }
-.film-library video { width: 100%; max-height: 540px; margin-top: 20px; border-radius: 8px; background: #17241d; }
-.film-library-empty { padding: 25px; border: 1px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; }
-.film-library-more { margin-top: 18px; }
-.film-library-drafts { border-top: 1px solid var(--line); padding-top: 25px; }
-.film-library-scene { margin: 20px 0; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
-.film-library-scene p { white-space: pre-wrap; line-height: 1.7; margin-top: 8px; font-size: 13px; }
-.film-library-dialog { width: min(560px, calc(100vw - 36px)); border: 1px solid var(--line); border-radius: 14px; padding: 28px; color: var(--ink); background: #fff; }
-.film-library-dialog::backdrop { background: rgb(20 35 27 / 45%); }
-.film-library-dialog h2 { overflow-wrap: anywhere; }
-.film-library-dialog p { line-height: 1.7; font-size: 13px; margin: 18px 0; }
-.film-library-dialog .action-group { justify-content: flex-end; flex-wrap: wrap; }
-.film-library-upload { margin-top: 30px; }
-.film-library-upload > summary { cursor: pointer; font-size: 15px; color: var(--forest); padding: 16px 0; }
-@media (max-width: 700px) {
-  .film-library-item { grid-template-columns: 36px minmax(0, 1fr); gap: 12px; padding: 16px; }
-  .film-library-item .library-art { width: 36px; height: 40px; }
-  .film-library-statuses { gap: 20px; }
+  .library-layout,
+  .film-library,
+  .film-library-upload {
+    --library-strip-height: 6.5rem;
+    --library-tile: var(--space-10);
+  }
+  .library-layout {
+    gap: var(--space-5) var(--space-2);
+  }
+  .library-artwork {
+    gap: var(--space-2);
+  }
+  .film-library-toolbar nav {
+    display: flex;
+    flex: 1 1 100%;
+  }
+  .film-library-toolbar nav .button {
+    flex: 1 1 auto;
+    min-height: var(--control-height);
+    padding-inline: var(--space-3);
+  }
+  .film-library-toolbar > .text-button {
+    min-height: var(--control-height);
+  }
+  .film-library > section {
+    margin-top: var(--space-6);
+  }
+  .film-library > .film-library-drafts {
+    margin-top: var(--space-10);
+  }
+  .film-library > section > p[role="status"],
+  .film-library-empty {
+    padding: var(--space-8) var(--space-4);
+  }
+  .library-item {
+    column-gap: var(--space-3);
+    padding: var(--space-4);
+  }
+  .library-art > svg {
+    width: var(--space-5);
+    height: var(--space-5);
+  }
+  /* Label beside value, one status per row: nothing wraps mid-phrase. */
+  .film-library-statuses {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .film-library-statuses > div {
+    grid-template-columns: 6rem minmax(0, 1fr);
+    align-items: baseline;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3);
+  }
+  .film-library-statuses > div + div {
+    border-left: 0;
+    border-top: var(--hairline) solid var(--color-border);
+  }
+  .film-library-statuses span {
+    grid-column: 1;
+  }
+  .film-library-statuses strong {
+    grid-column: 2;
+  }
+  /* Buttons share the row; links and the keep-or-remove row follow underneath. */
+  .film-library-actions > .button {
+    flex: 1 1 auto;
+    min-height: var(--control-height);
+  }
+  .film-library-actions .text-button {
+    min-height: var(--control-height);
+  }
+  .film-library-detail > .section-title .icon-button {
+    width: var(--control-height);
+    height: var(--control-height);
+  }
+  .film-library-version-action {
+    padding: var(--space-4);
+  }
+  .film-library-version-action > .button {
+    justify-self: stretch;
+    min-height: var(--control-height);
+    white-space: normal;
+  }
+  .film-library-detail > .button {
+    width: 100%;
+    min-height: var(--control-height);
+  }
+  .film-library-dialog {
+    padding: var(--space-6);
+  }
+  .film-library-dialog .action-group > .button {
+    flex: 1 1 8rem;
+  }
+  .film-library-upload > summary {
+    padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12);
+  }
+  .film-library-upload > summary::before {
+    left: var(--space-4);
+  }
 }

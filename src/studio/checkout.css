@@ -1,0 +1,570 @@
+/* Checkout, price review, order status and paid-film fulfilment. Loaded with the studio. */
+.film-checkout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+.finished-production {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.finished-production video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  background: var(--chrome-bg-deep);
+  border-radius: var(--radius-md);
+}
+.finished-production > a {
+  justify-self: start;
+}
+.film-checkout > .button {
+  justify-self: start;
+}
+.film-price-review,
+.film-order-status,
+.film-paid-production {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+.film-price-review > .button,
+.film-price-review > .feedback,
+.film-order-status > .button,
+.film-paid-production > .button {
+  justify-self: start;
+}
+.film-price-review video {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  background: var(--chrome-bg-deep);
+}
+.film-price-review,
+.film-paid-production {
+  border-top: var(--hairline) solid var(--color-border);
+  padding-top: var(--space-4);
+}
+.film-fulfillment-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.film-fulfillment-steps li {
+  padding: var(--space-4);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+.film-fulfillment-steps li[data-complete="true"] {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+.film-fulfillment-steps span {
+  display: block;
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+.film-fulfillment-steps h4 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+@media (max-width: 680px) {
+.film-fulfillment-steps {
+    grid-template-columns: 1fr;
+  }
+}
+.film-price-total {
+  font-family: var(--font-display);
+  font-size: var(--display-md);
+  line-height: var(--leading-heading);
+  letter-spacing: var(--tracking-heading);
+  color: var(--color-text-brand);
+}
+.film-price-total span {
+  font-family: var(--font-ui);
+  font-size: var(--text-secondary);
+  color: var(--color-text-muted);
+}
+.film-order-reference {
+  overflow-wrap: anywhere;
+}
+
+/*
+  The checkout itself (step 4, "Create & watch"). Everything below is scoped to
+  .film-checkout, so the owner's film generation panel, which borrows
+  .film-price-review, keeps the plain rules above.
+  One language with the film library: white cards with a hairline, a tinted
+  status row, one primary action per state.
+*/
+.readiness-panel.film-checkout {
+  --checkout-glyph-size: var(--text-xl);
+  /* Glyph shapes for notices, used as masks so they take the text colour. */
+  --checkout-glyph-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M12 16h.01'/%3E%3C/svg%3E");
+  --checkout-glyph-check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E");
+  --checkout-glyph-caution: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+  gap: var(--space-5);
+  margin: var(--space-8) 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.film-checkout > h3 {
+  font-size: var(--display-xs);
+  line-height: var(--leading-heading);
+  letter-spacing: var(--tracking-heading);
+}
+.film-checkout > p {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+}
+.film-checkout .field-note {
+  max-width: var(--measure);
+  font-size: var(--text-secondary);
+  line-height: 1.55;
+}
+.film-checkout .text-button {
+  font-size: var(--text-secondary);
+}
+.film-checkout .action-group {
+  gap: var(--space-2) var(--space-3);
+}
+
+/* ---- Consent: a box that is comfortable to read and to tick ------------------------ */
+.film-checkout .film-consent {
+  padding: var(--space-4);
+  border: var(--hairline) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  transition:
+    border-color var(--duration-base) var(--ease-out),
+    background-color var(--duration-base) var(--ease-out);
+}
+.film-checkout .film-consent > span {
+  max-width: var(--measure);
+  line-height: 1.55;
+}
+.film-checkout .film-consent:has(input:checked) {
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+.film-checkout .film-consent:has(input:disabled) {
+  border-color: var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+/* ---- Before the price: the lead action and the saved-plan line ---------------------- */
+/* Once a later step offers its own action (continue, or pay), this one steps back. */
+.film-checkout:has(> .film-price-review > .button) > .film-checkout-lead:not(:disabled) {
+  min-height: var(--control-height-sm);
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-xs);
+  color: var(--color-text);
+  font-size: var(--text-secondary);
+}
+.film-checkout:has(> .film-price-review > .button) > .film-checkout-lead:hover:not(:disabled) {
+  background: var(--neutral-25);
+  border-color: var(--color-border-control);
+  box-shadow: var(--shadow-sm);
+}
+.film-checkout:has(> .film-price-review > .button) > .film-checkout-lead:disabled {
+  min-height: var(--control-height-sm);
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-secondary);
+}
+.film-checkout > .film-plan-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-4);
+  margin-top: calc(var(--space-2) * -1);
+}
+
+/* ---- Price and payment review: one card ---------------------------------------------- */
+/* (.readiness-panel in the selector outranks the shared "saved-plan record" rule
+   for a status region inside a readiness panel, which would otherwise restyle it.) */
+.readiness-panel.film-checkout > .film-price-review {
+  gap: var(--space-4);
+  padding: var(--space-6);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--neutral-25);
+  box-shadow: var(--shadow-xs);
+}
+.film-checkout .film-price-summary {
+  display: grid;
+  gap: var(--space-2);
+  padding-bottom: var(--space-5);
+  border-bottom: var(--hairline) solid var(--color-border);
+}
+.film-checkout .film-price-total {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-3);
+  font-size: var(--display-lg);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  font-variant-numeric: tabular-nums lining-nums;
+}
+.film-checkout .film-price-total span {
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-normal);
+}
+.film-checkout .film-price-summary > p:not(.eyebrow, .film-price-total) {
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.film-checkout .film-price-review > p:not(.field-note, .feedback) {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+}
+/* Delivery and refund terms: always shown in full. */
+.film-checkout .film-terms {
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+.film-checkout .film-terms > div {
+  padding: var(--space-4) var(--space-5);
+}
+.film-checkout .film-terms > div + div {
+  border-top: var(--hairline) solid var(--color-border);
+}
+.film-checkout .film-terms h4 {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--color-accent-text);
+}
+.film-checkout .film-terms p {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+  overflow-wrap: anywhere;
+}
+/* The one action of the step. */
+.film-checkout > .film-price-review > .button.primary {
+  min-height: var(--control-height-lg);
+  padding-inline: var(--space-6);
+}
+
+/* ---- Notices --------------------------------------------------------------------------- */
+.film-checkout .feedback {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  overflow-wrap: anywhere;
+}
+.film-checkout .feedback::before {
+  content: "";
+  flex: none;
+  width: var(--checkout-glyph-size);
+  height: var(--checkout-glyph-size);
+  margin-top: 0.2em;
+  background: currentColor;
+  -webkit-mask: var(--checkout-glyph-alert) center / contain no-repeat;
+  mask: var(--checkout-glyph-alert) center / contain no-repeat;
+}
+.film-checkout .feedback.success::before {
+  -webkit-mask-image: var(--checkout-glyph-check);
+  mask-image: var(--checkout-glyph-check);
+}
+.film-checkout .feedback.warning::before {
+  -webkit-mask-image: var(--checkout-glyph-caution);
+  mask-image: var(--checkout-glyph-caution);
+}
+/* A notice that carries its own action: the text, then the button under it. */
+.film-checkout div.feedback {
+  flex-wrap: wrap;
+  row-gap: var(--space-3);
+}
+.film-checkout div.feedback > p {
+  flex: 1 1 0;
+  min-width: 12rem;
+}
+/* The result of the last action spans the checkout, like the banners in the film library. */
+.film-checkout > .feedback {
+  justify-self: stretch;
+  max-width: none;
+}
+/* What the checkout is doing right now. */
+.film-checkout > .film-checkout-busy {
+  justify-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: none;
+  padding: var(--space-3) var(--space-4);
+  border: var(--hairline) solid var(--info-border);
+  border-radius: var(--radius-md);
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+/* ---- After a payment request: steps, progress, what is next ------------------------ */
+.readiness-panel.film-checkout > .film-order-status {
+  gap: var(--space-4);
+  padding-top: 0;
+  border-top: 0;
+}
+.film-checkout .film-fulfillment-steps {
+  gap: 0;
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+.film-checkout .film-fulfillment-steps li {
+  position: relative;
+  min-width: 0;
+  padding: var(--space-4) var(--space-4) var(--space-4) calc(var(--space-4) + var(--space-6) + var(--space-3));
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.film-checkout .film-fulfillment-steps li + li {
+  border-left: var(--hairline) solid var(--color-border);
+}
+/* A ring for a step still to come, a filled tick for a finished one. */
+.film-checkout .film-fulfillment-steps li::before {
+  content: "";
+  position: absolute;
+  left: var(--space-4);
+  top: var(--space-4);
+  width: var(--space-6);
+  height: var(--space-6);
+  border: 1.5px solid var(--color-border-control);
+  border-radius: var(--radius-full);
+  background: var(--color-surface) center / var(--space-4) no-repeat;
+}
+.film-checkout .film-fulfillment-steps li[data-complete="true"] {
+  background: var(--success-bg);
+}
+.film-checkout .film-fulfillment-steps li[data-complete="true"]::before {
+  border-color: var(--success-solid);
+  background-color: var(--success-solid);
+  background-image: var(--icon-check);
+}
+.film-checkout .film-fulfillment-steps span {
+  margin-bottom: 2px;
+  line-height: 1.4;
+}
+.film-checkout .film-fulfillment-steps h4 {
+  font-size: var(--text-body);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.film-checkout .film-order-status > .film-production-progress {
+  margin: 0;
+}
+.film-checkout .film-order-status > p:not(.field-note, .feedback) {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+}
+.film-checkout .film-order-status > .film-order-amount {
+  font-size: var(--text-xl);
+  line-height: 1.4;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* ---- Paid: film production ---------------------------------------------------------- */
+.film-checkout .film-paid-production {
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding-top: var(--space-5);
+}
+.film-checkout .film-paid-production > h4 {
+  font-size: var(--text-xl);
+  line-height: 1.35;
+}
+.film-checkout .film-paid-production > p:not(.field-note, .feedback) {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-700);
+}
+/* The saved paid version, opened for review. */
+.film-checkout .film-paid-production > .film-price-review {
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-5);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--neutral-25);
+}
+.film-checkout .film-paid-production > .film-price-review > h4 {
+  font-size: var(--text-xl);
+  overflow-wrap: anywhere;
+}
+.film-checkout .film-paid-production > .film-price-review > p {
+  font-size: var(--text-secondary);
+  color: var(--color-text-muted);
+}
+.film-checkout .film-paid-production > .film-price-review > details {
+  border-top: var(--hairline) solid var(--color-border);
+}
+.film-checkout .film-paid-production > .film-price-review > details > summary {
+  padding-block: var(--space-3);
+  font-size: var(--text-body);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.film-checkout .film-paid-production > .film-price-review > details > summary::before {
+  top: calc(var(--space-3) + (1lh - 1rem) / 2);
+}
+.film-checkout .film-paid-production > .film-price-review > details > p {
+  max-width: var(--measure);
+  margin: 0 0 var(--space-3) var(--space-6);
+  font-size: var(--text-body);
+  line-height: var(--leading-relaxed);
+  color: var(--neutral-700);
+  overflow-wrap: anywhere;
+}
+.film-checkout .film-paid-production > .film-price-review > details > p strong {
+  margin-right: var(--space-1);
+  font-size: var(--text-caption);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-accent-text);
+}
+.film-checkout .film-paid-production > .film-price-review > .action-group {
+  justify-content: space-between;
+  padding-top: var(--space-3);
+  border-top: var(--hairline) solid var(--color-border);
+}
+
+/* ---- Payment details and receipt; buying an edited draft separately ---------------- */
+.film-checkout .film-order-details,
+.film-checkout .film-order-status > details.film-price-review {
+  display: block;
+  padding: 0 var(--space-5);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--neutral-25);
+}
+.film-checkout .film-order-details > summary,
+.film-checkout .film-order-status > details.film-price-review > summary {
+  padding-block: var(--space-4);
+  font-size: var(--text-body);
+  line-height: 1.5;
+  color: var(--color-text);
+}
+.film-checkout .film-order-details > summary::before,
+.film-checkout .film-order-status > details.film-price-review > summary::before {
+  top: calc(var(--space-4) + (1lh - 1rem) / 2);
+}
+.film-checkout .film-order-details[open],
+.film-checkout .film-order-status > details.film-price-review[open] {
+  padding-bottom: var(--space-5);
+}
+.film-checkout .film-order-details[open] > summary,
+.film-checkout .film-order-status > details.film-price-review[open] > summary {
+  margin-bottom: var(--space-4);
+  border-bottom: var(--hairline) solid var(--color-border);
+  border-radius: 0;
+}
+.film-checkout .film-order-details > :not(summary) + :not(summary),
+.film-checkout .film-order-status > details.film-price-review > :not(summary) + :not(summary) {
+  margin-top: var(--space-3);
+}
+.film-checkout .film-order-details > p:not(.field-note),
+.film-checkout .film-order-status > details.film-price-review > p:not(.field-note) {
+  max-width: var(--measure);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--color-text);
+}
+.film-checkout .film-order-details > .action-group {
+  margin-top: var(--space-5);
+}
+.film-checkout .film-order-reference {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  letter-spacing: 0;
+  color: var(--color-text);
+}
+
+@media (max-width: 680px) {
+  .readiness-panel.film-checkout {
+    margin-top: var(--space-6);
+    padding: 0;
+  }
+  .film-checkout .film-price-total {
+    font-size: var(--display-md);
+  }
+  .readiness-panel.film-checkout > .film-price-review {
+    padding: var(--space-5) var(--space-4);
+  }
+  /* On a phone the terms are flat sections of the card, not a box inside it. */
+  .film-checkout .film-terms {
+    border: 0;
+    border-top: var(--hairline) solid var(--color-border);
+    border-bottom: var(--hairline) solid var(--color-border);
+    border-radius: 0;
+    background: transparent;
+  }
+  .film-checkout .film-terms > div {
+    padding: var(--space-4) 0;
+  }
+  .readiness-panel.film-checkout > .film-price-review > .button.primary {
+    padding-inline: var(--space-4);
+  }
+  /* Actions fill the row; where two fit side by side they share it. */
+  .film-checkout > .button,
+  .film-checkout > .film-price-review > .button,
+  .film-checkout .film-order-status > details.film-price-review > .button {
+    justify-self: stretch;
+    width: 100%;
+    white-space: normal;
+  }
+  .film-checkout .action-group > .button {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+  .film-checkout div.feedback > .button {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
+  .film-checkout .film-fulfillment-steps li + li {
+    border-left: 0;
+    border-top: var(--hairline) solid var(--color-border);
+  }
+  .film-checkout .film-fulfillment-steps li {
+    padding-block: var(--space-3);
+  }
+  .film-checkout .film-fulfillment-steps li::before {
+    top: var(--space-3);
+  }
+  .film-checkout .film-paid-production > .film-price-review {
+    padding: var(--space-4);
+  }
+  .film-checkout .film-paid-production > .film-price-review > details > p {
+    margin-left: 0;
+  }
+  .film-checkout .film-order-details,
+  .film-checkout .film-order-status > details.film-price-review {
+    padding-inline: var(--space-4);
+  }
+}

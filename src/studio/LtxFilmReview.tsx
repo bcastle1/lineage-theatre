@@ -28,7 +28,7 @@ export default function LtxFilmReview({ job, onChange }: { job: LtxJob; onChange
         <details><summary>Scene direction and narration</summary><p>{job.plan.scenes.find(item => item.id === scene.id)?.visual}</p><p className="ltx-transcript">{job.plan.scenes.find(item => item.id === scene.id)?.narration || "No narration script."}</p></details>
       </li>)}</ol>
     </>}
-    {job.review && <p role="status">{job.status === "completed" ? "Approved" : "Changes requested"} on {new Date(job.review.at).toLocaleString()}{job.review.notes ? ` — ${job.review.notes}` : ""}</p>}
+    {job.review && <p role="status" className="feedback success">{job.status === "completed" ? "Approved" : "Changes requested"} on {new Date(job.review.at).toLocaleString()}{job.review.notes ? ` — ${job.review.notes}` : ""}</p>}
     {job.status === "review" && <fieldset disabled={busy} className="ltx-checks"><legend>Finish your review</legend>
       <p className="field-note">Watch the entire film. Reference images guide appearance; review every scene for identity drift, unusual movement, and factual errors.</p>
       {([['characters', 'I reviewed character appearance and continuity.'], ['narration', 'I listened to the narration and checked its words.'], ['timing', 'I reviewed scene order, timing, and the complete ending.']] as const).map(([key, label]) =>
@@ -37,6 +37,6 @@ export default function LtxFilmReview({ job, onChange }: { job: LtxJob; onChange
       <div className="action-group"><button className="button primary" disabled={!Object.values(checks).every(Boolean)} onClick={() => void review("approve")}>{busy ? "Saving review…" : "Approve finished film"}</button>
         <button className="button secondary" disabled={!notes.trim()} onClick={() => void review("changes")}>Request changes</button></div>
     </fieldset>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert" className="feedback error">{error}</p>}
   </section>;
 }

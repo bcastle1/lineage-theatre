@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CloudUpload, Download, Film as FilmIcon, Loader2, RefreshCw } from "lucide-react";
 import { getSourceBlob } from "../lib/storage";
 import { api, type Film } from "./model";
+import "./cloud-archive.css";
 
 export interface CloudFilm {
   id: string;
@@ -130,10 +131,10 @@ export default function CloudArchivePanel({ projects, onBusyChange, showFilms = 
     finally { setBusy(""); }
   }
   return (
-    <section className="panel" aria-labelledby="cloud-archive-title" aria-busy={!!busy}>
+    <section className="panel cloud-archive" aria-labelledby="cloud-archive-title" aria-busy={!!busy}>
       <div className="section-title">
         <div><h2 id="cloud-archive-title">Your private cloud archive</h2><p>Keep completed films available when you sign in on another device.</p></div>
-        <CloudUpload size={24} />
+        <CloudUpload size={24} aria-hidden="true" />
       </div>
       <p className="field-note">Cloud copies can be viewed by you and Lineage Theatre administrators. Saving here is optional. Your family documents, original photographs, and full script stay in this browser.</p>
       <div className="form-grid">
@@ -152,14 +153,14 @@ export default function CloudArchivePanel({ projects, onBusyChange, showFilms = 
         {!alreadyUploaded && source === "file" && <label>Completed film file<input key={fileKey} type="file" accept="video/mp4,video/webm,.mp4,.webm" disabled={!!busy} onChange={(event) => { setFile(event.target.files?.[0] || null); setConsent(false); }} /><small>Up to 500 MB per film. 100 films and 5 GB of uploads per account.</small></label>}
       </div>
       {alreadyUploaded && <p className="field-note">This film already has a verified cloud video. Saving updates its details. Choose “Upload another completed film” for another version.</p>}
-      <label className="check-label">
+      <label className="check-label cloud-archive-consent">
         <input type="checkbox" checked={consent} disabled={!!busy} onChange={(event) => setConsent(event.target.checked)} />
         I have permission to upload this film. Save its title, ancestor, runtime and selected finished video privately, with access for Lineage Theatre administrators.
       </label>
       <div className="panel-actions"><button className="button primary" disabled={!!busy || !consent} onClick={() => void save()}>
         {busy ? <Loader2 className="spin" size={17} /> : <CloudUpload size={17} />}{busy || "Save to cloud archive"}
       </button><button className="text-button" disabled={!!busy} onClick={() => void load()}><RefreshCw size={15} />Refresh cloud films</button></div>
-      {busy && <p className="field-note" role="status">{busy}</p>}
+      {busy && <p className="field-note cloud-archive-status" role="status">{busy}</p>}
       {message && <p className={`feedback ${error ? "error" : "success"}`} role={error ? "alert" : "status"}>{message}</p>}
       {showFilms && <><div className="library-list">
         {!busy && films.length === 0 && <p>No cloud films saved yet. Your local projects are listed above.</p>}

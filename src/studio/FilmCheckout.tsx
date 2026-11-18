@@ -14,6 +14,7 @@ import { filmFulfillmentProgress, filmReadyToWatch, type ProductionStatus } from
 import { libraryFilmLink, normalizeLibraryEntry, type LibraryEntry } from "./film-library";
 import FilmProductionProgress from "./FilmProductionProgress";
 import { confirmedFilmPayment, paidFilmPlaybackLink } from "./payment-confirmation";
+import "./checkout.css";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
@@ -377,34 +378,40 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
     <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Your film price and payment"}</h3>
     {!paymentReference && <>
       <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
-      {(!currentPlan||planRefreshRequired)&&<label className="check-label"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
-      <button className="button primary small" disabled={Boolean(busy) || !film.scenes.length || ((!currentPlan||planRefreshRequired)&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (planRefreshRequired ? "Refresh production plan" : price ? "Refresh my pricing" : "Prepare my pricing")}</button>
+      {(!currentPlan||planRefreshRequired)&&<label className="check-label film-consent"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
+      <button className="button primary film-checkout-lead" disabled={Boolean(busy) || !film.scenes.length || ((!currentPlan||planRefreshRequired)&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (planRefreshRequired ? "Refresh production plan" : price ? "Refresh my pricing" : "Prepare my pricing")}</button>
     </>}
-    {prepared&&!paymentReference&&<p className="field-note">{!inputHash?"Checking your draft against its saved plan…":currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
+    {prepared&&!paymentReference&&<p className="field-note film-plan-note">{!inputHash?"Checking your draft against its saved plan…":currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
     {price&&!paymentReference&&!quote&&<div className="film-price-review" role="status">
-      <p className="eyebrow">Your film price</p>
-      <p className="film-price-total">{money(price.amountCents)} <span>USD total</span></p>
-      <p>{price.filmTitle} · {prepared?.durationSeconds} seconds target</p>
+      <div className="film-price-summary">
+        <p className="eyebrow">Your film price</p>
+        <p className="film-price-total">{money(price.amountCents)} <span>USD total</span></p>
+        <p>{price.filmTitle} · {prepared?.durationSeconds} seconds target</p>
+      </div>
       <p className="field-note">{price.note}</p>
-      {!priceCurrent&&<p className="feedback">Refresh your pricing to include the latest plan and rates.</p>}
-      {price.kind==="confirmed"&&priceCurrent&&<button className="button secondary" disabled={Boolean(busy)} onClick={()=>void requestQuote()}>Continue to payment</button>}
+      {!priceCurrent&&<p className="feedback warning">Refresh your pricing to include the latest plan and rates.</p>}
+      {price.kind==="confirmed"&&priceCurrent&&<button className="button primary" disabled={Boolean(busy)} onClick={()=>void requestQuote()}>Continue to payment</button>}
     </div>}
     {quote && !paymentReference && <div className="film-price-review">
-      <p className="film-price-total">{money(quote.amountCents)} <span>USD total</span></p>
-      <p>{quote.filmTitle} · {prepared?.durationSeconds} seconds target</p>
-      <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
+      <div className="film-price-summary">
+        <p className="film-price-total">{money(quote.amountCents)} <span>USD total</span></p>
+        <p>{quote.filmTitle} · {prepared?.durationSeconds} seconds target</p>
+        <p>{quote.sandbox ? "Test payment — no real money will be charged." : "This is a real payment to BROCO Technologies LLC."}</p>
+      </div>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
       <p className="field-note">{!quote.sandbox
         ? `Your saved film enters ${productionProvider === "kling" ? "Kling production" : "production"} automatically after QuickBooks confirms payment. Follow its progress here or in your Film library. The finished film opens when its video is verified.`
         : "A test payment does not start production of this film."}</p>
-      {!quote.sandbox && !checkoutProductionReady && <div className="feedback" role="status">
+      {!quote.sandbox && !checkoutProductionReady && <div className="feedback warning" role="status">
         <p>Production availability must be confirmed before a payment page can be created. Your saved film and price remain available.</p>
         <button className="button secondary small" disabled={Boolean(busy)} onClick={() => void requestQuote()}><RefreshCw size={15} />Check production availability</button>
       </div>}
-      <h4>Delivery</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.deliveryTerms}</p>
-      <h4>Refund policy</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.refundTerms}</p>
-      {!quoteCurrent && <p className="feedback">This price has expired or the plan has changed. Request a new price before paying.</p>}
-      <label className="check-label"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !quote.sandbox && !checkoutProductionReady} onChange={event => setConsent(event.target.checked)} />
+      <div className="film-terms">
+        <div><h4>Delivery</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.deliveryTerms}</p></div>
+        <div><h4>Refund policy</h4><p style={{ whiteSpace: "pre-wrap" }}>{quote.refundTerms}</p></div>
+      </div>
+      {!quoteCurrent && <p className="feedback warning">This price has expired or the plan has changed. Request a new price before paying.</p>}
+      <label className="check-label film-consent"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !quote.sandbox && !checkoutProductionReady} onChange={event => setConsent(event.target.checked)} />
         <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks. Start this saved version automatically when my payment is confirmed.`}</span>
       </label>
       {configuration?.available && quoteCurrent && <>
@@ -422,7 +429,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
         <li data-complete={progress.ready}><span>3. Watch & download</span><h4>{progress.watch}</h4></li>
       </ol>
       <FilmProductionProgress paid={progress.paid} ready={progress.ready} available={productionAvailable} status={production?.status} completedShots={production?.completedShots} shotCount={production?.shotCount} progress={production?.progress} needsAttention={production?.needsAttention} workerReady={production?.workerReady} message={production?.message} />
-      {order && <p>{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
+      {order && <p className="film-order-amount">{money(order.amountCents)} {order.status === "captured" ? `paid · ${order.filmTitle}` : "total"}{order.refundedCents > 0 ? ` · ${money(order.refundedCents)} refunded` : ""}</p>}
       {order?.status !== "captured" && <p>{order ? paymentStatusMessage(order) : "A payment request has been recorded. Check its result before taking any further action."}</p>}
       {order?.status === "awaiting-payment" && <p className="field-note">We check your payment automatically when you return from QuickBooks. You can also check its status below.</p>}
       <div className="action-group">
@@ -430,13 +437,13 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
         {progress.ready && delivery?.downloadUrl && <a className="button secondary small" href={delivery.downloadUrl} download><Download size={16} />Download film</a>}
       </div>
       <p className="field-note">Your film stays in your Film library. When the finished video is ready, you can watch and download it there.</p>
-      {order?.status === "captured" && order.requiresReview && <p className="feedback">{paymentStatusMessage(order)}</p>}
-      {order?.status === "captured" && order.refundedCents > 0 && <p className="feedback">A refund is recorded for this order. Production cannot start; contact the administrator to review this payment.</p>}
+      {order?.status === "captured" && order.requiresReview && <p className="feedback warning">{paymentStatusMessage(order)}</p>}
+      {order?.status === "captured" && order.refundedCents > 0 && <p className="feedback warning">A refund is recorded for this order. Production cannot start; contact the administrator to review this payment.</p>}
       {order?.status === "captured" && <div className="film-paid-production">
         <h4>Film production</h4>
         <p>{progress.ready ? "Your finished film is ready to watch and download." : "Your paid version is saved. Follow its progress above or open it in your film library."}</p>
-        {production?.needsAttention && <p className="feedback">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
-        {!productionAvailable && !progress.ready && <p className="feedback">{production && !production.preparationOnly
+        {production?.needsAttention && <p className="feedback warning">Production needs administrator attention. Your order and saved plan remain recorded.</p>}
+        {!productionAvailable && !progress.ready && <p className="feedback warning">{production && !production.preparationOnly
           ? "Starting or resuming film creation is currently unavailable. The production status above remains saved. Contact the administrator for help; you do not need to pay again."
           : "Film creation is not available yet. Your payment and paid version are saved. You do not need to pay again. Contact the administrator for help or a refund."}</p>}
         <p className="field-note">This order covers the saved paid version. Later draft edits are not included; your current draft stays unchanged.</p>
@@ -448,7 +455,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
         {paidPlanReviewed && paidPlan && <div className="film-price-review" aria-label="Saved paid version">
           <h4>{paidPlan.title}</h4>
           <p>{paidPlan.durationSeconds} seconds target · {paidPlan.scenes.length} {paidPlan.scenes.length === 1 ? "scene" : "scenes"}</p>
-          {paidPlan.scenes.map((scene, index) => <details key={index}>
+          {paidPlan.scenes.map((scene, index) => <details className="disclosure" key={index}>
             <summary>Scene {index + 1}: {scene.title}</summary>
             {scene.visual && <p><strong>Visual:</strong> {scene.visual}</p>}
             {scene.narration && <p><strong>Narration:</strong> {scene.narration}</p>}
@@ -463,13 +470,13 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
           <video controls preload="metadata" aria-label="Your finished film" src={delivery.mediaUrl} />
         </div>}
       </div>}
-      <details open={order?.status !== "captured"}>
+      <details className="disclosure film-order-details" open={order?.status !== "captured"}>
         <summary>Payment details and receipt</summary>
         {order?.status === "captured" && <p>{paymentStatusMessage(order)}</p>}
         {hostedOrder && order?.invoiceNumber && <p className="field-note">Invoice {order.invoiceNumber}</p>}
         {hostedOrder && order?.status === "captured" && <p className="field-note">This confirms a payment applied to the invoice in QuickBooks. It does not verify bank settlement or later refunds.</p>}
         {order?.retryAllowed === true && <><p className="field-note">Retrying uses this saved price and the terms you accepted. It prepares the payment page; you complete payment separately on QuickBooks.</p>
-          {!order.sandbox && <label className="check-label"><input type="checkbox" checked={retryProductionConsent} disabled={Boolean(busy)} onChange={event => setRetryProductionConsent(event.target.checked)} />
+          {!order.sandbox && <label className="check-label film-consent"><input type="checkbox" checked={retryProductionConsent} disabled={Boolean(busy)} onChange={event => setRetryProductionConsent(event.target.checked)} />
             <span>Prepare this saved film's payment page and start this saved version automatically when QuickBooks confirms my payment.</span>
           </label>}<CaptchaNotice /></>}
         <p className="field-note">Order reference: <span className="film-order-reference">{paymentReference.orderId}</span></p>
@@ -483,14 +490,14 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
           <a className="text-button" href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre payment ${paymentReference.orderId}`)}`}>Contact the administrator</a>
         </div>
       </details>
-      {order?.status === "captured" && inputHash && !currentPlan && <details className="film-price-review" aria-label="Separate film checkout">
+      {order?.status === "captured" && inputHash && !currentPlan && <details className="disclosure film-price-review" aria-label="Separate film checkout">
         <summary>Buy your edited draft as a separate film</summary>
         <p>This payment covers the saved version of {order.filmTitle}. To buy “{film.title || "your current draft"}” as a separate film, prepare a new price.</p>
         <button className="button secondary small" disabled={Boolean(busy) || !film.scenes.length} onClick={onNewFilmCheckout}>Price this draft as a new film</button>
         <p className="field-note">Your earlier film and payment stay saved. This does not charge you or start production.</p>
       </details>}
     </div>}
-    {busy && <p role="status"><Loader2 className="spin" size={15} /> {busy}</p>}
+    {busy && <p className="film-checkout-busy" role="status"><Loader2 className="spin" size={15} /> {busy}</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
     {message && <p className="feedback success" role="status">{message}</p>}
   </section>;

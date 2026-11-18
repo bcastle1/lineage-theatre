@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   Check,
   Download,
   FileText,
@@ -17,6 +18,7 @@ import {
   Video,
   X,
   CheckCircle2,
+  AlertCircle,
 } from "lucide-react";
 import { type Source, type Scene, type Theme, type FilmPaymentReference, formatDuration, productionStatusMessage } from "./model";
 import FilmCheckout from "./FilmCheckout";
@@ -509,7 +511,7 @@ export function CuttingStep({
       characters: film.characters.map((c) => (c.id === id ? { ...c, ...patch } : c)),
     });
   return (
-    <section className="panel">
+    <section className="panel cutting-panel">
       <div className="section-title">
         <div>
           <h2>Your film, ready to shape</h2>
@@ -552,7 +554,8 @@ export function CuttingStep({
             </p>
             {coverage.warnings?.map((warning, i) => (
               <p className="coverage-warning" key={i}>
-                {warning}
+                <AlertCircle size={16} aria-hidden="true" />
+                <span>{warning}</span>
               </p>
             ))}
           </>
@@ -592,9 +595,10 @@ export function CuttingStep({
           onChange={(e) => update({ logline: e.target.value })}
         />
       </label>
+      <div className="script-section">
       <div className="section-subtitle">
         <div>
-          <h3>The people in this story</h3>
+          <h3>The people in this story <span className="count-tag">{film.characters.length}</span></h3>
           <span>
             Give the ancestor relationships, community, and a life beyond the frame.
           </span>
@@ -674,6 +678,7 @@ export function CuttingStep({
                 }
               />
             </label>
+            <div className="cast-photo">
             <label>
               Appearance reference photo
               <select aria-label={`Appearance reference photo for ${character.name || "character"}`}
@@ -698,6 +703,7 @@ export function CuttingStep({
               <SourceThumb source={referencePhotos.find(source => source.id === character.referencePhotoId)!} />}
             {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId) &&
               <p className="feedback error" role="alert">Restore the selected photo or choose a replacement before preparing production.</p>}
+            </div>
             <label>
               Basis
               <select
@@ -739,14 +745,16 @@ export function CuttingStep({
         ))}
       </div>
       {!film.characters.length && (
-        <p className="field-note">
+        <p className="field-note empty-note">
           No cast has been developed yet. Add the ancestor and the people who shaped their
           life.
         </p>
       )}
+      </div>
+      <div className="script-section">
       <div className="section-subtitle">
         <div>
-          <h3>Assumptions & dramatic choices</h3>
+          <h3>Assumptions & dramatic choices <span className="count-tag">{film.assumptions.length}</span></h3>
           <span>Review what was added, and why it belongs in the story.</span>
         </div>
         <button
@@ -811,13 +819,15 @@ export function CuttingStep({
         ))}
       </div>
       {!film.assumptions.length && (
-        <p className="field-note">
+        <p className="field-note empty-note">
           No assumptions have been listed. Review dialogue and scene details for anything
           the family evidence does not establish.
         </p>
       )}
+      </div>
+      <div className="script-section">
       <div className="section-subtitle">
-        <h3>Script & scene direction</h3>
+        <h3>Script & scene direction <span className="count-tag">{film.scenes.length}</span></h3>
         <span>Every word and scene is editable</span>
       </div>
       {!film.scenes.length ? (
@@ -950,7 +960,7 @@ export function CuttingStep({
                         notify("Scene moved earlier.");
                       }}
                     >
-                      <ArrowLeft size={16} />
+                      <ArrowUp size={16} />
                     </button>
                     <button
                       className="icon-button"
@@ -970,7 +980,7 @@ export function CuttingStep({
         </div>
       )}
       <button
-        className="text-button"
+        className="text-button add-scene"
         disabled={!!busy}
         onClick={() =>
           update({
@@ -993,7 +1003,8 @@ export function CuttingStep({
         <Plus size={15} />
         Add a scene
       </button>
-      <p className="field-note">
+      </div>
+      <p className="field-note draft-note">
         {film.generatedBy?.startsWith("Manual") ? "Manual outline from source text" : "Your editable film draft"} · Source links identify material
         used, not independent proof that every detail is true.
       </p>
@@ -1097,7 +1108,7 @@ export function CreateStep({
         </div>
       </div>
       {film.job && (
-        <div className="render-progress" role="status">
+        <div className="render-progress" role="status" data-status={film.job.status}>
           <p>
             {film.job.status === "queued" || film.job.status === "processing" ? (
               <Loader2 className="spin" size={16} />

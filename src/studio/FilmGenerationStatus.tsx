@@ -66,7 +66,7 @@ export default function FilmGenerationStatus({ allowed, onStatus, onApproved, ..
       <p>Request recorded {new Date(current.submittedAt).toLocaleString()}.</p>
       <p>Generation time estimate: not available yet. This is an initial full-film attempt; completion timing has not been established.</p>
       <p>{generationAttemptExplanation(current)}</p>
-      {diagnosticExplanation && <div className="feedback" role="status">
+      {diagnosticExplanation && <div className="feedback warning" role="status">
         <p>{diagnosticExplanation}</p>
         {current.diagnostic && <p className="field-note">Recorded response: {current.diagnostic.code}
           {current.diagnostic.httpStatus !== undefined ? ` · HTTP ${current.diagnostic.httpStatus}` : ""}
