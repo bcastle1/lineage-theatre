@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Loader2,
   Music2,
+  Pencil,
   Plus,
   RefreshCw,
   Sparkles,
@@ -245,6 +246,8 @@ export function ArchiveStep({
   );
 }
 
+// The running times offered. A draft that carries any other value keeps it and shows it as one more option.
+const runningTimes = [30, 60, 120, 300, 600];
 type DirectionProps = StepProps & {
   caps: Capabilities | null;
   aiConsent: boolean;
@@ -327,25 +330,34 @@ export function DirectionStep({
         </button>
       </div>
       <div className="duration-row">
-        <label>
-          Target running time
-          <select
-            value={film.duration}
-            disabled={!!busy}
-            onChange={(e) => update({ duration: Number(e.target.value) })}
-          >
-            {[30, 60, 120, 300, 600].map((s) => (
-              <option key={s} value={s}>
-                {formatDuration(s)} ·{" "}
-                {s === 120
-                  ? "Short film · recommended"
-                  : s <= 60
-                    ? "Trailer"
-                    : "Extended family story"}
-              </option>
+        <fieldset className="duration-choice">
+          <legend>Target running time</legend>
+          <div className="duration-options">
+            {(runningTimes.includes(film.duration)
+              ? runningTimes
+              : [...runningTimes, film.duration].sort((a, b) => a - b)
+            ).map((s) => (
+              <label key={s} className={`choice ${film.duration === s ? "chosen" : ""}`}>
+                <input
+                  type="radio"
+                  name="film-duration"
+                  value={s}
+                  checked={film.duration === s}
+                  disabled={!!busy}
+                  onChange={() => update({ duration: s })}
+                />
+                <span>{formatDuration(s)}</span>
+                <small>
+                  {s === 120
+                    ? "Short film · recommended"
+                    : s <= 60
+                      ? "Trailer"
+                      : "Extended family story"}
+                </small>
+              </label>
             ))}
-          </select>
-        </label>
+          </div>
+        </fieldset>
         <p className="field-note">
           Final running time and available film quality will be confirmed before you
           approve production.
@@ -479,6 +491,10 @@ export function DirectionStep({
 }
 
 type FilmCharacter = import("./model").Character;
+// Reading view: a value as text, or a quiet note that it is still missing.
+function readValue(value: string, missing = "Not added yet") {
+  return value?.trim() ? value : <span className="read-empty">{missing}</span>;
+}
 export function CuttingStep({
   film,
   update,
@@ -510,8 +526,87 @@ export function CuttingStep({
     update({
       characters: film.characters.map((c) => (c.id === id ? { ...c, ...patch } : c)),
     });
+  // Character and scene cards open as a reading view. The cards being edited are
+  // kept here by film and card id; this is view state only and is never saved.
+  const [editing, setEditing] = useState<Set<string>>(() => new Set());
+  const focusAfterRender = useRef<{ cardId: string; selector: string } | null>(null);
+  const isEditing = (cardId: string) => editing.has(`${film.id}:${cardId}`);
+  const setCardsEditing = (cardIds: string[], edit: boolean) =>
+    setEditing((current) => {
+      const next = new Set(current);
+      for (const cardId of cardIds) {
+        if (edit) next.add(`${film.id}:${cardId}`);
+        else next.delete(`${film.id}:${cardId}`);
+      }
+      return next;
+    });
+  // A change of mode never moves the page under the pointer: one card keeps its place
+  // in the window while the cards around it change height. (Browsers that anchor the
+  // scroll position themselves pick a card of their own, often the one below.)
+  const keepInPlace = useRef<{ cardId: string; top: number; limit: number } | null>(null);
+  // One card changes mode: it stays where it is, and focus goes to its first field,
+  // or back to its Edit button.
+  const setCardMode = (cardId: string, edit: boolean) => {
+    focusAfterRender.current = {
+      cardId,
+      selector: edit ? "input, textarea, select" : ".card-mode",
+    };
+    const box = document.getElementById(cardId)?.getBoundingClientRect();
+    keepInPlace.current = box ? { cardId, top: box.top, limit: -Infinity } : null;
+    setCardsEditing([cardId], edit);
+  };
+  // A whole section changes mode: the card being read stays where it is. That is the
+  // first card that starts under the section's header, or else the one card that fills
+  // the window.
+  const setSectionMode = (cardIds: string[], edit: boolean, control: HTMLElement) => {
+    const limit = Math.max(
+      control.getBoundingClientRect().bottom,
+      control.closest(".section-subtitle")?.getBoundingClientRect().bottom ?? 0,
+    );
+    const shown = cardIds.flatMap((cardId) => {
+      const box = document.getElementById(cardId)?.getBoundingClientRect();
+      return box && box.bottom > limit && box.top < window.innerHeight ? [{ cardId, top: box.top, limit }] : [];
+    });
+    keepInPlace.current = shown.find((card) => card.top >= limit - 1) ?? shown[0] ?? null;
+    setCardsEditing(cardIds, edit);
+  };
+  // A double click is one decision. The mode buttons act on its first click only
+  // (activation from the keyboard reports a click count of 0), and its second press
+  // does not take the focus from where the first one put it: the field of a card
+  // that has just opened, or the Edit button of one that has just closed.
+  const once =
+    (action: (control: HTMLElement) => void) =>
+    (event: { detail: number; currentTarget: HTMLElement }) => {
+      if (event.detail <= 1) action(event.currentTarget);
+    };
+  const keepFocus = (event: { detail: number; target: EventTarget; preventDefault: () => void }) => {
+    if (
+      event.detail > 1 &&
+      document.activeElement !== document.body &&
+      !(event.target as Element).closest("input, textarea, select, summary")
+    )
+      event.preventDefault();
+  };
+  useEffect(() => {
+    const keep = keepInPlace.current;
+    keepInPlace.current = null;
+    const box = keep && document.getElementById(keep.cardId)?.getBoundingClientRect();
+    if (keep && box) {
+      // Where the card was, or just under the header if it would now end above it.
+      const top = keep.top + box.height > keep.limit ? keep.top : keep.limit;
+      if (Math.abs(box.top - top) >= 1) window.scrollBy({ top: box.top - top, behavior: "instant" });
+    }
+    const focus = focusAfterRender.current;
+    if (!focus) return;
+    focusAfterRender.current = null;
+    document.getElementById(focus.cardId)?.querySelector<HTMLElement>(focus.selector)?.focus();
+  });
+  const characterCards = film.characters.map((c) => `character-${c.id}`);
+  const sceneCards = film.scenes.map((s) => `scene-${s.id}`);
+  const allCharactersEditing = characterCards.length > 0 && characterCards.every(isEditing);
+  const allScenesEditing = sceneCards.length > 0 && sceneCards.every(isEditing);
   return (
-    <section className="panel cutting-panel">
+    <section className="panel cutting-panel" onMouseDown={keepFocus}>
       <div className="section-title">
         <div>
           <h2>Your film, ready to shape</h2>
@@ -603,15 +698,27 @@ export function CuttingStep({
             Give the ancestor relationships, community, and a life beyond the frame.
           </span>
         </div>
+        <div className="action-group">
+        {film.characters.length > 0 && (
+          <button
+            className="button secondary small section-mode"
+            aria-label={allCharactersEditing ? "Done editing all characters" : "Edit all characters"}
+            onClick={once((control) => setSectionMode(characterCards, !allCharactersEditing, control))}
+          >
+            {allCharactersEditing ? <Check size={15} /> : <Pencil size={15} />}
+            {allCharactersEditing ? "Done editing" : "Edit all"}
+          </button>
+        )}
         <button
           className="button secondary small"
           disabled={!!busy}
-          onClick={() =>
+          onClick={() => {
+            const id = crypto.randomUUID();
             update({
               characters: [
                 ...film.characters,
                 {
-                  id: crypto.randomUUID(),
+                  id,
                   name: "",
                   role: "Supporting character",
                   description: "",
@@ -619,16 +726,33 @@ export function CuttingStep({
                   sourceIds: [],
                 },
               ],
-            })
-          }
+            });
+            setCardMode(`character-${id}`, true);
+          }}
         >
           <Plus size={15} />
           Add character
         </button>
+        </div>
       </div>
       <div className="cast-grid">
-        {film.characters.map((character) => (
-          <article className="cast-card" key={character.id}>
+        {film.characters.map((character, index) => {
+          const cardId = `character-${character.id}`;
+          const edit = isEditing(cardId);
+          const photo = referencePhotos.find((source) => source.id === character.referencePhotoId);
+          // The mode button keeps its place in both modes, and nothing else stands beside it.
+          const modeButton = (
+            <button
+              className="button secondary small card-mode"
+              aria-label={`${edit ? "Done editing" : "Edit"} ${character.name || `character ${index + 1}`}`}
+              onClick={once(() => setCardMode(cardId, !edit))}
+            >
+              {edit ? <Check size={15} /> : <Pencil size={15} />}
+              {edit ? "Done" : "Edit"}
+            </button>
+          );
+          return (
+          <article className={`cast-card ${edit ? "editing" : ""}`} key={character.id} id={cardId}>
             <div className="cast-card-heading">
               <span className={`basis-tag ${character.basis}`}>
                 {character.basis === "documented"
@@ -637,23 +761,21 @@ export function CuttingStep({
                     ? "Inferred · review"
                     : "Invented · dramatization"}
               </span>
-              <button
-                className="icon-button"
-                aria-label={`Remove ${character.name || "character"}`}
-                disabled={!!busy}
-                onClick={() =>
-                  update({
-                    characters: film.characters.filter((c) => c.id !== character.id),
-                    scenes: film.scenes.map((s) => ({
-                      ...s,
-                      characterIds: s.characterIds.filter((id) => id !== character.id),
-                    })),
-                  })
-                }
-              >
-                <X size={15} />
-              </button>
+              <div className="action-group">{modeButton}</div>
             </div>
+            {!edit && (
+              <>
+                <h4>{readValue(character.name, "Unnamed character")}</h4>
+                <p className="cast-role">
+                  {readValue(character.role, "Role or relationship: not added yet")}
+                </p>
+                <p className="cast-description">
+                  {readValue(character.description, "Character, appearance & motivation: not added yet")}
+                </p>
+              </>
+            )}
+            {edit && (
+            <>
             <label>
               Name
               <input
@@ -678,6 +800,21 @@ export function CuttingStep({
                 }
               />
             </label>
+            </>
+            )}
+            {/* One block in both modes, so the missing-photo alert is the same element
+                before and after a mode change and is announced once. */}
+            <div className="cast-photo-block">
+            {!edit && photo && (
+              <div className="cast-read-photo">
+                <SourceThumb source={photo} />
+                <p>
+                  <span className="read-label">Appearance reference photo</span>
+                  {photo.name}
+                </p>
+              </div>
+            )}
+            {edit && (
             <div className="cast-photo">
             <label>
               Appearance reference photo
@@ -701,9 +838,18 @@ export function CuttingStep({
               Add known identity and age details in the description above. Review generated scenes for likeness.</p>
             {character.referencePhotoId && referencePhotos.find(source => source.id === character.referencePhotoId) &&
               <SourceThumb source={referencePhotos.find(source => source.id === character.referencePhotoId)!} />}
+            </div>
+            )}
             {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId) &&
               <p className="feedback error" role="alert">Restore the selected photo or choose a replacement before preparing production.</p>}
             </div>
+            {!edit && (
+              <p className="field-note">
+                Evidence for this character · {character.sourceIds.length} sources
+              </p>
+            )}
+            {edit && (
+            <>
             <label>
               Basis
               <select
@@ -741,8 +887,30 @@ export function CuttingStep({
                 </label>
               ))}
             </details>
+            <div className="cast-card-foot">
+              <button
+                className="icon-button"
+                aria-label={`Remove ${character.name || "character"}`}
+                disabled={!!busy}
+                onClick={() =>
+                  update({
+                    characters: film.characters.filter((c) => c.id !== character.id),
+                    scenes: film.scenes.map((s) => ({
+                      ...s,
+                      characterIds: s.characterIds.filter((id) => id !== character.id),
+                    })),
+                  })
+                }
+              >
+                <Trash2 size={16} />
+              </button>
+              {modeButton}
+            </div>
+            </>
+            )}
           </article>
-        ))}
+          );
+        })}
       </div>
       {!film.characters.length && (
         <p className="field-note empty-note">
@@ -827,8 +995,20 @@ export function CuttingStep({
       </div>
       <div className="script-section">
       <div className="section-subtitle">
-        <h3>Script & scene direction <span className="count-tag">{film.scenes.length}</span></h3>
-        <span>Every word and scene is editable</span>
+        <div>
+          <h3>Script & scene direction <span className="count-tag">{film.scenes.length}</span></h3>
+          <span>Every word and scene is editable</span>
+        </div>
+        {film.scenes.length > 0 && (
+          <button
+            className="button secondary small section-mode"
+            aria-label={allScenesEditing ? "Done editing all scenes" : "Edit all scenes"}
+            onClick={once((control) => setSectionMode(sceneCards, !allScenesEditing, control))}
+          >
+            {allScenesEditing ? <Check size={15} /> : <Pencil size={15} />}
+            {allScenesEditing ? "Done editing" : "Edit all"}
+          </button>
+        )}
       </div>
       {!film.scenes.length ? (
         <div className="empty-inline">
@@ -841,12 +1021,84 @@ export function CuttingStep({
         </div>
       ) : (
         <div className="scene-list">
-          {film.scenes.map((scene, i) => (
-            <article className="scene-card" key={scene.id} id={`scene-${scene.id}`}>
+          {film.scenes.map((scene, i) => {
+            const cardId = `scene-${scene.id}`;
+            const edit = isEditing(cardId);
+            const sceneCast = film.characters.filter((c) => scene.characterIds.includes(c.id));
+            const moveEarlier = (
+              <button
+                className="icon-button"
+                aria-label={`Move scene ${i + 1} earlier`}
+                disabled={i === 0 || !!busy}
+                onClick={() => {
+                  const scenes = [...film.scenes];
+                  [scenes[i - 1], scenes[i]] = [scenes[i], scenes[i - 1]];
+                  update({ scenes });
+                  notify("Scene moved earlier.");
+                }}
+              >
+                <ArrowUp size={16} />
+              </button>
+            );
+            return (
+            <article className={`scene-card ${edit ? "editing" : ""}`} key={scene.id} id={`scene-${scene.id}`}>
               <div className="scene-index">
                 {String(i + 1).padStart(2, "0")}
                 <small>{formatDuration((i * film.duration) / film.scenes.length)}</small>
               </div>
+              {!edit && (
+                <div className="scene-content">
+                  <div className="scene-heading">
+                    <h4>{readValue(scene.title, "Scene title: not added yet")}</h4>
+                    <div className="action-group">
+                      {moveEarlier}
+                      <button
+                        className="button secondary small card-mode"
+                        aria-label={`Edit scene ${i + 1}`}
+                        onClick={once(() => setCardMode(cardId, true))}
+                      >
+                        <Pencil size={15} />
+                        Edit
+                      </button>
+                    </div>
+                  </div>
+                  <dl className="scene-read">
+                    <div>
+                      <dt>Narration</dt>
+                      <dd>{readValue(scene.narration)}</dd>
+                    </div>
+                    <div>
+                      <dt>Visual direction & cinematography</dt>
+                      <dd>{readValue(scene.visual)}</dd>
+                    </div>
+                    <div>
+                      <dt>Dialogue</dt>
+                      <dd>{readValue(scene.dialogue)}</dd>
+                    </div>
+                    <div>
+                      <dt>Dramatization in this scene</dt>
+                      <dd>{readValue(scene.dramatization, "Review factual basis")}</dd>
+                    </div>
+                    <div>
+                      <dt>Characters in this scene</dt>
+                      <dd>
+                        {sceneCast.length
+                          ? sceneCast.map((c) => c.name || "Unnamed character").join(", ")
+                          : readValue(
+                              "",
+                              film.characters.length
+                                ? undefined
+                                : "Add characters above to connect them to this scene.",
+                            )}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="field-note">
+                    Source evidence & reference images · {scene.sourceIds.length} sources
+                  </p>
+                </div>
+              )}
+              {edit && (
               <div className="scene-content">
                 <label>
                   Scene title
@@ -949,19 +1201,7 @@ export function CuttingStep({
                     {scene.dramatization ? "Dramatization noted" : "Review factual basis"}
                   </span>
                   <div className="action-group">
-                    <button
-                      className="icon-button"
-                      aria-label={`Move scene ${i + 1} earlier`}
-                      disabled={i === 0 || !!busy}
-                      onClick={() => {
-                        const scenes = [...film.scenes];
-                        [scenes[i - 1], scenes[i]] = [scenes[i], scenes[i - 1]];
-                        update({ scenes });
-                        notify("Scene moved earlier.");
-                      }}
-                    >
-                      <ArrowUp size={16} />
-                    </button>
+                    {moveEarlier}
                     <button
                       className="icon-button"
                       aria-label={`Remove scene ${i + 1}`}
@@ -972,22 +1212,33 @@ export function CuttingStep({
                     >
                       <Trash2 size={16} />
                     </button>
+                    <button
+                      className="button secondary small card-mode"
+                      aria-label={`Done editing scene ${i + 1}`}
+                      onClick={once(() => setCardMode(cardId, false))}
+                    >
+                      <Check size={15} />
+                      Done
+                    </button>
                   </div>
                 </div>
               </div>
+              )}
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
       <button
         className="text-button add-scene"
         disabled={!!busy}
-        onClick={() =>
+        onClick={() => {
+          const id = crypto.randomUUID();
           update({
             scenes: [
               ...film.scenes,
               {
-                id: crypto.randomUUID(),
+                id,
                 title: "A new chapter",
                 narration: "",
                 visual: "",
@@ -997,8 +1248,9 @@ export function CuttingStep({
                 dramatization: "",
               },
             ],
-          })
-        }
+          });
+          setCardMode(`scene-${id}`, true);
+        }}
       >
         <Plus size={15} />
         Add a scene

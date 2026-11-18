@@ -13,6 +13,11 @@ import { startLibraryRefresh } from "./library-refresh";
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "The film library could not complete this action. Please refresh.";
+// How the page is scrolled to something: not animated when reduced motion is requested.
+const scrolling = (): ScrollBehavior => typeof window !== "undefined" && typeof window.matchMedia === "function"
+  && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+const inPanel = (at: string) => /^(status|detail|version):/.test(at);
+type Line = "message" | "error" | "busy";
 function resumablePayment(detail: LibraryDetail | null) {
   if (!detail?.manifest || !detail.entry.production.needsAttention
     || !["prepared", "queued", "submitting", "processing", "uncertain"].includes(detail.entry.production.status)) return null;
@@ -85,12 +90,21 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  // Where each line is shown: a saved film's key (its card), "draft:<id>" (a browser draft's card), a place in
+  // the open film status panel ("status:", "detail:" or "version:" plus the film's key), or "" for the top.
+  const [busyAt, setBusyAt] = useState("");
+  const [errorAt, setErrorAt] = useState("");
+  const [messageAt, setMessageAt] = useState("");
+  const [revealed, setRevealed] = useState<{ line: Line; count: number }>({ line: "message", count: 0 });
+  // Ask for a line to be brought into view once it is rendered (see the effect below).
+  const reveal = (line: Line) => setRevealed(current => ({ line, count: current.count + 1 }));
   const [reload, setReload] = useState(0);
   const [detail, setDetail] = useState<LibraryDetail | null>(null);
   const [libraryHash, setLibraryHash] = useState(() => typeof window === "undefined" ? "" : window.location.hash);
   const [playing, setPlaying] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const detailPanel = useRef<HTMLElement>(null);
+  const messageLine = useRef<HTMLParagraphElement>(null), errorLine = useRef<HTMLParagraphElement>(null), busyLine = useRef<HTMLParagraphElement>(null);
   const dialog = useRef<HTMLDialogElement>(null), lock = useRef(false), mounted = useRef(false), sequence = useRef(0);
   const detailSequence = useRef(0);
   const automaticallyOpenedPlayer = useRef("");
@@ -112,21 +126,21 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       .then(page => { if (request === sequence.current) {
         setEntries(page.entries); setCursor(page.cursor); pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
       } })
-      .catch(cause => { if (request === sequence.current) setError(errorText(cause)); })
+      .catch(cause => { if (request === sequence.current) { setErrorAt(""); setError(errorText(cause)); } })
       .finally(() => { if (request === sequence.current) setLoading(false); });
   }, [view, reload]);
   useEffect(() => {
     const request = ++detailSequence.current;
     if (!linkedFilm) {
       lock.current = false; setDetail(null); setPlaying(""); setBusy("");
-      if (libraryHash.startsWith("#library?")) setError("This film link is invalid. Choose a saved film from your library.");
+      if (libraryHash.startsWith("#library?")) { setErrorAt(""); setError("This film link is invalid. Choose a saved film from your library."); }
       return;
     }
     let cancelled = false;
-    lock.current = true; setBusy("Opening your film status…"); setError(""); setDetail(null); setPlaying("");
+    lock.current = true; setBusyAt(""); setBusy("Opening your film status…"); setError(""); setDetail(null); setPlaying("");
     void loadLibraryLinkedFilm(libraryHash, api)
       .then(value => { if (!cancelled && request === detailSequence.current) setDetail(value); })
-      .catch(() => { if (!cancelled && request === detailSequence.current) setError("This saved film could not be opened. It may be unavailable or belong to another account. Sign in to the account that purchased it, or refresh to try again."); })
+      .catch(() => { if (!cancelled && request === detailSequence.current) { setErrorAt(""); setError("This saved film could not be opened. It may be unavailable or belong to another account. Sign in to the account that purchased it, or refresh to try again."); reveal("error"); } })
       .finally(() => { if (!cancelled && request === detailSequence.current) { lock.current = false; setBusy(""); } });
     return () => { cancelled = true; lock.current = false; };
   }, [linkedFilm, libraryHash, reload]);
@@ -147,7 +161,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
             setEntries(page.entries); setCursor(page.cursor); setError("");
             pageCursors.current = page.cursors; loadedPageCount.current = page.pageCount;
           }
-        } catch { if (!cancelled && request === sequence.current) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh films to try again."); }
+        } catch { if (!cancelled && request === sequence.current) { setErrorAt(""); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh films to try again."); } }
         finally { backgroundRead.current = false; }
       },
     });
@@ -157,7 +171,14 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     if (confirmation && dialog.current && !dialog.current.open) dialog.current.showModal();
   }, [confirmation]);
   useEffect(() => {
-    if (detail) { detailPanel.current?.focus({ preventScroll: true }); detailPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    // The line an action has just produced can be out of sight: under an action row at the foot of the window,
+    // at the head of the status panel, or at the top of the library when its card has left the view.
+    // Bring it into view without moving focus; no animated scrolling when reduced motion is requested.
+    if (!revealed.count || typeof window === "undefined") return;
+    ({ message: messageLine, error: errorLine, busy: busyLine })[revealed.line].current?.scrollIntoView({ behavior: scrolling(), block: "nearest" });
+  }, [revealed]);
+  useEffect(() => {
+    if (detail) { detailPanel.current?.focus({ preventScroll: true }); detailPanel.current?.scrollIntoView({ behavior: scrolling(), block: "start" }); }
   }, [detail?.entry.kind, detail?.entry.id]);
   useEffect(() => {
     if (!detail) { automaticallyOpenedPlayer.current = ""; return; }
@@ -167,7 +188,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     // redirect or a status refresh. A customer can then close it normally.
     automaticallyOpenedPlayer.current = key;
     setPlaying(key);
-    detailPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    detailPanel.current?.scrollIntoView({ behavior: scrolling(), block: "start" });
   }, [detail]);
   useEffect(() => {
     if (!detail || disabled || busy || playing || confirmation) return;
@@ -182,7 +203,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           setError("");
           setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
         }
-      } catch { if (!cancelled) setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); }
+      } catch { if (!cancelled) { setErrorAt(`detail:${libraryKey(expected)}`); setError("Film status could not be refreshed. Your last confirmed status is shown. Use Refresh film status to try again."); } }
       finally { backgroundRead.current = false; }
     };
     const stop = startLibraryRefresh({ intervalMs: libraryRefreshDelay([expected], 30_000),
@@ -195,34 +216,35 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   async function loadMore() {
     if (!cursor || lock.current || loading || disabled) return;
     const next = cursor, request = sequence.current;
-    lock.current = true; setBusy("Loading more films…"); setError("");
+    lock.current = true; setBusyAt(""); setBusy("Loading more films…"); setError("");
     try {
       if (pageCursors.current.has(next)) throw new Error("The next library page could not be verified. Refresh the library to continue.");
       const page = normalizeLibraryPage(await api<unknown>(`/api/library?view=${view}&cursor=${encodeURIComponent(next)}`), view);
       if (request === sequence.current) {
         pageCursors.current.add(next); loadedPageCount.current++; setEntries(current => mergeLibraryPages(current, page.entries)); setCursor(page.cursor);
       }
-    } catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    } catch (cause) { if (mounted.current) { setErrorAt(""); setError(errorText(cause)); } }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
-  async function openDetail(entry: LibraryEntry) {
+  async function openDetail(entry: LibraryEntry, at = libraryKey(entry)) {
     if (lock.current || disabled) return;
     const request = ++detailSequence.current;
-    lock.current = true; setBusy("Opening your saved version…"); setError("");
+    lock.current = true; setBusyAt(at); setBusy("Opening your saved version…"); setError(""); reveal("busy");
     try {
       const value = await api<unknown>(`/api/library?action=detail&kind=${entry.kind}&id=${encodeURIComponent(entry.id)}`);
       const verified = await verifyLibraryDetail(value, entry);
       if (mounted.current && request === detailSequence.current) {
+        if (libraryKey(verified.entry) !== detailKey) leavePanel();
         setDetail(verified); setPlaying("");
         setEntries(current => current.map(saved => libraryKey(saved) === libraryKey(verified.entry) ? verified.entry : saved));
       }
-    } catch (cause) { if (mounted.current && request === detailSequence.current) setError(errorText(cause)); }
+    } catch (cause) { if (mounted.current && request === detailSequence.current) { setErrorAt(at); setError(errorText(cause)); reveal("error"); } }
     finally { if (mounted.current && request === detailSequence.current) { lock.current = false; setBusy(""); } }
   }
   async function confirmAction() {
     if (!confirmation || lock.current || disabled) return;
-    const selected = confirmation;
-    lock.current = true; setBusy(`${actions[selected.action]}…`); setError("");
+    const selected = confirmation, at = selected.entry ? libraryKey(selected.entry) : selected.draft ? `draft:${selected.draft.id}` : "";
+    lock.current = true; setBusyAt(at); setBusy(`${actions[selected.action]}…`); setError("");
     try {
       if (selected.entry) {
         const value = await api<unknown>("/api/library", libraryActionRequest(selected.entry, selected.action));
@@ -230,16 +252,18 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         if (mounted.current) { setEntries(current => current.filter(entry => libraryKey(entry) !== libraryKey(changed))); setDetail(null); setPlaying(""); }
       } else if (selected.draft) onLocalAction(selected.draft.id, selected.action);
       if (mounted.current) {
+        // The card leaves this view, so its confirmation is shown at the top and brought into view.
+        setMessageAt(""); reveal("message");
         setMessage(selected.action === "restore" ? "Film restored to your library." : selected.action === "archive" ? "Film archived. You can restore it from Archived." : "Film moved to Trash. You can restore it at any time.");
         dialog.current?.close(); setConfirmation(null);
       }
-    } catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    } catch (cause) { if (mounted.current) { setErrorAt(at); setError(errorText(cause)); } }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
   async function resumePaidFilm() {
     const payment = resumablePayment(detail);
     if (!detail || !payment || lock.current || disabled || productionAvailable !== true) return;
-    const expected = detail.entry, request = ++detailSequence.current;
+    const expected = detail.entry, request = ++detailSequence.current, at = libraryKey(expected);
     const isCurrent = () => mounted.current && request === detailSequence.current;
     const refreshDetail = async () => verifyLibraryDetail(await api<unknown>(
       `/api/library?action=detail&kind=${expected.kind}&id=${encodeURIComponent(expected.id)}`), expected);
@@ -248,7 +272,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       setDetail(value);
       setEntries(current => current.map(entry => libraryKey(entry) === libraryKey(value.entry) ? value.entry : entry));
     };
-    lock.current = true; setBusy("Resuming your paid film…"); setError(""); setMessage("");
+    lock.current = true; setBusyAt(`detail:${at}`); setBusy("Resuming your paid film…"); setError(""); setMessage(""); reveal("busy");
     try {
       // Revalidate the exact stored manifest and payment before resuming it.
       const latest = await refreshDetail();
@@ -266,30 +290,91 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       }
       const refreshed = await refreshDetail();
       showDetail(refreshed);
-      if (isCurrent()) setMessage(libraryCanWatch(refreshed.entry)
-        ? "Your paid film is ready to watch."
-        : "Resume request completed. Follow this saved film's current production status below.");
-    } catch (cause) { if (isCurrent()) setError(errorText(cause)); }
+      if (isCurrent()) {
+        setMessageAt(`status:${at}`); reveal("message");
+        setMessage(libraryCanWatch(refreshed.entry)
+          ? "Your paid film is ready to watch."
+          : "Resume request completed. Follow this saved film's current production status below.");
+      }
+    } catch (cause) { if (isCurrent()) { setErrorAt(`detail:${at}`); setError(errorText(cause)); reveal("error"); } }
     finally { if (isCurrent()) { lock.current = false; setBusy(""); } }
   }
   async function createVersion(entry: LibraryEntry) {
     if (lock.current || disabled || !detail?.manifest || detail.entry.kind !== "plan"
       || libraryKey(detail.entry) !== libraryKey(entry)) return;
-    lock.current = true; setBusy("Creating a separate draft…"); setError(""); setMessage("");
+    lock.current = true; setBusyAt(`version:${libraryKey(entry)}`); setBusy("Creating a separate draft…"); setError(""); setMessage(""); reveal("busy");
     try { await onCreateVersion(entry); }
-    catch (cause) { if (mounted.current) setError(errorText(cause)); }
+    catch (cause) { if (mounted.current) { setErrorAt(`version:${libraryKey(entry)}`); setError(errorText(cause)); reveal("error"); } }
     finally { lock.current = false; if (mounted.current) setBusy(""); }
   }
   const blocked = disabled || Boolean(busy);
   const resumePayment = resumablePayment(detail);
   const drafts = projects.filter(project => localLibraryState(project) === view);
-  const closeConfirmation = () => { if (!busy) { dialog.current?.close(); setConfirmation(null); } };
+  // An error shown in the dialog moves to its film's card when the dialog closes: bring it into view there.
+  const leaveConfirmation = () => { setConfirmation(null); if (error) reveal("error"); };
+  const closeConfirmation = () => { if (!busy) { dialog.current?.close(); leaveConfirmation(); } };
   const openConfirmation = (value: Confirmation) => { if (!blocked) { setError(""); setConfirmation(value); } };
-  const closeDetail = () => {
+  // A line shown inside the status panel goes when the panel is closed or shows another film.
+  const leavePanel = () => { if (inPanel(messageAt)) setMessage(""); if (inPanel(errorAt)) setError(""); };
+  const closeDetail = (returnToCard = false) => {
     detailSequence.current++;
+    leavePanel();
+    if (returnToCard && detail && typeof document !== "undefined") {
+      // Back to the card the panel belongs to: focus its first action ("View film status") and keep the card in view.
+      const card = document.getElementById(`film-${detail.entry.kind}-${detail.entry.id}`)?.closest("article");
+      card?.querySelector<HTMLElement>(".film-library-actions button")?.focus({ preventScroll: true });
+      card?.scrollIntoView({ behavior: scrolling(), block: "nearest" });
+    }
     setDetail(null); setPlaying("");
     if (linkedFilm) { window.history.replaceState(null, "", "#library"); setLibraryHash("#library"); }
   };
+  const detailKey = detail ? libraryKey(detail.entry) : "";
+  // A line whose card is not on the page (another view, a removed card) is shown at the top. A line that was
+  // shown inside the status panel is not shown anywhere once that panel is gone.
+  const places = new Set([...entries.map(entry => libraryKey(entry)), ...drafts.map(draft => `draft:${draft.id}`),
+    ...(detail ? [`status:${detailKey}`, `detail:${detailKey}`, `version:${detailKey}`] : [])]);
+  const placed = (at: string) => places.has(at) ? at : inPanel(at) ? "closed" : "";
+  const attached = places.has(detailKey);
+  const busyPlace = placed(busyAt), errorPlace = placed(errorAt), messagePlace = placed(messageAt);
+  const notices = (at: string) => {
+    const done = Boolean(message) && messagePlace === at, failed = Boolean(error) && !confirmation && errorPlace === at, working = Boolean(busy) && busyPlace === at;
+    const lines = <>
+      {done && <p ref={messageLine} className="feedback success" role="status">{message}</p>}
+      {failed && <p ref={errorLine} className="feedback error" role="alert">{error}</p>}
+      {working && <p ref={busyLine} role="status"><Loader2 className="spin" size={16} aria-hidden="true" /> {busy}</p>}
+    </>;
+    return at ? (done || failed || working) && <div className="film-library-notices">{lines}</div> : lines;
+  };
+  // The film status panel sits in the card list, directly under its film's card. Its key keeps the same
+  // element, and so the player and focus, wherever the list places it. Under its card it is marked as attached
+  // (the notch that points at the card) and its headings rank below the card's own heading.
+  const detailSection = detail && <section key="detail" ref={detailPanel} tabIndex={-1} className={`panel film-library-detail${attached ? " film-library-detail-attached" : ""}`} aria-labelledby="saved-film-detail-heading">
+    <div className="section-title"><div><h2 id="saved-film-detail-heading" aria-level={attached ? 4 : undefined}>Film status: {detail.entry.title || "Untitled family film"}</h2>
+      <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
+      <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={() => closeDetail(true)}><X size={18} /></button></div>
+    {notices(`status:${detailKey}`)}
+    <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
+    {resumePayment && <p className="field-note">Resume production using this saved screenplay and its existing payment.</p>}
+    <div className="action-group film-library-actions">
+      {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true}
+        onClick={() => void resumePaidFilm()}><RotateCcw size={15} aria-hidden="true" />Resume paid film</button>}
+      {libraryCanWatch(detail.entry) && <>
+        <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
+        <a className="text-button" href={detail.entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
+      </>}
+      <button type="button" className="text-button" disabled={blocked} onClick={() => void openDetail(detail.entry, `detail:${detailKey}`)}><RefreshCw size={15} aria-hidden="true" />Refresh film status</button>
+    </div>
+    {notices(`detail:${detailKey}`)}
+    {playing === `detail:${libraryKey(detail.entry)}` && libraryCanWatch(detail.entry) && <video controls playsInline preload="metadata" src={detail.entry.mediaUrl} aria-label={`${detail.entry.title || "Family film"} player`}
+      onError={() => { setErrorAt(`detail:${detailKey}`); setError("This film could not be played. Refresh its status or try the download."); reveal("error"); }} />}
+    <p className="field-note">Payment and production status are checked when you return here and while this page is open. A watch link appears only when your video is ready.</p>
+    <p className="field-note">This saved version is separate from any edits in your browser draft.</p>
+    {detail.scenes?.map((scene, index) => <article className="film-library-scene" key={index}><h3 aria-level={attached ? 5 : undefined}>{index + 1}. {scene.title || "Scene"}</h3>
+      {scene.narration && <p><strong>Narration:</strong> {scene.narration}</p>}{scene.visual && <p><strong>Visual:</strong> {scene.visual}</p>}{scene.dialogue && <p><strong>Dialogue:</strong> {scene.dialogue}</p>}</article>)}
+    {detail.manifest && <button type="button" className="button secondary small" onClick={() => downloadPlan(detail)}><Download size={15} aria-hidden="true" />Download saved plan</button>}
+    <SavedPlanVersionAction detail={detail} disabled={blocked} onCreateVersion={createVersion} />
+    {notices(`version:${detailKey}`)}
+  </section>;
   return <div className="film-library">
     <div className="page-heading"><div><h1>Your film library</h1><p>Your saved films, production progress, and drafts in one place.</p></div>
       <button type="button" className="button primary" disabled={blocked} onClick={onCreate}><Plus size={17} aria-hidden="true" />Create film</button>
@@ -300,19 +385,17 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         disabled={blocked} onClick={() => { closeDetail(); setView(item); setMessage(""); }}>{item === "active" ? "My films" : item === "archived" ? "Archived" : "Trash"}</button>)}</nav>
       <button type="button" className="text-button" disabled={blocked || loading} onClick={() => setReload(value => value + 1)}><RefreshCw size={15} aria-hidden="true" />Refresh films</button>
     </div>
-    {message && <p className="feedback success" role="status">{message}</p>}
-    {error && !confirmation && <p className="feedback error" role="alert">{error}</p>}
-    {busy && <p role="status"><Loader2 className="spin" size={16} aria-hidden="true" /> {busy}</p>}
+    {notices("")}
     {view !== "active" && <p className="field-note">{view === "trash" ? "Nothing here is permanently deleted." : "Archived films stay in your account."} Active production continues, and payment records are retained. Restore returns a film to My films.</p>}
     {view === "active" && <LtxFilmLibrary />}
     <section aria-labelledby="saved-films-heading" aria-busy={loading}>
       <div className="section-title"><div><h2 id="saved-films-heading">Saved to your account</h2><p>Each card is a saved version. Its payment and production status are shown separately.</p></div></div>
       {loading && <p role="status"><Loader2 className="spin" size={20} aria-hidden="true" />Loading your saved films…</p>}
       {!loading && !entries.length && !error && <p className="film-library-empty"><FilmIcon size={22} aria-hidden="true" />{cursor ? "No films in this part of the list. Load more to continue." : view === "active" ? "No saved films yet. Create a film, or continue a browser draft below." : "No saved films in this view."}</p>}
-      <div className="library-list">{entries.map(entry => {
+      <div className="library-list">{[...entries.flatMap(entry => {
         const key = libraryKey(entry), local = projects.find(project => project.id === entry.filmId && localLibraryState(project) === "active");
         const isPlaying = playing === key;
-        return <article className="library-item film-library-item" key={key} aria-labelledby={`film-${entry.kind}-${entry.id}`}>
+        return [<article className="library-item film-library-item" key={key} aria-labelledby={`film-${entry.kind}-${entry.id}`}>
           <div className="library-art"><FilmIcon size={27} strokeWidth={1.2} aria-hidden="true" /></div>
           <div className="film-library-content"><h3 id={`film-${entry.kind}-${entry.id}`}>{entry.title || "Untitled family film"}</h3>
             <p>{formatDuration(entry.durationSeconds)}{entry.kind === "plan" ? " target" : " runtime"} · {entry.origin === "studio-delivery" ? "Delivered to your library" : "Saved"} {new Date(entry.createdAt).toLocaleString()}</p>
@@ -328,37 +411,14 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
               {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ entry, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore</button>}
               {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ entry, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move to trash</button>}
             </div>
+            {notices(key)}
             {isPlaying && libraryCanWatch(entry) && <video controls playsInline preload="metadata" src={entry.mediaUrl} aria-label={`${entry.title || "Family film"} player`}
-              onError={() => setError("This film could not be played. Refresh its status or try the download.")} />}
+              onError={() => { setErrorAt(key); setError("This film could not be played. Refresh its status or try the download."); reveal("error"); }} />}
           </div>
-        </article>;
-      })}</div>
+        </article>, key === detailKey && detailSection];
+      }), !attached && detailSection]}</div>
       {cursor && <button type="button" className="button secondary film-library-more" disabled={blocked || loading} onClick={() => void loadMore()}>Load more saved films</button>}
     </section>
-    {detail && <section ref={detailPanel} tabIndex={-1} className="panel film-library-detail" aria-labelledby="saved-film-detail-heading">
-      <div className="section-title"><div><h2 id="saved-film-detail-heading">Film status: {detail.entry.title || "Untitled family film"}</h2>
-        <p>{formatDuration(detail.entry.durationSeconds)} {detail.entry.kind === "plan" ? "target" : "runtime"} · Saved {new Date(detail.entry.createdAt).toLocaleString()}</p></div>
-        <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={closeDetail}><X size={18} /></button></div>
-      <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
-      {resumePayment && <p className="field-note">Resume production using this saved screenplay and its existing payment.</p>}
-      <div className="action-group film-library-actions">
-        {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true}
-          onClick={() => void resumePaidFilm()}><RotateCcw size={15} aria-hidden="true" />Resume paid film</button>}
-        {libraryCanWatch(detail.entry) && <>
-          <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
-          <a className="text-button" href={detail.entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
-        </>}
-        <button type="button" className="text-button" disabled={blocked} onClick={() => void openDetail(detail.entry)}><RefreshCw size={15} aria-hidden="true" />Refresh film status</button>
-      </div>
-      {playing === `detail:${libraryKey(detail.entry)}` && libraryCanWatch(detail.entry) && <video controls playsInline preload="metadata" src={detail.entry.mediaUrl} aria-label={`${detail.entry.title || "Family film"} player`}
-        onError={() => setError("This film could not be played. Refresh its status or try the download.")} />}
-      <p className="field-note">Payment and production status are checked when you return here and while this page is open. A watch link appears only when your video is ready.</p>
-      <p className="field-note">This saved version is separate from any edits in your browser draft.</p>
-      {detail.scenes?.map((scene, index) => <article className="film-library-scene" key={index}><h3>{index + 1}. {scene.title || "Scene"}</h3>
-        {scene.narration && <p><strong>Narration:</strong> {scene.narration}</p>}{scene.visual && <p><strong>Visual:</strong> {scene.visual}</p>}{scene.dialogue && <p><strong>Dialogue:</strong> {scene.dialogue}</p>}</article>)}
-      {detail.manifest && <button type="button" className="button secondary small" onClick={() => downloadPlan(detail)}><Download size={15} aria-hidden="true" />Download saved plan</button>}
-      <SavedPlanVersionAction detail={detail} disabled={blocked} onCreateVersion={createVersion} />
-    </section>}
     <section aria-labelledby="browser-drafts-heading" className="film-library-drafts"><div className="section-title"><div>
       <h2 id="browser-drafts-heading">Browser drafts</h2><p>These editable drafts and original source files are stored on this browser. They are not a backup of your account's saved versions.</p>
     </div></div>
@@ -376,11 +436,12 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
               <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "archive" })}><Archive size={14} aria-hidden="true" />Archive draft</button></>}
             {view !== "active" && <button type="button" className="text-button film-library-manage" disabled={blocked} onClick={() => openConfirmation({ draft, action: "restore" })}><RotateCcw size={14} aria-hidden="true" />Restore draft</button>}
             {view !== "trash" && <button type="button" className="text-button film-library-manage film-library-trash" disabled={blocked} onClick={() => openConfirmation({ draft, action: "trash" })}><Trash2 size={14} aria-hidden="true" />Move draft to trash</button>}
-          </div></div>
+          </div>
+          {notices(`draft:${draft.id}`)}</div>
       </article>; })}</div>
     </section>
     {confirmation && <dialog ref={dialog} className="film-library-dialog" data-action={confirmation.action} aria-labelledby="library-confirm-title" aria-describedby="library-confirm-description"
-      onCancel={event => { if (busy) event.preventDefault(); else setConfirmation(null); }}>
+      onCancel={event => { if (busy) event.preventDefault(); else leaveConfirmation(); }}>
       <h2 id="library-confirm-title">{actions[confirmation.action]} {confirmation.entry?.title || confirmation.draft?.title || "Untitled family film"}?</h2>
       <p id="library-confirm-description">{confirmation.action === "restore" ? "Return this item to My films." : confirmation.action === "archive" ? "Move this item to Archived. You can restore it at any time." : "Move this item to Trash. You can restore it at any time; nothing is permanently deleted."}
         {confirmation.draft ? " This changes this browser draft only." : " This changes the saved version's library location only."} Active production is not cancelled. Payment records are retained.</p>
