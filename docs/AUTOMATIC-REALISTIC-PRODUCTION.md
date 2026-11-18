@@ -28,7 +28,10 @@ The private worker runs every 15 seconds after its previous pass on the existing
 isolated Docker host. It holds only Blob, fal and a scoped worker secret; QuickBooks
 credentials remain in the web runtime. A worker heartbeat no older than three
 minutes, matching the Kling recipe and `deliveryChecksVersion: 1`, is required
-before a new price can be quoted. New invoices also require a fresh server-side
+before a new price can be quoted. Since October 22 (PR #74), plans with visual
+continuity also require `visualChecksVersion: 1`; since November 5,
+character-bound plans require a `characterBindingVersion` no lower than the
+plan's (3 for new plans; `api/_lib/fal-production.mjs`). New invoices also require a fresh server-side
 check of the saved plan and its accepted budget. Reused quote keys cannot silently
 change the accepted price. Keep the image pinned by
 digest in `/etc/lineage-worker/host.conf` and secrets in the mode-600 runtime file.

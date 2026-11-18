@@ -1,5 +1,7 @@
 # Film pricing and QuickBooks verification
 
+> **Status note, November 18, 2026:** The planning-rate fallback described below no longer prices customer films; a price requires a verified live fal quote (`api/_lib/film-pricing.mjs`). MagicLight is no longer the video provider. The `scripts/test-workflow-server.mjs` results below predate that pricing change; an offline audit on November 18, 2026 found the default, `--checkout-fixtures` and `--generation-review-fixture` `--check` modes failing against the current backend. The harness was repaired the same day and all four `--check` modes now pass and run in CI; its fictional plan is now priced from an in-process fal price list ($6.75, provider quote), not the $1.41 planning rate described below. The results below are historical. See the [current status](../README.md#current-status-november-18-2026).
+
 Prepared September 22, 2026. Source changes require approval before merging or deploying to production.
 
 ## Customer behavior

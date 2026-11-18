@@ -1,5 +1,7 @@
 # Automatic production after confirmed payment
 
+> **Status note, November 18, 2026:** The October 8 activation section below is superseded. Since October 20 (PR #63), new paid films are produced with Kling O3 Pro through fal on the self-hosted worker, not MagicLight ([automatic realistic production](AUTOMATIC-REALISTIC-PRODUCTION.md)). On October 23 a real $7.88 test payment was queued through this outbox 1.2 seconds after it was recognized, and its film was delivered about 18 minutes later (PR #74 and #75). No film has yet been delivered under the character-binding v3 pipeline that new plans use since November 5. See the [current status](../README.md#current-status-november-18-2026).
+
 This change connects a customer's explicit checkout consent to a durable production-start outbox. QuickBooks Accounting must confirm the saved invoice payment. Closing the browser does not lose the intent: the payment reconciliation schedule recovers an interrupted write, and the film-generation schedule attempts the queued start.
 
 The outbox accepts only live, captured, unreversed hosted-invoice orders with dated production consent, an approved current customer, and an unchanged private production manifest. Starting the existing production queue independently rechecks provider readiness, live payment and reversals, the exact paid budget, and the owning account. Its existing film identity prevents duplicate provider work during overlapping or repeated outbox processing. Receipt delivery and provider task polling can fail independently of scheduling.

@@ -12,13 +12,13 @@ The owner requested non-taxable invoices, delivery within 24 hours after payment
 
 ## Customer flow and records
 
-1. Prepare pricing saves the opted-in film plan and computes the fixed price from a verified provider quote or the saved planning rates plus markup. A later pricing change does not alter an existing invoice.
+1. Prepare pricing saves the opted-in film plan and computes the fixed price from a verified live provider quote plus markup. Planning rates no longer price customer films (`api/_lib/film-pricing.mjs`). A later pricing change does not alter an existing invoice.
 2. GET `checkoutConfiguration` reads saved availability. POST `prepareCheckout` may refresh the current accounting grant. Both return either `{available:false}` or a hosted method, environment, and delivery/refund terms. Neither creates an invoice.
 3. POST `quote` accepts the project, prepared reference, and idempotency key. It validates the saved preparation and returns the server-computed total, order identity, expiry, and policy snapshot. No client amount or account mapping is accepted.
 4. POST `checkoutCheck` obtains a short-lived one-use CAPTCHA proof for that account and quote. POST `checkout` accepts only the quote reference, idempotency key, proof, and explicit consent. The browser durably saves the order reference before this request.
 5. New production invoices require a fresh production quote and sufficient reserved provider credit before any accounting write. A private conditional-write ledger counts outstanding production commitments; a second live credit check runs immediately before the invoice claim. Configure the separate read-only `FAL_BILLING_KEY` and exact `FAL_BILLING_ACCOUNT` as described in [Production credit before payment](FAL-FUNDING.md). Missing or insufficient funding blocks the new invoice while keeping quotes and existing orders accessible.
 6. A durable claim precedes each customer/invoice write. The invoice uses one selected service line, the fixed USD total, the account email, and a generic Film production description. Family materials and the private film title are not included. Only a validated Intuit invoice link is returned. Unknown write results are retained for review and never automatically resubmitted.
-7. Customers open the payment page, then explicitly check payment status in Lineage Theatre. GET order/receipt reads stored records only; POST `checkPayment` reads the existing invoice and linked accounting Payment records. An invoice balance of zero alone does not confirm payment.
+7. Customers open the payment page. While Lineage Theatre's payment page stays open it checks status every 30 seconds, for at most 48 checks or 24 minutes, and the customer can also check explicitly; with the browser closed, the `/api/payment-reconcile` cron checks up to three saved orders each minute. GET order/receipt reads stored records only; POST `checkPayment` reads the existing invoice and linked accounting Payment records. An invoice balance of zero alone does not confirm payment.
 
 Production order identity is shared with the legacy flow and excludes the OAuth grant, preventing reconnection or switching payment methods from silently creating another order for the same film. Ownership, preparation, amount, currency, environment, item, and invoice/customer references must match. Expired quotes cannot create new invoices.
 
@@ -28,13 +28,13 @@ An expired funding-blocked request can obtain a fresh price only after an explic
 
 ## Confirmation and operational limits
 
-A matched accounting Payment is displayed as **Payment recorded by QuickBooks**. It may have been entered manually in QuickBooks; it is not independent processor capture or settlement evidence. Downloaded records preserve that distinction. Hosted accounting records do not authorize the legacy rendering adapter. No automatic video generation is activated by checkout setup.
+A matched accounting Payment is displayed as **Payment recorded by QuickBooks**. It may have been entered manually in QuickBooks; it is not independent processor capture or settlement evidence. Downloaded records preserve that distinction. Hosted accounting records do not authorize the legacy rendering adapter. Checkout setup alone starts no video generation; a confirmed payment with the customer's automatic-production consent queues the saved film ([automatic production](AUTOMATIC-PAID-PRODUCTION.md)).
 
 Refunds are managed in QuickBooks. Hosted invoice IDs and accounting Payment IDs must never be sent to the legacy card refund API. The application does not infer a refund from a changed invoice balance or claim that stored payment records reflect all later refunds. No duplicate journal entry or invoice is posted by the accounting export.
 
 The application never calls Invoice `/send`. QuickBooks can nevertheless email API-created invoices if its company-wide automatic imported-invoice setting is turned on; `EmailStatus: NotSet` alone does not prevent this. Keep the setting off. The owner acknowledgment records a reviewed setting, not continuous remote enforcement. Intuit documents automatic reminders as applying to invoices already emailed.
 
-Setup and mocked tests do not establish a live successful invoice payment, bank settlement, refund, or completed film. Verify each separately and do not use the merchant's own card to manufacture a sale. MagicLight generation remains unavailable until its supported API and actual output are verified.
+Setup and mocked tests do not establish a live successful invoice payment, bank settlement, refund, or completed film. Verify each separately and do not use the merchant's own card to manufacture a sale. New films are produced with Kling through fal; see the [current status](../README.md#current-status-november-18-2026) for what has been verified live.
 
 ## Official references
 

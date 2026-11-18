@@ -10,6 +10,10 @@
  * Owner review route proof: node scripts/test-workflow-server.mjs --generation-review-fixture --check
  * URL: http://127.0.0.1:5178
  * Route checks use an ephemeral loopback port so browser QA can remain open.
+ * CI runs all four --check modes (.github/workflows/deploy-pages.yml).
+ * Strictly offline: only loopback sockets may connect; fetch, UDP and remote
+ * DNS are refused. fal pricing, fal funding, the worker heartbeat and
+ * QuickBooks Accounting are in-process fakes driving the real services.
  * Customer: customer@example.invalid / Cedar lantern rivers wander
  * Owner fixture: erik@brocotech.ai / Copper forest windmills travel
  * Agreement QA: registration loads the real public agreement handler; edit it
@@ -19,10 +23,52 @@
  * All records disappear on exit. Browser fixture drafts stay on this local origin.
  */
 import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
+import net from "node:net";
+import dgram from "node:dgram";
+import dns from "node:dns";
+
+// Egress guard, installed before any application module loads. Every TCP or
+// TLS socket (node:http, node:https, node:net, node:tls, undici) passes through
+// net.Socket#connect; only loopback hosts and local IPC paths may connect.
+// UDP and non-loopback DNS lookups are refused too. Global fetch is replaced
+// below and refuses every request, loopback included.
+const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"]);
+const isLoopback = host => loopbackHosts.has(String(host ?? "localhost").replace(/^\[|\]$/g, "").toLowerCase());
+let blockedConnections = 0;
+const egressError = target => Object.assign(new Error(`Synthetic workflow server forbids outbound network access (${target}).`), { code: "SYNTHETIC_EGRESS_BLOCKED" });
+const realSocketConnect = net.Socket.prototype.connect;
+net.Socket.prototype.connect = function guardedConnect(...args) {
+  const first = Array.isArray(args[0]) ? args[0][0] : args[0];
+  const options = first && typeof first === "object" ? first : typeof first === "string" && !/^\d+$/.test(first) ? { path: first } : { host: typeof args[1] === "string" ? args[1] : undefined };
+  if (!options.path && !isLoopback(options.host)) {
+    blockedConnections++;
+    const error = egressError(String(options.host));
+    process.nextTick(() => this.destroy(error));
+    return this;
+  }
+  return realSocketConnect.apply(this, args);
+};
+for (const method of ["send", "connect"]) {
+  dgram.Socket.prototype[method] = function guardedDatagram() { blockedConnections++; throw egressError(`udp ${method}`); };
+}
+for (const target of [dns, dns.promises]) {
+  for (const name of Object.keys(target).filter(key => /^(?:lookup|lookupService|resolve\w*|reverse)$/.test(key))) {
+    const real = target[name];
+    target[name] = function guardedDns(host, ...rest) {
+      if (name === "lookup" && isLoopback(host)) return real.call(this, host, ...rest);
+      blockedConnections++;
+      const error = egressError(`dns ${name} ${host}`), callback = rest.findLast?.(value => typeof value === "function");
+      if (target === dns.promises) return Promise.reject(error);
+      if (callback) { process.nextTick(() => callback(error)); return undefined; }
+      throw error;
+    };
+  }
+}
 
 const HOST = "127.0.0.1";
 let PORT = 5178, origin = `http://${HOST}:${PORT}`;
@@ -36,7 +82,7 @@ if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new 
 
 // Remove inherited provider settings before importing application services.
 for (const name of Object.keys(process.env)) {
-  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|PAYMENT_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_)/.test(name)) delete process.env[name];
+  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|PAYMENT_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_|FAL_|KLING_|CRON_|RESEND_|SMTP_)/.test(name)) delete process.env[name];
 }
 process.env.LINEAGE_SESSION_SECRET = "synthetic-workflow-session-key-local-only-never-production";
 process.env.LINEAGE_MFA_ENCRYPTION_KEY = "cd".repeat(32);
@@ -47,16 +93,20 @@ globalThis.fetch = async () => {
   throw new Error("Synthetic workflow server forbids outbound fetch requests.");
 };
 
-const [{ createAuthHandler }, { createStudioHandler }, { createAdminHandler }, auth,
+const [{ createAuthHandler }, { createStudioHandler, connections: studioConnections }, { createAdminHandler }, auth,
   { OWNER_EMAIL }, { createFilmProductionService, fictionalOperatorProject, productionJobPath },
-  { createPaymentsService }, { productionReadiness }, securityHelpers, { parseRange },
-  { readPricingSettings }, { createFilmPricingService }] = await Promise.all([
+  { createPaymentsService }, securityHelpers, { parseRange },
+  { readPricingSettings }, { createFilmPricingService },
+  { createFalProductionAdapter, FAL_RECIPE_VERSION }, { FAL_MODELS }, { createFalFunding, FAL_FUNDING_PATH },
+  { createHostedCheckoutService, HOSTED_CHECKOUT_SETTINGS_PATH }, { createAutomaticProduction, automaticProductionPath }] = await Promise.all([
   import("../api/auth.mjs"), import("../api/studio.mjs"), import("../api/admin.mjs"),
   import("../api/_lib/auth.mjs"), import("../api/_lib/access.mjs"),
   import("../api/_lib/film-production.mjs"), import("../api/_lib/payments.mjs"),
-  import("../api/_lib/production.mjs"), import("../api/_lib/auth-security.mjs"),
+  import("../api/_lib/auth-security.mjs"),
   import("../api/_lib/archive.mjs"),
   import("../api/_lib/admin.mjs"), import("../api/_lib/film-pricing.mjs"),
+  import("../api/_lib/fal-production.mjs"), import("../api/_lib/fal-client.mjs"), import("../api/_lib/fal-funding.mjs"),
+  import("../api/_lib/hosted-checkout.mjs"), import("../api/_lib/automatic-production.mjs"),
 ]);
 const records = new Map();
 let revision = 0;
@@ -99,12 +149,127 @@ const limit = async (key, maximum, windowMs) => {
 const session = (req, allowSetup) => auth.getSession(req, allowSetup, { readRecordImpl: read, writeRecordImpl: write });
 const pricingSettings = () => readPricingSettings(read);
 const registrationPolicy = async () => (await read("settings/registration.json"))?.value || { approvalRequired: true, revision: 0, updatedAt: null, updatedBy: null };
-const connections = async () => ({ story: false, ...productionReadiness({ env: {}, pricingSettings: await pricingSettings() }),
-  connections: { ...productionReadiness({ env: {} }).connections,
-    story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } });
 const refuseProvider = async () => { throw new Error("Synthetic test cannot call an external provider."); };
-const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write });
+const listRecords = async ({ prefix, cursor, limit: size = 30 }) => {
+  const paths = [...records.keys()].filter(key => key.startsWith(prefix)).sort(), offset = Number(cursor || 0);
+  return { blobs: paths.slice(offset, offset + size).map(pathname => ({ pathname })), hasMore: offset + size < paths.length, cursor: String(offset + size) };
+};
+
+// Default and checkout modes price films exactly as production does since
+// 2026-10-18: the real Kling adapter, its live-rate check, the self-hosted
+// worker heartbeat and fal funding. Each of those is served here by an
+// in-process fake. The fake answers only the two fal read endpoints the
+// pricing and funding code use; it can never submit, poll or download.
+const syntheticProvider = !deliveryFixture && !generationReviewFixture;
+let syntheticFalReads = 0, syntheticFalBalanceCents = 10_000, syntheticWorkerReady = true;
+const syntheticFalBillingAccount = "synthetic-billing-account-local-only";
+const syntheticFalFetch = async (url, options = {}) => {
+  const target = new URL(url);
+  assert.equal(target.origin, "https://api.fal.ai", "The synthetic fal service answers only fal API reads.");
+  assert.equal(options.method ?? "GET", "GET");
+  syntheticFalReads++;
+  if (target.pathname === "/v1/models/pricing") {
+    assert.deepEqual(target.searchParams.getAll("endpoint_id"), [FAL_MODELS.kling, FAL_MODELS.reference]);
+    // The reviewed public list prices that api/_lib/fal-pricing.mjs accepts.
+    return new Response(JSON.stringify({ prices: [
+      { endpoint_id: FAL_MODELS.kling, currency: "USD", unit: "seconds", unit_price: 0.14 },
+      { endpoint_id: FAL_MODELS.reference, currency: "USD", unit: "images", unit_price: 0.15 } ] }), { status: 200 });
+  }
+  if (target.pathname === "/v1/account/billing" && target.searchParams.get("expand") === "credits")
+    return new Response(JSON.stringify({ username: syntheticFalBillingAccount,
+      credits: { currency: "USD", current_balance: syntheticFalBalanceCents / 100 } }), { status: 200 });
+  return new Response("{}", { status: 404 });
+};
+const syntheticFalAdapter = createFalProductionAdapter({ model: "kling", requireWorker: true, read, fetchImpl: syntheticFalFetch,
+  key: () => "synthetic-fal-key-local-only", client: { get: refuseProvider, poll: refuseProvider, submit: refuseProvider },
+  validateStartFrame: refuseProvider, verifyStartFrame: refuseProvider, normalizeReference: refuseProvider,
+  normalizeKlingReference: refuseProvider, selectedPhoto: refuseProvider });
+// Same record shape scripts/production-worker.mjs writes every cycle. Pricing
+// refuses a heartbeat older than three minutes, so it is refreshed while open.
+const writeWorkerHeartbeat = async (checkedAt = new Date()) => {
+  const previous = await read("production/worker-health.json");
+  await write("production/worker-health.json", { version: 1, ready: syntheticWorkerReady, model: "kling", recipe: FAL_RECIPE_VERSION,
+    referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, characterBindingVersion: 3,
+    checkedAt: checkedAt.toISOString(), syntheticFixture: { memoryOnly: true, workerRunning: false } }, previous?.etag);
+};
+if (syntheticProvider) {
+  await writeWorkerHeartbeat();
+  setInterval(() => { if (syntheticWorkerReady) void writeWorkerHeartbeat(); }, 60_000).unref();
+}
+const filmProduction = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write, ...(syntheticProvider ? { adapter: syntheticFalAdapter } : {}) });
 const filmPricing = createFilmPricingService({ filmProduction, pricingSettings, env: {} });
+// The studio's own readiness summary (production from the film service,
+// billing from the hosted checkout configuration) with story calls disabled.
+const connections = async (options = {}) => {
+  const ready = await studioConnections({ pricingSettings: await pricingSettings(), ...options, filmService: filmProduction, key: "", fetchImpl: refuseProvider });
+  return { ...ready, story: false, connections: { ...ready.connections,
+    story: { available: false, reason: "SYNTHETIC LOCAL TEST: story provider calls are disabled." } } };
+};
+
+// QuickBooks-hosted invoice checkout, the only customer checkout in
+// production, with the real service and an in-process Accounting fake. The
+// default mode leaves it unconfigured (billing disabled); --checkout-fixtures
+// configures a fictional production company so the whole paid path runs.
+const syntheticQuickBooksBinding = { environment: "production", grantId: "e".repeat(64), realmId: "9130000000000001" };
+const syntheticQuickBooks = { customers: new Map(), invoices: new Map(), payments: new Map(), invoiceRequests: new Map(), invoicePosts: 0, requests: 0 };
+const qbReply = (status, body) => new Response(JSON.stringify(body), { status });
+const syntheticQuickBooksTransport = {
+  binding: async () => structuredClone(syntheticQuickBooksBinding),
+  request: async (binding, operation) => {
+    assert.deepEqual(binding, syntheticQuickBooksBinding);
+    syntheticQuickBooks.requests++;
+    const { method, path } = operation;
+    if (method === "GET" && path === "/query" && operation.query?.entity === "Item")
+      return qbReply(200, { QueryResponse: { Item: [{ Id: "2", Name: "SYNTHETIC film production", Active: true, Type: "Service", Taxable: false }] } });
+    if (method === "GET" && path === "/item/2") return qbReply(200, { Item: { Id: "2", Name: "SYNTHETIC film production", Active: true, Type: "Service", Taxable: false } });
+    if (method === "GET" && path === "/query" && operation.query?.entity === "Customer")
+      return qbReply(200, { QueryResponse: { Customer: [...syntheticQuickBooks.customers.values()].filter(customer => customer.DisplayName === operation.query.where?.value) } });
+    if (method === "POST" && path === "/customer") {
+      const customer = { ...structuredClone(operation.body), Id: String(100 + syntheticQuickBooks.customers.size), Active: true };
+      syntheticQuickBooks.customers.set(customer.Id, customer); return qbReply(200, { Customer: customer });
+    }
+    if (method === "GET" && /^\/customer\/\d+$/.test(path)) return qbReply(syntheticQuickBooks.customers.has(path.slice(10)) ? 200 : 404, { Customer: syntheticQuickBooks.customers.get(path.slice(10)) });
+    if (method === "POST" && path === "/invoice") {
+      // Accounting honours the request id; a repeated POST returns the same invoice.
+      if (syntheticQuickBooks.invoiceRequests.has(operation.requestId)) return qbReply(200, { Invoice: syntheticQuickBooks.invoices.get(syntheticQuickBooks.invoiceRequests.get(operation.requestId)) });
+      syntheticQuickBooks.invoicePosts++;
+      const id = String(500 + syntheticQuickBooks.invoices.size), amount = operation.body.Line[0].Amount;
+      const invoice = { ...structuredClone(operation.body), Id: id, DocNumber: `SYNTHETIC-${id}`, TotalAmt: amount, Balance: amount, LinkedTxn: [],
+        InvoiceLink: `https://connect.intuit.com/portal/app/synthetic-local-fixture-invoice-${id}` };
+      syntheticQuickBooks.invoices.set(id, invoice); syntheticQuickBooks.invoiceRequests.set(operation.requestId, id);
+      return qbReply(200, { Invoice: invoice });
+    }
+    if (method === "GET" && /^\/invoice\/\d+$/.test(path)) return qbReply(syntheticQuickBooks.invoices.has(path.slice(9)) ? 200 : 404, { Invoice: syntheticQuickBooks.invoices.get(path.slice(9)) });
+    if (method === "GET" && /^\/payment\/\d+$/.test(path)) return qbReply(syntheticQuickBooks.payments.has(path.slice(9)) ? 200 : 404, { Payment: syntheticQuickBooks.payments.get(path.slice(9)) });
+    return qbReply(400, { Fault: { Error: [{ Message: "Synthetic QuickBooks fake does not support this operation." }] } });
+  },
+};
+// Stands in for the customer paying on the hosted page: Accounting then
+// shows one Payment linked to the invoice and a zero balance.
+function recordSyntheticInvoicePayment(invoiceId) {
+  const invoice = syntheticQuickBooks.invoices.get(invoiceId);
+  assert.ok(invoice && invoice.Balance > 0, "Only an open synthetic invoice can be paid.");
+  const id = String(900 + syntheticQuickBooks.payments.size);
+  syntheticQuickBooks.payments.set(id, { Id: id, CustomerRef: invoice.CustomerRef, CurrencyRef: { value: "USD" }, TotalAmt: invoice.TotalAmt,
+    TxnDate: new Date().toISOString().slice(0, 10), Line: [{ Amount: invoice.TotalAmt, LinkedTxn: [{ TxnId: invoiceId, TxnType: "Invoice" }] }] });
+  Object.assign(invoice, { Balance: 0, LinkedTxn: [{ TxnId: id, TxnType: "Payment" }] });
+  return id;
+}
+if (checkoutFixtures) await write(HOSTED_CHECKOUT_SETTINGS_PATH, { revision: 1, enabled: true, serviceItemId: "2", serviceItemName: "SYNTHETIC film production",
+  taxCode: "NON", deliveryTerms: "SYNTHETIC LOCAL TEST: no film will be delivered.", refundTerms: "SYNTHETIC LOCAL TEST: no payment exists to refund.",
+  merchantConfirmed: true, pciAcknowledged: true, automaticInvoiceEmailDisabled: true, merchantBinding: syntheticQuickBooksBinding, updatedBy: OWNER_EMAIL });
+const syntheticReceipts = [], syntheticQueue = [];
+// The real payment-to-production outbox; its queue hand-off is recorded here
+// instead of reaching the production worker.
+const automaticProduction = createAutomaticProduction({ read, write, listBlobs: listRecords,
+  queue: { enqueueAutomatic: async input => { syntheticQueue.push({ email: input.actor.email, id: input.id, orderId: input.orderId }); return { queued: true }; } } });
+const hostedCheckout = createHostedCheckoutService({ read, write, transport: syntheticQuickBooksTransport, pricingSettings,
+  env: checkoutFixtures ? { QUICKBOOKS_ENVIRONMENT: "production", LINEAGE_PAYMENT_ACCESS: "approved" } : {},
+  receiptDelivery: { deliver: async order => { syntheticReceipts.push(order.id); } }, productionAutomation: automaticProduction,
+  quoteProvider: (...args) => filmPricing.quoteForPayment(...args), productionQuote: input => filmProduction.quoteForProductionBudget(input),
+  verifyReversals: refuseProvider,
+  funding: createFalFunding({ read, write, listBlobs: listRecords, fetchImpl: syntheticFalFetch,
+    env: { FAL_BILLING_KEY: "synthetic-billing-key-local-only", FAL_BILLING_ACCOUNT: syntheticFalBillingAccount } }) });
 let deliveryMedia, deliveryProject, generationProject;
 let deliveryBlobReads = 0;
 const getDeliveryBlob = async (pathname, options) => {
@@ -119,31 +284,13 @@ const getDeliveryBlob = async (pathname, options) => {
     headers: new Headers({ "content-type": "video/mp4", "content-length": String(bytes.length), ...(range ? { "content-range": range.contentRange } : {}) }),
     blob: { pathname, contentType: "video/mp4", size: bytes.length } };
 };
-let syntheticCharges = 0;
-const syntheticChargeAmounts = [];
 const simulatedBinding = { environment: "sandbox", grantId: "c".repeat(64) };
-const fakePaymentsProvider = {
-  binding: async () => simulatedBinding,
-  charge: async (_binding, { amountCents, paymentToken }) => {
-    if (!["fixture_card_captured", "fixture_card_declined", "fixture_card_uncertain"].includes(paymentToken)) throw new Error("Only fabricated fixture tokens are accepted.");
-    syntheticCharges++;
-    syntheticChargeAmounts.push(amountCents);
-    if (paymentToken === "fixture_card_uncertain") throw new Error("Simulated unknown processor outcome.");
-    return { id: `fixture_charge_${syntheticCharges}`, amountCents, currency: "USD", verified: true,
-      status: paymentToken === "fixture_card_declined" ? "DECLINED" : "CAPTURED" };
-  },
-  readCharge: async (_binding, { chargeId, amountCents }) => ({ id: chargeId, amountCents, currency: "USD", verified: true, status: "CAPTURED" }),
-  refund: async (_binding, { amountCents }) => ({ id: `fixture_refund_${randomUUID()}`, amountCents, currency: "USD", verified: true, status: "ISSUED" }),
-  readRefund: refuseProvider,
-};
+// The retired direct-card service still reads older saved orders (the delivery
+// fixture uses one). It is never configured here and cannot charge anything.
 const payments = createPaymentsService({ read, write, pricingSettings,
   quoteProvider: (...args) => filmPricing.quoteForPayment(...args),
-  readiness: checkoutFixtures ? async () => ({ sandboxEnabled: true, merchantVerified: true, authorization: {
-    ...simulatedBinding, evidenceHash: "d".repeat(64), validatedAt: new Date(Date.now() - 1000).toISOString(),
-    expiresAt: new Date(Date.now() + 60_000).toISOString(), operations: ["quote", "charge", "refund", "read", "card-entry"],
-  } }) : async () => ({ sandboxEnabled: false, merchantVerified: false }),
-  provider: checkoutFixtures ? fakePaymentsProvider : { binding: refuseProvider, charge: refuseProvider, readCharge: refuseProvider,
-    refund: refuseProvider, readRefund: refuseProvider } });
+  readiness: async () => ({ sandboxEnabled: false, merchantVerified: false }),
+  provider: { binding: refuseProvider, charge: refuseProvider, readCharge: refuseProvider, refund: refuseProvider, readRefund: refuseProvider } });
 const audit = async (actor, action, target, details = {}) => {
   const id = randomUUID(), event = { id, actor, action, target, details, at: new Date().toISOString() };
   await write(`admin/audit/${id}.json`, event); return event;
@@ -186,7 +333,7 @@ const handlers = {
       paidFilmGenerationReview: generationReviewService,
       hostedCheckout: { configuration: async () => ({ available: false }), ownsOrder: async id => Boolean((await read(`payments/orders/${id}.json`))?.value?.checkoutMethod),
         order: generationFixtureOrder, check: generationFixturePaymentCheck, prepareCheckout: refuseProvider, quote: refuseProvider, checkout: refuseProvider, receipt: refuseProvider },
-    } : {}) }),
+    } : {}), ...(syntheticProvider ? { hostedCheckout } : {}) }),
   "/api/admin": createAdminHandler({ ...shared, audit, recordPage }),
 };
 
@@ -199,10 +346,7 @@ const [{ createFilmDeliveryService }, { createFilmDeliveryHandler }, { createArc
 ]);
 const websiteCopies = new Map();
 const websiteBytes = await readFile(new URL("../public/assets/the-journey-of-thomas-wilson.mp4", import.meta.url));
-const websiteList = async ({ prefix, cursor, limit: size = 30 }) => {
-  const paths = [...records.keys()].filter(key => key.startsWith(prefix)).sort(), offset = Number(cursor || 0);
-  return { blobs: paths.slice(offset, offset + size).map(pathname => ({ pathname })), hasMore: offset + size < paths.length, cursor: String(offset + size) };
-};
+const websiteList = listRecords;
 const websiteGet = async (pathname, options) => {
   const bytes = websiteCopies.get(pathname); if (!bytes) return null;
   const range = parseRange(options?.headers?.Range, bytes.length), part = range ? bytes.subarray(range.start, range.end + 1) : bytes;
@@ -237,7 +381,7 @@ fixture.selectedThemes = fixture.selectedThemes.map((theme, index) => ({ ...them
 fixture.themes = structuredClone(fixture.selectedThemes);
 fixture.sources = fixture.sources.map(source => ({ ...source, size: Buffer.byteLength(source.text), extraction: "Synthetic fixture text" }));
 Object.assign(fixture, { providerId: "magiclight", quality: "highest", generatedBy: "Lineage Theatre", updatedAt: new Date().toISOString() });
-const checkoutProjects = ["captured", "declined", "uncertain"].map((scenario, index) => ({ ...structuredClone(fixture), id: `00000000-0000-4000-8000-${String(index + 11).padStart(12, "0")}`, title: `SAMPLE ONLY - ${scenario} payment: The shared garden` }));
+const checkoutProjects = ["paid", "unpaid", "funding-blocked"].map((scenario, index) => ({ ...structuredClone(fixture), id: `00000000-0000-4000-8000-${String(index + 11).padStart(12, "0")}`, title: `SAMPLE ONLY - ${scenario} invoice: The shared garden` }));
 if (deliveryFixture) {
   // Exercise delivery of an existing public illustration, never claim this is
   // provider-generated output of the fictional screenplay or a paid transaction.
@@ -352,14 +496,17 @@ if(!localStorage.getItem(${JSON.stringify(seedMarker)})) {
 const originalFetch=window.fetch.bind(window);
 window.fetch=async(input,options)=>{
   const url=new URL(typeof input==='string'?input:input.url,location.href);
-  if(url.href==='https://sandbox.api.intuit.com/quickbooks/v4/payments/tokens') {
-    const fields=JSON.parse(options.body); const number=fields.card?.number;
-    const outcome={'4111111111111111':'captured','4000000000000002':'declined','4000000000009995':'uncertain'}[number];
-    if(!outcome) throw new Error('Only displayed fabricated test card numbers are allowed. No external request was made.');
-    return new Response(JSON.stringify({value:'fixture_card_'+outcome}),{status:200,headers:{'Content-Type':'application/json'}});
-  }
   if(url.origin!==location.origin) throw new Error('Synthetic browser fixture forbids all external fetch requests.');
   return originalFetch(input,options);
+};
+// The fake invoice link has the real Intuit shape so the app accepts it. The
+// payment tab is redirected to the local fake invoice page instead.
+const originalOpen=window.open.bind(window);
+window.open=(url,target,features)=>{
+  const tab=originalOpen('about:blank',target,features);
+  if(!tab) return null;
+  const local=next=>String(next).startsWith('https://connect.intuit.com/')?'/__workflow/invoice?link='+encodeURIComponent(String(next)):String(next).startsWith(location.origin+'/')?String(next):'/__workflow';
+  return {get document(){return tab.document;},get closed(){return tab.closed;},close(){tab.close();},location:{replace(next){tab.location.replace(local(next));}}};
 };` : `// SYNTHETIC LOCAL TEST ONLY\nconst fixture=${JSON.stringify(fixture)};\nfor(const email of ${JSON.stringify(accounts.map(account=>account.email))}){const key='lineage-studio-v3:'+email;if(!localStorage.getItem(key))localStorage.setItem(key,JSON.stringify([fixture]));}`;
 
 let vite;
@@ -375,7 +522,9 @@ const server = createServer(async (req, res) => {
       code: "SYNTHETIC_SERVICE_DISABLED", message: "This service is disabled in the synthetic local workflow test." });
     if (path === "/__workflow/status") return auth.json(res, 200, {
       synthetic: true, memoryOnly: true, providersEnabled: false, mailEnabled: false,
-      blockedExternalCalls, recordCount: records.size, syntheticCharges, checkoutFixtures, deliveryFixture, generationReviewFixture, deliveryBlobReads,
+      blockedExternalCalls, blockedConnections, recordCount: records.size, checkoutFixtures, deliveryFixture, generationReviewFixture, deliveryBlobReads,
+      syntheticProvider, syntheticFalReads, syntheticInvoices: syntheticQuickBooks.invoicePosts, syntheticPayments: syntheticQuickBooks.payments.size,
+      syntheticProductionQueue: syntheticQueue.length,
       ...(deliveryFixture ? { deliveryPreparedId: deliveryProject.productionPreparation.id, illustrativePlaybackOnly: true } : {}),
       ...(generationReviewFixture ? { generationPreparedId: generationProject.productionPreparation.id, generationPaymentChecks, reviewVerificationSimulated: true,
         generationStatusLink: `/#library?film=${generationProject.productionPreparation.id}`, illustrativePlaybackOnly: true } : {}),
@@ -389,6 +538,19 @@ const server = createServer(async (req, res) => {
       res.setHeader("Content-Type", "text/javascript; charset=utf-8");
       return res.end('/* SYNTHETIC LOCAL TEST ONLY: no Google service call. */ window.grecaptcha={ready:callback=>callback(),execute:async(_key,{action})=>"synthetic_captcha_"+action+"_"+crypto.randomUUID()};');
     }
+    if (checkoutFixtures && path === "/__workflow/invoice" && req.method === "GET") {
+      const match = /synthetic-local-fixture-invoice-(\d+)$/.exec(url.searchParams.get("link") || ""), invoice = match && syntheticQuickBooks.invoices.get(match[1]);
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (!invoice) { res.statusCode = 404; return res.end("<!doctype html><title>Synthetic invoice</title><p>No synthetic invoice matches this link.</p>"); }
+      return res.end(`<!doctype html><html><head><title>Synthetic invoice ${invoice.DocNumber}</title></head><body><h1>SYNTHETIC QUICKBOOKS INVOICE · NOT A REAL PAYMENT PAGE</h1><p>Invoice ${invoice.DocNumber} for $${invoice.TotalAmt.toFixed(2)}. Balance $${invoice.Balance.toFixed(2)}. This page stands in for the Intuit payment page; nothing leaves this computer.</p>${invoice.Balance > 0 ? `<form method="post" action="/__workflow/pay-invoice"><input type="hidden" name="invoiceId" value="${invoice.Id}"><button type="submit">Record synthetic payment in the fake QuickBooks</button></form>` : "<p>Paid in the fake QuickBooks. Return to Lineage Theatre and check the payment.</p>"}</body></html>`);
+    }
+    if (checkoutFixtures && path === "/__workflow/pay-invoice" && req.method === "POST") {
+      if (req.headers.origin !== origin) { res.statusCode = 403; return res.end("Same-origin form only."); }
+      let text = ""; for await (const chunk of req) { text += chunk; if (text.length > 1000) throw new Error("Too large."); }
+      const invoiceId = new URLSearchParams(text).get("invoiceId"), invoice = syntheticQuickBooks.invoices.get(invoiceId);
+      if (invoice?.Balance > 0) recordSyntheticInvoicePayment(invoiceId);
+      res.statusCode = 303; res.setHeader("Location", `/__workflow/invoice?link=${encodeURIComponent(invoice?.InvoiceLink || "")}`); return res.end();
+    }
     if (path === "/__workflow") {
       // This helper exposes only the intentionally public fixture accounts, never real users.
       const visible = [];
@@ -401,7 +563,7 @@ const server = createServer(async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       if (generationReviewFixture) return res.end(`<!doctype html><html><head><title>Synthetic generated-film review fixture</title></head><body><h1>SYNTHETIC GENERATION REVIEW FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4. It is not a newly generated film, does not match the fictional garden screenplay, and represents no real payment. Technical verification metadata is deliberately simulated to test the review interface; the worker and provider do not run.</p><p>Sign in as the fictional owner erik@brocotech.ai using its public password below. Open the saved film link, preview the demonstration, then approve only as a synthetic interface test. Every record disappears on exit.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/#library?film=${generationProject.productionPreparation.id}">Open synthetic review film</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
       if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and fabricated confirmed payment use the live record format solely to test payment-gated delivery. Every record exists only in memory; there is no real transaction, production credential, or external provider call.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
-      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? '<h2>Fake checkout fixtures — no real card data</h2><p>Use separate preloaded films for each payment. Card 4111111111111111 captures; 4000000000000002 declines; 4000000000009995 stays uncertain. Expiry 12/2030, CVC 123, Sample Person, 1 Fictional Street, Test City, UT 84003. The browser intercepts fabricated tokenization locally. No card data or payment request leaves this computer.</p>' : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
+      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? `<h2>Fake QuickBooks-hosted invoice checkout</h2><p>Each preloaded film can be priced, quoted and checked out. Pricing uses the real Kling adapter against an in-process fake of fal's price list and a fake worker heartbeat; checkout reserves fake fal funding and creates an invoice in an in-process fake QuickBooks company. The payment tab opens a local fake invoice page with a button that records a synthetic payment. Then use the app's payment check: production is handed to a recording queue, never to the worker or a provider. No request leaves this computer.</p><table><tr><th>Fake invoice</th><th>Amount</th><th>Balance</th></tr>${[...syntheticQuickBooks.invoices.values()].map(invoice => `<tr><td><a href="/__workflow/invoice?link=${encodeURIComponent(invoice.InvoiceLink)}">${invoice.DocNumber}</a></td><td>$${invoice.TotalAmt.toFixed(2)}</td><td>$${invoice.Balance.toFixed(2)}</td></tr>`).join("")}</table>` : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
     if (checkOnly) { res.statusCode = 404; return res.end("Synthetic route-check mode."); }
     vite.middlewares(req, res);
@@ -464,19 +626,52 @@ async function currentAgreementConsent() {
   assert.ok(agreement && typeof agreement.body === "string" && agreement.body.length > 0);
   return { sourceAgreementAccepted: true, sourceAgreementVersion: agreement.version, sourceAgreementHash: agreement.contentHash };
 }
-// Three five-second shots use three six-second planning clips: 858 credits at
-// $88/80,000 = 94 cents rounded, plus the default 50% markup = 141 cents.
-const expectedFixturePriceCents = 141;
-function assertPlanningPrice(price, prepared) {
-  assert.equal(price.status, 200);
+// Pricing has used a live provider quote since 2026-10-18 (a485316). The
+// fictional garden plans as three Kling shots of 5.5, 5.0 and 4.5 seconds,
+// billed as 6 + 5 + 5 = 16 seconds at the reviewed $0.15/second, plus seven
+// $0.30 reference images (two cast references, two cast elements and three
+// start frames for character binding v3): 240 + 210 = 450 cents provider cost,
+// plus the default 50% markup (225 cents) = 675 cents.
+const expectedProviderCostCents = 450, expectedFixturePriceCents = 675;
+function assertProviderQuotePrice(price, prepared) {
+  assert.equal(price.status, 200, JSON.stringify(price.body));
   assert.equal(price.body.preparedId, prepared.id);
   assert.equal(price.body.manifestHash, prepared.manifestHash);
   assert.equal(price.body.currency, "USD");
   assert.equal(price.body.amountCents, expectedFixturePriceCents);
   assert.equal(price.body.kind, "confirmed");
-  assert.equal(price.body.pricingBasis, "planning-rate");
+  assert.equal(price.body.pricingBasis, "provider-quote");
+  assert.equal(price.body.sandbox, false);
+  assert.ok(Date.parse(price.body.expiresAt) > Date.now());
   assert.match(price.body.note, /fixed price/i);
-  assert.doesNotMatch(JSON.stringify(price.body), /providerCostCents|planningCreditsPerClip|markupBasisPoints|apiVerified/);
+  assert.doesNotMatch(JSON.stringify(price.body), /providerCostCents|quoteReference|planningCreditsPerClip|markupBasisPoints|apiVerified/);
+}
+// The production adapter refuses to price while the worker heartbeat is stale.
+async function withStaleWorker(callback) {
+  await writeWorkerHeartbeat(new Date(Date.now() - 10 * 60_000)); syntheticWorkerReady = false;
+  try { return await callback(); } finally { syntheticWorkerReady = true; await writeWorkerHeartbeat(); }
+}
+async function checkEgressGuard() {
+  // Runs last: nothing above may have attempted a non-loopback connection.
+  assert.equal(blockedExternalCalls, 0, "No application code may call global fetch");
+  assert.equal(blockedConnections, 0, "No application code may open a non-loopback connection");
+  const refused = (start, label) => new Promise(resolve => {
+    const done = error => { assert.equal(error?.code, "SYNTHETIC_EGRESS_BLOCKED", `${label}: ${error?.message}`); resolve(); };
+    try { const request = start(); request.on("error", done); request.on("response", () => assert.fail(`${label} connected`)); request.end?.(); }
+    catch (error) { done(error); }
+  });
+  await refused(() => httpRequest("http://192.0.2.10/"), "http to TEST-NET address");
+  await refused(() => httpsRequest("https://api.fal.ai/v1/models/pricing"), "https by hostname");
+  await refused(() => httpsRequest("https://quickbooks.api.intuit.com/"), "QuickBooks host");
+  await refused(() => net.connect({ host: "203.0.113.7", port: 443 }), "raw TCP");
+  await refused(() => net.connect(443, "lineagetheater.com"), "raw TCP by port, host");
+  await assert.rejects(fetch("https://lineagetheater.com/"), /forbids outbound fetch/);
+  await assert.rejects(fetch(`${origin}/__workflow/status`), /forbids outbound fetch/, "fetch is refused even for loopback");
+  await assert.rejects(dns.promises.lookup("example.com"), error => error.code === "SYNTHETIC_EGRESS_BLOCKED");
+  assert.throws(() => dgram.createSocket("udp4").send("x", 53, "192.0.2.53"), error => error.code === "SYNTHETIC_EGRESS_BLOCKED");
+  assert.equal(blockedConnections, 7); assert.equal(blockedExternalCalls, 2);
+  const loopback = await route("/__workflow/status");
+  assert.equal(loopback.status, 200, "Loopback connections still work");
 }
 async function check() {
   assert.equal((await route("/api/studio?action=capabilities")).status, 401);
@@ -484,7 +679,9 @@ async function check() {
   assert.equal((await route("/api/admin?action=overview", { cookie: customer })).status, 403);
   assert.equal((await route("/api/admin?action=overview", { cookie: owner })).status, 200);
   const capabilities = await route("/api/studio?action=capabilities", { cookie: customer });
-  assert.equal(capabilities.body.production, false); assert.equal(capabilities.body.billing, false);
+  // The synthetic Kling adapter, price list and worker make production configured; billing stays off.
+  assert.equal(capabilities.body.production, true); assert.equal(capabilities.body.productionProvider, "kling");
+  assert.equal(capabilities.body.billing, false);
   assert.deepEqual(await pricingSettings(), { markupBasisPoints: 5000, planningCreditsPerClip: 286,
     planningSecondsPerClip: 6, planningRendersPerClip: 1, revision: 0, updatedAt: null, updatedBy: null });
   const prepare = { action: "prepare", project: fixture, idempotencyKey: "synthetic-workflow-prepare-001", preparationConsent: true };
@@ -499,14 +696,22 @@ async function check() {
   assert.equal((await route(`/api/studio?action=productionStatus&id=${job.id}`, { cookie: customer })).status, 200);
   assert.equal((await route(`/api/studio?action=manifest&id=${job.id}`, { cookie: customer })).status, 200);
   assert.equal((await route(`/api/studio?action=productionStatus&id=${job.id}`, { cookie: other })).status, 404);
-  const priced = await route("/api/studio", { cookie: customer, body: { action: "price", project: fixture,
-    preparedId: job.id, idempotencyKey: "synthetic-workflow-price-001" } });
-  assertPlanningPrice(priced, job);
+  const priceBody = { action: "price", project: fixture, preparedId: job.id, idempotencyKey: "synthetic-workflow-price-001" };
+  const stale = await withStaleWorker(() => route("/api/studio", { cookie: customer, body: priceBody }));
+  // The adapter's worker check throws a plain error, so the studio answers its generic 503.
+  assert.equal(stale.status, 503, "A stale worker heartbeat must block pricing"); assert.equal(stale.body.amountCents, undefined);
+  const readsBeforePrice = syntheticFalReads;
+  const priced = await route("/api/studio", { cookie: customer, body: priceBody });
+  assertProviderQuotePrice(priced, job);
+  assert.ok(syntheticFalReads > readsBeforePrice, "Pricing reads the (fake) fal price list");
+  assert.equal((await route("/api/studio", { cookie: other, body: { ...priceBody, idempotencyKey: "synthetic-workflow-price-002" } })).status, 404,
+    "Another account cannot price this saved plan");
   assert.equal((await route("/api/studio?action=checkoutConfiguration", { cookie: customer })).body.available, false);
-  assert.equal(syntheticCharges, 0);
+  assert.equal(syntheticQuickBooks.requests, 0);
   assert.equal([...records.keys()].some(path => path.startsWith("payments/")), false, "Pricing cannot create a payment quote or order");
-  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "quote", project: fixture, idempotencyKey: "synthetic-workflow-quote-001" } })).status, 503);
-  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "checkout", quoteId: "a".repeat(64), idempotencyKey: "synthetic-workflow-pay-001", paymentToken: "synthetic_token_never_real", consent: true } })).status, 403);
+  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "quote", project: fixture, preparedId: job.id, idempotencyKey: "synthetic-workflow-quote-001" } })).status, 503);
+  assert.equal((await route("/api/studio", { cookie: customer, body: { action: "checkout", quoteId: "a".repeat(64), idempotencyKey: "synthetic-workflow-pay-001", consent: true, productionConsent: true } })).status, 403);
+  assert.equal(syntheticQuickBooks.requests, 0, "Billing is disabled: QuickBooks is never contacted");
   assert.equal((await route("/api/studio", { cookie: customer, body: { action: "generate" } })).status, 503);
   assert.equal((await route("/api/admin", { cookie: customer, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 403);
   assert.equal((await route("/api/admin", { cookie: owner, body: { action: "prepareProductionTest", idempotencyKey: "synthetic-operator-test-001" } })).status, 201);
@@ -514,8 +719,9 @@ async function check() {
   await checkRegistrationAccess(owner);
   assert.equal((await route("/api/auth", { cookie: customer, body: { action: "logout" } })).status, 200);
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).status, 401);
-  assert.equal(blockedExternalCalls, 0);
-  console.log("PASS: real-handler synthetic workflow, fixed $1.41 planning price with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, disabled providers, and logout replay; zero outbound calls.");
+  assert.equal(syntheticQueue.length, 0);
+  await checkEgressGuard();
+  console.log("PASS: real-handler synthetic workflow, $6.75 provider-quote price (fake fal price list, fake worker heartbeat; a stale heartbeat blocks pricing) with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, no generation, and logout replay; zero outbound calls, egress guard verified.");
 }
 async function checkSourceAgreement(owner, customer) {
   const published = await route("/api/auth?action=agreement");
@@ -600,7 +806,7 @@ async function checkRegistrationAccess(owner) {
   for (const cookie of [owner, administrator, waiting]) {
     const capabilities = await route("/api/studio?action=capabilities", { cookie });
     assert.equal(capabilities.status, 200);
-    assert.equal(capabilities.body.production, false);
+    assert.equal(capabilities.body.production, true);
     assert.equal(capabilities.body.billing, false);
     assert.equal((await route("/api/studio", { cookie, body: { action: "generate" } })).status, 503);
     assert.equal((await route("/api/studio", { cookie, body: { action: "quote", project: fixture, idempotencyKey: "synthetic-same-workflow-quote" } })).status, 503);
@@ -631,58 +837,125 @@ async function checkRegistrationAccess(owner) {
   assert.equal((await register("waiting-again@example.invalid")).body.user.accessStatus, "pending");
 }
 async function checkCheckout() {
+  // Current equivalent of the retired direct-card fixture: the QuickBooks-hosted
+  // invoice path production uses, with fake fal pricing, worker and funding.
   const customer = await login(accounts[0]), other = await login(accounts[2]);
   const configuration = await route("/api/studio?action=checkoutConfiguration", { cookie: customer });
   assert.equal(configuration.status, 200);
   assert.equal(configuration.body.available, true);
-  assert.equal(configuration.body.environment, "sandbox");
-  let firstOrder;
-  for (const [index, status] of ["captured", "declined", "uncertain"].entries()) {
-    const prepared = await route("/api/studio", { cookie: customer, body: { action: "prepare", project: checkoutProjects[index], preparationConsent: true, idempotencyKey: `checkout-fixture-prepare-${index}` } });
+  assert.equal(configuration.body.method, "quickbooks-hosted-invoice");
+  assert.equal(configuration.body.environment, "production");
+  const capabilities = await route("/api/studio?action=capabilities", { cookie: customer });
+  assert.equal(capabilities.body.production, true); assert.equal(capabilities.body.billing, true);
+  async function prepareAndQuote(index) {
+    const project = checkoutProjects[index];
+    const prepared = await route("/api/studio", { cookie: customer, body: { action: "prepare", project, preparationConsent: true, idempotencyKey: `checkout-fixture-prepare-${index}` } });
     assert.equal(prepared.status, 201);
-    const priced = await route("/api/studio", { cookie: customer, body: { action: "price", project: checkoutProjects[index],
-      preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-price-${index}` } });
-    assertPlanningPrice(priced, prepared.body);
-    const paymentsBeforeQuote = [...records.values()].filter(record => record.value?.filmId === checkoutProjects[index].id
-      && record.value?.merchantBinding);
-    assert.equal(paymentsBeforeQuote.length, 0, "Viewing the film price cannot create a billable quote or order");
-    const quoted = await route("/api/studio", { cookie: customer, body: { action: "quote", project: checkoutProjects[index], preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-quote-${index}` } });
-    assert.equal(quoted.status, 200);
+    const priced = await route("/api/studio", { cookie: customer, body: { action: "price", project, preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-price-${index}` } });
+    assertProviderQuotePrice(priced, prepared.body);
+    assert.equal([...records.values()].filter(record => record.value?.filmId === project.id && record.value?.merchantBinding).length, 0,
+      "Viewing the film price cannot create a billable quote or order");
+    const quoted = await route("/api/studio", { cookie: customer, body: { action: "quote", project, preparedId: prepared.body.id, idempotencyKey: `checkout-fixture-quote-${index}` } });
+    assert.equal(quoted.status, 200, JSON.stringify(quoted.body));
     assert.equal(quoted.body.preparedId, prepared.body.id);
     assert.equal(quoted.body.manifestHash, prepared.body.manifestHash);
-    assert.equal(quoted.body.amountCents, priced.body.amountCents);
-    assert.equal(quoted.body.sandbox, true);
-    const preflight = await route("/api/studio", { cookie: customer, body: { action: "checkoutCheck", quoteId: quoted.body.id, captchaToken: fixtureCaptchaToken("checkout") } });
-    assert.equal(preflight.status, 200);
-    const body = { action: "checkout", quoteId: quoted.body.id, checkoutProof: preflight.body.checkoutProof, idempotencyKey: `checkout-fixture-charge-${index}`, paymentToken: `fixture_card_${status}`, consent: true };
-    const paid = await route("/api/studio", { cookie: customer, body });
-    assert.equal(paid.status, 200);
-    assert.equal(paid.body.id, quoted.body.orderId);
-    assert.equal(paid.body.status, status);
-    assert.equal(paid.body.sandbox, true);
-    assert.equal(paid.body.amountCents, expectedFixturePriceCents);
-    assert.equal(syntheticChargeAmounts[index], expectedFixturePriceCents, "The displayed fixed price must reach the processor unchanged");
-    const charges = syntheticCharges;
-    assert.equal((await route("/api/studio", { cookie: customer, body })).status, 403);
-    assert.equal(syntheticCharges, charges, "Replaying a consumed CAPTCHA proof must not call the processor");
-    for (let readNumber = 0; readNumber < 2; readNumber++) {
-      const checked = await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: customer });
-      assert.equal(checked.status, 200); assert.equal(checked.body.status, status);
-    }
-    assert.equal(syntheticCharges, charges);
-    assert.equal((await route(`/api/studio?action=order&id=${paid.body.id}`, { cookie: other })).status, 404);
-    const receipt = await route(`/api/studio?action=receipt&id=${paid.body.id}`, { cookie: customer });
-    assert.equal(receipt.status, status === "captured" ? 200 : 409);
-    if (status === "captured") {
-      firstOrder = paid.body; assert.equal(receipt.body.sandbox, true);
-      assert.equal(receipt.body.amountCents, expectedFixturePriceCents);
-    }
+    assert.equal(quoted.body.amountCents, priced.body.amountCents, "The displayed fixed price is the quoted amount");
+    assert.equal(quoted.body.sandbox, false); assert.equal(quoted.body.method, "quickbooks-hosted-invoice");
+    assert.match(quoted.body.orderId, /^[a-f0-9]{64}$/);
+    assert.doesNotMatch(JSON.stringify(quoted.body), /providerCost|grantId|markupCents|quoteReference/);
+    return { project, prepared: prepared.body, quoted: quoted.body };
   }
-  assert.equal(syntheticCharges, 3);
-  assert.ok(firstOrder);
-  assert.equal(blockedExternalCalls, 0);
-  assert.doesNotMatch(JSON.stringify([...records.values()]), /fixture_card_|4111111111111111|4000000000009995|"cvc"/);
-  console.log("PASS: actual-handler fixed $1.41 planning price through checkout, processor and receipt; captured/declined/uncertain outcomes, GET-only recovery, sandbox receipts, ownership, no stored card tokens, and zero outbound calls.");
+  async function checkoutBody(quoted, idempotencyKey, extra = {}) {
+    const preflight = await route("/api/studio", { cookie: customer, body: { action: "checkoutCheck", quoteId: quoted.id, captchaToken: fixtureCaptchaToken("checkout") } });
+    assert.equal(preflight.status, 200);
+    return { action: "checkout", quoteId: quoted.id, checkoutProof: preflight.body.checkoutProof, idempotencyKey, consent: true, productionConsent: true, ...extra };
+  }
+  const pay = body => route("/api/studio", { cookie: customer, body });
+  const checkPayment = async (orderId, expectedQuoteId) => {
+    const result = await route("/api/studio", { cookie: customer, body: { action: "checkPayment", orderId, expectedQuoteId } });
+    assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body;
+  };
+
+  // 1. Paid film: one invoice, a payment recorded in the fake QuickBooks,
+  // verified capture, receipt, and the automatic production hand-off.
+  const paid = await prepareAndQuote(0);
+  const noConsent = await pay(await checkoutBody(paid.quoted, "checkout-fixture-pay-0", { productionConsent: false }));
+  assert.equal(noConsent.status, 400); assert.equal(noConsent.body.code, "PRODUCTION_CONSENT_REQUIRED");
+  const stale = await withStaleWorker(async () => pay(await checkoutBody(paid.quoted, "checkout-fixture-pay-0")));
+  assert.equal(stale.status, 503); assert.equal(stale.body.code, "PRODUCTION_UNAVAILABLE", "A stale worker heartbeat must block a new invoice");
+  assert.equal(syntheticQuickBooks.invoicePosts, 0); assert.equal(await read(`payments/orders/${paid.quoted.orderId}.json`), null);
+  const firstBody = await checkoutBody(paid.quoted, "checkout-fixture-pay-0");
+  const invoiced = await pay(firstBody);
+  assert.equal(invoiced.status, 200, JSON.stringify(invoiced.body));
+  assert.equal(invoiced.body.id, paid.quoted.orderId); assert.equal(invoiced.body.status, "awaiting-payment");
+  assert.equal(invoiced.body.charged, false); assert.equal(invoiced.body.sandbox, false);
+  assert.equal(invoiced.body.amountCents, expectedFixturePriceCents);
+  assert.match(invoiced.body.invoiceUrl, /^https:\/\/connect\.intuit\.com\/portal\/app\/synthetic-local-fixture-invoice-\d+$/);
+  assert.equal(syntheticQuickBooks.invoicePosts, 1);
+  const invoice = [...syntheticQuickBooks.invoices.values()][0];
+  assert.equal(invoice.TotalAmt, expectedFixturePriceCents / 100, "The displayed fixed price reaches QuickBooks unchanged");
+  assert.equal(invoice.BillEmail.Address, accounts[0].email); assert.equal(invoice.EmailStatus, "NotSet");
+  assert.equal(invoice.Line[0].SalesItemLineDetail.ItemRef.value, "2"); assert.equal(invoice.Line[0].SalesItemLineDetail.TaxCodeRef.value, "NON");
+  const ledger = (await read(FAL_FUNDING_PATH)).value;
+  assert.deepEqual(ledger.entries.map(entry => [entry.orderId, entry.maximumCostCents]), [[paid.quoted.orderId, expectedProviderCostCents]],
+    "The full provider budget is reserved against fal funding before the invoice");
+  assert.equal((await pay(firstBody)).status, 403, "A consumed CAPTCHA proof cannot be replayed");
+  const recovered = await pay(await checkoutBody(paid.quoted, "checkout-fixture-pay-0"));
+  assert.equal(recovered.status, 200); assert.equal(recovered.body.id, paid.quoted.orderId); assert.equal(recovered.body.status, "awaiting-payment");
+  assert.equal(syntheticQuickBooks.invoicePosts, 1, "Retrying a checkout key never opens a second invoice");
+  for (let readNumber = 0; readNumber < 2; readNumber++) {
+    const order = await route(`/api/studio?action=order&id=${paid.quoted.orderId}`, { cookie: customer });
+    assert.equal(order.status, 200); assert.equal(order.body.status, "awaiting-payment");
+  }
+  assert.equal((await route(`/api/studio?action=order&id=${paid.quoted.orderId}`, { cookie: other })).status, 404);
+  assert.equal((await route(`/api/studio?action=receipt&id=${paid.quoted.orderId}`, { cookie: customer })).status, 409);
+  assert.equal((await checkPayment(paid.quoted.orderId, paid.quoted.id)).status, "awaiting-payment");
+  assert.equal(syntheticQueue.length, 0, "Nothing is produced before payment");
+  const paymentId = recordSyntheticInvoicePayment(invoice.Id), requestsAfterPayment = syntheticQuickBooks.requests;
+  assert.equal((await route(`/api/studio?action=order&id=${paid.quoted.orderId}`, { cookie: customer })).body.status, "awaiting-payment",
+    "Reading an order is not a payment check");
+  assert.equal(syntheticQuickBooks.requests, requestsAfterPayment);
+  const captured = await checkPayment(paid.quoted.orderId, paid.quoted.id);
+  assert.equal(captured.status, "captured"); assert.equal(captured.charged, true); assert.equal(captured.receiptAvailable, true);
+  assert.equal(captured.confirmationSource, "quickbooks-accounting"); assert.equal(captured.invoiceUrl, null);
+  const receipt = await route(`/api/studio?action=receipt&id=${paid.quoted.orderId}`, { cookie: customer });
+  assert.equal(receipt.status, 200); assert.equal(receipt.body.amountCents, expectedFixturePriceCents);
+  assert.equal(receipt.body.sandbox, false); assert.equal(receipt.body.transactionId, paymentId);
+  assert.deepEqual(syntheticReceipts, [paid.quoted.orderId]);
+  assert.deepEqual(syntheticQueue, [{ email: accounts[0].email, id: paid.prepared.id, orderId: paid.quoted.orderId }],
+    "Verified payment hands exactly this film to the production queue");
+  assert.equal((await read(automaticProductionPath(paid.quoted.orderId))).value.state, "queued");
+  assert.equal((await checkPayment(paid.quoted.orderId, paid.quoted.id)).status, "captured");
+  assert.equal(syntheticQueue.length, 1, "Checking again does not queue the film twice");
+
+  // 2. An unpaid invoice stays awaiting payment and never reaches production.
+  const unpaid = await prepareAndQuote(1);
+  const open = await pay(await checkoutBody(unpaid.quoted, "checkout-fixture-pay-1"));
+  assert.equal(open.status, 200); assert.equal(open.body.status, "awaiting-payment"); assert.equal(syntheticQuickBooks.invoicePosts, 2);
+  assert.equal((await checkPayment(unpaid.quoted.orderId, unpaid.quoted.id)).status, "awaiting-payment");
+  assert.equal((await route(`/api/studio?action=receipt&id=${unpaid.quoted.orderId}`, { cookie: customer })).status, 409);
+  assert.equal(syntheticQueue.length, 1);
+
+  // 3. Short fal funding blocks the invoice before QuickBooks is asked; the
+  // same checkout succeeds once funding covers every open production budget.
+  const blocked = await prepareAndQuote(2);
+  syntheticFalBalanceCents = 3 * expectedProviderCostCents - 1;
+  const short = await pay(await checkoutBody(blocked.quoted, "checkout-fixture-pay-2"));
+  assert.equal(short.status, 503); assert.equal(short.body.code, "PRODUCTION_FUNDING_UNAVAILABLE");
+  assert.equal(syntheticQuickBooks.invoicePosts, 2, "No invoice is requested without funding");
+  const held = await route(`/api/studio?action=order&id=${blocked.quoted.orderId}`, { cookie: customer });
+  assert.equal(held.body.status, "uncertain"); assert.equal(held.body.checkoutBlock, "production-funding"); assert.equal(held.body.invoiceUrl, null);
+  syntheticFalBalanceCents = 3 * expectedProviderCostCents;
+  const funded = await pay(await checkoutBody(blocked.quoted, "checkout-fixture-pay-2"));
+  assert.equal(funded.status, 200, JSON.stringify(funded.body)); assert.equal(funded.body.status, "awaiting-payment");
+  assert.equal(syntheticQuickBooks.invoicePosts, 3);
+  assert.equal((await read(FAL_FUNDING_PATH)).value.entries.length, 3);
+
+  assert.equal(syntheticQueue.length, 1);
+  assert.doesNotMatch(JSON.stringify([...records.values()]), /synthetic-fal-key-local-only|synthetic-billing-key-local-only|"cvc"/,
+    "Provider keys and card data are never stored");
+  await checkEgressGuard();
+  console.log("PASS: actual-handler QuickBooks-hosted invoice checkout against in-process fakes of QuickBooks, fal pricing, fal funding and the worker heartbeat: fixed $6.75 provider-quote price reaches the invoice unchanged; production consent required; stale worker and short funding block the invoice; one invoice per checkout key; CAPTCHA replay refused; GET-only order reads; verified capture, receipt and a single automatic production hand-off; unpaid invoices never produce; ownership; zero outbound calls, egress guard verified.");
 }
 function mediaRoute(path, { cookie, method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
@@ -737,7 +1010,8 @@ async function checkDelivery() {
   const download = await mediaRoute(`${mediaUrl}&download=1`, { cookie: customer });
   assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), deliveryMedia.sha256);
   assert.equal(download.headers["content-disposition"], `attachment; filename="${preparation.id}.mp4"`);
-  assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
+  assert.equal(syntheticQuickBooks.requests, 0); assert.equal(syntheticFalReads, 0);
+  await checkEgressGuard();
   console.log("PASS: actual-handler completed status, synthetic confirmed live-format payment, unpaid/uncertain/sandbox denial, private MP4 playback/ranges, HEAD, verified download bytes, ownership denial, and zero outbound calls or charges. Media and payment are local fixtures, not new provider output or a real transaction.");
 }
 async function checkGenerationReview() {
@@ -747,13 +1021,23 @@ async function checkGenerationReview() {
   const libraryUrl = `/api/library?action=detail&kind=plan&id=${prepared.id}`;
   const mediaUrl = `/api/studio?action=productionMedia&id=${prepared.id}`;
   const capability = await route("/api/studio?action=capabilities", { cookie: owner });
-  assert.equal(capability.body.generationAttempt, true); assert.equal(capability.body.production, false);
+  // Owner-started generation attempts are retired (requestFilmGeneration and
+  // replaceFilmGeneration answer 410; paid films use automatic production), so
+  // capabilities no longer advertise them to anyone. A saved attempt stays
+  // readable and reviewable, which is what this fixture exercises.
+  assert.equal(capability.status, 200);
+  assert.equal(capability.body.generationAttempt, undefined); assert.equal(capability.body.production, false);
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).body.generationAttempt, undefined);
+  for (const action of ["requestFilmGeneration", "replaceFilmGeneration"])
+    assert.equal((await route("/api/studio", { cookie: owner, body: { action, preparedId: prepared.id, orderId: payment.orderId, consent: true } })).status, 410);
   assert.equal((await route(reviewUrl)).status, 401); assert.equal((await route(reviewUrl, { cookie: customer })).status, 403);
   const status = await route(`/api/studio?action=generationAttempt&id=${prepared.id}`, { cookie: owner });
   assert.equal(status.status, 200); assert.equal(status.body.status, "verifying"); assert.equal(status.body.orderId, payment.orderId);
   const before = await route(libraryUrl, { cookie: owner });
-  assert.equal(before.status, 200); assert.equal(before.body.entry.production.mediaReady, false); assert.equal(before.body.entry.production.status, "prepared");
+  assert.equal(before.status, 200); assert.equal(before.body.entry.production.mediaReady, false);
+  // Since the paid-soundtrack/automatic-production work (merged 2026-10-19) the library
+  // shows a prepared plan whose saved video awaits review as in progress.
+  assert.equal(before.body.entry.production.status, "processing"); assert.ok(["creating", "finishing"].includes(before.body.entry.production.progress.stage));
   assert.equal(before.body.entry.payments[0].status, "captured"); assert.equal(before.body.entry.payments[0].sandbox, false);
   assert.equal((await mediaRoute(mediaUrl, { cookie: owner })).status, 409);
   const review = await route(reviewUrl, { cookie: owner });
@@ -775,7 +1059,8 @@ async function checkGenerationReview() {
   assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), deliveryMedia.sha256);
   assert.equal((await route(reviewUrl, { cookie: owner })).body.status, "approved");
   assert.equal((await route(libraryUrl, { cookie: customer })).status, 404);
-  assert.equal(generationPaymentChecks, 1); assert.equal(blockedExternalCalls, 0); assert.equal(syntheticCharges, 0);
+  assert.equal(generationPaymentChecks, 1); assert.equal(syntheticQuickBooks.requests, 0); assert.equal(syntheticFalReads, 0);
+  await checkEgressGuard();
   console.log("PASS: SYNTHETIC owner review fixture; exact artifact-bound private preview, approval gating, confirmed readback, finished library playback/download, foreign-account denial, and zero outbound calls or charges. Existing demonstration MP4 and simulated verification/payment metadata prove interface behavior only, not real generation or worker verification.");
 }
 if (checkOnly) {

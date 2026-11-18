@@ -1,5 +1,7 @@
 # Film quality and automatic production release verification
 
+> **Status note, November 18, 2026:** The October 23 results recorded at the end of this document were observed on this candidate's release. On November 5 the generation contract was replaced by character binding v3 ([cast continuity](VIDEO-CAST-CONTINUITY-20261105.md)), and no film has yet been delivered under it, so this checklist must be completed again for the current pipeline. See the [current status](../README.md#current-status-november-18-2026).
+
 Candidate prepared on 2026-10-22. Local verification is recorded below; live
 release acceptance remains pending until the evidence checklist is completed.
 A deployment marked ready, a paid invoice, or a provider clip alone does not
@@ -95,3 +97,33 @@ need matching completed-film history before a measured delivery window is shown.
 
 Append deployment identifiers and observed results when these checks are
 performed. Leave any unverified item unchecked.
+
+## Observed results: October 23, 2026
+
+Recorded in the PR #74 and PR #75 descriptions; not re-checked from this
+repository.
+
+- Release: the paid run used 0ef5815 (PR #74; GitHub production deployment
+  7265196490 at 22:24:24 UTC on October 22). The final release was 49e468f
+  (PR #75; Vercel deployment `dpl_4wBDQ8HF4eFiHgiH3qgDtenNVJRV`, GitHub
+  production deployment 7285104468 at 17:53:51 UTC on October 23). Worker image `sha256:b29ea599…`, timer active, fresh heartbeat.
+- Paid run: QuickBooks invoice 354, $7.88, captured at 17:31:13.147 UTC. The
+  automatic outbox queued production 1.210 seconds after the payment was
+  recognized, and the film completed at 17:49:29.783 UTC (18 min 16.6 s). The
+  content was fictional and the payment was a test.
+- Output: a 30.04-second 1080p24 H.264/AAC MP4 of 29,180,138 bytes, all 721
+  frames decoded, private SHA-256 `85e16a8b…` verified. The payment page opened
+  the film automatically; signed-in desktop and mobile playback and download
+  were verified.
+- Inspection: the PR #74 description records that nine sampled frames matched
+  the fictional reference appearances, wardrobe (cream shirts, green and blue
+  aprons) and intended actions, and that independent offline speech
+  recognition matched all scripted words. It claims no human listening and no
+  perfect lip-sync.
+- Not recorded: human listening, the separately authorized quality canary,
+  expired-price recovery, and the reversal, invalid-artifact and review-hold
+  checks.
+
+The checklist boxes stay unchecked. These results belong to the October 22
+candidate, whose generation contract was replaced on November 5, and the
+checklist has not been completed for the current pipeline.

@@ -1,5 +1,7 @@
 # Existing IONOS worker host
 
+> **Status note, November 18, 2026:** The September staging state below is historical. The worker was later activated and recorded active with a fresh heartbeat on October 23, 2026 (PR #74 and #75), and the binding v2 worker was heartbeat-verified on November 5 (PR #78). No record names a worker image with character-binding capability 3. See the [current status](../README.md#current-status-november-18-2026).
+
 The lowest-operation deployment is an isolated Node 22 / FFmpeg container on the existing IONOS Ubuntu VPS. The website, payments, private Blob store and source repository keep their existing hosts. The worker opens no listening port. Its durable queue and immutable completed media use the app's existing private records.
 
 ## Verified host inventory — September 24, 2026 UTC

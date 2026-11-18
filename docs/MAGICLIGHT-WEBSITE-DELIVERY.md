@@ -4,7 +4,7 @@ The administration overview includes **Deliver a MagicLight film**. An administr
 
 This is an operator-assisted alternative to API generation: registering the export and recipient is manual. Transfer, private storage verification and library availability happen automatically after registration. This does not discover website projects, generate scenes, mark a paid production order complete, or charge a customer. Website credit balances and API balances remain separate.
 
-Production Vercel Cron calls `/api/film-delivery` every five minutes with the existing `CRON_SECRET`. Each invocation processes at most one pending transfer within a 300-second function window. Administrators can also use **Transfer now**. No customer browser must stay open. The customer's library refreshes each minute while visible and idle; it does not interrupt playback or an open detail panel.
+Production Vercel Cron calls `/api/film-delivery` every five minutes with the existing `CRON_SECRET`. (Since commit a485316 on October 19, 2026 UTC, `vercel.json` runs this cron every minute.) Each invocation processes at most one pending transfer within a 300-second function window. Administrators can also use **Transfer now**. No customer browser must stay open. The customer's library refreshes each minute while visible and idle; it does not interrupt playback or an open detail panel.
 
 ## Delivery guarantees and limits
 

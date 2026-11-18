@@ -1,5 +1,7 @@
 # Magiclight media integration development
 
+> **Status note, November 18, 2026:** MagicLight is no longer the production video provider; new paid films use Kling O3 Pro through fal. This record is historical. See the [current status](../README.md#current-status-november-18-2026).
+
 Development checkpoint: September 24, 2026 UTC. This branch adds native media processing, hosted payment authorization, an isolated MagicLight protocol client, and owner-only runtime diagnostics. The worker is staged and tested on the existing host. No authenticated MagicLight generation or live worker activation is claimed.
 
 ## Native output quality

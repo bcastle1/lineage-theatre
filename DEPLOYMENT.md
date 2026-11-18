@@ -1,5 +1,7 @@
 # Deploying Lineage Theatre
 
+> **Status note, November 18, 2026:** Statements below that MagicLight film generation and QuickBooks charges and refunds remain connection pending describe the September releases. Customer films now use Kling O3 Pro through fal on the self-hosted worker, and customers pay QuickBooks-hosted invoices; what has and has not been verified live is in the [current status](README.md#current-status-november-18-2026). The release gates and rollback guidance below still apply.
+
 GitHub `bcastle1/lineage-theatre` main is the source of record. The existing Vercel project `lineage-theater` serves `lineagetheater.com`; keep its DNS and project assignment unchanged. GitHub Actions validates builds and tests. Publish the exact reviewed commit through the existing Vercel project.
 
 The authorized release includes public customer registration, owner-delegated administration, optional private finished-film archiving, configurable future-quote markup, owner-managed QuickBooks OAuth connection controls, and connected GPT-6 Astra ideas and screenplay generation. MagicLight film generation and QuickBooks charges/refunds remain connection pending. Public and signed-in screens must distinguish verified story development from those pending capabilities. See `docs/INTERNAL-FILM-INTEGRATION.md` for the remaining provider and merchant prerequisites.

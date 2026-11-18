@@ -1,6 +1,8 @@
 # Paid generation delivery
 
-The owner can request one generation for an exact paid screenplay. A permanent claim prevents automatic resubmission even when its response is uncertain. The Vercel generation cron checks saved task IDs every five minutes.
+> **Status note, November 18, 2026:** This record covers the owner-only MagicLight pilot generation and its separate delivery worker, not the customer production path, which uses Kling through fal ([automatic realistic production](AUTOMATIC-REALISTIC-PRODUCTION.md)). The cron interval in the next paragraph has since changed; see the annotation. See the [current status](../README.md#current-status-november-18-2026).
+
+The owner can request one generation for an exact paid screenplay. A permanent claim prevents automatic resubmission even when its response is uncertain. The Vercel generation cron checks saved task IDs every five minutes. (Since commit a485316 on October 19, 2026 UTC, `vercel.json` runs this cron every minute.)
 
 The separate delivery worker handles returned video only. It cannot submit generation, charge or refund money, approve content, or mark a film completed. It requires Node 22, FFmpeg, the existing private Blob token, and `LINEAGE_GENERATION_OUTPUT_HOSTS`, a comma-separated allowlist of reviewed exact output hosts. Missing hosts disable the worker. Redirects, oversized media, wrong duration, incomplete decoding, and missing browser-compatible video/audio fail verification.
 

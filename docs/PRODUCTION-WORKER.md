@@ -1,5 +1,7 @@
 # Production queue and private delivery
 
+> **Status note, November 18, 2026:** The activation boundary and requirements below describe the MagicLight state in September. The worker was later activated on the IONOS host and produces films with Kling O3 Pro through fal ([automatic realistic production](AUTOMATIC-REALISTIC-PRODUCTION.md)); it was recorded active with a fresh heartbeat on October 23 (PR #74 and #75). An ongoing paid Kling film can renew expired pricing within its fixed ceiling ([film quality](film-quality-reliability.md)). See the [current status](../README.md#current-status-november-18-2026) for what has been verified live.
+
 The studio now saves an idempotent production request instead of depending on the customer keeping the page open. The request uses the saved plan and captured order. A separate worker continues provider jobs, assembles verified clips with FFmpeg, publishes an immutable private MP4, verifies its stored bytes, and marks the film complete. The studio reads status and serves authenticated range playback/download through its existing API function. No new public worker or completion endpoint exists.
 
 ## Current activation boundary

@@ -47,3 +47,16 @@ jobs:
         run: pnpm test
         env:
           FFMPEG_PATH: ffmpeg
+
+      # Offline workflow simulator: real handlers over loopback with in-memory
+      # storage and in-process fakes for fal, the worker and QuickBooks. The
+      # script refuses every non-loopback connection and checks that guard.
+      - name: Offline workflow simulator
+        timeout-minutes: 5
+        run: |
+          node scripts/test-workflow-server.mjs --check
+          node scripts/test-workflow-server.mjs --checkout-fixtures --check
+          node scripts/test-workflow-server.mjs --generation-review-fixture --check
+          node scripts/test-workflow-server.mjs --delivery-fixture --check
+        env:
+          FFMPEG_PATH: ffmpeg

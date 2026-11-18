@@ -1,5 +1,7 @@
 # QuickBooks setup and activation
 
+> **Status note, November 18, 2026:** Statements below that customer charges or production payments remain disabled describe the legacy direct-card path and the state before hosted checkout. Production QuickBooks-hosted invoice payments have since been recorded: invoice 207 ($3.30, September 23) and invoice 354 ($7.88, October 23), both tests. `LINEAGE_PAYMENT_ACCESS=owner` is the last recorded setting. Hosted refunds are handled in QuickBooks, and none is recorded live. See the [current status](../README.md#current-status-november-18-2026).
+
 ## Current hosted-checkout path — September 23, 2026
 
 The owner selected QuickBooks-hosted checkout. Production OAuth and a separate company-information read verified the intended BROCO Tech company. The dedicated `Lineage Theater Film Production` Service item was saved with the existing Services income account and no fixed rate; its QuickBooks item reference is `2`. No customer, invoice, email, payment, or refund was created by that setup. Complete the versioned owner settings described in [Hosted checkout](HOSTED-CHECKOUT.md). Deployment alone does not enable checkout, prove a payment, or activate MagicLight.
