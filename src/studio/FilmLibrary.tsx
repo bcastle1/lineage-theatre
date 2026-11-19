@@ -25,9 +25,9 @@ const QUIET_MS = 500, QUIET_LIMIT_MS = 4000;
 // A scroll that starts within OWN_SCROLL_MS of a move the library made is taken to be part of that move.
 const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 16, OWN_SCROLL_MS = 300;
 // How long a control that starts something costly or hard to undo (marked data-arrival-guard: Resume paid film,
-// the confirm button of a confirmation) ignores presses after it may have arrived under a pointer: after the
-// library has moved the page, and after a confirmation has opened over it (see "arrivedUntil" below).
-const ARRIVAL_MS = 2500, DIALOG_ARRIVAL_MS = 1000;
+// the confirm button of a confirmation) ignores presses after it may have arrived under a pointer: after it
+// appears or moves, and after the library has scrolled the page (see "arrivedUntil" below).
+const ARRIVAL_MS = 2500;
 const CONTROLS = "a[href], button, input, select, textarea, summary, label, video, audio, [role=button], [role=link], [tabindex]";
 const controlOf = (target: EventTarget | null) => target instanceof Element ? target.closest(CONTROLS) : null;
 type Point = { x: number; y: number; radius: number; control: Element | null };
@@ -145,11 +145,13 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // the customer waits between presses, until the pointer moves away, a press is made somewhere else, the customer
   // scrolls or presses a key, or eight seconds have passed since the library last changed the page. A press on the
   // control that was there before is never ignored by this.
-  // And a control that starts something costly or hard to undo ignores every press (not the keyboard) for a
-  // moment after it may have arrived under a pointer, wherever that pointer is: 2.5 s after the library moves the
-  // page (the status panel opening under "View film status" can bring Resume paid film there), 1 s after a
-  // confirmation opens (on a phone its confirm button can open where Archive or Move to trash was pressed).
+  // And a control that starts something costly or hard to undo ignores every press (not the keyboard) for 2.5 s
+  // after it may have arrived under a pointer, wherever that pointer is: after it appears or moves on the page
+  // (the status panel opening under "View film status", or a status read, can bring Resume paid film there; on a
+  // phone a confirmation's confirm button can open where Archive or Move to trash was pressed), and after the
+  // library scrolls the page. An ignored press does nothing at all: it does not even take the focus.
   const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0), arrivedUntil = useRef(0);
+  const arrive = (now: number) => { arrivedUntil.current = Math.max(arrivedUntil.current, now + ARRIVAL_MS); };
   const pointer = useRef<Point | null>(null), held = useRef<(Point & { until: number }) | null>(null);
   const hold = () => {
     const now = performance.now(), current = held.current && now < held.current.until ? held.current : pointer.current;
@@ -159,7 +161,6 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const quiet = () => {
     const now = performance.now();
     quietUntil.current = now + QUIET_MS; quietLimit.current = now + QUIET_LIMIT_MS;
-    arrivedUntil.current = Math.max(arrivedUntil.current, now + ARRIVAL_MS);
     hold();
   };
   // Every scroll the library asks for goes through here.
@@ -181,19 +182,32 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     const pressedAt = new Map<number, { x: number; y: number }>();
     let lastPress: { x: number; y: number } | null = null;
     const caughtUp = () => { if (window.scrollY !== seenY) scrolled(); };
-    const ignorePress = (event: MouseEvent) => {
-      if (event.detail === 0) return;   // the keyboard
+    // Whether a press is ignored, judged when its mouse button goes down (so that an ignored press does not even
+    // take the focus, after which a key would act on that control) and again at its click.
+    const ignored = (event: MouseEvent, consume: boolean) => {
       caughtUp();
       const id = (event as Partial<PointerEvent>).pointerId, own = typeof id === "number" ? pressedAt.get(id) : undefined;
       const from = own ?? lastPress ?? { x: event.clientX, y: event.clientY };
-      if (own) pressedAt.delete(id as number);
-      lastPress = null;
+      if (consume) { if (own) pressedAt.delete(id as number); lastPress = null; }
       // When the press happened, not when the page got round to it: a busy page delivers taps late, and a
       // page that seems stuck is when a customer taps again.
       const now = Math.min(performance.now(), event.timeStamp > 0 ? event.timeStamp : Infinity), still = held.current;
       const moved = Boolean(still && now < still.until && Math.hypot(from.x - still.x, from.y - still.y) <= still.radius && controlOf(event.target) !== still.control);
       const arriving = now < arrivedUntil.current && Boolean((event.target as Element | null)?.closest?.("[data-arrival-guard]"));
-      if (now < quietUntil.current || moved || arriving) { event.preventDefault(); event.stopPropagation(); }
+      return now < quietUntil.current || moved || arriving;
+    };
+    // A press that was ignored when its button went down stays ignored, however slowly it is released.
+    let downIgnored = false;
+    const ignoreDown = (event: MouseEvent) => {
+      if (event.detail === 0) return;
+      downIgnored = ignored(event, false);
+      if (downIgnored) event.preventDefault();
+    };
+    const ignorePress = (event: MouseEvent) => {
+      if (event.detail === 0) return;   // the keyboard
+      const skip = ignored(event, true) || downIgnored;
+      downIgnored = false;
+      if (skip) { event.preventDefault(); event.stopPropagation(); }
     };
     const release = () => { held.current = null; };
     // A press the browser took over (a touch that became a scroll) sends no click.
@@ -219,7 +233,8 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       seenY = window.scrollY;
       if (now < quietUntil.current) quietUntil.current = Math.min(now + QUIET_MS, quietLimit.current);
       const own = now < ownScroll.current;
-      if (own) ownScroll.current = now + OWN_SCROLL_MS;
+      // The library moved the page: what is under a pointer now may be a guarded control.
+      if (own) { ownScroll.current = now + OWN_SCROLL_MS; arrive(now); }
       if (own && held.current && now < held.current.until) return;
       // Someone else moved the page (or nothing is held): what is under the pointer now is what the customer sees there.
       release();
@@ -228,6 +243,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     }
     const capture = { capture: true, passive: true };
     document.addEventListener("click", ignorePress, true);
+    document.addEventListener("mousedown", ignoreDown, true);
     document.addEventListener("pointerdown", track, capture);
     document.addEventListener("pointermove", track, capture);
     document.addEventListener("pointercancel", cancel, capture);
@@ -236,6 +252,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     window.addEventListener("scroll", scrolled, { passive: true });
     return () => {
       document.removeEventListener("click", ignorePress, true);
+      document.removeEventListener("mousedown", ignoreDown, true);
       document.removeEventListener("pointerdown", track, capture);
       document.removeEventListener("pointermove", track, capture);
       document.removeEventListener("pointercancel", cancel, capture);
@@ -302,9 +319,25 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     if (confirmation && dialog.current && !dialog.current.open) {
       dialog.current.showModal();
       // Its confirm button can open where the customer's finger or pointer already is.
-      arrivedUntil.current = Math.max(arrivedUntil.current, performance.now() + DIALOG_ARRIVAL_MS);
+      arrive(performance.now());
     }
   }, [confirmation]);
+  // A guarded control that appears, or moves on the page, may have arrived under a pointer. Its place is taken
+  // in the page (in the window for one in an open dialog), so the customer's own scrolling does not count.
+  const guardedAt = useRef(new Map<Element, string>());
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const seen = new Map<Element, string>();
+    let arrived = false;
+    for (const control of document.querySelectorAll(".film-library [data-arrival-guard]")) {
+      const box = control.getBoundingClientRect(), fixed = Boolean(control.closest("dialog[open]"));
+      const at = `${Math.round(box.left + (fixed ? 0 : window.scrollX))},${Math.round(box.top + (fixed ? 0 : window.scrollY))}`;
+      if (guardedAt.current.get(control) !== at) arrived = true;
+      seen.set(control, at);
+    }
+    guardedAt.current = seen;
+    if (arrived) arrive(performance.now());
+  });
   useEffect(() => {
     // The line an action has just produced can be out of sight: under an action row at the foot of the window,
     // at the head of the status panel, or at the top of the library when its card has left the view.

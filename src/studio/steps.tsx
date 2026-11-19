@@ -501,10 +501,11 @@ type FilmCharacter = import("./model").Character;
 // one counted as part of a double click.
 const QUIET_AFTER_MODE_CHANGE = 500;
 const QUIET_FOR_DOUBLE_CLICK = 1500;
-// After a removal the cards below move up under the pointer, and a customer who is not sure
-// it worked may press the same place again, where the next card's Remove can now be: any
-// press is ignored for longer.
-const QUIET_AFTER_REMOVE = 1500;
+// After a removal the cards move up (or the browser moves the page to keep the reader's
+// place), and another card's Remove can come to rest under the pointer. For this long after
+// a Remove made with a pointer, a press on any Remove is ignored: a customer who is not sure
+// the first one worked may press the same place again. Nothing else is held back longer.
+const REMOVE_GUARD_MS = 2500;
 // A press straight into a text field this far (CSS px) from the press that started the
 // quiet period is a new decision, not the second half of a double click; it may pass.
 const NEW_PRESS_DISTANCE = 40;
@@ -617,19 +618,21 @@ export function CuttingStep({
   // period began, which cannot change the draft and only places the caret there.
   // Activation from the keyboard, from assistive technology and from script reports a
   // click count of 0: it is never ignored and never starts a quiet period.
-  const quiet = useRef({ any: 0, multi: 0, pending: 0, x: 0, y: 0, span: QUIET_AFTER_MODE_CHANGE });
-  const startQuiet = (now: number, span = quiet.current.span) => {
-    quiet.current = { ...quiet.current, span, any: now + span, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
+  const quiet = useRef({ any: 0, multi: 0, pending: 0, x: 0, y: 0 });
+  const startQuiet = (now: number) => {
+    quiet.current = { ...quiet.current, any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
   };
+  // Until when a press on any Remove is ignored (see REMOVE_GUARD_MS).
+  const removeGuard = useRef(0);
   const isQuiet = (clickCount: number, at: number) =>
     clickCount > 0 && at < (clickCount > 1 ? Math.max(quiet.current.any, quiet.current.multi) : quiet.current.any);
   // Every control that moves the page goes through here.
   const movesPage =
-    (action: (control: HTMLElement, byPointer: boolean) => void, span = QUIET_AFTER_MODE_CHANGE) =>
+    (action: (control: HTMLElement, byPointer: boolean) => void) =>
     (event: { detail: number; clientX: number; clientY: number; currentTarget: HTMLElement }) => {
       if (event.detail > 0) {
         const now = performance.now();
-        startQuiet(now, span);
+        startQuiet(now);
         // Counted again once the page has moved (the effect below), if it does so now.
         quiet.current = { ...quiet.current, pending: now, x: event.clientX, y: event.clientY };
       }
@@ -640,7 +643,7 @@ export function CuttingStep({
   // quiet period. A list moved with the keyboard starts it too, which only holds back the pointer.
   const choiceMovesPage = () => {
     const now = performance.now();
-    startQuiet(now, QUIET_AFTER_MODE_CHANGE);
+    startQuiet(now);
     quiet.current = { ...quiet.current, pending: now };
   };
   useEffect(() => {
@@ -655,21 +658,26 @@ export function CuttingStep({
     // one that has just closed), place a caret, select a word, or open a list of options.
     // A press is seen first as a pointer going down, which does not know its click count
     // yet, then (unless that was ignored) as a mouse button going down, which does.
+    // When the press happened, not when a busy page got round to it.
+    const pressTime = (event: Event) => Math.min(performance.now(), event.timeStamp > 0 ? event.timeStamp : Infinity);
+    const onRemove = (event: Event, at: number) =>
+      at < removeGuard.current && !!(event.target as Element).closest?.("[data-remove]");
     const ignorePointer = (event: PointerEvent) => {
-      const now = performance.now();
-      pressIgnored = isQuiet(1, now) && !newPressIntoField(event);
+      const now = pressTime(event);
+      pressIgnored = (isQuiet(1, now) && !newPressIntoField(event)) || onRemove(event, now);
       // A control that is switched off sends nothing further, but would take the focus.
       if (pressIgnored || (isQuiet(2, now) && (event.target as Element).closest?.(":disabled")))
         event.preventDefault();
     };
     const ignorePress = (event: MouseEvent) => {
-      pressIgnored = pressIgnored || (isQuiet(event.detail, performance.now()) && !newPressIntoField(event));
+      const now = pressTime(event);
+      pressIgnored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event)) || (event.detail > 0 && onRemove(event, now));
       if (pressIgnored) event.preventDefault();
     };
     const ignoreClick = (event: MouseEvent) => {
       if (event.detail === 0) return;
-      const now = performance.now();
-      const ignored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event));
+      const now = pressTime(event);
+      const ignored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event)) || onRemove(event, now);
       pressIgnored = false;
       if (ignored) {
         event.preventDefault();
@@ -689,7 +697,8 @@ export function CuttingStep({
       document.removeEventListener("pointerdown", ignorePointer, true);
       document.removeEventListener("mousedown", ignorePress, true);
       document.removeEventListener("click", ignoreClick, true);
-      quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0, span: QUIET_AFTER_MODE_CHANGE };
+      quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0 };
+      removeGuard.current = 0;
     };
   }, []);
   // Outside the quiet period, the second press of a double click leaves the focus where
@@ -728,10 +737,12 @@ export function CuttingStep({
     const root = document.getElementById(focus.cardId);
     const target = root?.matches(focus.selector) ? root : root?.querySelector<HTMLElement>(focus.selector);
     if (target && !target.hasAttribute("tabindex") && target.tabIndex < 0) {
-      // A card is not a control: it takes the focus only until the focus moves on (a card that a
-      // click could focus would change what a double click on its text does).
+      // A card is not a control: it takes the focus only until the focus moves on or the next press
+      // (a card that a click could focus would change what a double click on its text does).
       target.setAttribute("tabindex", "-1");
-      target.addEventListener("blur", () => target.removeAttribute("tabindex"), { once: true });
+      const drop = () => target.removeAttribute("tabindex");
+      target.addEventListener("blur", drop, { once: true });
+      document.addEventListener("pointerdown", drop, { capture: true, once: true });
     }
     target?.focus({ preventScroll: focus.preventScroll });
   });
@@ -888,7 +899,7 @@ export function CuttingStep({
           );
           return (
           <article className={`cast-card ${edit ? "editing" : ""}`} key={character.id} id={cardId}
-            aria-label={character.name || `Character ${index + 1}`}>
+            aria-label={character.name?.trim() ? character.name : `Character ${index + 1}`}>
             <div className="cast-card-heading">
               <span className={`basis-tag ${character.basis}`}>
                 {character.basis === "documented"
@@ -1030,7 +1041,9 @@ export function CuttingStep({
                 className="icon-button"
                 aria-label={`Remove ${character.name || "character"}`}
                 disabled={!!busy}
+                data-remove=""
                 onClick={movesPage((_, byPointer) => {
+                  if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                   focusAfterRemove(characterCards, cardId, "add-character", byPointer);
                   update({
                     characters: film.characters.filter((c) => c.id !== character.id),
@@ -1039,7 +1052,7 @@ export function CuttingStep({
                       characterIds: s.characterIds.filter((id) => id !== character.id),
                     })),
                   });
-                }, QUIET_AFTER_REMOVE)}
+                })}
               >
                 <Trash2 size={16} />
               </button>
@@ -1117,10 +1130,12 @@ export function CuttingStep({
             <button
               className="icon-button"
               aria-label={`Remove assumption ${i + 1}`}
+              data-remove=""
               onClick={movesPage((_, byPointer) => {
+                if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                 focusAfterRemove(film.assumptions.map((x) => `assumption-${x.id}`), `assumption-${a.id}`, "add-assumption", byPointer);
                 update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) });
-              }, QUIET_AFTER_REMOVE)}
+              })}
             >
               <X size={15} />
             </button>
@@ -1348,10 +1363,12 @@ export function CuttingStep({
                       className="icon-button"
                       aria-label={`Remove scene ${i + 1}`}
                       disabled={film.scenes.length <= 1 || !!busy}
+                      data-remove=""
                       onClick={movesPage((_, byPointer) => {
+                        if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                         focusAfterRemove(sceneCards, cardId, "add-scene", byPointer);
                         update({ scenes: film.scenes.filter((s) => s.id !== scene.id) });
-                      }, QUIET_AFTER_REMOVE)}
+                      })}
                     >
                       <Trash2 size={16} />
                     </button>
