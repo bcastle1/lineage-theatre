@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-// When a press opens another step or view, the page under a pointer that has not moved changes: the second
+// When a press opens another step, view or film, the page under a pointer that has not moved changes: the second
 // press of a double click, or of a quick double tap, would land on whatever the new screen shows there (a
 // consent box, the next step's main action, a navigation item). For a moment after such a change, presses
 // are ignored everywhere in the document: half a second for any press, and a second and a half for a press
