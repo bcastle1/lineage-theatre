@@ -3164,14 +3164,17 @@ html:has(.cutting-panel) {
 .scene-bottom > .field-note {
   font-variant-numeric: tabular-nums;
 }
+/* Like a character's form, a scene's closes with Move and Remove at one end and Done at the other. */
 .scene-bottom > .action-group {
-  flex: 0 0 auto;
+  flex: 1 0 100%;
   flex-wrap: nowrap;
   gap: var(--space-1);
-  margin-left: auto;
+}
+.scene-bottom > .action-group > .icon-button:first-child {
+  margin-left: calc(var(--space-2) * -1);
 }
 .scene-bottom .card-mode {
-  margin-left: var(--space-2);
+  margin-left: auto;
 }
 .add-scene {
   display: flex;

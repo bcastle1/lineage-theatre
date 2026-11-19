@@ -497,7 +497,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true}
         onClick={() => void resumePaidFilm()}><RotateCcw size={15} aria-hidden="true" />Resume paid film</button>}
       {libraryCanWatch(detail.entry) && <>
-        <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`)}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
+        <button type="button" className="button primary small" disabled={blocked} onClick={() => { if (errorPlace === `detail:${detailKey}`) setError(""); setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`); }}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
         <a className="text-button" href={detail.entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
       </>}
       <button type="button" className="text-button" disabled={blocked} onClick={() => void openDetail(detail.entry, `detail:${detailKey}`)}><RefreshCw size={15} aria-hidden="true" />Refresh film status</button>
@@ -541,7 +541,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
             <div className="action-group film-library-actions">
               <button type="button" className="button secondary small" disabled={blocked} onClick={() => void openDetail(entry)}>View film status</button>
               {libraryCanWatch(entry) && <>
-                <button type="button" className="button primary small" disabled={blocked} onClick={() => setPlaying(isPlaying ? "" : key)}>{isPlaying ? "Close player" : "Watch film"}</button>
+                <button type="button" className="button primary small" disabled={blocked} onClick={() => { if (errorPlace === key) setError(""); setPlaying(isPlaying ? "" : key); }}>{isPlaying ? "Close player" : "Watch film"}</button>
                 <a className="text-button" href={entry.downloadUrl} download><Download size={15} aria-hidden="true" />Download film</a>
               </>}
               {local && !entry.coverage && <button type="button" className="text-button" disabled={blocked} onClick={() => onOpenDraft(local.id)}>Open browser draft</button>}

@@ -274,6 +274,12 @@ export function DirectionStep({
   editorial,
   archivePlan,
 }: DirectionProps) {
+  // A draft's own running time that is not on offer stays on offer while the step is open, chosen or not:
+  // choosing another time never removes a card from under the pointer, and the customer can choose it again.
+  const [kept, setKept] = useState({ id: film.id, duration: film.duration });
+  if (kept.id !== film.id) setKept({ id: film.id, duration: film.duration });
+  const ownTime = kept.id === film.id && !runningTimes.includes(kept.duration) ? kept.duration : null;
+  const durations = [...new Set([...runningTimes, ...(ownTime === null ? [] : [ownTime]), film.duration])].sort((a, b) => a - b);
   return (
     <section className="panel">
       <div className="section-title">
@@ -333,10 +339,7 @@ export function DirectionStep({
         <fieldset className="duration-choice">
           <legend>Target running time</legend>
           <div className="duration-options">
-            {(runningTimes.includes(film.duration)
-              ? runningTimes
-              : [...runningTimes, film.duration].sort((a, b) => a - b)
-            ).map((s) => (
+            {durations.map((s) => (
               <label key={s} className={`choice ${film.duration === s ? "chosen" : ""}`}>
                 <input
                   type="radio"
@@ -348,11 +351,13 @@ export function DirectionStep({
                 />
                 <span>{formatDuration(s)}</span>
                 <small>
-                  {s === 120
-                    ? "Short film · recommended"
-                    : s <= 60
-                      ? "Trailer"
-                      : "Extended family story"}
+                  {!runningTimes.includes(s)
+                    ? "Kept from this draft"
+                    : s === 120
+                      ? "Short film · recommended"
+                      : s <= 60
+                        ? "Trailer"
+                        : "Extended family story"}
                 </small>
               </label>
             ))}
@@ -565,6 +570,13 @@ export function CuttingStep({
     keepInPlace.current = box ? { cardId, top: box.top, limit: -Infinity } : null;
     setCardsEditing([cardId], edit);
   };
+  // A removed card takes the focus with it: give it to the card that takes its place, or the one
+  // before it, or the section's Add button when none is left.
+  const focusAfterRemove = (cardIds: string[], cardId: string, selector: string, addId: string) => {
+    const index = cardIds.indexOf(cardId);
+    const neighbour = cardIds[index + 1] ?? cardIds[index - 1];
+    focusAfterRender.current = neighbour ? { cardId: neighbour, selector } : { cardId: addId, selector: "button" };
+  };
   // A whole section changes mode: the card being read stays where it is. That is the
   // first card that starts under the section's header, or else the one card that fills
   // the window.
@@ -615,6 +627,14 @@ export function CuttingStep({
       }
       action(event.currentTarget);
     };
+  // A choice from a list of options closes the list where the pointer is: the second press of a double
+  // click on an option would land on the form under it (Remove sits at its foot). A choice starts the same
+  // quiet period. A list moved with the keyboard starts it too, which only holds back the pointer.
+  const choiceMovesPage = () => {
+    const now = performance.now();
+    startQuiet(now);
+    quiet.current = { ...quiet.current, pending: now };
+  };
   useEffect(() => {
     if (typeof document === "undefined") return;
     // Whether the press under way began in the quiet period.
@@ -697,7 +717,8 @@ export function CuttingStep({
     const focus = focusAfterRender.current;
     if (!focus) return;
     focusAfterRender.current = null;
-    document.getElementById(focus.cardId)?.querySelector<HTMLElement>(focus.selector)?.focus();
+    const root = document.getElementById(focus.cardId);
+    (root?.matches(focus.selector) ? root : root?.querySelector<HTMLElement>(focus.selector))?.focus();
   });
   const characterCards = film.characters.map((c) => `character-${c.id}`);
   const sceneCards = film.scenes.map((s) => `scene-${s.id}`);
@@ -808,6 +829,7 @@ export function CuttingStep({
           </button>
         )}
         <button
+          id="add-character"
           className="button secondary small"
           disabled={!!busy}
           onClick={movesPage(() => {
@@ -919,6 +941,7 @@ export function CuttingStep({
               <select aria-label={`Appearance reference photo for ${character.name || "character"}`}
                 value={character.referencePhotoId || ""} disabled={!!busy}
                 onChange={(event) => {
+                  choiceMovesPage();
                   const referencePhotoId = event.target.value;
                   changeCharacter(character.id, { referencePhotoId: referencePhotoId || undefined,
                     sourceIds: referencePhotoId && !character.sourceIds.includes(referencePhotoId)
@@ -952,11 +975,12 @@ export function CuttingStep({
               Basis
               <select
                 value={character.basis}
-                onChange={(e) =>
+                onChange={(e) => {
+                  choiceMovesPage();
                   changeCharacter(character.id, {
                     basis: e.target.value as FilmCharacter["basis"],
-                  })
-                }
+                  });
+                }}
               >
                 <option value="documented">Documented in family evidence</option>
                 <option value="inferred">Inferred from context</option>
@@ -990,15 +1014,16 @@ export function CuttingStep({
                 className="icon-button"
                 aria-label={`Remove ${character.name || "character"}`}
                 disabled={!!busy}
-                onClick={movesPage(() =>
+                onClick={movesPage(() => {
+                  focusAfterRemove(characterCards, cardId, ".card-mode", "add-character");
                   update({
                     characters: film.characters.filter((c) => c.id !== character.id),
                     scenes: film.scenes.map((s) => ({
                       ...s,
                       characterIds: s.characterIds.filter((id) => id !== character.id),
                     })),
-                  }),
-                )}
+                  });
+                })}
               >
                 <Trash2 size={16} />
               </button>
@@ -1024,6 +1049,7 @@ export function CuttingStep({
           <span>Review what was added, and why it belongs in the story.</span>
         </div>
         <button
+          id="add-assumption"
           className="button secondary small"
           disabled={!!busy}
           onClick={movesPage(() =>
@@ -1041,7 +1067,7 @@ export function CuttingStep({
       </div>
       <div className="assumption-list">
         {film.assumptions.map((a, i) => (
-          <article className="assumption-card" key={a.id}>
+          <article className="assumption-card" key={a.id} id={`assumption-${a.id}`}>
             <span className="assumption-number">{String(i + 1).padStart(2, "0")}</span>
             <div>
               <label>
@@ -1075,9 +1101,10 @@ export function CuttingStep({
             <button
               className="icon-button"
               aria-label={`Remove assumption ${i + 1}`}
-              onClick={movesPage(() =>
-                update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) }),
-              )}
+              onClick={movesPage(() => {
+                focusAfterRemove(film.assumptions.map((x) => `assumption-${x.id}`), `assumption-${a.id}`, "textarea", "add-assumption");
+                update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) });
+              })}
             >
               <X size={15} />
             </button>
@@ -1304,9 +1331,10 @@ export function CuttingStep({
                       className="icon-button"
                       aria-label={`Remove scene ${i + 1}`}
                       disabled={film.scenes.length <= 1 || !!busy}
-                      onClick={movesPage(() =>
-                        update({ scenes: film.scenes.filter((s) => s.id !== scene.id) }),
-                      )}
+                      onClick={movesPage(() => {
+                        focusAfterRemove(sceneCards, cardId, ".card-mode", "add-scene");
+                        update({ scenes: film.scenes.filter((s) => s.id !== scene.id) });
+                      })}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -1328,6 +1356,7 @@ export function CuttingStep({
         </div>
       )}
       <button
+        id="add-scene"
         className="text-button add-scene"
         disabled={!!busy}
         onClick={movesPage(() => {
