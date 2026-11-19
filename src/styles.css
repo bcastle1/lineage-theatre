@@ -2862,6 +2862,15 @@ html:has(.cutting-panel) {
 .cast-card-foot > .icon-button {
   margin-left: calc(var(--space-2) * -1);
 }
+/* After a removal the card that takes its place holds the focus (given by script, so it
+   carries tabindex="-1"). From the keyboard it is outlined like a control, so the reader
+   can see where they are; after a press nothing is drawn. */
+.cast-card[tabindex="-1"]:focus-visible,
+.scene-card[tabindex="-1"]:focus-visible,
+.assumption-card[tabindex="-1"]:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
 /* A card changes mode in one step. Its layout is never animated: under the
    reduced-motion rule the old spacing would otherwise stay for one more frame,
    after the page has been measured to keep the reader's place. */

@@ -501,6 +501,10 @@ type FilmCharacter = import("./model").Character;
 // one counted as part of a double click.
 const QUIET_AFTER_MODE_CHANGE = 500;
 const QUIET_FOR_DOUBLE_CLICK = 1500;
+// After a removal the cards below move up under the pointer, and a customer who is not sure
+// it worked may press the same place again, where the next card's Remove can now be: any
+// press is ignored for longer.
+const QUIET_AFTER_REMOVE = 1500;
 // A press straight into a text field this far (CSS px) from the press that started the
 // quiet period is a new decision, not the second half of a double click; it may pass.
 const NEW_PRESS_DISTANCE = 40;
@@ -544,7 +548,7 @@ export function CuttingStep({
   // Character and scene cards open as a reading view. The cards being edited are
   // kept here by film and card id; this is view state only and is never saved.
   const [editing, setEditing] = useState<Set<string>>(() => new Set());
-  const focusAfterRender = useRef<{ cardId: string; selector: string } | null>(null);
+  const focusAfterRender = useRef<{ cardId: string; selector: string; preventScroll?: boolean } | null>(null);
   const isEditing = (cardId: string) => editing.has(`${film.id}:${cardId}`);
   const setCardsEditing = (cardIds: string[], edit: boolean) =>
     setEditing((current) => {
@@ -571,11 +575,15 @@ export function CuttingStep({
     setCardsEditing([cardId], edit);
   };
   // A removed card takes the focus with it: give it to the card that takes its place, or the one
-  // before it, or the section's Add button when none is left.
-  const focusAfterRemove = (cardIds: string[], cardId: string, selector: string, addId: string) => {
+  // before it (the card itself, not a field or a button in it, so that a key pressed again edits or
+  // removes nothing), or the section's Add button when none is left. After a press the page is not
+  // scrolled to it; from the keyboard it is.
+  const focusAfterRemove = (cardIds: string[], cardId: string, addId: string, byPointer: boolean) => {
     const index = cardIds.indexOf(cardId);
     const neighbour = cardIds[index + 1] ?? cardIds[index - 1];
-    focusAfterRender.current = neighbour ? { cardId: neighbour, selector } : { cardId: addId, selector: "button" };
+    focusAfterRender.current = neighbour
+      ? { cardId: neighbour, selector: "article", preventScroll: byPointer }
+      : { cardId: addId, selector: "button", preventScroll: byPointer };
   };
   // A whole section changes mode: the card being read stays where it is. That is the
   // first card that starts under the section's header, or else the one card that fills
@@ -609,30 +617,30 @@ export function CuttingStep({
   // period began, which cannot change the draft and only places the caret there.
   // Activation from the keyboard, from assistive technology and from script reports a
   // click count of 0: it is never ignored and never starts a quiet period.
-  const quiet = useRef({ any: 0, multi: 0, pending: 0, x: 0, y: 0 });
-  const startQuiet = (now: number) => {
-    quiet.current = { ...quiet.current, any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
+  const quiet = useRef({ any: 0, multi: 0, pending: 0, x: 0, y: 0, span: QUIET_AFTER_MODE_CHANGE });
+  const startQuiet = (now: number, span = quiet.current.span) => {
+    quiet.current = { ...quiet.current, span, any: now + span, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
   };
   const isQuiet = (clickCount: number, at: number) =>
     clickCount > 0 && at < (clickCount > 1 ? Math.max(quiet.current.any, quiet.current.multi) : quiet.current.any);
   // Every control that moves the page goes through here.
   const movesPage =
-    (action: (control: HTMLElement) => void) =>
+    (action: (control: HTMLElement, byPointer: boolean) => void, span = QUIET_AFTER_MODE_CHANGE) =>
     (event: { detail: number; clientX: number; clientY: number; currentTarget: HTMLElement }) => {
       if (event.detail > 0) {
         const now = performance.now();
-        startQuiet(now);
+        startQuiet(now, span);
         // Counted again once the page has moved (the effect below), if it does so now.
         quiet.current = { ...quiet.current, pending: now, x: event.clientX, y: event.clientY };
       }
-      action(event.currentTarget);
+      action(event.currentTarget, event.detail > 0);
     };
   // A choice from a list of options closes the list where the pointer is: the second press of a double
   // click on an option would land on the form under it (Remove sits at its foot). A choice starts the same
   // quiet period. A list moved with the keyboard starts it too, which only holds back the pointer.
   const choiceMovesPage = () => {
     const now = performance.now();
-    startQuiet(now);
+    startQuiet(now, QUIET_AFTER_MODE_CHANGE);
     quiet.current = { ...quiet.current, pending: now };
   };
   useEffect(() => {
@@ -681,7 +689,7 @@ export function CuttingStep({
       document.removeEventListener("pointerdown", ignorePointer, true);
       document.removeEventListener("mousedown", ignorePress, true);
       document.removeEventListener("click", ignoreClick, true);
-      quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0 };
+      quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0, span: QUIET_AFTER_MODE_CHANGE };
     };
   }, []);
   // Outside the quiet period, the second press of a double click leaves the focus where
@@ -718,7 +726,14 @@ export function CuttingStep({
     if (!focus) return;
     focusAfterRender.current = null;
     const root = document.getElementById(focus.cardId);
-    (root?.matches(focus.selector) ? root : root?.querySelector<HTMLElement>(focus.selector))?.focus();
+    const target = root?.matches(focus.selector) ? root : root?.querySelector<HTMLElement>(focus.selector);
+    if (target && !target.hasAttribute("tabindex") && target.tabIndex < 0) {
+      // A card is not a control: it takes the focus only until the focus moves on (a card that a
+      // click could focus would change what a double click on its text does).
+      target.setAttribute("tabindex", "-1");
+      target.addEventListener("blur", () => target.removeAttribute("tabindex"), { once: true });
+    }
+    target?.focus({ preventScroll: focus.preventScroll });
   });
   const characterCards = film.characters.map((c) => `character-${c.id}`);
   const sceneCards = film.scenes.map((s) => `scene-${s.id}`);
@@ -872,7 +887,8 @@ export function CuttingStep({
             </button>
           );
           return (
-          <article className={`cast-card ${edit ? "editing" : ""}`} key={character.id} id={cardId}>
+          <article className={`cast-card ${edit ? "editing" : ""}`} key={character.id} id={cardId}
+            aria-label={character.name || `Character ${index + 1}`}>
             <div className="cast-card-heading">
               <span className={`basis-tag ${character.basis}`}>
                 {character.basis === "documented"
@@ -1014,8 +1030,8 @@ export function CuttingStep({
                 className="icon-button"
                 aria-label={`Remove ${character.name || "character"}`}
                 disabled={!!busy}
-                onClick={movesPage(() => {
-                  focusAfterRemove(characterCards, cardId, ".card-mode", "add-character");
+                onClick={movesPage((_, byPointer) => {
+                  focusAfterRemove(characterCards, cardId, "add-character", byPointer);
                   update({
                     characters: film.characters.filter((c) => c.id !== character.id),
                     scenes: film.scenes.map((s) => ({
@@ -1023,7 +1039,7 @@ export function CuttingStep({
                       characterIds: s.characterIds.filter((id) => id !== character.id),
                     })),
                   });
-                })}
+                }, QUIET_AFTER_REMOVE)}
               >
                 <Trash2 size={16} />
               </button>
@@ -1067,7 +1083,7 @@ export function CuttingStep({
       </div>
       <div className="assumption-list">
         {film.assumptions.map((a, i) => (
-          <article className="assumption-card" key={a.id} id={`assumption-${a.id}`}>
+          <article className="assumption-card" key={a.id} id={`assumption-${a.id}`} aria-label={`Assumption ${i + 1}`}>
             <span className="assumption-number">{String(i + 1).padStart(2, "0")}</span>
             <div>
               <label>
@@ -1101,10 +1117,10 @@ export function CuttingStep({
             <button
               className="icon-button"
               aria-label={`Remove assumption ${i + 1}`}
-              onClick={movesPage(() => {
-                focusAfterRemove(film.assumptions.map((x) => `assumption-${x.id}`), `assumption-${a.id}`, "textarea", "add-assumption");
+              onClick={movesPage((_, byPointer) => {
+                focusAfterRemove(film.assumptions.map((x) => `assumption-${x.id}`), `assumption-${a.id}`, "add-assumption", byPointer);
                 update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) });
-              })}
+              }, QUIET_AFTER_REMOVE)}
             >
               <X size={15} />
             </button>
@@ -1166,7 +1182,8 @@ export function CuttingStep({
               </button>
             );
             return (
-            <article className={`scene-card ${edit ? "editing" : ""}`} key={scene.id} id={`scene-${scene.id}`}>
+            <article className={`scene-card ${edit ? "editing" : ""}`} key={scene.id} id={`scene-${scene.id}`}
+              aria-label={`Scene ${i + 1}${scene.title?.trim() ? `: ${scene.title}` : ""}`}>
               <div className="scene-index">
                 {String(i + 1).padStart(2, "0")}
                 <small>{formatDuration((i * film.duration) / film.scenes.length)}</small>
@@ -1331,10 +1348,10 @@ export function CuttingStep({
                       className="icon-button"
                       aria-label={`Remove scene ${i + 1}`}
                       disabled={film.scenes.length <= 1 || !!busy}
-                      onClick={movesPage(() => {
-                        focusAfterRemove(sceneCards, cardId, ".card-mode", "add-scene");
+                      onClick={movesPage((_, byPointer) => {
+                        focusAfterRemove(sceneCards, cardId, "add-scene", byPointer);
                         update({ scenes: film.scenes.filter((s) => s.id !== scene.id) });
-                      })}
+                      }, QUIET_AFTER_REMOVE)}
                     >
                       <Trash2 size={16} />
                     </button>
