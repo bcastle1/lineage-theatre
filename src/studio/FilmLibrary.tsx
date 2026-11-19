@@ -17,8 +17,16 @@ const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "
 const scrolling = (): ScrollBehavior => typeof window !== "undefined" && typeof window.matchMedia === "function"
   && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 const inPanel = (at: string) => /^(status|detail|version):/.test(at);
-// How long presses are ignored after the library itself has moved the page (see "quiet" below).
-const QUIET_MS = 500;
+// How long presses are ignored after the library itself has moved the page, and the longest that a page still
+// scrolling can extend it (see "quiet" below).
+const QUIET_MS = 500, QUIET_LIMIT_MS = 4000;
+// How long a still pointer is held to the control it was on when the library moved the page, and how far a
+// mouse (or a finger or pen, between taps) may stray and still count as the same point (see "hold" below).
+// A scroll that starts within OWN_SCROLL_MS of a move the library made is taken to be part of that move.
+const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 16, OWN_SCROLL_MS = 300;
+const CONTROLS = "a[href], button, input, select, textarea, summary, label, video, audio, [role=button], [role=link], [tabindex]";
+const controlOf = (target: EventTarget | null) => target instanceof Element ? target.closest(CONTROLS) : null;
+type Point = { x: number; y: number; radius: number; control: Element | null };
 type Line = "message" | "error" | "busy";
 function resumablePayment(detail: LibraryDetail | null) {
   if (!detail?.manifest || !detail.entry.production.needsAttention
@@ -120,31 +128,88 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
   }, []);
-  // When the library itself moves the page (it brings a line or the status panel into view, a line appears,
-  // changes or goes, or the status panel closes), whatever arrives under a pointer that has not moved is not
-  // what the customer aimed at. For a moment after each such move, presses are ignored everywhere in the
-  // document. Activation from the keyboard (a click with no press count) is never ignored.
-  // While the page is still scrolling the moment is extended, but never past three moments after the move, so
-  // the customer's own scrolling cannot keep presses ignored.
-  const quietUntil = useRef(0), quietLimit = useRef(0);
-  const quiet = () => { const now = performance.now(); quietUntil.current = now + QUIET_MS; quietLimit.current = now + 3 * QUIET_MS; };
+  // When the library itself moves the page (it brings a line or the status panel into view, the status panel
+  // closes, or a line in a card appears, changes or goes after the customer's action), whatever arrives under a
+  // pointer that has not moved is not what the customer aimed at. For a moment after each such move, presses
+  // are ignored everywhere in the document. Activation from the keyboard (a click with no press count) is never
+  // ignored. While the page is still scrolling (a long smooth scroll can take well over a second) the moment is
+  // extended, but never past four seconds after the move, so the customer's own scrolling cannot keep presses
+  // ignored for long. A background refresh never starts that moment.
+  // Independently of that moment, a pointer that has not moved since the library changed the page (any change,
+  // a background refresh's included) is held to the control it was on before: a press at that point (within a
+  // few pixels) that would now land on a different control is ignored, however long the customer waits between
+  // presses, until the pointer moves away, a press is made somewhere else, the customer scrolls, or eight
+  // seconds have passed since the library last changed the page. A press on the control that was there before,
+  // which is every control that did not move, is never ignored by this.
+  const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0);
+  const pointer = useRef<Point | null>(null), held = useRef<(Point & { until: number }) | null>(null);
+  const hold = () => {
+    const now = performance.now(), current = held.current && now < held.current.until ? held.current : pointer.current;
+    if (current) held.current = { ...current, until: now + HOLD_MS };
+    ownScroll.current = Math.max(ownScroll.current, now + OWN_SCROLL_MS);
+  };
+  const quiet = () => { const now = performance.now(); quietUntil.current = now + QUIET_MS; quietLimit.current = now + QUIET_LIMIT_MS; hold(); };
   // Every scroll the library asks for goes through here.
   const bring = (target: Element | null | undefined, block: ScrollLogicalPosition) => {
     if (!target || typeof window === "undefined") return;
-    quiet(); target.scrollIntoView({ behavior: scrolling(), block });
+    const behavior = scrolling();
+    quiet(); ownScroll.current = Math.max(ownScroll.current, performance.now() + (behavior === "smooth" ? 1000 : OWN_SCROLL_MS));
+    target.scrollIntoView({ behavior, block });
   };
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") return;
+    // The browser reports a scroll at its next frame; a press can arrive before that. Each handler first takes
+    // account of a scroll that has happened but has not been reported yet.
+    let seenY = window.scrollY;
+    const caughtUp = () => { if (window.scrollY !== seenY) scrolled(); };
     const ignorePress = (event: MouseEvent) => {
-      if (event.detail > 0 && performance.now() < quietUntil.current) { event.preventDefault(); event.stopPropagation(); }
+      if (event.detail === 0) return;   // the keyboard
+      caughtUp();
+      const now = performance.now(), still = held.current;
+      const moved = Boolean(still && now < still.until && Math.hypot(event.clientX - still.x, event.clientY - still.y) <= still.radius && controlOf(event.target) !== still.control);
+      if (now < quietUntil.current || moved) { event.preventDefault(); event.stopPropagation(); }
     };
-    const stillMoving = () => {
+    const release = () => { held.current = null; };
+    // Where the pointer is and which control it is on. A move to the same point (as a browser may report after
+    // the page moved under it) changes nothing.
+    const track = (event: PointerEvent) => {
+      caughtUp();
+      const at = { x: event.clientX, y: event.clientY, radius: event.pointerType === "mouse" ? MOUSE_RADIUS : TOUCH_RADIUS, control: controlOf(event.target) };
+      const still = held.current, last = pointer.current;
+      if (still && performance.now() < still.until && Math.hypot(at.x - still.x, at.y - still.y) <= still.radius) return;
+      if (event.type === "pointermove" && last && last.x === at.x && last.y === at.y) return;
+      release(); pointer.current = at;
+    };
+    function scrolled() {
       const now = performance.now();
+      seenY = window.scrollY;
       if (now < quietUntil.current) quietUntil.current = Math.min(now + QUIET_MS, quietLimit.current);
-    };
+      const own = now < ownScroll.current;
+      if (own) ownScroll.current = now + OWN_SCROLL_MS;
+      if (own && held.current && now < held.current.until) return;
+      // Someone else moved the page (or nothing is held): what is under the pointer now is what the customer sees there.
+      release();
+      const last = pointer.current;
+      if (last) last.control = controlOf(document.elementFromPoint(last.x, last.y));
+    }
+    const capture = { capture: true, passive: true };
     document.addEventListener("click", ignorePress, true);
-    window.addEventListener("scroll", stillMoving, { passive: true });
-    return () => { document.removeEventListener("click", ignorePress, true); window.removeEventListener("scroll", stillMoving); quietUntil.current = 0; };
+    document.addEventListener("pointerdown", track, capture);
+    document.addEventListener("pointermove", track, capture);
+    document.addEventListener("pointercancel", release, capture);
+    document.addEventListener("wheel", release, capture);
+    document.addEventListener("keydown", release, true);
+    window.addEventListener("scroll", scrolled, { passive: true });
+    return () => {
+      document.removeEventListener("click", ignorePress, true);
+      document.removeEventListener("pointerdown", track, capture);
+      document.removeEventListener("pointermove", track, capture);
+      document.removeEventListener("pointercancel", release, capture);
+      document.removeEventListener("wheel", release, capture);
+      document.removeEventListener("keydown", release, true);
+      window.removeEventListener("scroll", scrolled);
+      quietUntil.current = 0; held.current = null; pointer.current = null;
+    };
   }, []);
   useEffect(() => { onBusyChange(Boolean(busy)); }, [busy, onBusyChange]);
   useEffect(() => () => onBusyChange(false), [onBusyChange]);
@@ -374,8 +439,12 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const attached = places.has(detailKey);
   const busyPlace = placed(busyAt), errorPlace = placed(errorAt), messagePlace = placed(messageAt);
   // Which lines are on the page, and where. When one appears, changes or goes, what follows it moves.
-  const lines = [message && `${messagePlace}:${message}`, confirmation ? "" : error && `${errorPlace}:${error}`, busy && `${busyPlace}:${busy}`].join("|");
-  const linesBefore = useRef(lines);
+  const shown: [string, string][] = [[messagePlace, message], [errorPlace, confirmation ? "" : error], [busyPlace, busy]];
+  const lines = shown.map(([place, text]) => text && `${place}:${text}`).join("|");
+  // The lines in cards and under "Load more saved films". Only the customer's own actions write these; a
+  // background refresh writes only the top of the library and the status panel.
+  const cardLines = shown.map(([place, text]) => text && place && !inPanel(place) ? `${place}:${text}` : "").join("|");
+  const linesBefore = useRef(lines), cardLinesBefore = useRef(cardLines);
   // In a card the row of lines does not get shorter while it stays (a one-line error after a two-line working
   // line): the page may have been scrolled for the taller one, and Archive / Move to trash must not rise to the
   // pointer. Each card row's tallest height so far, by place; a row that goes starts again from nothing.
@@ -383,7 +452,11 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   useEffect(() => {
     if (linesBefore.current === lines) return;
     linesBefore.current = lines;
-    quiet();
+    // A row in a card changed: the customer's own action moved what follows it, so presses pause for a moment.
+    // Any other change (the top or the panel, which is all a background refresh changes) only holds a still
+    // pointer to the control it was on: a press on a control that did not move is never ignored.
+    if (cardLinesBefore.current !== cardLines) quiet(); else hold();
+    cardLinesBefore.current = cardLines;
     errorInList.current = Boolean(error) && !confirmation && errorPlace !== "" && !inPanel(errorPlace);
     const floors: Record<string, number> = {};
     for (const [place, line] of [[messagePlace, messageLine], [errorPlace, errorLine], [busyPlace, busyLine]] as const) {
