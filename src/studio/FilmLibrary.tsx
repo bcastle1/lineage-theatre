@@ -27,7 +27,7 @@ const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 16, OWN_SCROLL_MS = 300;
 // How long a control that starts something costly or hard to undo (marked data-arrival-guard: Resume paid film,
 // the confirm button of a confirmation) ignores presses after it may have arrived under a pointer: after the
 // library has moved the page, and after a confirmation has opened over it (see "arrivedUntil" below).
-const ARRIVAL_MS = 1500, DIALOG_ARRIVAL_MS = 1000;
+const ARRIVAL_MS = 2500, DIALOG_ARRIVAL_MS = 1000;
 const CONTROLS = "a[href], button, input, select, textarea, summary, label, video, audio, [role=button], [role=link], [tabindex]";
 const controlOf = (target: EventTarget | null) => target instanceof Element ? target.closest(CONTROLS) : null;
 type Point = { x: number; y: number; radius: number; control: Element | null };
@@ -146,7 +146,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // scrolls or presses a key, or eight seconds have passed since the library last changed the page. A press on the
   // control that was there before is never ignored by this.
   // And a control that starts something costly or hard to undo ignores every press (not the keyboard) for a
-  // moment after it may have arrived under a pointer, wherever that pointer is: 1.5 s after the library moves the
+  // moment after it may have arrived under a pointer, wherever that pointer is: 2.5 s after the library moves the
   // page (the status panel opening under "View film status" can bring Resume paid film there), 1 s after a
   // confirmation opens (on a phone its confirm button can open where Archive or Move to trash was pressed).
   const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0), arrivedUntil = useRef(0);
@@ -188,7 +188,9 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       const from = own ?? lastPress ?? { x: event.clientX, y: event.clientY };
       if (own) pressedAt.delete(id as number);
       lastPress = null;
-      const now = performance.now(), still = held.current;
+      // When the press happened, not when the page got round to it: a busy page delivers taps late, and a
+      // page that seems stuck is when a customer taps again.
+      const now = Math.min(performance.now(), event.timeStamp > 0 ? event.timeStamp : Infinity), still = held.current;
       const moved = Boolean(still && now < still.until && Math.hypot(from.x - still.x, from.y - still.y) <= still.radius && controlOf(event.target) !== still.control);
       const arriving = now < arrivedUntil.current && Boolean((event.target as Element | null)?.closest?.("[data-arrival-guard]"));
       if (now < quietUntil.current || moved || arriving) { event.preventDefault(); event.stopPropagation(); }
