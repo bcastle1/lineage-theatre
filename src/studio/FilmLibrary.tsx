@@ -22,9 +22,12 @@ const inPanel = (at: string) => /^(status|detail|version):/.test(at);
 const QUIET_MS = 500, QUIET_LIMIT_MS = 4000;
 // How long a still pointer is held to the control it was on when the library moved the page, and how far a
 // mouse (or a finger or pen, between taps) may stray and still count as the same point (see "hold" below).
-// A finger repeating a tap lands up to a few millimetres from the first one, so its allowance is wider.
 // A scroll that starts within OWN_SCROLL_MS of a move the library made is taken to be part of that move.
-const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 32, OWN_SCROLL_MS = 300;
+const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 16, OWN_SCROLL_MS = 300;
+// How long a control that starts something costly or hard to undo (marked data-arrival-guard: Resume paid film,
+// the confirm button of a confirmation) ignores presses after it may have arrived under a pointer: after the
+// library has moved the page, and after a confirmation has opened over it (see "arrivedUntil" below).
+const ARRIVAL_MS = 1500, DIALOG_ARRIVAL_MS = 1000;
 const CONTROLS = "a[href], button, input, select, textarea, summary, label, video, audio, [role=button], [role=link], [tabindex]";
 const controlOf = (target: EventTarget | null) => target instanceof Element ? target.closest(CONTROLS) : null;
 type Point = { x: number; y: number; radius: number; control: Element | null };
@@ -137,19 +140,28 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // extended, but never past four seconds after the move, so the customer's own scrolling cannot keep presses
   // ignored for long. A background refresh never starts that moment.
   // Independently of that moment, a pointer that has not moved since the library changed the page (any change,
-  // a background refresh's included) is held to the control it was on before: a press at that point (within a
-  // few pixels) that would now land on a different control is ignored, however long the customer waits between
-  // presses, until the pointer moves away, a press is made somewhere else, the customer scrolls, or eight
-  // seconds have passed since the library last changed the page. A press on the control that was there before,
-  // which is every control that did not move, is never ignored by this.
-  const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0);
+  // a background refresh's included) is held to the control it was on before: a press at that point (within 8 px
+  // for a mouse, 16 px for a finger or pen) that would now land on a different control is ignored, however long
+  // the customer waits between presses, until the pointer moves away, a press is made somewhere else, the customer
+  // scrolls or presses a key, or eight seconds have passed since the library last changed the page. A press on the
+  // control that was there before is never ignored by this.
+  // And a control that starts something costly or hard to undo ignores every press (not the keyboard) for a
+  // moment after it may have arrived under a pointer, wherever that pointer is: 1.5 s after the library moves the
+  // page (the status panel opening under "View film status" can bring Resume paid film there), 1 s after a
+  // confirmation opens (on a phone its confirm button can open where Archive or Move to trash was pressed).
+  const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0), arrivedUntil = useRef(0);
   const pointer = useRef<Point | null>(null), held = useRef<(Point & { until: number }) | null>(null);
   const hold = () => {
     const now = performance.now(), current = held.current && now < held.current.until ? held.current : pointer.current;
     if (current) held.current = { ...current, until: now + HOLD_MS };
     ownScroll.current = Math.max(ownScroll.current, now + OWN_SCROLL_MS);
   };
-  const quiet = () => { const now = performance.now(); quietUntil.current = now + QUIET_MS; quietLimit.current = now + QUIET_LIMIT_MS; hold(); };
+  const quiet = () => {
+    const now = performance.now();
+    quietUntil.current = now + QUIET_MS; quietLimit.current = now + QUIET_LIMIT_MS;
+    arrivedUntil.current = Math.max(arrivedUntil.current, now + ARRIVAL_MS);
+    hold();
+  };
   // Every scroll the library asks for goes through here.
   const bring = (target: Element | null | undefined, block: ScrollLogicalPosition) => {
     if (!target || typeof window === "undefined") return;
@@ -162,28 +174,39 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     // The browser reports a scroll at its next frame; a press can arrive before that. Each handler first takes
     // account of a scroll that has happened but has not been reported yet.
     let seenY = window.scrollY;
-    // Where the press under way began. A touch screen delivers the click of a tap at the nearest control, which
-    // can be several pixels from the finger, so a press is judged by where it began, not where its click lands.
-    let pressedAt: { x: number; y: number } | null = null;
+    // Where each press under way began, by pointer. A touch screen delivers the click of a tap at the nearest
+    // control, which can be several pixels from the finger, so a press is judged by where it began, not where its
+    // click lands. Two quick taps can both begin before the first one's click arrives (while the page is busy), so
+    // each click is matched to its own press; a browser whose clicks carry no pointer uses the latest press.
+    const pressedAt = new Map<number, { x: number; y: number }>();
+    let lastPress: { x: number; y: number } | null = null;
     const caughtUp = () => { if (window.scrollY !== seenY) scrolled(); };
     const ignorePress = (event: MouseEvent) => {
       if (event.detail === 0) return;   // the keyboard
       caughtUp();
-      const from = pressedAt ?? { x: event.clientX, y: event.clientY };
-      pressedAt = null;
+      const id = (event as Partial<PointerEvent>).pointerId, own = typeof id === "number" ? pressedAt.get(id) : undefined;
+      const from = own ?? lastPress ?? { x: event.clientX, y: event.clientY };
+      if (own) pressedAt.delete(id as number);
+      lastPress = null;
       const now = performance.now(), still = held.current;
       const moved = Boolean(still && now < still.until && Math.hypot(from.x - still.x, from.y - still.y) <= still.radius && controlOf(event.target) !== still.control);
-      if (now < quietUntil.current || moved) { event.preventDefault(); event.stopPropagation(); }
+      const arriving = now < arrivedUntil.current && Boolean((event.target as Element | null)?.closest?.("[data-arrival-guard]"));
+      if (now < quietUntil.current || moved || arriving) { event.preventDefault(); event.stopPropagation(); }
     };
     const release = () => { held.current = null; };
     // A press the browser took over (a touch that became a scroll) sends no click.
-    const cancel = () => { pressedAt = null; release(); };
+    const cancel = (event: PointerEvent) => { pressedAt.delete(event.pointerId); lastPress = null; release(); };
     // Where the pointer is and which control it is on. A move to the same point (as a browser may report after
     // the page moved under it) changes nothing.
     const track = (event: PointerEvent) => {
       caughtUp();
       const at = { x: event.clientX, y: event.clientY, radius: event.pointerType === "mouse" ? MOUSE_RADIUS : TOUCH_RADIUS, control: controlOf(event.target) };
-      if (event.type === "pointerdown") pressedAt = { x: at.x, y: at.y };
+      if (event.type === "pointerdown") {
+        // A press on a switched-off control sends no click: keep only the few latest presses.
+        pressedAt.delete(event.pointerId); pressedAt.set(event.pointerId, { x: at.x, y: at.y });
+        if (pressedAt.size > 4) pressedAt.delete(pressedAt.keys().next().value as number);
+        lastPress = { x: at.x, y: at.y };
+      }
       const still = held.current, last = pointer.current;
       if (still && performance.now() < still.until && Math.hypot(at.x - still.x, at.y - still.y) <= still.radius) return;
       if (event.type === "pointermove" && last && last.x === at.x && last.y === at.y) return;
@@ -274,7 +297,11 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     return () => { cancelled = true; stop(); };
   }, [disabled, busy, loading, playing, detail, confirmation, listRefreshInterval, view, reload]);
   useEffect(() => {
-    if (confirmation && dialog.current && !dialog.current.open) dialog.current.showModal();
+    if (confirmation && dialog.current && !dialog.current.open) {
+      dialog.current.showModal();
+      // Its confirm button can open where the customer's finger or pointer already is.
+      arrivedUntil.current = Math.max(arrivedUntil.current, performance.now() + DIALOG_ARRIVAL_MS);
+    }
   }, [confirmation]);
   useEffect(() => {
     // The line an action has just produced can be out of sight: under an action row at the foot of the window,
@@ -494,7 +521,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
     {resumePayment && <p className="field-note">Resume production using this saved screenplay and its existing payment.</p>}
     <div className="action-group film-library-actions">
-      {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true}
+      {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true} data-arrival-guard=""
         onClick={() => void resumePaidFilm()}><RotateCcw size={15} aria-hidden="true" />Resume paid film</button>}
       {libraryCanWatch(detail.entry) && <>
         <button type="button" className="button primary small" disabled={blocked} onClick={() => { if (errorPlace === `detail:${detailKey}`) setError(""); setPlaying(playing === `detail:${libraryKey(detail.entry)}` ? "" : `detail:${libraryKey(detail.entry)}`); }}>{playing === `detail:${libraryKey(detail.entry)}` ? "Close player" : "Watch film"}</button>
@@ -588,7 +615,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
         {confirmation.draft ? " This changes this browser draft only." : " This changes the saved version's library location only."} Active production is not cancelled. Payment records are retained.</p>
       {error && <p className="feedback error" role="alert">{error}</p>}
       <div className="action-group"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={closeConfirmation} autoFocus>Cancel</button>
-        <button type="button" className="button primary" disabled={blocked} onClick={() => void confirmAction()}>{busy || actions[confirmation.action]}</button></div>
+        <button type="button" className="button primary" disabled={blocked} data-arrival-guard="" onClick={() => void confirmAction()}>{busy || actions[confirmation.action]}</button></div>
     </dialog>}
   </div>;
 }
