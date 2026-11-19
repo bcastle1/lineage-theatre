@@ -151,12 +151,16 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   // phone a confirmation's confirm button can open where Archive or Move to trash was pressed), and after the
   // library scrolls the page. An ignored press does nothing at all: it does not even take the focus.
   const quietUntil = useRef(0), quietLimit = useRef(0), ownScroll = useRef(0), arrivedUntil = useRef(0);
+  // Until when a scroll is the library's own move, for arming the guard: unlike ownScroll it is not carried on by
+  // the scroll events that follow, so a customer who starts scrolling straight after does not keep it armed.
+  const arrivalScroll = useRef(0);
   const arrive = (now: number) => { arrivedUntil.current = Math.max(arrivedUntil.current, now + ARRIVAL_MS); };
   const pointer = useRef<Point | null>(null), held = useRef<(Point & { until: number }) | null>(null);
   const hold = () => {
     const now = performance.now(), current = held.current && now < held.current.until ? held.current : pointer.current;
     if (current) held.current = { ...current, until: now + HOLD_MS };
     ownScroll.current = Math.max(ownScroll.current, now + OWN_SCROLL_MS);
+    arrivalScroll.current = Math.max(arrivalScroll.current, now + OWN_SCROLL_MS);
   };
   const quiet = () => {
     const now = performance.now();
@@ -167,7 +171,9 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
   const bring = (target: Element | null | undefined, block: ScrollLogicalPosition) => {
     if (!target || typeof window === "undefined") return;
     const behavior = scrolling();
-    quiet(); ownScroll.current = Math.max(ownScroll.current, performance.now() + (behavior === "smooth" ? 1000 : OWN_SCROLL_MS));
+    quiet();
+    const until = performance.now() + (behavior === "smooth" ? 1000 : OWN_SCROLL_MS);
+    ownScroll.current = Math.max(ownScroll.current, until); arrivalScroll.current = Math.max(arrivalScroll.current, until);
     target.scrollIntoView({ behavior, block });
   };
   useEffect(() => {
@@ -234,7 +240,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       if (now < quietUntil.current) quietUntil.current = Math.min(now + QUIET_MS, quietLimit.current);
       const own = now < ownScroll.current;
       // The library moved the page: what is under a pointer now may be a guarded control.
-      if (own) { ownScroll.current = now + OWN_SCROLL_MS; arrive(now); }
+      if (own) { ownScroll.current = now + OWN_SCROLL_MS; if (now < arrivalScroll.current) arrive(now); }
       if (own && held.current && now < held.current.until) return;
       // Someone else moved the page (or nothing is held): what is under the pointer now is what the customer sees there.
       release();
@@ -322,16 +328,18 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       arrive(performance.now());
     }
   }, [confirmation]);
-  // A guarded control that appears, or moves on the page, may have arrived under a pointer. Its place is taken
-  // in the page (in the window for one in an open dialog), so the customer's own scrolling does not count.
+  // A guarded control that appears, or moves on the page, may have arrived under a pointer. Its place is its
+  // layout position in the page (in the window for one in an open dialog), which neither the customer's own
+  // scrolling nor a transform (a pressed button, the dialog's entrance) changes.
   const guardedAt = useRef(new Map<Element, string>());
   useEffect(() => {
     if (typeof document === "undefined") return;
     const seen = new Map<Element, string>();
     let arrived = false;
-    for (const control of document.querySelectorAll(".film-library [data-arrival-guard]")) {
-      const box = control.getBoundingClientRect(), fixed = Boolean(control.closest("dialog[open]"));
-      const at = `${Math.round(box.left + (fixed ? 0 : window.scrollX))},${Math.round(box.top + (fixed ? 0 : window.scrollY))}`;
+    for (const control of document.querySelectorAll<HTMLElement>(".film-library [data-arrival-guard]")) {
+      let x = 0, y = 0;
+      for (let node: HTMLElement | null = control; node; node = node.offsetParent as HTMLElement | null) { x += node.offsetLeft; y += node.offsetTop; }
+      const at = `${x},${y}`;
       if (guardedAt.current.get(control) !== at) arrived = true;
       seen.set(control, at);
     }
@@ -468,7 +476,8 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
           : "Resume request completed. Follow this saved film's current production status below.");
       }
     } catch (cause) { if (isCurrent()) { setErrorAt(`detail:${at}`); setError(errorText(cause)); reveal("error"); } }
-    finally { if (isCurrent()) { lock.current = false; setBusy(""); } }
+    // Resume is offered again where it was: a second press of the same double press must not send it again.
+    finally { if (isCurrent()) { lock.current = false; setBusy(""); arrive(performance.now()); } }
   }
   async function createVersion(entry: LibraryEntry) {
     if (lock.current || disabled || !detail?.manifest || detail.entry.kind !== "plan"

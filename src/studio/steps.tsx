@@ -210,6 +210,7 @@ export function ArchiveStep({
                 className="icon-button"
                 disabled={!!busy}
                 aria-label={`Remove ${source.name}`}
+                data-remove=""
                 onClick={() => {
                   update({
                     sources: film.sources.filter((s) => s.id !== source.id),
@@ -501,11 +502,6 @@ type FilmCharacter = import("./model").Character;
 // one counted as part of a double click.
 const QUIET_AFTER_MODE_CHANGE = 500;
 const QUIET_FOR_DOUBLE_CLICK = 1500;
-// After a removal the cards move up (or the browser moves the page to keep the reader's
-// place), and another card's Remove can come to rest under the pointer. For this long after
-// a Remove made with a pointer, a press on any Remove is ignored: a customer who is not sure
-// the first one worked may press the same place again. Nothing else is held back longer.
-const REMOVE_GUARD_MS = 2500;
 // A press straight into a text field this far (CSS px) from the press that started the
 // quiet period is a new decision, not the second half of a double click; it may pass.
 const NEW_PRESS_DISTANCE = 40;
@@ -624,8 +620,6 @@ export function CuttingStep({
   const startQuiet = (now: number) => {
     quiet.current = { ...quiet.current, any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
   };
-  // Until when a press on any Remove is ignored (see REMOVE_GUARD_MS).
-  const removeGuard = useRef(0);
   const isQuiet = (clickCount: number, at: number) =>
     clickCount > 0 && at < (clickCount > 1 ? Math.max(quiet.current.any, quiet.current.multi) : quiet.current.any);
   // Every control that moves the page goes through here.
@@ -662,24 +656,22 @@ export function CuttingStep({
     // yet, then (unless that was ignored) as a mouse button going down, which does.
     // When the press happened, not when a busy page got round to it.
     const pressTime = (event: Event) => Math.min(performance.now(), event.timeStamp > 0 ? event.timeStamp : Infinity);
-    const onRemove = (event: Event, at: number) =>
-      at < removeGuard.current && !!(event.target as Element).closest?.("[data-remove]");
     const ignorePointer = (event: PointerEvent) => {
       const now = pressTime(event);
-      pressIgnored = (isQuiet(1, now) && !newPressIntoField(event)) || onRemove(event, now);
+      pressIgnored = isQuiet(1, now) && !newPressIntoField(event);
       // A control that is switched off sends nothing further, but would take the focus.
       if (pressIgnored || (isQuiet(2, now) && (event.target as Element).closest?.(":disabled")))
         event.preventDefault();
     };
     const ignorePress = (event: MouseEvent) => {
       const now = pressTime(event);
-      pressIgnored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event)) || (event.detail > 0 && onRemove(event, now));
+      pressIgnored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event));
       if (pressIgnored) event.preventDefault();
     };
     const ignoreClick = (event: MouseEvent) => {
       if (event.detail === 0) return;
       const now = pressTime(event);
-      const ignored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event)) || onRemove(event, now);
+      const ignored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event));
       pressIgnored = false;
       if (ignored) {
         event.preventDefault();
@@ -700,7 +692,6 @@ export function CuttingStep({
       document.removeEventListener("mousedown", ignorePress, true);
       document.removeEventListener("click", ignoreClick, true);
       quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0 };
-      removeGuard.current = 0;
       releaseFocusCard.current?.();
     };
   }, []);
@@ -900,7 +891,7 @@ export function CuttingStep({
           const modeButton = (
             <button
               className="button secondary small card-mode"
-              aria-label={`${edit ? "Done editing" : "Edit"} ${character.name || `character ${index + 1}`}`}
+              aria-label={`${edit ? "Done editing" : "Edit"} ${character.name?.trim() || `character ${index + 1}`}`}
               onClick={movesPage(() => setCardMode(cardId, !edit))}
             >
               {edit ? <Check size={15} /> : <Pencil size={15} />}
@@ -975,7 +966,7 @@ export function CuttingStep({
             <div className="cast-photo">
             <label>
               Appearance reference photo
-              <select aria-label={`Appearance reference photo for ${character.name || "character"}`}
+              <select aria-label={`Appearance reference photo for ${character.name?.trim() || "character"}`}
                 value={character.referencePhotoId || ""} disabled={!!busy}
                 onChange={(event) => {
                   choiceMovesPage();
@@ -983,8 +974,8 @@ export function CuttingStep({
                   changeCharacter(character.id, { referencePhotoId: referencePhotoId || undefined,
                     sourceIds: referencePhotoId && !character.sourceIds.includes(referencePhotoId)
                       ? [...character.sourceIds, referencePhotoId] : character.sourceIds });
-                  notify(referencePhotoId ? `Photo selected for ${character.name || "this character"}. Prepare a new plan to include it.`
-                    : `Appearance for ${character.name || "this character"} will use the written description.`);
+                  notify(referencePhotoId ? `Photo selected for ${character.name?.trim() || "this character"}. Prepare a new plan to include it.`
+                    : `Appearance for ${character.name?.trim() || "this character"} will use the written description.`);
                 }}>
                 <option value="">Use written appearance description</option>
                 {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId)
@@ -1049,11 +1040,10 @@ export function CuttingStep({
             <div className="cast-card-foot">
               <button
                 className="icon-button"
-                aria-label={`Remove ${character.name || "character"}`}
+                aria-label={`Remove ${character.name?.trim() || "character"}`}
                 disabled={!!busy}
                 data-remove=""
                 onClick={movesPage((_, byPointer) => {
-                  if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                   focusAfterRemove(characterCards, cardId, "add-character", byPointer);
                   update({
                     characters: film.characters.filter((c) => c.id !== character.id),
@@ -1142,7 +1132,6 @@ export function CuttingStep({
               aria-label={`Remove assumption ${i + 1}`}
               data-remove=""
               onClick={movesPage((_, byPointer) => {
-                if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                 focusAfterRemove(film.assumptions.map((x) => `assumption-${x.id}`), `assumption-${a.id}`, "add-assumption", byPointer);
                 update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) });
               })}
@@ -1375,7 +1364,6 @@ export function CuttingStep({
                       disabled={film.scenes.length <= 1 || !!busy}
                       data-remove=""
                       onClick={movesPage((_, byPointer) => {
-                        if (byPointer) removeGuard.current = performance.now() + REMOVE_GUARD_MS;
                         focusAfterRemove(sceneCards, cardId, "add-scene", byPointer);
                         update({ scenes: film.scenes.filter((s) => s.id !== scene.id) });
                       })}
