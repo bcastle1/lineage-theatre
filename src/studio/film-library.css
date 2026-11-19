@@ -160,24 +160,70 @@
 .film-library > .feedback {
   margin: 0 0 var(--space-4);
 }
-/* The working line ("Opening your saved version…"). It stays in view while the
-   list is scrolled, because the action that started it can be far down the page. */
-.film-library > p[role="status"]:not(.feedback) {
-  position: sticky;
-  top: var(--space-3);
-  z-index: var(--z-raised);
+/* A confirmation that is brought into view keeps the view switch, or the title
+   of the status panel, visible above it. So does an error at the top. */
+.film-library .feedback.success,
+.film-library > .feedback.error {
+  scroll-margin: calc(var(--space-32) + var(--space-4)) 0 var(--space-4);
+}
+/* The working line ("Opening your saved version…"). */
+.film-library > p[role="status"]:not(.feedback),
+.film-library-notices > p[role="status"]:not(.feedback) {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: 0 0 var(--space-4);
+  margin: 0;
   padding: var(--space-3) var(--space-4);
   border: var(--hairline) solid var(--info-border);
   border-radius: var(--radius-md);
   background: var(--info-bg);
-  box-shadow: var(--shadow-sm);
   color: var(--info-text);
   font-size: var(--text-body);
   line-height: var(--leading-normal);
+}
+/* At the top of the library it belongs to no single film ("Loading more films…"),
+   so it stays in view while the list is scrolled. */
+.film-library > p[role="status"]:not(.feedback) {
+  position: sticky;
+  top: var(--space-3);
+  z-index: var(--z-raised);
+  margin: 0 0 var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+/* The working line, an error or a confirmation for one film, shown where the
+   action was taken: under the card's actions, inside its status panel, or
+   under the "Load more saved films" button. */
+.film-library-notices {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.film-library-notices > p[role="status"]:not(.feedback) > svg {
+  flex: none;
+}
+/* A line that is brought into view (the action row was at the foot of the
+   window) keeps some air around it. */
+.film-library-notices > p {
+  scroll-margin: var(--space-4) 0;
+}
+/* In a card the line is a row of its own between the film's actions and the
+   keep-or-remove row (Archive, Move to trash). Bringing it into view moves
+   the page no further than the line needs: less than the distance to that
+   row, so the row cannot arrive under a pointer resting on the actions. */
+.film-library-actions > .film-library-notices {
+  flex: 0 0 100%;
+  margin-top: var(--space-2);
+}
+.film-library-actions > .film-library-notices > p {
+  scroll-margin-bottom: var(--space-2);
+}
+/* Where the bottom tab bar is fixed, the page scroller already reserves its
+   height and some air above it (styles.css). */
+@media (max-width: 680px) {
+  .film-library-actions > .film-library-notices > p {
+    scroll-margin-bottom: 0;
+  }
 }
 /* What Archived and Trash mean. */
 .film-library > .field-note {
@@ -459,6 +505,10 @@
 }
 
 /* ---- Film status panel ------------------------------------------------------------------ */
+/* Closing the panel brings its film's card back into view. */
+.film-library-item {
+  scroll-margin: var(--space-4) 0;
+}
 .film-library-detail {
   margin-top: var(--space-8);
   scroll-margin-top: var(--space-4);
@@ -467,7 +517,7 @@
 }
 .film-library-detail > .section-title {
   flex-wrap: nowrap;
-  margin-bottom: var(--space-6);
+  margin-bottom: var(--space-5);
   padding-bottom: var(--space-5);
 }
 .film-library-detail > .section-title h2 {
@@ -481,8 +531,35 @@
   flex-shrink: 0;
   margin: calc(var(--space-2) * -1) calc(var(--space-2) * -1) 0 0;
 }
+/* In the card list the panel sits directly under its film's card, and a small
+   notch on its top edge points back at that card. A panel whose film has no
+   card in the list (a film link) follows the list, set apart, without a notch. */
+.library-list > .film-library-detail {
+  position: relative;
+  margin-top: var(--space-4);
+}
+.library-list > .film-library-detail-attached {
+  margin-top: 0;
+}
+.film-library-detail-attached::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-2) * -1);
+  left: var(--space-12);
+  width: var(--space-4);
+  height: var(--space-4);
+  border: var(--hairline) solid var(--color-border-strong);
+  border-right: 0;
+  border-bottom: 0;
+  border-top-left-radius: var(--radius-xs);
+  background: var(--color-surface);
+  transform: rotate(45deg);
+}
 .film-library-detail > .film-library-progress {
   margin-top: 0;
+}
+.film-library-detail > .section-title + .film-library-notices {
+  margin: 0 0 var(--space-5);
 }
 .film-library-detail > .field-note {
   max-width: var(--measure);
@@ -741,6 +818,12 @@
   .film-library > section > p[role="status"],
   .film-library-empty {
     padding: var(--space-8) var(--space-4);
+  }
+  .film-library .feedback.success {
+    scroll-margin-top: calc(var(--space-32) + var(--space-12));
+  }
+  .film-library-detail-attached::before {
+    left: var(--space-8);
   }
   .library-item {
     column-gap: var(--space-3);

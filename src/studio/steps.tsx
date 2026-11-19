@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Loader2,
   Music2,
+  Pencil,
   Plus,
   RefreshCw,
   Sparkles,
@@ -245,6 +246,8 @@ export function ArchiveStep({
   );
 }
 
+// The running times offered. A draft that carries any other value keeps it and shows it as one more option.
+const runningTimes = [30, 60, 120, 300, 600];
 type DirectionProps = StepProps & {
   caps: Capabilities | null;
   aiConsent: boolean;
@@ -327,25 +330,34 @@ export function DirectionStep({
         </button>
       </div>
       <div className="duration-row">
-        <label>
-          Target running time
-          <select
-            value={film.duration}
-            disabled={!!busy}
-            onChange={(e) => update({ duration: Number(e.target.value) })}
-          >
-            {[30, 60, 120, 300, 600].map((s) => (
-              <option key={s} value={s}>
-                {formatDuration(s)} ·{" "}
-                {s === 120
-                  ? "Short film · recommended"
-                  : s <= 60
-                    ? "Trailer"
-                    : "Extended family story"}
-              </option>
+        <fieldset className="duration-choice">
+          <legend>Target running time</legend>
+          <div className="duration-options">
+            {(runningTimes.includes(film.duration)
+              ? runningTimes
+              : [...runningTimes, film.duration].sort((a, b) => a - b)
+            ).map((s) => (
+              <label key={s} className={`choice ${film.duration === s ? "chosen" : ""}`}>
+                <input
+                  type="radio"
+                  name="film-duration"
+                  value={s}
+                  checked={film.duration === s}
+                  disabled={!!busy}
+                  onChange={() => update({ duration: s })}
+                />
+                <span>{formatDuration(s)}</span>
+                <small>
+                  {s === 120
+                    ? "Short film · recommended"
+                    : s <= 60
+                      ? "Trailer"
+                      : "Extended family story"}
+                </small>
+              </label>
             ))}
-          </select>
-        </label>
+          </div>
+        </fieldset>
         <p className="field-note">
           Final running time and available film quality will be confirmed before you
           approve production.
@@ -479,6 +491,20 @@ export function DirectionStep({
 }
 
 type FilmCharacter = import("./model").Character;
+// After a press that moves the page (a change of mode; an addition, removal or move of a
+// card), how long the presses that follow are ignored, in milliseconds: any press, and
+// one counted as part of a double click.
+const QUIET_AFTER_MODE_CHANGE = 500;
+const QUIET_FOR_DOUBLE_CLICK = 1500;
+// A press straight into a text field this far (CSS px) from the press that started the
+// quiet period is a new decision, not the second half of a double click; it may pass.
+const NEW_PRESS_DISTANCE = 40;
+const TEXT_FIELD =
+  "textarea, input:not([type]), input[type=text], input[type=search], input[type=email], input[type=url], input[type=tel]";
+// Reading view: a value as text, or a quiet note that it is still missing.
+function readValue(value: string, missing = "Not added yet") {
+  return value?.trim() ? value : <span className="read-empty">{missing}</span>;
+}
 export function CuttingStep({
   film,
   update,
@@ -510,8 +536,175 @@ export function CuttingStep({
     update({
       characters: film.characters.map((c) => (c.id === id ? { ...c, ...patch } : c)),
     });
+  // Character and scene cards open as a reading view. The cards being edited are
+  // kept here by film and card id; this is view state only and is never saved.
+  const [editing, setEditing] = useState<Set<string>>(() => new Set());
+  const focusAfterRender = useRef<{ cardId: string; selector: string } | null>(null);
+  const isEditing = (cardId: string) => editing.has(`${film.id}:${cardId}`);
+  const setCardsEditing = (cardIds: string[], edit: boolean) =>
+    setEditing((current) => {
+      const next = new Set(current);
+      for (const cardId of cardIds) {
+        if (edit) next.add(`${film.id}:${cardId}`);
+        else next.delete(`${film.id}:${cardId}`);
+      }
+      return next;
+    });
+  // A change of mode never moves the page under the pointer: one card keeps its place
+  // in the window while the cards around it change height. (Browsers that anchor the
+  // scroll position themselves pick a card of their own, often the one below.)
+  const keepInPlace = useRef<{ cardId: string; top: number; limit: number } | null>(null);
+  // One card changes mode: it stays where it is, and focus goes to its first field,
+  // or back to its Edit button.
+  const setCardMode = (cardId: string, edit: boolean) => {
+    focusAfterRender.current = {
+      cardId,
+      selector: edit ? "input, textarea, select" : ".card-mode",
+    };
+    const box = document.getElementById(cardId)?.getBoundingClientRect();
+    keepInPlace.current = box ? { cardId, top: box.top, limit: -Infinity } : null;
+    setCardsEditing([cardId], edit);
+  };
+  // A whole section changes mode: the card being read stays where it is. That is the
+  // first card that starts under the section's header, or else the one card that fills
+  // the window.
+  const setSectionMode = (cardIds: string[], edit: boolean, control: HTMLElement) => {
+    const limit = Math.max(
+      control.getBoundingClientRect().bottom,
+      control.closest(".section-subtitle")?.getBoundingClientRect().bottom ?? 0,
+    );
+    const shown = cardIds.flatMap((cardId) => {
+      const box = document.getElementById(cardId)?.getBoundingClientRect();
+      return box && box.bottom > limit && box.top < window.innerHeight ? [{ cardId, top: box.top, limit }] : [];
+    });
+    keepInPlace.current = shown.find((card) => card.top >= limit - 1) ?? shown[0] ?? null;
+    setCardsEditing(cardIds, edit);
+  };
+  // A double click is one decision, and a press that changes a mode, or adds, removes or
+  // moves a card, moves the page under a pointer that stays still: a form closes, the
+  // cards after it rise, the next card's own Remove slides into the removed one's place,
+  // the page ends sooner. So after such a press the document is quiet for a moment: the
+  // next presses do nothing, whatever has arrived under the pointer (a remove button, the
+  // way forward, a neighbour's checkbox, the navigation outside this step).
+  //   any:   until then, every press is ignored: half a second after the change, and
+  //          half a second after each ignored press, so that a burst of presses stays
+  //          one decision, but never later than "multi";
+  //   multi: until then, a press the browser counts as part of a double click is
+  //          ignored: a second and a half after the change, for a slow double click.
+  // Only presses start and feel the quiet, and a press is judged when it begins: one
+  // that begins in the quiet period is ignored as a whole, however slowly it is released.
+  // The one exception: a press straight into a text field, away from where the quiet
+  // period began, which cannot change the draft and only places the caret there.
+  // Activation from the keyboard, from assistive technology and from script reports a
+  // click count of 0: it is never ignored and never starts a quiet period.
+  const quiet = useRef({ any: 0, multi: 0, pending: 0, x: 0, y: 0 });
+  const startQuiet = (now: number) => {
+    quiet.current = { ...quiet.current, any: now + QUIET_AFTER_MODE_CHANGE, multi: now + QUIET_FOR_DOUBLE_CLICK, pending: 0 };
+  };
+  const isQuiet = (clickCount: number, at: number) =>
+    clickCount > 0 && at < (clickCount > 1 ? Math.max(quiet.current.any, quiet.current.multi) : quiet.current.any);
+  // Every control that moves the page goes through here.
+  const movesPage =
+    (action: (control: HTMLElement) => void) =>
+    (event: { detail: number; clientX: number; clientY: number; currentTarget: HTMLElement }) => {
+      if (event.detail > 0) {
+        const now = performance.now();
+        startQuiet(now);
+        // Counted again once the page has moved (the effect below), if it does so now.
+        quiet.current = { ...quiet.current, pending: now, x: event.clientX, y: event.clientY };
+      }
+      action(event.currentTarget);
+    };
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    // Whether the press under way began in the quiet period.
+    let pressIgnored = false;
+    const newPressIntoField = (event: MouseEvent) =>
+      !!(event.target as Element).matches?.(TEXT_FIELD) &&
+      Math.hypot(event.clientX - quiet.current.x, event.clientY - quiet.current.y) >= NEW_PRESS_DISTANCE;
+    // An ignored press does nothing at all: it does not take the focus from where the
+    // mode change put it (the field of a card that has just opened, the Edit button of
+    // one that has just closed), place a caret, select a word, or open a list of options.
+    // A press is seen first as a pointer going down, which does not know its click count
+    // yet, then (unless that was ignored) as a mouse button going down, which does.
+    const ignorePointer = (event: PointerEvent) => {
+      const now = performance.now();
+      pressIgnored = isQuiet(1, now) && !newPressIntoField(event);
+      // A control that is switched off sends nothing further, but would take the focus.
+      if (pressIgnored || (isQuiet(2, now) && (event.target as Element).closest?.(":disabled")))
+        event.preventDefault();
+    };
+    const ignorePress = (event: MouseEvent) => {
+      pressIgnored = pressIgnored || (isQuiet(event.detail, performance.now()) && !newPressIntoField(event));
+      if (pressIgnored) event.preventDefault();
+    };
+    const ignoreClick = (event: MouseEvent) => {
+      if (event.detail === 0) return;
+      const now = performance.now();
+      const ignored = pressIgnored || (isQuiet(event.detail, now) && !newPressIntoField(event));
+      pressIgnored = false;
+      if (ignored) {
+        event.preventDefault();
+        event.stopPropagation();
+        quiet.current.any = Math.max(quiet.current.any, Math.min(now + QUIET_AFTER_MODE_CHANGE, quiet.current.multi));
+      } else if (event.detail === 1) {
+        // A first click that gets through starts a double click of its own.
+        quiet.current.multi = 0;
+      }
+    };
+    // On the document, before anything else sees the press: what arrives under the
+    // pointer can be outside this step.
+    document.addEventListener("pointerdown", ignorePointer, true);
+    document.addEventListener("mousedown", ignorePress, true);
+    document.addEventListener("click", ignoreClick, true);
+    return () => {
+      document.removeEventListener("pointerdown", ignorePointer, true);
+      document.removeEventListener("mousedown", ignorePress, true);
+      document.removeEventListener("click", ignoreClick, true);
+      quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0 };
+    };
+  }, []);
+  // Outside the quiet period, the second press of a double click leaves the focus where
+  // it is, except in a field, where it selects a word.
+  const keepFocus = (event: { detail: number; target: EventTarget; preventDefault: () => void }) => {
+    if (
+      event.detail > 1 &&
+      document.activeElement !== document.body &&
+      !(event.target as Element).closest("input, textarea, select, summary")
+    )
+      event.preventDefault();
+  };
+  // A key held down is one press: its repeats do not act again (change a mode, add or
+  // move a card, open and close a disclosure).
+  const oncePerKeyPress = (event: { repeat: boolean; key: string; target: EventTarget; preventDefault: () => void }) => {
+    if (event.repeat && event.key === "Enter" && (event.target as Element).closest("button, summary"))
+      event.preventDefault();
+  };
+  useEffect(() => {
+    // The render that follows the press, not one long after it (a press that changed
+    // nothing on the page leaves no quiet period to restart).
+    const now = performance.now();
+    if (quiet.current.pending && now - quiet.current.pending < QUIET_AFTER_MODE_CHANGE) startQuiet(now);
+    quiet.current.pending = 0;
+    const keep = keepInPlace.current;
+    keepInPlace.current = null;
+    const box = keep && document.getElementById(keep.cardId)?.getBoundingClientRect();
+    if (keep && box) {
+      // Where the card was, or just under the header if it would now end above it.
+      const top = keep.top + box.height > keep.limit ? keep.top : keep.limit;
+      if (Math.abs(box.top - top) >= 1) window.scrollBy({ top: box.top - top, behavior: "instant" });
+    }
+    const focus = focusAfterRender.current;
+    if (!focus) return;
+    focusAfterRender.current = null;
+    document.getElementById(focus.cardId)?.querySelector<HTMLElement>(focus.selector)?.focus();
+  });
+  const characterCards = film.characters.map((c) => `character-${c.id}`);
+  const sceneCards = film.scenes.map((s) => `scene-${s.id}`);
+  const allCharactersEditing = characterCards.length > 0 && characterCards.every(isEditing);
+  const allScenesEditing = sceneCards.length > 0 && sceneCards.every(isEditing);
   return (
-    <section className="panel cutting-panel">
+    <section className="panel cutting-panel" onMouseDown={keepFocus} onKeyDown={oncePerKeyPress}>
       <div className="section-title">
         <div>
           <h2>Your film, ready to shape</h2>
@@ -571,7 +764,7 @@ export function CuttingStep({
         )}
         {evidenceSources.length > 0 && (
           <details>
-            <summary>Review source links</summary>
+            <summary onClick={movesPage(() => {})}>Review source links</summary>
             <ul className="source-coverage-list">
               {evidenceSources.map((source) => (
                 <li key={source.id}>
@@ -603,15 +796,27 @@ export function CuttingStep({
             Give the ancestor relationships, community, and a life beyond the frame.
           </span>
         </div>
+        <div className="action-group">
+        {film.characters.length > 0 && (
+          <button
+            className="button secondary small section-mode"
+            aria-label={allCharactersEditing ? "Done editing all characters" : "Edit all characters"}
+            onClick={movesPage((control) => setSectionMode(characterCards, !allCharactersEditing, control))}
+          >
+            {allCharactersEditing ? <Check size={15} /> : <Pencil size={15} />}
+            {allCharactersEditing ? "Done editing" : "Edit all"}
+          </button>
+        )}
         <button
           className="button secondary small"
           disabled={!!busy}
-          onClick={() =>
+          onClick={movesPage(() => {
+            const id = crypto.randomUUID();
             update({
               characters: [
                 ...film.characters,
                 {
-                  id: crypto.randomUUID(),
+                  id,
                   name: "",
                   role: "Supporting character",
                   description: "",
@@ -619,16 +824,33 @@ export function CuttingStep({
                   sourceIds: [],
                 },
               ],
-            })
-          }
+            });
+            setCardMode(`character-${id}`, true);
+          })}
         >
           <Plus size={15} />
           Add character
         </button>
+        </div>
       </div>
       <div className="cast-grid">
-        {film.characters.map((character) => (
-          <article className="cast-card" key={character.id}>
+        {film.characters.map((character, index) => {
+          const cardId = `character-${character.id}`;
+          const edit = isEditing(cardId);
+          const photo = referencePhotos.find((source) => source.id === character.referencePhotoId);
+          // The mode button keeps its place in both modes, and nothing else stands beside it.
+          const modeButton = (
+            <button
+              className="button secondary small card-mode"
+              aria-label={`${edit ? "Done editing" : "Edit"} ${character.name || `character ${index + 1}`}`}
+              onClick={movesPage(() => setCardMode(cardId, !edit))}
+            >
+              {edit ? <Check size={15} /> : <Pencil size={15} />}
+              {edit ? "Done" : "Edit"}
+            </button>
+          );
+          return (
+          <article className={`cast-card ${edit ? "editing" : ""}`} key={character.id} id={cardId}>
             <div className="cast-card-heading">
               <span className={`basis-tag ${character.basis}`}>
                 {character.basis === "documented"
@@ -637,23 +859,21 @@ export function CuttingStep({
                     ? "Inferred · review"
                     : "Invented · dramatization"}
               </span>
-              <button
-                className="icon-button"
-                aria-label={`Remove ${character.name || "character"}`}
-                disabled={!!busy}
-                onClick={() =>
-                  update({
-                    characters: film.characters.filter((c) => c.id !== character.id),
-                    scenes: film.scenes.map((s) => ({
-                      ...s,
-                      characterIds: s.characterIds.filter((id) => id !== character.id),
-                    })),
-                  })
-                }
-              >
-                <X size={15} />
-              </button>
+              <div className="action-group">{modeButton}</div>
             </div>
+            {!edit && (
+              <>
+                <h4>{readValue(character.name, "Unnamed character")}</h4>
+                <p className="cast-role">
+                  {readValue(character.role, "Role or relationship: not added yet")}
+                </p>
+                <p className="cast-description">
+                  {readValue(character.description, "Character, appearance & motivation: not added yet")}
+                </p>
+              </>
+            )}
+            {edit && (
+            <>
             <label>
               Name
               <input
@@ -678,6 +898,21 @@ export function CuttingStep({
                 }
               />
             </label>
+            </>
+            )}
+            {/* One block in both modes, so the missing-photo alert is the same element
+                before and after a mode change and is announced once. */}
+            <div className="cast-photo-block">
+            {!edit && photo && (
+              <div className="cast-read-photo">
+                <SourceThumb source={photo} />
+                <p>
+                  <span className="read-label">Appearance reference photo</span>
+                  {photo.name}
+                </p>
+              </div>
+            )}
+            {edit && (
             <div className="cast-photo">
             <label>
               Appearance reference photo
@@ -701,9 +936,18 @@ export function CuttingStep({
               Add known identity and age details in the description above. Review generated scenes for likeness.</p>
             {character.referencePhotoId && referencePhotos.find(source => source.id === character.referencePhotoId) &&
               <SourceThumb source={referencePhotos.find(source => source.id === character.referencePhotoId)!} />}
+            </div>
+            )}
             {character.referencePhotoId && !referencePhotos.some(source => source.id === character.referencePhotoId) &&
               <p className="feedback error" role="alert">Restore the selected photo or choose a replacement before preparing production.</p>}
             </div>
+            {!edit && (
+              <p className="field-note">
+                Evidence for this character · {character.sourceIds.length} sources
+              </p>
+            )}
+            {edit && (
+            <>
             <label>
               Basis
               <select
@@ -720,7 +964,7 @@ export function CuttingStep({
               </select>
             </label>
             <details className="source-picker">
-              <summary>
+              <summary onClick={movesPage(() => {})}>
                 Evidence for this character · {character.sourceIds.length} sources
               </summary>
               {evidenceSources.map((s) => (
@@ -741,8 +985,30 @@ export function CuttingStep({
                 </label>
               ))}
             </details>
+            <div className="cast-card-foot">
+              <button
+                className="icon-button"
+                aria-label={`Remove ${character.name || "character"}`}
+                disabled={!!busy}
+                onClick={movesPage(() =>
+                  update({
+                    characters: film.characters.filter((c) => c.id !== character.id),
+                    scenes: film.scenes.map((s) => ({
+                      ...s,
+                      characterIds: s.characterIds.filter((id) => id !== character.id),
+                    })),
+                  }),
+                )}
+              >
+                <Trash2 size={16} />
+              </button>
+              {modeButton}
+            </div>
+            </>
+            )}
           </article>
-        ))}
+          );
+        })}
       </div>
       {!film.characters.length && (
         <p className="field-note empty-note">
@@ -760,14 +1026,14 @@ export function CuttingStep({
         <button
           className="button secondary small"
           disabled={!!busy}
-          onClick={() =>
+          onClick={movesPage(() =>
             update({
               assumptions: [
                 ...film.assumptions,
                 { id: crypto.randomUUID(), description: "", reason: "" },
               ],
-            })
-          }
+            }),
+          )}
         >
           <Plus size={15} />
           Add assumption
@@ -809,9 +1075,9 @@ export function CuttingStep({
             <button
               className="icon-button"
               aria-label={`Remove assumption ${i + 1}`}
-              onClick={() =>
-                update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) })
-              }
+              onClick={movesPage(() =>
+                update({ assumptions: film.assumptions.filter((x) => x.id !== a.id) }),
+              )}
             >
               <X size={15} />
             </button>
@@ -827,8 +1093,20 @@ export function CuttingStep({
       </div>
       <div className="script-section">
       <div className="section-subtitle">
-        <h3>Script & scene direction <span className="count-tag">{film.scenes.length}</span></h3>
-        <span>Every word and scene is editable</span>
+        <div>
+          <h3>Script & scene direction <span className="count-tag">{film.scenes.length}</span></h3>
+          <span>Every word and scene is editable</span>
+        </div>
+        {film.scenes.length > 0 && (
+          <button
+            className="button secondary small section-mode"
+            aria-label={allScenesEditing ? "Done editing all scenes" : "Edit all scenes"}
+            onClick={movesPage((control) => setSectionMode(sceneCards, !allScenesEditing, control))}
+          >
+            {allScenesEditing ? <Check size={15} /> : <Pencil size={15} />}
+            {allScenesEditing ? "Done editing" : "Edit all"}
+          </button>
+        )}
       </div>
       {!film.scenes.length ? (
         <div className="empty-inline">
@@ -841,12 +1119,84 @@ export function CuttingStep({
         </div>
       ) : (
         <div className="scene-list">
-          {film.scenes.map((scene, i) => (
-            <article className="scene-card" key={scene.id} id={`scene-${scene.id}`}>
+          {film.scenes.map((scene, i) => {
+            const cardId = `scene-${scene.id}`;
+            const edit = isEditing(cardId);
+            const sceneCast = film.characters.filter((c) => scene.characterIds.includes(c.id));
+            const moveEarlier = (
+              <button
+                className="icon-button"
+                aria-label={`Move scene ${i + 1} earlier`}
+                disabled={i === 0 || !!busy}
+                onClick={movesPage(() => {
+                  const scenes = [...film.scenes];
+                  [scenes[i - 1], scenes[i]] = [scenes[i], scenes[i - 1]];
+                  update({ scenes });
+                  notify("Scene moved earlier.");
+                })}
+              >
+                <ArrowUp size={16} />
+              </button>
+            );
+            return (
+            <article className={`scene-card ${edit ? "editing" : ""}`} key={scene.id} id={`scene-${scene.id}`}>
               <div className="scene-index">
                 {String(i + 1).padStart(2, "0")}
                 <small>{formatDuration((i * film.duration) / film.scenes.length)}</small>
               </div>
+              {!edit && (
+                <div className="scene-content">
+                  <div className="scene-heading">
+                    <h4>{readValue(scene.title, "Scene title: not added yet")}</h4>
+                    <div className="action-group">
+                      {moveEarlier}
+                      <button
+                        className="button secondary small card-mode"
+                        aria-label={`Edit scene ${i + 1}`}
+                        onClick={movesPage(() => setCardMode(cardId, true))}
+                      >
+                        <Pencil size={15} />
+                        Edit
+                      </button>
+                    </div>
+                  </div>
+                  <dl className="scene-read">
+                    <div>
+                      <dt>Narration</dt>
+                      <dd>{readValue(scene.narration)}</dd>
+                    </div>
+                    <div>
+                      <dt>Visual direction & cinematography</dt>
+                      <dd>{readValue(scene.visual)}</dd>
+                    </div>
+                    <div>
+                      <dt>Dialogue</dt>
+                      <dd>{readValue(scene.dialogue)}</dd>
+                    </div>
+                    <div>
+                      <dt>Dramatization in this scene</dt>
+                      <dd>{readValue(scene.dramatization, "Review factual basis")}</dd>
+                    </div>
+                    <div>
+                      <dt>Characters in this scene</dt>
+                      <dd>
+                        {sceneCast.length
+                          ? sceneCast.map((c) => c.name || "Unnamed character").join(", ")
+                          : readValue(
+                              "",
+                              film.characters.length
+                                ? undefined
+                                : "Add characters above to connect them to this scene.",
+                            )}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="field-note">
+                    Source evidence & reference images · {scene.sourceIds.length} sources
+                  </p>
+                </div>
+              )}
+              {edit && (
               <div className="scene-content">
                 <label>
                   Scene title
@@ -923,7 +1273,7 @@ export function CuttingStep({
                   )}
                 </fieldset>
                 <details className="source-picker">
-                  <summary>
+                  <summary onClick={movesPage(() => {})}>
                     Source evidence & reference images · {scene.sourceIds.length} sources
                   </summary>
                   {evidenceSources.map((s) => (
@@ -949,45 +1299,44 @@ export function CuttingStep({
                     {scene.dramatization ? "Dramatization noted" : "Review factual basis"}
                   </span>
                   <div className="action-group">
-                    <button
-                      className="icon-button"
-                      aria-label={`Move scene ${i + 1} earlier`}
-                      disabled={i === 0 || !!busy}
-                      onClick={() => {
-                        const scenes = [...film.scenes];
-                        [scenes[i - 1], scenes[i]] = [scenes[i], scenes[i - 1]];
-                        update({ scenes });
-                        notify("Scene moved earlier.");
-                      }}
-                    >
-                      <ArrowUp size={16} />
-                    </button>
+                    {moveEarlier}
                     <button
                       className="icon-button"
                       aria-label={`Remove scene ${i + 1}`}
                       disabled={film.scenes.length <= 1 || !!busy}
-                      onClick={() =>
-                        update({ scenes: film.scenes.filter((s) => s.id !== scene.id) })
-                      }
+                      onClick={movesPage(() =>
+                        update({ scenes: film.scenes.filter((s) => s.id !== scene.id) }),
+                      )}
                     >
                       <Trash2 size={16} />
+                    </button>
+                    <button
+                      className="button secondary small card-mode"
+                      aria-label={`Done editing scene ${i + 1}`}
+                      onClick={movesPage(() => setCardMode(cardId, false))}
+                    >
+                      <Check size={15} />
+                      Done
                     </button>
                   </div>
                 </div>
               </div>
+              )}
             </article>
-          ))}
+            );
+          })}
         </div>
       )}
       <button
         className="text-button add-scene"
         disabled={!!busy}
-        onClick={() =>
+        onClick={movesPage(() => {
+          const id = crypto.randomUUID();
           update({
             scenes: [
               ...film.scenes,
               {
-                id: crypto.randomUUID(),
+                id,
                 title: "A new chapter",
                 narration: "",
                 visual: "",
@@ -997,8 +1346,9 @@ export function CuttingStep({
                 dramatization: "",
               },
             ],
-          })
-        }
+          });
+          setCardMode(`scene-${id}`, true);
+        })}
       >
         <Plus size={15} />
         Add a scene
