@@ -764,7 +764,7 @@ export function CuttingStep({
         )}
         {evidenceSources.length > 0 && (
           <details>
-            <summary>Review source links</summary>
+            <summary onClick={movesPage(() => {})}>Review source links</summary>
             <ul className="source-coverage-list">
               {evidenceSources.map((source) => (
                 <li key={source.id}>
@@ -964,7 +964,7 @@ export function CuttingStep({
               </select>
             </label>
             <details className="source-picker">
-              <summary>
+              <summary onClick={movesPage(() => {})}>
                 Evidence for this character · {character.sourceIds.length} sources
               </summary>
               {evidenceSources.map((s) => (
@@ -1273,7 +1273,7 @@ export function CuttingStep({
                   )}
                 </fieldset>
                 <details className="source-picker">
-                  <summary>
+                  <summary onClick={movesPage(() => {})}>
                     Source evidence & reference images · {scene.sourceIds.length} sources
                   </summary>
                   {evidenceSources.map((s) => (
