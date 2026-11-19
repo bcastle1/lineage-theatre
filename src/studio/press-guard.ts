@@ -12,7 +12,8 @@ const QUIET_DOUBLE_MS = 1500;
 const PRESS_TO_CHANGE_MS = 500;
 
 export function useQuietAfterPressedChange(screen: string) {
-  const state = useRef({ any: 0, multi: 0, lastPress: 0 });
+  // No press yet: a change of screen as the page loads (a redirect, a link) was not caused by one.
+  const state = useRef({ any: 0, multi: 0, lastPress: -Infinity });
   useEffect(() => {
     if (typeof document === "undefined") return;
     // Whether the press under way began in the quiet period. A press is seen first as a pointer going
@@ -57,7 +58,7 @@ export function useQuietAfterPressedChange(screen: string) {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("click", onClick, true);
-      state.current = { any: 0, multi: 0, lastPress: 0 };
+      state.current = { any: 0, multi: 0, lastPress: -Infinity };
     };
   }, []);
   const shown = useRef(screen);

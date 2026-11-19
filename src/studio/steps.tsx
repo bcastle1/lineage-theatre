@@ -550,6 +550,8 @@ export function CuttingStep({
   // kept here by film and card id; this is view state only and is never saved.
   const [editing, setEditing] = useState<Set<string>>(() => new Set());
   const focusAfterRender = useRef<{ cardId: string; selector: string; preventScroll?: boolean } | null>(null);
+  // Ends a card's hold on the focus (see the effect that gives a card the focus after a Remove).
+  const releaseFocusCard = useRef<(() => void) | null>(null);
   const isEditing = (cardId: string) => editing.has(`${film.id}:${cardId}`);
   const setCardsEditing = (cardIds: string[], edit: boolean) =>
     setEditing((current) => {
@@ -699,6 +701,7 @@ export function CuttingStep({
       document.removeEventListener("click", ignoreClick, true);
       quiet.current = { any: 0, multi: 0, pending: 0, x: 0, y: 0 };
       removeGuard.current = 0;
+      releaseFocusCard.current?.();
     };
   }, []);
   // Outside the quiet period, the second press of a double click leaves the focus where
@@ -740,9 +743,16 @@ export function CuttingStep({
       // A card is not a control: it takes the focus only until the focus moves on or the next press
       // (a card that a click could focus would change what a double click on its text does).
       target.setAttribute("tabindex", "-1");
-      const drop = () => target.removeAttribute("tabindex");
-      target.addEventListener("blur", drop, { once: true });
-      document.addEventListener("pointerdown", drop, { capture: true, once: true });
+      const drop = () => {
+        target.removeAttribute("tabindex");
+        target.removeEventListener("blur", drop);
+        document.removeEventListener("pointerdown", drop, true);
+        if (releaseFocusCard.current === drop) releaseFocusCard.current = null;
+      };
+      releaseFocusCard.current?.();
+      releaseFocusCard.current = drop;
+      target.addEventListener("blur", drop);
+      document.addEventListener("pointerdown", drop, true);
     }
     target?.focus({ preventScroll: focus.preventScroll });
   });
