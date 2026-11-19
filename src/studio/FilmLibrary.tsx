@@ -22,8 +22,9 @@ const inPanel = (at: string) => /^(status|detail|version):/.test(at);
 const QUIET_MS = 500, QUIET_LIMIT_MS = 4000;
 // How long a still pointer is held to the control it was on when the library moved the page, and how far a
 // mouse (or a finger or pen, between taps) may stray and still count as the same point (see "hold" below).
+// A finger repeating a tap lands up to a few millimetres from the first one, so its allowance is wider.
 // A scroll that starts within OWN_SCROLL_MS of a move the library made is taken to be part of that move.
-const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 16, OWN_SCROLL_MS = 300;
+const HOLD_MS = 8000, MOUSE_RADIUS = 8, TOUCH_RADIUS = 32, OWN_SCROLL_MS = 300;
 const CONTROLS = "a[href], button, input, select, textarea, summary, label, video, audio, [role=button], [role=link], [tabindex]";
 const controlOf = (target: EventTarget | null) => target instanceof Element ? target.closest(CONTROLS) : null;
 type Point = { x: number; y: number; radius: number; control: Element | null };
@@ -161,20 +162,28 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     // The browser reports a scroll at its next frame; a press can arrive before that. Each handler first takes
     // account of a scroll that has happened but has not been reported yet.
     let seenY = window.scrollY;
+    // Where the press under way began. A touch screen delivers the click of a tap at the nearest control, which
+    // can be several pixels from the finger, so a press is judged by where it began, not where its click lands.
+    let pressedAt: { x: number; y: number } | null = null;
     const caughtUp = () => { if (window.scrollY !== seenY) scrolled(); };
     const ignorePress = (event: MouseEvent) => {
       if (event.detail === 0) return;   // the keyboard
       caughtUp();
+      const from = pressedAt ?? { x: event.clientX, y: event.clientY };
+      pressedAt = null;
       const now = performance.now(), still = held.current;
-      const moved = Boolean(still && now < still.until && Math.hypot(event.clientX - still.x, event.clientY - still.y) <= still.radius && controlOf(event.target) !== still.control);
+      const moved = Boolean(still && now < still.until && Math.hypot(from.x - still.x, from.y - still.y) <= still.radius && controlOf(event.target) !== still.control);
       if (now < quietUntil.current || moved) { event.preventDefault(); event.stopPropagation(); }
     };
     const release = () => { held.current = null; };
+    // A press the browser took over (a touch that became a scroll) sends no click.
+    const cancel = () => { pressedAt = null; release(); };
     // Where the pointer is and which control it is on. A move to the same point (as a browser may report after
     // the page moved under it) changes nothing.
     const track = (event: PointerEvent) => {
       caughtUp();
       const at = { x: event.clientX, y: event.clientY, radius: event.pointerType === "mouse" ? MOUSE_RADIUS : TOUCH_RADIUS, control: controlOf(event.target) };
+      if (event.type === "pointerdown") pressedAt = { x: at.x, y: at.y };
       const still = held.current, last = pointer.current;
       if (still && performance.now() < still.until && Math.hypot(at.x - still.x, at.y - still.y) <= still.radius) return;
       if (event.type === "pointermove" && last && last.x === at.x && last.y === at.y) return;
@@ -196,7 +205,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
     document.addEventListener("click", ignorePress, true);
     document.addEventListener("pointerdown", track, capture);
     document.addEventListener("pointermove", track, capture);
-    document.addEventListener("pointercancel", release, capture);
+    document.addEventListener("pointercancel", cancel, capture);
     document.addEventListener("wheel", release, capture);
     document.addEventListener("keydown", release, true);
     window.addEventListener("scroll", scrolled, { passive: true });
@@ -204,7 +213,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       document.removeEventListener("click", ignorePress, true);
       document.removeEventListener("pointerdown", track, capture);
       document.removeEventListener("pointermove", track, capture);
-      document.removeEventListener("pointercancel", release, capture);
+      document.removeEventListener("pointercancel", cancel, capture);
       document.removeEventListener("wheel", release, capture);
       document.removeEventListener("keydown", release, true);
       window.removeEventListener("scroll", scrolled);
