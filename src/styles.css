@@ -2171,9 +2171,9 @@ button {
   margin-right: calc(var(--space-2) * -1);
 }
 .source-item > .icon-button:hover:not(:disabled),
-.cast-card-heading > .icon-button:hover:not(:disabled),
+.cast-card-foot > .icon-button:hover:not(:disabled),
 .assumption-card > .icon-button:hover:not(:disabled),
-.scene-bottom .icon-button:last-child:hover:not(:disabled) {
+.scene-bottom .icon-button + .icon-button:hover:not(:disabled) {
   background: var(--danger-bg);
   color: var(--danger-text);
 }
@@ -2322,21 +2322,140 @@ button {
   background-color: var(--neutral-500);
   border-color: var(--neutral-500);
 }
+/* Forced colours (Windows contrast themes) drop the tint, the inset line and the
+   colour of the mark. The selection is drawn in the system's own highlight colour
+   instead: a filled mark, and a line inside the card unless the focus ring is on it. */
+@media (forced-colors: active) {
+  .choice.chosen::after {
+    forced-color-adjust: none;
+    border-color: Highlight;
+    background-color: Highlight;
+  }
+  .choice.chosen:not(:focus-visible, :has(input:focus-visible)) {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+  .choice.chosen:disabled::after,
+  .duration-options > .choice.chosen:has(input:disabled)::after {
+    border-color: GrayText;
+    background-color: GrayText;
+  }
+}
+/* Running time: one radio group, each option a card with the same corner mark as
+   the treatment cards. The radio itself covers its card, so the whole card is the
+   target and the arrow keys move between options. */
 .duration-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: var(--space-2) var(--space-6);
+  container-type: inline-size;
   margin: var(--space-6) 0;
 }
-.duration-row > label {
-  flex: 0 1 21rem;
+.duration-choice {
   min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.duration-choice > legend {
+  padding: 0;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-label);
+  line-height: 1.4;
+  color: var(--neutral-700);
+}
+.duration-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: var(--space-3);
+}
+.duration-options > .choice {
+  gap: 0;
+  padding: var(--space-4);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-base) var(--ease-out),
+    background-color var(--duration-base) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out);
+}
+.duration-options > .choice::after {
+  top: var(--space-4);
+  right: var(--space-4);
+}
+.duration-options > .choice > input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: inherit;
+  opacity: 0;
+}
+/* While a job runs: no hover response, the same grey marks as a disabled treatment card. */
+.duration-options > .choice > input:disabled {
+  cursor: not-allowed;
+}
+.duration-options > .choice:has(input:disabled):hover {
+  border-color: var(--color-border-control);
+  box-shadow: none;
+}
+.duration-options > .choice.chosen:has(input:disabled):hover {
+  box-shadow: inset 0 0 0 1px var(--color-primary);
+}
+.duration-options > .choice:has(input:disabled)::after {
+  border-color: var(--color-border-strong);
+}
+.duration-options > .choice.chosen:has(input:disabled)::after {
+  background-color: var(--neutral-500);
+  border-color: var(--neutral-500);
+}
+.duration-options > .choice > span {
+  padding-right: calc(1.375rem + var(--space-2));
+  font-size: var(--text-xl);
+  line-height: 1.375rem;
+  font-variant-numeric: tabular-nums;
+}
+.duration-options > .choice:has(input:focus-visible) {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  box-shadow: var(--shadow-focus);
+}
+.duration-options > .choice.chosen:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 1px var(--color-primary), var(--shadow-focus);
 }
 .duration-row > .field-note {
-  flex: 1 1 14rem;
-  max-width: 30rem;
-  padding-bottom: var(--space-1);
+  max-width: var(--measure);
+  margin-top: var(--space-3);
+}
+/* A sixth option (a draft that carries its own running time) wraps as three and three. */
+@container (min-width: 45.51rem) {
+  .duration-options:has(> :nth-child(6)) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+/* Too narrow for five cards in a row (phones, tablets): a list of rows, the time
+   first and its description beside it. */
+@container (max-width: 45.5rem) {
+  .duration-options {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+  .duration-options > .choice {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: var(--control-height-lg);
+    padding: var(--space-3) calc(var(--space-4) + 1.375rem + var(--space-3)) var(--space-3) var(--space-4);
+  }
+  .duration-options > .choice::after {
+    top: 50%;
+    translate: 0 -50%;
+  }
+  .duration-options > .choice > span {
+    flex: 0 0 3.25rem;
+    padding-right: 0;
+  }
+  .duration-options > .choice > small {
+    margin-top: 0;
+  }
 }
 .ai-consent {
   padding: var(--space-5);
@@ -2645,9 +2764,18 @@ html:has(.cutting-panel) {
   background: var(--neutral-50);
   border-block: var(--hairline) solid var(--color-border);
 }
-.script-section > .section-subtitle > div {
+.script-section > .section-subtitle > div:not(.action-group) {
   flex: 1 1 14rem;
   min-width: 0;
+}
+.script-section > .section-subtitle > .action-group {
+  flex: 0 0 auto;
+  gap: var(--space-2);
+}
+/* "Edit all" and "Done editing" take the same width, so the button beside this
+   one never moves under the pointer when the label changes. */
+.section-mode {
+  min-width: 8.75rem;
 }
 .count-tag {
   display: inline-flex;
@@ -2687,22 +2815,147 @@ html:has(.cutting-panel) {
   border-radius: var(--radius-lg);
   background: var(--neutral-25);
 }
-/* The seven parts of a card share row lines with the card beside it, so the
-   same field sits at the same height in both. */
+/* While they are edited, the eight parts of a card share row lines with the card
+   beside it, so the same field sits at the same height in both. A card in the
+   reading view spans the same rows as one block. */
 @supports (grid-template-rows: subgrid) {
   .cast-card {
+    grid-row: span 8;
+  }
+  .cast-card.editing {
     display: grid;
     grid-template-rows: subgrid;
-    grid-row: span 7;
     align-items: start;
   }
 }
 .cast-card-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-1) var(--space-2);
+  margin: calc(var(--space-1) * -1) 0 0;
+}
+/* Edit and Done share one place at the end of the heading, with nothing beside
+   them: a second click where Edit was can only close the form again. */
+.cast-card-heading > .action-group {
+  flex-wrap: nowrap;
+  margin-left: auto;
+}
+.cast-card-heading .card-mode {
+  min-width: 5.75rem;
+}
+/* The narrowest phones: the button still fits beside the longest basis tag. */
+@media (max-width: 380px) {
+  .cast-card-heading .card-mode {
+    min-width: 5.25rem;
+    padding-inline: var(--space-3);
+  }
+}
+/* The form closes with the remove control at one end and Done at the other. */
+.cast-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.cast-card-foot > .icon-button {
+  margin-left: calc(var(--space-2) * -1);
+}
+/* After a removal the card that takes its place holds the focus (given by script, so it
+   carries tabindex="-1"). From the keyboard it is outlined like a control, so the reader
+   can see where they are; after a press nothing is drawn. */
+.cast-card[tabindex="-1"]:focus-visible,
+.scene-card[tabindex="-1"]:focus-visible,
+.assumption-card[tabindex="-1"]:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+/* A card changes mode in one step. Its layout is never animated: under the
+   reduced-motion rule the old spacing would otherwise stay for one more frame,
+   after the page has been measured to keep the reader's place. */
+.cast-card,
+.scene-card,
+.scene-index {
+  transition-property: none;
+}
+/* Reading view of a character or a scene: the words as text, one Edit button.
+   A missing value is named in a quieter colour so it can be found and filled in. */
+.read-empty {
+  color: var(--color-text-subtle);
+}
+.read-label,
+.scene-read dt {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+.cast-card:not(.editing) {
+  gap: var(--space-2);
+}
+.cast-card > h4,
+.scene-heading > h4 {
+  font-family: var(--font-display);
+  font-size: var(--display-2xs);
+  line-height: 1.25;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.cast-card > h4 {
+  margin-top: var(--space-2);
+}
+.cast-role {
+  font-size: var(--text-secondary);
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+.cast-description,
+.scene-read dd {
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--neutral-800);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.cast-description {
+  margin-top: var(--space-2);
+}
+.cast-read-photo {
+  display: flex;
+  align-items: center;
   gap: var(--space-3);
-  margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0;
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+.cast-read-photo > p {
+  min-width: 0;
+  font-size: var(--text-secondary);
+  line-height: 1.5;
+  color: var(--neutral-800);
+  overflow-wrap: anywhere;
+}
+/* The reference photo and the missing-photo message form one block in both modes.
+   In the reading view its parts sit directly in the card's column. */
+.cast-photo-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+}
+.cast-card:not(.editing) > .cast-photo-block {
+  display: contents;
+}
+.cast-card:not(.editing) > .cast-photo-block > .feedback {
+  margin-top: var(--space-2);
+}
+/* The evidence line closes the card, at the same height in both cards of a row. */
+.cast-card:not(.editing) > .field-note {
+  margin-top: auto;
+  padding-top: var(--space-4);
+  font-variant-numeric: tabular-nums;
 }
 .cast-card input,
 .cast-card textarea,
@@ -2728,8 +2981,7 @@ html:has(.cutting-panel) {
   grid-column: 2;
   grid-row: 1;
 }
-.cast-photo > .field-note,
-.cast-photo > .feedback {
+.cast-photo > .field-note {
   grid-column: 1 / -1;
 }
 .basis-tag {
@@ -2852,6 +3104,40 @@ html:has(.cutting-panel) {
   gap: var(--space-4);
   min-width: 0;
 }
+.scene-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.scene-heading > h4 {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: var(--space-2);
+}
+.scene-heading > .action-group {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+}
+.scene-read {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-8);
+  margin: 0;
+}
+.scene-read > div {
+  min-width: 0;
+}
+.scene-read > div:last-child {
+  grid-column: 1 / -1;
+}
+.scene-read dd {
+  margin: 0;
+}
+.scene-content > .field-note {
+  font-variant-numeric: tabular-nums;
+}
 .scene-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2879,18 +3165,25 @@ html:has(.cutting-panel) {
 }
 .scene-bottom {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-4);
+  gap: var(--space-2) var(--space-4);
 }
 .scene-bottom > .field-note {
   font-variant-numeric: tabular-nums;
 }
+/* Like a character's form, a scene's closes with Move and Remove at one end and Done at the other. */
 .scene-bottom > .action-group {
-  flex: 0 0 auto;
+  flex: 1 0 100%;
   flex-wrap: nowrap;
   gap: var(--space-1);
-  margin-right: calc(var(--space-2) * -1);
+}
+.scene-bottom > .action-group > .icon-button:first-child {
+  margin-left: calc(var(--space-2) * -1);
+}
+.scene-bottom .card-mode {
+  margin-left: auto;
 }
 .add-scene {
   display: flex;
@@ -3138,6 +3431,21 @@ html:has(.cutting-panel) {
   .choice-row {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Section headers: the title keeps a line of its own; the description shares
+     the next line with the section's buttons. */
+  .script-section > .section-subtitle {
+    row-gap: var(--space-1);
+  }
+  .script-section > .section-subtitle > div:not(.action-group) {
+    display: contents;
+  }
+  .script-section > .section-subtitle h3 {
+    flex: 1 1 100%;
+  }
+  .script-section > .section-subtitle > div > span {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 @media (max-width: 680px) {
   .upload-zone {
@@ -3184,13 +3492,8 @@ html:has(.cutting-panel) {
     top: var(--space-4);
     right: var(--space-4);
   }
-  .duration-row {
-    display: block;
-  }
   .duration-row > .field-note {
     max-width: none;
-    margin-top: var(--space-2);
-    padding-bottom: 0;
   }
   .ai-consent {
     padding: var(--space-4);
@@ -3230,7 +3533,7 @@ html:has(.cutting-panel) {
     margin-top: var(--space-8);
   }
   .script-section > .section-subtitle,
-  .script-section > .section-subtitle > div {
+  .script-section > .section-subtitle > div:not(.action-group) {
     display: contents;
   }
   .script-section > .section-subtitle h3 {
@@ -3251,6 +3554,9 @@ html:has(.cutting-panel) {
   .script-section > .section-subtitle > .button {
     display: flex;
     width: fit-content;
+    margin-top: var(--space-3);
+  }
+  .script-section > .section-subtitle > .action-group {
     margin-top: var(--space-3);
   }
   .script-section > .cast-grid,
@@ -3280,7 +3586,7 @@ html:has(.cutting-panel) {
     border-bottom: 0;
   }
   .cast-card-heading {
-    margin: 0 calc(var(--space-2) * -1) calc(var(--space-2) * -1) 0;
+    margin: 0 0 calc(var(--space-2) * -1);
   }
   /* Assumptions: number and remove control on one line, the two fields underneath. */
   .assumption-card {
@@ -3318,8 +3624,28 @@ html:has(.cutting-panel) {
   .scene-index small {
     margin-left: var(--space-1);
   }
-  .scene-fields {
+  .scene-fields,
+  .scene-read {
     grid-template-columns: minmax(0, 1fr);
+  }
+  /* Reading view: the scene's actions sit on its number line, so the title has the full width. */
+  .scene-card:not(.editing) {
+    position: relative;
+  }
+  .scene-card:not(.editing) > .scene-index {
+    padding-right: 7.5rem;
+    line-height: var(--control-height);
+  }
+  .scene-heading > .action-group {
+    position: absolute;
+    top: var(--space-5);
+    right: 0;
+  }
+  .scene-card:first-child .scene-heading > .action-group {
+    top: 0;
+  }
+  .scene-heading > h4 {
+    padding-top: 0;
   }
   .scene-cast {
     flex-direction: column;

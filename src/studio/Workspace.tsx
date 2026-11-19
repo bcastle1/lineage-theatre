@@ -43,6 +43,7 @@ import { importSource } from "./sources";
 import { ArchiveStep, DirectionStep, CuttingStep, CreateStep } from "./steps";
 import CloudArchivePanel from "./CloudArchivePanel";
 import FilmLibrary from "./FilmLibrary";
+import { useQuietAfterPressedChange } from "./press-guard";
 import MediaLibrary from "./MediaLibrary";
 import { downloadMediaFile, type MediaItem } from "./media-library";
 import LibraryArtwork from "./LibraryArtwork";
@@ -131,6 +132,8 @@ export default function Workspace({
     return () => window.removeEventListener("hashchange", openPayments);
   }, [user.role]);
   const [step, setStep] = useState(0);
+  // A press that opens another step, view or film starts a short quiet period (see press-guard.ts).
+  useQuietAfterPressedChange(`${view}:${step}:${activeId}`);
   const [saved, setSaved] = useState("Saved in this browser");
   const [notice, setNotice] = useState<Notice | null>(
     welcome ? { tone: "success", text: welcome } : null,
