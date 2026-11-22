@@ -7,10 +7,9 @@ import { digest, readRecord, writeRecord, userPath } from '../api/_lib/auth.mjs'
 import { isOwner } from '../api/_lib/access.mjs';
 import { createFilmProductionService, productionJobPath } from '../api/_lib/film-production.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
-import { visualReceiptPath, verifiedVisualDecision } from '../api/_lib/film-visual-review.mjs';
+import { VISUAL_REVIEW_MODEL, visualReceiptPath, verifiedVisualDecision } from '../api/_lib/film-visual-review.mjs';
 import { storedFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
 
 const HEX = /^[a-f0-9]{64}$/;
 const requireValue = (value, code = 'FINISHING_RECONCILIATION_REQUIRED') => {
@@ -35,7 +34,7 @@ export function createOperatorFinishingReconciler({ read = readRecord, write = w
     const binding = receipt?.binding, index = job.manifest.shots.findIndex(shot => shot.id === binding?.shotId);
     const shot = job.manifest.shots[index], saved = job.shots[index];
     const previous = index > 0 && job.manifest.shots[index - 1].sceneIndex === shot?.sceneIndex ? job.shots[index - 1] : null;
-    requireValue(receipt?.version === 1 && receipt.state === 'reviewed' && receipt.model === STORY_MODEL
+    requireValue(receipt?.version === 1 && receipt.state === 'reviewed' && receipt.model === VISUAL_REVIEW_MODEL
       && receipt.bindingHash === bindingHash && binding?.version === 1 && digest(JSON.stringify(binding)) === bindingHash
       && binding.manifestHash === manifestHash && shot && saved?.id === shot.id && saved.status === 'completed' && saved.output
       && binding.outputHash === digest(JSON.stringify(saved.output))
