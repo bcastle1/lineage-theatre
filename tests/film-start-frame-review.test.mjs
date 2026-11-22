@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { digest } from '../api/_lib/auth.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { VISUAL_REVIEW_MODEL } from '../api/_lib/film-visual-review.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { FAL_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
@@ -41,7 +41,7 @@ async function fixture() {
     normalizeStartImage: async url => { assert.equal(url, 'https://v3.fal.media/scene-2.jpg'); return normalizedImageData; },
     fetchImpl: async (_url, options) => {
       calls++; if (afterInference) await afterInference(options);
-      return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+      return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(pass) }] }] }));
     } };
   const input = { email, productionId: id, manifestHash, shotId, referenceIdentity };
@@ -70,7 +70,7 @@ test('duplicate, missing, or unverifiable cast fails durably and cannot turn int
     { ...pass, cast: 'mismatch', findings: ['missing-required-character'] }, { ...pass, cast: 'unverifiable' }]) {
     const f = await fixture(); let calls = 0;
     const service = createStartFrameReviewService({ ...f.options, fetchImpl: async () => {
-      calls++; return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+      calls++; return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }));
     } });
     const proof = await service(f.input); assert.equal(proof.passed, false);

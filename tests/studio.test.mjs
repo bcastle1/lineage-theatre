@@ -10,15 +10,15 @@ import { FilmProductionError } from "../api/_lib/film-production.mjs";
 const actor={email:"customer@example.invalid",role:"customer",status:"active",
   approvedAt:"2026-09-01T00:00:00.000Z",approvedBy:"erik@brocotech.ai"};
 const internalDetails=/OpenAI|GPT-6|Astra|MagicLight|QuickBooks|Intuit|BROCOTech|supplier|markup|referenceRate|providerCredits|providerCost|storyModel|connections|credential/i;
-const ready=()=>({story:true,storyModel:"gpt-6-astra",magiclight:false,billing:false,
-  connections:{story:{available:true,reason:"OpenAI GPT-6 Astra connected"},magiclight:{available:false,reason:"MagicLight API connection pending"}},
+const ready=()=>({story:true,storyModel:"gpt-6.2-astra",magiclight:false,billing:false,
+  connections:{story:{available:true,reason:"OpenAI GPT-6.2 Astra connected"},magiclight:{available:false,reason:"MagicLight API connection pending"}},
   payment:{provider:"quickbooks",label:"QuickBooks"},
   quality:{preference:"highest",label:"MagicLight supplier quality",verified:false},
   pricing:{currency:"USD",referenceRate:{amountCents:110},markupBasisPoints:1250,providerCostCents:2500,
     estimate:{amountCents:2813,providerCredits:1000,reason:"Supplier cost with BROCOTech markup"},chargeReady:true}});
 const coverage=()=>({totalSources:1,readSources:1,textCharacters:50,photoSources:0,photosRead:0,notesOnlySources:0,warnings:[]});
 const story=()=>({themes:[{title:"A fictional family garden",plot:"A family grows a garden",climax:"A shared harvest",reason:"Supplied family memory"}],
-  sourceCoverage:coverage(),generatedBy:"GPT-6 Astra",model:"gpt-6-astra",generatedAt:"2026-09-14T12:00:00.000Z"});
+  sourceCoverage:coverage(),generatedBy:"GPT-6.2 Astra",model:"gpt-6.2-astra",generatedAt:"2026-09-14T12:00:00.000Z"});
 
 function harness(overrides={},user=actor) {
   const calls={connections:0,pricing:0,generation:[],limits:[],reads:[]};
@@ -58,9 +58,12 @@ test("customer capabilities are an explicit allowlist, excluding detailed suppli
 });
 
 test("admin connection diagnostics still retain model, provider, merchant, and pricing setup information",async()=>{
-  const result=await connections({key:"synthetic-test-key",fetchImpl:async()=>new Response("",{status:200}),pricingSettings:{markupBasisPoints:1250,revision:2}});
-  assert.equal(result.storyModel,"gpt-6-astra");assert.equal(result.story,true);
-  assert.match(result.connections.story.reason,/GPT-6 Astra/);
+  const result=await connections({key:"synthetic-test-key",fetchImpl:async url=>{
+    assert.equal(url,"https://api.openai.com/v1/models/gpt-6.2-astra");
+    return new Response("",{status:200});
+  },pricingSettings:{markupBasisPoints:1250,revision:2}});
+  assert.equal(result.storyModel,"gpt-6.2-astra");assert.equal(result.story,true);
+  assert.match(result.connections.story.reason,/GPT-6\.2 Astra/);
   assert.equal(result.connections.magiclight.provider,"fal");
   assert.match(result.connections.magiclight.reason,/Film production setup/);
   assert.match(result.connections.billing.reason,/QuickBooks/);
@@ -83,7 +86,7 @@ test("story responses retain screenplay and evidence content but expose only Lin
       ["themes","sourceCoverage","generatedBy","generatedAt"]:
       ["logline","selectedThemes","characters","assumptions","scenes","sourceCoverage","generatedBy","generatedAt"]).sort());
     assert.deepEqual(result.body[action==="themes"?"themes":"scenes"],generated[action==="themes"?"themes":"scenes"]);
-    assert.equal(generated.model,"gpt-6-astra");
+    assert.equal(generated.model,"gpt-6.2-astra");
     assertCustomerSafe(result);
   }
 });

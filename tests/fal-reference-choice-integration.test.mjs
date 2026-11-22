@@ -5,8 +5,7 @@ import { digest } from '../api/_lib/auth.mjs';
 import { FAL_MODELS, falRequestPath } from '../api/_lib/fal-client.mjs';
 import { createFalProductionAdapter, characterReferenceInput, characterViewIdentity, startFrameIdentity } from '../api/_lib/fal-production.mjs';
 import { createStartFrameReviewService, startFrameReviewContext, verifyStartFrameReceipt } from '../api/_lib/film-start-frame-review.mjs';
-import { visualReferenceImages } from '../api/_lib/film-visual-review.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { VISUAL_REVIEW_MODEL, visualReferenceImages } from '../api/_lib/film-visual-review.mjs';
 import { candidateCanaryProfile, createGuardedCandidateClient } from '../scripts/test-kling-cast-continuity.mjs';
 import { REFERENCE_RECOVERY as S, referenceRecoveryHash as hash, referenceRecoveryIdentity as originalIdentity,
   referenceReplacementIdentity as replacementIdentity, referenceRecoveryId as recoveryId, referenceRecoveryPath,
@@ -71,7 +70,7 @@ async function fixture(decision = pass) {
     generatedPhoto: async url => { referenceReads.push(url); return normalized(url); }, normalizeStartImage: normalized,
     fetchImpl: async (_url, options) => { inferenceCalls++; const body = JSON.parse(options.body);
       assert.equal(body.input[0].content.filter(item => item.type === 'input_image').length, 3);
-      return Response.json({ status: 'completed', model: STORY_MODEL,
+      return Response.json({ status: 'completed', model: VISUAL_REVIEW_MODEL,
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }); } });
   const adapter = createFalProductionAdapter({ key: 'offline-only', read, client, now: () => AT,
     normalizeKlingReference: normalized, validateStartFrame: input => review({ ...input, productionId: input.preparedId }),
