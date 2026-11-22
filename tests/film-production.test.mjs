@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { buildFilmManifest, createFilmProductionService, fictionalOperatorProject, productionJobPath, validateProviderOutput } from "../api/_lib/film-production.mjs";
 import { userPath, digest } from "../api/_lib/auth.mjs";
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
-import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+import { testSeedanceQualification } from './fixtures/seedance-qualification.mjs';
+import { FAL_MODELS } from '../api/_lib/fal-client.mjs';
+import { createFalProductionAdapter, FAL_RECIPE_VERSION, SEEDANCE_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 
 const email = "customer@example.invalid";
 const owner = { email: "erik@brocotech.ai", role: "owner", status: "active" };
@@ -577,4 +579,40 @@ test("a fixed sandbox sample quotes and submits only for the persisted active ow
     authorize: async args => ({ ...await grant(args), environment: "sandbox", fictionalOnly: false }) });
   const next = await unrestricted.prepareOperatorTest({ actor: owner, idempotencyKey: "fictional-other-test-002" });
   await assert.rejects(unrestricted.advance({ email: owner.email, id: next.id, actor: owner }), e => e.code === "PRODUCTION_AUTHORIZATION_REQUIRED");
+});
+
+test('new paid plans pin Seedance at preparation, quote the same plan and send only one native-audio video per scene', async () => {
+  const data = store(), calls = [], receipts = new Map();
+  const client = {
+    get: async id => receipts.get(id),
+    submit: async request => {
+      calls.push(request);
+      const receipt = { endpoint: request.endpoint, state: 'queued', requestId: 'fixture-request' };
+      receipts.set(request.identity, receipt);
+      return receipt;
+    },
+  };
+  const rates = { videoMicroUsdPerSecond: 1200000, referenceMicroUsd: 0, expiresAt: new Date(at + 360000).toISOString() };
+  const provider = createFalProductionAdapter({ qualification: testSeedanceQualification(), key: 'offline-only',
+    now: () => at, read: data.readRecordImpl, client, pricing: async () => rates });
+  const service = createFilmProductionService({ ...data, adapter: provider, now: () => at,
+    authorize: async input => ({ ...await grant(input), budgetCents: 10000, quoteReference: 'paid-fixture' }) });
+  const prepared = await prepare(service);
+  const saved = await service.getPrepared({ email, id: prepared.id });
+  assert.deepEqual(saved.provider, { id: 'fal', model: 'seedance', recipe: SEEDANCE_RECIPE_VERSION });
+  assert.equal(saved.manifest.productionPlan.provider, 'seedance');
+  assert.equal(saved.manifest.productionPlan.characterBindingVersion, undefined);
+  assert.equal(service.readiness().productionProvider, 'seedance');
+  const quote = await service.quoteForPayment(fictionalOperatorProject(), { email },
+    { preparedId: prepared.id, manifestHash: prepared.manifestHash, idempotencyKey });
+  assert.equal(quote.manifestHash, saved.manifestHash);
+  assert.ok(quote.providerCostCents > 0);
+  for (const shot of saved.shots) await service.advance({ email, id: saved.id });
+  assert.deepEqual(calls.map(call => call.endpoint), saved.shots.map(() => FAL_MODELS.seedanceText));
+  assert.equal(new Set(calls.map(call => call.identity)).size, saved.shots.length);
+  for (const call of calls) {
+    assert.equal(call.input.generate_audio, true);
+    assert.equal(call.input.resolution, '1080p');
+    assert.equal(call.input.image_urls, undefined);
+  }
 });

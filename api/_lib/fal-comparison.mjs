@@ -1,6 +1,6 @@
 import { digest, readRecord, userPath } from './auth.mjs';
 import { isOwner } from './access.mjs';
-import { createFalProductionAdapter, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from './fal-production.mjs';
+import { falAdapterForSavedProvider, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from './fal-production.mjs';
 
 const fail = () => { throw new Error('The paid-film comparison authorization could not be verified.'); };
 export const comparisonPath = orderId => {
@@ -11,7 +11,7 @@ export const comparisonPath = orderId => {
 // Historical comparison ledgers permit reconciliation of their original tasks.
 // They can no longer authorize any new provider operation.
 export function createFalComparison({ read = readRecord,
-  adapterFactory = model => createFalProductionAdapter({ model }), now = Date.now } = {}) {
+  adapterFactory = model => falAdapterForSavedProvider({ id: 'fal', model, recipe: FAL_RECIPE_VERSION }), now = Date.now } = {}) {
   async function context(orderId, actorEmail) {
     const owner = await read(userPath(actorEmail));
     const order = (await read(`payments/orders/${orderId}.json`))?.value;
@@ -37,8 +37,8 @@ export function createFalComparison({ read = readRecord,
     comparisonPath(orderId);
     const ctx = await context(orderId, actorEmail), existing = await read(comparisonPath(orderId));
     if (existing) { if (!matches(existing.value, ctx, actorEmail)) fail(); return existing.value; }
-    // Legacy comparison records remain readable; new movies use Kling only.
-    throw new Error('New multi-provider comparisons are disabled. Production uses Kling.');
+    // Legacy comparison records remain readable.
+    throw new Error('New multi-provider comparisons are disabled. Production uses Seedance 2.5 US.');
   }
   async function pass({ orderId, actorEmail }) {
     const ctx = await context(orderId, actorEmail);

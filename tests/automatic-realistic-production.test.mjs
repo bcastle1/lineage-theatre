@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {speechEdit,reviewFilmSpeech} from '../scripts/review-film-speech.mjs';
 import {productionProgressSnapshot} from '../api/_lib/production-progress.mjs';
 import {localVideoHandler,aiVideoHandler} from '../api/_lib/local-video-handler.mjs';
-import {createFalProductionAdapter, FAL_RECIPE_VERSION} from '../api/_lib/fal-production.mjs';
+import {createFalProductionAdapter, SEEDANCE_RECIPE_VERSION} from '../api/_lib/fal-production.mjs';
+import {planSeedanceShots} from '../api/_lib/kling-film-plan.mjs';
+import {testSeedanceQualification} from './fixtures/seedance-qualification.mjs';
 import {buildFilmManifest,fictionalOperatorProject} from '../api/_lib/film-production.mjs';
 
 test('speech verification rejects missing, changed and truncated narration; trims only trailing extra speech',()=>{
@@ -48,12 +50,17 @@ test('retired public video handlers cannot submit with any previously configured
 });
 
 test('checkout cannot obtain a quote with missing, stale, wrong-model or future worker health',async()=>{
- const now=Date.parse('2026-10-19T03:00:00Z'),{manifest}=buildFilmManifest(fictionalOperatorProject());
- const good={ready:true,model:'wan',recipe:FAL_RECIPE_VERSION,checkedAt:new Date(now).toISOString()};
+ const now=Date.parse('2026-10-19T03:00:00Z'),manifest=planSeedanceShots(buildFilmManifest(fictionalOperatorProject()).manifest);
+ const good={version:1,ready:true,model:'seedance',recipe:SEEDANCE_RECIPE_VERSION,deliveryChecksVersion:1,visualChecksVersion:1,
+   referencePhotoVersion:1,checkedAt:new Date(now).toISOString()};
  let pricingCalls=0;
- for(const health of [null,{...good,ready:false},{...good,model:'seedance'},{...good,checkedAt:new Date(now-181000).toISOString()},{...good,checkedAt:new Date(now+1).toISOString()}]){
-  const adapter=createFalProductionAdapter({key:'synthetic',requireWorker:true,now:()=>now,read:async()=>({value:health}),pricing:async()=>{pricingCalls++;}});
-  await assert.rejects(adapter.validateManifest(manifest));
- }
+ const validation = health => createFalProductionAdapter({key:'synthetic',qualification:testSeedanceQualification(),
+   requireWorker:true,now:()=>now,read:async()=>({value:health}),pricing:async()=>{
+     pricingCalls++; return {videoMicroUsdPerSecond:1200000,referenceMicroUsd:0,expiresAt:new Date(now+60000).toISOString()};
+   }}).validateManifest(manifest);
+ for(const health of [null,{...good,ready:false},{...good,model:'kling'},{...good,recipe:'retired'},{...good,checkedAt:new Date(now-181000).toISOString()},
+   {...good,checkedAt:new Date(now+1).toISOString()}]) await assert.rejects(validation(health));
  assert.equal(pricingCalls,0);
+ assert.equal((await validation(good)).ready,true);
+ assert.equal(pricingCalls,1);
 });

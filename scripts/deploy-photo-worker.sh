@@ -51,7 +51,7 @@ if [[ $action == stage ]]; then
   base=$4; source_dir=$(realpath -e -- "$source_dir")
   [[ $(pin) == "$base" ]] || die 'Current image pin differs from the supplied base.'
   docker image inspect "$base" >/dev/null
-  for file in api/_lib/production-photo-reference.mjs scripts/production-worker.mjs scripts/evaluate-film-models.mjs; do
+  for file in api/_lib/fal-production.mjs api/_lib/worker-models.mjs scripts/production-worker.mjs scripts/assemble-film.mjs scripts/review-film-visuals.mjs; do
     [[ -f $source_dir/$file && ! -L $source_dir/$file ]] || die "Missing regular source file: $file"
   done
   [[ -d $source_dir/api/_lib && ! -L $source_dir/api/_lib ]] || die 'Invalid source library directory.'
@@ -60,8 +60,7 @@ if [[ $action == stage ]]; then
   context=$(mktemp -d "$ROOT/context.XXXXXXXX")
   mkdir -p "$context/api/_lib" "$context/scripts"
   cp -- "$source_dir"/api/_lib/*.mjs "$context/api/_lib/"
-  # Ship the matching assembly, speech and soundtrack code with the provider.
-  # Updating only the entrypoint would leave old cut-count limits in the image.
+  # Include the matching provider, assembly, and visual-review code in the worker image.
   cp -- "$source_dir"/scripts/*.mjs "$source_dir"/scripts/*.py "$context/scripts/"
   (cd "$context"; find api scripts -type f -print0 | sort -z | xargs -0 sha256sum) > "$ROOT/$rev.sources.sha256"
   cat > "$context/Dockerfile" <<'DOCKERFILE'

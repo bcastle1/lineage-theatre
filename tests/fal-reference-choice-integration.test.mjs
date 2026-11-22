@@ -72,7 +72,7 @@ async function fixture(decision = pass) {
       assert.equal(body.input[0].content.filter(item => item.type === 'input_image').length, 3);
       return Response.json({ status: 'completed', model: VISUAL_REVIEW_MODEL,
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }); } });
-  const adapter = createFalProductionAdapter({ key: 'offline-only', read, client, now: () => AT,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'offline-only', read, client, now: () => AT,
     normalizeKlingReference: normalized, validateStartFrame: input => review({ ...input, productionId: input.preparedId }),
     verifyStartFrame: input => verifyStartFrameReceipt(input, { read }) });
   const shot = manifest.shots[1], frameIdentity = startFrameIdentity(S.id, S.manifestHash, shot.id);

@@ -113,7 +113,7 @@ test('additional views stay bound to their single-image context and cannot creat
 });
 test('the complete seven-operation bound remains idempotent across repeated invocations', async () => {
   const records = new Map(); let posts = 0, revision = 0;
-  const client = createFalClient({ key: 'synthetic-offline-key', now: () => at,
+  const client = createFalClient({ key: 'synthetic-offline-key', now: () => at, submissionEndpoints: [FAL_MODELS.reference, FAL_MODELS.kling],
     read: async path => structuredClone(records.get(path) || null),
     write: async (path, value, etag) => {
       const previous = records.get(path); if (previous && previous.etag !== etag) throw Error('conflict');
@@ -129,7 +129,7 @@ test('the complete seven-operation bound remains idempotent across repeated invo
 test('an uncertain provider POST is durably retained and repeat invocation cannot POST again or touch old records', async () => {
   const oldPath = 'production/fal/requests/old-canary.json', oldRecord = { value: { state: 'completed', sentinel: 'unchanged' }, etag: 'old' };
   const records = new Map([[oldPath, structuredClone(oldRecord)]]); let posts = 0, writes = 0;
-  const client = createFalClient({ key: 'synthetic-offline-key', now: () => at,
+  const client = createFalClient({ key: 'synthetic-offline-key', now: () => at, submissionEndpoints: [FAL_MODELS.reference, FAL_MODELS.kling],
     read: async path => structuredClone(records.get(path) || null),
     write: async (path, value, etag) => {
       const previous = records.get(path); if (previous && previous.etag !== etag) throw Error('conflict');

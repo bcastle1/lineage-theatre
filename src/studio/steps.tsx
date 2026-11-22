@@ -1474,7 +1474,7 @@ export function CreateStep({
         <div>
           <h2>Bring your family's world to life</h2>
           <p>Create, watch, and keep your film in Lineage Theatre.</p>
-          {!film.paymentReference && !film.job && caps?.productionProvider === "kling" && <p className="field-note">New films are produced with Kling. After payment is confirmed, follow production here and open the finished film in your library.</p>}
+          {!film.paymentReference && !film.job && !film.productionPreparation && caps?.productionProvider === "seedance" && <p className="field-note">Seedance 2.5 US generates the video for your new film. After payment is confirmed, you can follow its progress in your film library.</p>}
         </div>
         <FilmIcon size={24} />
       </div>
@@ -1501,7 +1501,7 @@ export function CreateStep({
           </div>
         </div>
       </div>
-      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} productionProvider={caps?.productionProvider} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} clearExpiredPaymentReference={clearExpiredPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
+      <FilmCheckout key={`checkout:${film.id}`} film={film} productionAvailable={caps?.production === true} generationAttemptAllowed={caps?.generationAttempt === true} persistPaymentReference={persistPaymentReference} clearExpiredPaymentReference={clearExpiredPaymentReference} onNewFilmCheckout={onNewFilmCheckout} onPrepared={prepared=>update({productionPreparation:prepared})} onBusyChange={onCheckoutBusy} />
       <div className="panel-actions">
         <div className="action-group">
           <button className="text-button" onClick={() => navigate(2)}>

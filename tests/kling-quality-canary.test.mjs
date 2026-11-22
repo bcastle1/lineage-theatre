@@ -48,7 +48,7 @@ test('staged quality canary can quote before the production visual heartbeat whi
   const staged = createKlingCanaryAdapter({ quality: true, ...options });
   assert.equal((await staged.quote({ manifest: quality.manifest, manifestHash: quality.fixedHash })).providerCostCents, 300);
   assert.equal(heartbeatReads, 0);
-  const customer = createFalProductionAdapter({ ...options, requireWorker: true });
+  const customer = createFalProductionAdapter({ model: 'kling', ...options, requireWorker: true });
   await assert.rejects(customer.quote({ manifest: quality.manifest, manifestHash: quality.fixedHash }), /appearance and wardrobe/);
   assert.equal(heartbeatReads, 1);
   const historical = klingCanaryProfile(), legacyAdapter = createKlingCanaryAdapter(options);

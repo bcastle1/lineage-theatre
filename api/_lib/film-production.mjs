@@ -5,7 +5,7 @@ import { prepareStory } from "./story.mjs";
 import { verifiedMediaProfile } from "./media-profile.mjs";
 import { createProductionProgress, productionTimingProfile } from "./production-progress.mjs";
 import { falProductionAdapter, falAdapterForSavedProvider } from "./fal-production.mjs";
-import { planKlingShots } from "./kling-film-plan.mjs";
+import { planKlingShots, planSeedanceShots } from "./kling-film-plan.mjs";
 import { savedKlingPlanningOptions, klingCharacterBindingVersion } from "./kling-character-binding.mjs";
 import { bindProductionPhotos, ProductionPhotoError } from "./production-photo-reference.mjs";
 import { sanitizeFinishingFailure, storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
@@ -191,7 +191,8 @@ export function createFilmProductionService(dependencies = {}) {
   async function preparedManifest(project, email, planningOptions = {}) {
     const built = buildFilmManifest(project);
     try {
-      const planned = adapter.model === "kling" ? planKlingShots(built.manifest, planningOptions) : built.manifest;
+      const planned = adapter.model === "seedance" ? planSeedanceShots(built.manifest)
+        : adapter.model === "kling" ? planKlingShots(built.manifest, planningOptions) : built.manifest;
       const manifest = await bindProductionPhotos(planned, owner(email), { read,
         ...(dependencies.getSourceBlob ? { getBlob: dependencies.getSourceBlob } : {}) });
       return { manifest, manifestHash: hash(manifest) };
@@ -223,7 +224,8 @@ export function createFilmProductionService(dependencies = {}) {
     // sandbox test. Verify the saved content against the fixed server sample.
     const built = buildFilmManifest(fictionalOperatorProject());
     const savedModel = job.provider?.model || adapter.model;
-    const fixedManifest = savedModel === "kling" ? planKlingShots(built.manifest, savedKlingPlanningOptions(job.manifest)) : built.manifest;
+    const fixedManifest = savedModel === "seedance" && job.manifest.productionPlan?.provider === "seedance"
+      ? planSeedanceShots(built.manifest) : savedModel === "kling" ? planKlingShots(built.manifest, savedKlingPlanningOptions(job.manifest)) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: hash(fixedManifest) };
     if (job.manifestHash !== fixed.manifestHash || hash(job.manifest) !== fixed.manifestHash
         || job.filmId !== fixed.manifest.filmId || job.ownerHash !== digest(email)
@@ -246,6 +248,7 @@ export function createFilmProductionService(dependencies = {}) {
       return customerJob(existing.value);
     }
     const job = { id, ownerHash: digest(email), filmId: manifest.filmId, manifestHash, manifest, mode,
+      ...(adapter.id === "fal" && adapter.model === "seedance" ? { provider: { id: "fal", model: "seedance", recipe: adapter.modelVersion } } : {}),
       status: "prepared", createdAt: stamp(), updatedAt: stamp(), preparationConsentAt: stamp(),
       shots: manifest.shots.map(s => ({ id: s.id, status: "prepared", requestKey: digest(`${id}:${manifestHash}:${s.id}`) })), revision: 1 };
     try { await write(path, job); }
@@ -293,11 +296,11 @@ export function createFilmProductionService(dependencies = {}) {
       || !Array.isArray(job.shots) || job.shots.length !== job.manifest.shots.length
       || job.shots.some((shot, index) => shot.id !== job.manifest.shots[index].id)) throw unavailable();
     const started = job.status !== "prepared" || job.shots.some(shot => shot.status !== "prepared");
-    // An ongoing Kling film may outlive a pricing snapshot. Refresh only that
+    // An ongoing film may outlive a pricing snapshot. Refresh only that
     // exact execution: no provider migration, larger budget or new plan identity.
     // Public checkout repricing still rejects every already-started film.
     if (started && (!["processing", "uncertain", "awaiting-assembly"].includes(job.status)
-      || adapter.id !== "fal" || adapter.model !== "kling" || !adapter.modelVersion
+      || adapter.id !== "fal" || !["kling", "seedance"].includes(adapter.model) || !adapter.modelVersion
       || job.provider?.id !== adapter.id || job.provider.model !== adapter.model || job.provider.recipe !== adapter.modelVersion
       || job.authorization?.environment !== environment || job.authorization.manifestHash !== manifestHash
       || !Number.isSafeInteger(job.authorization.budgetCents) || job.authorization.budgetCents < 1 || job.authorization.budgetCents > budgetCents
@@ -346,12 +349,14 @@ export function createFilmProductionService(dependencies = {}) {
     let record = await get(email, id);
     let job = clone(record.value);
     let runAdapter = adapter;
+    if (!job.provider && adapter.id === "fal" && adapter.model === "seedance" && job.manifest.productionPlan?.provider !== "seedance")
+      throw new FilmProductionError("This earlier film plan needs review before starting production.", 409, "PRODUCTION_PROVIDER_MISMATCH");
     if (job.provider && (job.provider.id !== adapter.id || job.provider.model !== (adapter.model || null)
       || job.provider.recipe !== (adapter.modelVersion || null))) {
       // Existing provider requests may be polled with their exact old binding.
       // The legacy adapter refuses any new render/reference submissions.
-      if (adapter.id !== "fal" || adapter.model !== "kling" || job.provider.id !== "fal"
-        || !["wan", "seedance"].includes(job.provider.model))
+      if (adapter.id !== "fal" || !["seedance", "kling"].includes(adapter.model) || job.provider.id !== "fal"
+        || !["kling", "wan", "seedance"].includes(job.provider.model))
         throw new FilmProductionError("This film has a different saved production provider and needs review.", 409, "PRODUCTION_PROVIDER_MISMATCH");
       try { runAdapter = (dependencies.adapterForSavedProvider || falAdapterForSavedProvider)(job.provider); }
       catch { throw new FilmProductionError("This film's saved provider could not be reconciled.", 409, "PRODUCTION_PROVIDER_MISMATCH"); }
@@ -371,10 +376,10 @@ export function createFilmProductionService(dependencies = {}) {
         || [...inflight].sort((a,b) => Date.parse(a.lastCheckedAt || a.submittedAt) - Date.parse(b.lastCheckedAt || b.submittedAt))[0];
     if (!shot) {
       if (retiredBinding && job.shots.some(s => s.status === 'prepared')) throw retiredError();
-      if (legacyRun && job.shots.some(s => s.status === "prepared")) throw new FilmProductionError("This earlier production has unstarted scenes that need review before conversion to Kling.", 409, "PRODUCTION_PROVIDER_MISMATCH");
+      if (legacyRun && job.shots.some(s => s.status === "prepared")) throw new FilmProductionError("This earlier production has unstarted scenes that need review.", 409, "PRODUCTION_PROVIDER_MISMATCH");
       return customerJob(job);
     }
-    if (legacyRun && shot.status === "prepared") throw new FilmProductionError("Earlier production cannot submit a new non-Kling scene.", 409, "PRODUCTION_PROVIDER_MISMATCH");
+    if (legacyRun && shot.status === "prepared") throw new FilmProductionError("This earlier film needs review before starting a new scene.", 409, "PRODUCTION_PROVIDER_MISMATCH");
     const previousStatus = shot.status;
     let grant = job.authorization;
     if (previousStatus === "prepared") {
@@ -519,6 +524,7 @@ export function createFilmProductionService(dependencies = {}) {
     catch { throw new FilmProductionError("The finished film needs quality verification.", 502, "OUTPUT_UNVERIFIED"); }
     job.media = { ...select(verified, ["pathname", "sha256", "contentType", "sizeBytes", "durationSeconds"]), ...profile };
     if(verified.speechReview?.passed===true)job.speechReview=verified.speechReview;
+    if(verified.audioReview?.passed===true)job.audioReview=verified.audioReview;
     if(verified.visualReview?.passed===true)job.visualReview=verified.visualReview;
     delete job.finishingFailure;
     job.status = "completed";
@@ -535,7 +541,7 @@ export function createFilmProductionService(dependencies = {}) {
     readiness: () => {
       let available = false;
       try { checkAdapter(adapter); available = true; } catch { /* Keep undocumented providers disabled. */ }
-      return { available, preparationAvailable: true, adapter: adapter.id, productionProvider: adapter.model === "kling" ? "kling" : null,
+      return { available, preparationAvailable: true, adapter: adapter.id, productionProvider: ["kling", "seedance"].includes(adapter.model) ? adapter.model : null,
         environment: adapter.environment, gaps: available ? [] : [...(adapter.gaps || MAGICLIGHT_GAPS)] };
     },
   };

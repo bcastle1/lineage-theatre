@@ -66,10 +66,10 @@ function customerCapabilities(ready) {
   return {
     story:ready.story===true,
     production:ready.magiclight===true,
-    productionProvider:ready.productionProvider === "kling" ? "kling" : null,
+    productionProvider:ready.productionProvider === "seedance" ? "seedance" : null,
     billing:ready.billing===true,
     pricing:{currency:"USD",estimate:{status:"unavailable",amountCents:null,reason:"Your film's price will be confirmed before you approve a payment."},chargeReady:false},
-    quality:{label:ready.quality?.verified===true?"1080p video with verified playback and script checks":"Video playback and script checks are required before delivery",verified:ready.quality?.verified===true},
+    quality:{label:ready.quality?.verified===true?"1080p video with verified playback and native audio":"Video playback, audio duration and visual review are checked before delivery",verified:ready.quality?.verified===true},
   };
 }
 
@@ -175,21 +175,14 @@ export function createStudioHandler(overrides={}) {
         return json(res,429,{message:"Please wait before requesting another video approval."});
       return json(res,200,await generationReview.approve(session.user,{preparedId:body.preparedId,artifactSha256:body.artifactSha256,consent:true}));
     }
-    if(["requestFilmGeneration","replaceFilmGeneration","checkFilmGeneration"].includes(body?.action)) {
-      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can use this generation attempt."});
-      const replacing=body.action==="replaceFilmGeneration", starting=body.action!=="checkFilmGeneration";
-      if(Object.keys(body).some(key=>!(replacing?["action","preparedId","orderId","consent","expectedChangeId","acknowledgePossibleDuplicate"]:starting?["action","preparedId","orderId","consent"]:["action","preparedId"]).includes(key))
-        ||typeof body.preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId)
-        ||(starting&&(typeof body.orderId!=="string"||!/^[a-f0-9]{64}$/.test(body.orderId)||body.consent!==true))
-        ||(replacing&&(body.acknowledgePossibleDuplicate!==true||typeof body.expectedChangeId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.expectedChangeId))))
-        return json(res,400,{message:starting?"Choose the saved film plan and its payment, then confirm the generation attempt.":"Choose the saved film plan before checking its generation attempt."});
-      if(!(await limitAction(`film-generation-${starting?"start":"check"}:${email}`,starting?6:60,3600_000)))
-        return json(res,429,{message:"Please wait before requesting this generation action again."});
-      return json(res,starting?202:200,await (replacing
-        ?generation.replace(session.user,{preparedId:body.preparedId,orderId:body.orderId,consent:true,expectedChangeId:body.expectedChangeId,acknowledgePossibleDuplicate:true})
-        :starting
-        ?generation.start(session.user,{preparedId:body.preparedId,orderId:body.orderId,consent:true})
-        :generation.check(session.user,{preparedId:body.preparedId})));
+    if(body?.action==="checkFilmGeneration") {
+      if(!isOwner(session.user)) return json(res,403,{message:"Only the owner can check this generation attempt."});
+      if(Object.keys(body).some(key=>!["action","preparedId"].includes(key))
+        ||typeof body.preparedId!=="string"||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId))
+        return json(res,400,{message:"Choose the saved film plan before checking its generation attempt."});
+      if(!(await limitAction(`film-generation-check:${email}`,60,3600_000)))
+        return json(res,429,{message:"Please wait before checking this generation attempt again."});
+      return json(res,200,await generation.check(session.user,{preparedId:body.preparedId}));
     }
     if(body?.action==="price") {
       if(!(await limitAction(`price:${email}`,20,3600_000)))

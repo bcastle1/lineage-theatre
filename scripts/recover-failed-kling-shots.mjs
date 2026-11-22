@@ -1,4 +1,4 @@
-// Exact operator recovery only. Default invocation is read-only preparation.
+// Reconcile existing Kling replacement receipts; generation has been retired.
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { digest } from '../api/_lib/auth.mjs';
@@ -18,7 +18,7 @@ try {
   const result = await createFailedShotRecovery().run({ email, preparedId, manifestHash, correctionId, failedRequests, rejectionEvidenceSha256, billing }, { execute });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
-  const stages = new Set(['input-validation', 'context', 'reconcile', 'claim', 'auth', 'submission', 'poll', 'resume']);
+  const stages = new Set(['input-validation', 'context', 'reconcile', 'claim', 'poll', 'resume']);
   process.stdout.write(`${JSON.stringify({ code: 'KLING_RECOVERY_UNVERIFIED', stage: stages.has(error?.stage) ? error.stage : 'input-validation',
     ...(Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? { httpStatus: error.httpStatus } : {}), completed: false })}\n`);
   process.exitCode = 1;

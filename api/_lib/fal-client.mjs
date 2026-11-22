@@ -2,8 +2,9 @@ import { digest, readRecord, writeRecord } from './auth.mjs';
 
 export const FAL_MODELS = Object.freeze({
   kling: 'fal-ai/kling-video/o3/pro/reference-to-video',
-  // Historical endpoint identifiers remain readable for reconciliation only.
   seedance: 'bytedance/seedance-2.5/us/reference-to-video',
+  seedanceText: 'bytedance/seedance-2.5/us/text-to-video',
+  // Historical endpoint identities remain readable for reconciliation.
   wan: 'alibaba/wan-3.0/reference-to-video',
   reference: 'fal-ai/nano-banana-pro',
 });
@@ -56,7 +57,7 @@ export const falRequestPath = identity => {
 // A timeout or lost receipt never authorizes another submission. An unresolved
 // claim is retained for provider reconciliation; polling cannot create work.
 export function createFalClient({ key = () => process.env.FAL_KEY, read = readRecord, write = writeRecord,
-  fetchImpl = fetch, now = Date.now } = {}) {
+  fetchImpl = fetch, now = Date.now, submissionEndpoints = [FAL_MODELS.seedance, FAL_MODELS.seedanceText] } = {}) {
   async function request(url, method, body, terminal = false) {
     const secret = typeof key === 'function' ? key() : key;
     if (!secret || typeof secret !== 'string') throw failure('FAL_KEY_REQUIRED');
@@ -82,7 +83,7 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
       if (existing.value.endpoint !== endpoint || existing.value.inputHash !== inputHash) throw failure('FAL_IDEMPOTENCY_CONFLICT');
       return existing.value;
     }
-    if (![FAL_MODELS.kling, FAL_MODELS.reference].includes(endpoint)) throw failure('FAL_LEGACY_SUBMISSION_DISABLED');
+    if (!submissionEndpoints.includes(endpoint)) throw failure('FAL_LEGACY_SUBMISSION_DISABLED');
     if (!(typeof key === 'function' ? key() : key)) throw failure('FAL_KEY_REQUIRED');
     const claim = { version: 1, identity, endpoint, inputHash, state: 'submitting', createdAt: new Date(now()).toISOString() };
     try { await write(path, claim); }

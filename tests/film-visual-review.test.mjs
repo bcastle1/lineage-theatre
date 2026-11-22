@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { digest } from '../api/_lib/auth.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
-import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
+import { planKlingShots, planSeedanceShots } from '../api/_lib/kling-film-plan.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, verifiedVisualDecision, visualSampleTimes, visualReviewBinding,
@@ -16,12 +16,14 @@ const pass = () => ({ appearance: 'consistent', wardrobe: 'consistent', sceneAct
 const jsonResult = decision => ({ status: 'completed', model: VISUAL_REVIEW_MODEL, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
 const dataImage = async color => `data:image/jpeg;base64,${(await sharp({ create: { width: 96, height: 96, channels: 3, background: color } }).jpeg().toBuffer()).toString('base64')}`;
 
-async function fixture({ bindingVersion = 2 } = {}) {
+async function fixture({ bindingVersion = 2, seedance = false } = {}) {
   const project = fictionalOperatorProject(); project.duration = 60; project.scenes = project.scenes.slice(0, 2);
   project.scenes.forEach(scene => { scene.narration = 'An entirely fictional garden.'; scene.dialogue = ''; });
-  const manifest = planKlingShots(buildFilmManifest(project).manifest, { characterBindingVersion: bindingVersion }), manifestHash = digest(JSON.stringify(manifest));
+  const base = buildFilmManifest(project).manifest;
+  const manifest = seedance ? planSeedanceShots(base) : planKlingShots(base, { characterBindingVersion: bindingVersion });
+  const manifestHash = digest(JSON.stringify(manifest));
   const job = { id, ownerHash: digest(email), manifest, manifestHash, status: 'awaiting-assembly',
-    provider: { model: 'kling', recipe: FAL_RECIPE_VERSION },
+    provider: { model: seedance ? 'seedance' : 'kling', recipe: seedance ? manifest.productionPlan.recipe : FAL_RECIPE_VERSION },
     shots: manifest.shots.map(shot => ({ id: shot.id, status: 'completed', output: { url: `https://v3.fal.media/${shot.id}.mp4`,
       contentType: 'video/mp4', sizeBytes: 1024, durationSeconds: shot.targetDurationMs / 1000 } })) };
   const records = new Map(); let etag = 0, fetches = 0, generatedReads = 0, photoReads = 0;
@@ -292,4 +294,23 @@ test('legacy films do not acquire new review requirements and foreign receipt pa
   await verifyFilmVisualReceipts({ manifest: {}, review: undefined });
   for (const args of [['invalid', id, 'a'.repeat(64)], [digest(email), '../escape', 'a'.repeat(64)], [digest(email), id, 'no']])
     assert.throws(() => visualReceiptPath(...args));
+});
+
+test('Seedance visual review uses Astra 6.2, text for unpictured cast, and rejects obsolete reviews', async () => {
+  const f = await fixture({ seedance: true });
+  f.options.fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.model, 'gpt-6.2-astra');
+    assert.ok(body.text.format.schema.required.includes('cast'));
+    const content = body.input[0].content;
+    assert.ok(JSON.parse(content[0].text).characters.length > 0);
+    assert.equal(content.filter(part => part.type === 'input_image').length, 3);
+    return new Response(JSON.stringify(jsonResult({ ...pass(), cast: 'consistent' })));
+  };
+  const service = createFilmVisualReviewService(f.options), proof = await service(f.input());
+  assert.equal(proof.passed, true);
+  assert.equal(f.generatedReads(), 0);
+  const stored = f.records.get(proof.receiptPath);
+  stored.value.model = 'gpt-6-astra';
+  await assert.rejects(service(f.input()), { code: 'VISUAL_REVIEW_INVALID' });
 });

@@ -4,25 +4,35 @@ import { createProductionWorkerHandler } from '../api/production-worker.mjs';
 import { createRemoteProductionAuthorization } from '../api/_lib/remote-production-authorization.mjs';
 
 const secret='a'.repeat(64), at=1792372000000;
-const input={email:'family@example.invalid',preparedId:'11111111-1111-4111-8111-111111111111',manifestHash:'b'.repeat(64),orderId:'c'.repeat(64)};
-const adapter={model:'wan',modelVersion:'fixture-recipe',available:true};
+import { digest } from '../api/_lib/auth.mjs';
+import { SEEDANCE_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
+const manifest = { productionPlan: { provider: 'seedance', version: 1 } };
+const input={email:'family@example.invalid',preparedId:'11111111-1111-4111-8111-111111111111',manifestHash:digest(JSON.stringify(manifest)),orderId:'c'.repeat(64)};
+const adapter={model:'seedance',modelVersion:SEEDANCE_RECIPE_VERSION,available:true};
+const job = { id: input.preparedId, manifest, manifestHash: input.manifestHash, provider: { id: 'fal', model: 'seedance', recipe: SEEDANCE_RECIPE_VERSION }, ownerHash: digest(input.email) };
+const ticket = {state:'pending', email:input.email, id:input.preparedId, orderId:input.orderId, manifestHash:input.manifestHash, lease:{expiresAt:at+10000}};
 function fixture(change={}){
   let calls=0;
   const handler=createProductionWorkerHandler({env:{LINEAGE_WORKER_SECRET:secret},adapter,now:()=>at,
-    read:async()=>({value:{state:'pending',email:input.email,id:input.preparedId,orderId:input.orderId,manifestHash:input.manifestHash,lease:{expiresAt:at+10000}}}),
+    read:async path=>({value:path.startsWith('production/jobs/') ? job : ticket}),
     limiter:async()=>true,paymentService:{authorizeProduction:async value=>{calls++;assert.deepEqual(value,input);return {allowed:true,manifestHash:input.manifestHash};}},...change});
   return {handler,calls:()=>calls};
 }
 async function invoke(f,change={}){const res={setHeader(){},end(body){this.body=JSON.parse(body);}};
-  await f.handler({method:'POST',headers:{authorization:`Bearer ${secret}`},body:{...input,model:adapter.model,recipe:adapter.modelVersion},...change},res);return res;}
+  await f.handler({method:'POST',headers:{authorization:`Bearer ${secret}`},body:{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2},...change},res);return res;}
 test('media worker receives a grant only after the existing live payment authorizer runs',async()=>{
   const f=fixture(),r=await invoke(f);assert.equal(r.statusCode,200);assert.equal(r.body.allowed,true);assert.equal(f.calls(),1);
 });
 test('wrong secret, provider recipe, absent lease and unexpected fields cannot issue worker grants',async()=>{
   for(const change of [{headers:{}},{headers:{authorization:'Bearer wrong'}},{method:'GET'},
-    {body:{...input,model:'seedance',recipe:adapter.modelVersion}},
-    {body:{...input,model:adapter.model,recipe:adapter.modelVersion,paid:true}}]){
+    {body:{...input,model:'kling',recipe:'lineage-realistic-kling-o3-v1'}},
+    {body:{...input,model:adapter.model,recipe:adapter.modelVersion}},
+    {body:{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2,paid:true}}]){
     const f=fixture();assert.notEqual((await invoke(f,change)).statusCode,200);assert.equal(f.calls(),0);
+  }
+  for (const change of [{provider: {...job.provider, model:'kling'}}, {manifest: {productionPlan: {provider:'kling',version:1}}}, {ownerHash:digest('someone else')}]) {
+    const f = fixture({read:async path=>({value:path.startsWith('production/jobs/') ? {...job,...change} : ticket})});
+    assert.equal((await invoke(f)).statusCode,409); assert.equal(f.calls(),0);
   }
   for(const ticket of [null,{state:'pending',lease:{expiresAt:at-1}},{state:'completed'}]){
     const f=fixture({read:async()=>({value:ticket})});assert.equal((await invoke(f)).statusCode,409);assert.equal(f.calls(),0);
@@ -31,7 +41,7 @@ test('wrong secret, provider recipe, absent lease and unexpected fields cannot i
 test('remote authorization uses a fixed origin, no redirects and bounded response bytes',async()=>{
   const service=createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async(url,options)=>{
     assert.equal(url,'https://lineagetheater.com/api/production-worker');assert.equal(options.redirect,'error');
-    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion});return new Response('{"allowed":true}');
+    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2});return new Response('{"allowed":true}');
   }});assert.equal((await service.authorizeProduction(input)).allowed,true);
   for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
     await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
@@ -58,24 +68,9 @@ test('reviewed delivery accepts an explicit supported candidate model but reject
   assert.equal((await invoke(f,{body})).statusCode,200);assert.equal(calls,1);
 });
 
-test('explicit failed-shot recovery uses a separate immutable-claim gate without relaxing ordinary worker leases', async () => {
-  const request = { action: 'authorize-failed-shot-recovery', email: input.email, preparedId: input.preparedId,
-    manifestHash: input.manifestHash, correctionId: input.orderId, recoveryId: 'd'.repeat(64),
-    originalIdentity: 'e'.repeat(64), originalRequestId: 'original-request-id', replacementIdentity: 'f'.repeat(64),
-    model: 'kling', recipe: adapter.modelVersion };
-  let calls = 0;
-  const f = fixture({ adapter: { ...adapter, model: 'kling' }, read: async () => null,
-    corrections: { authorizeFailedShotRecovery: async value => {
-      const { action, model, recipe, ...expected } = request; assert.deepEqual(value, expected); calls++;
-      return { allowed: true, recoveryId: value.recoveryId };
-    } } });
-  for (const change of [{ headers: {} }, { body: { ...request, paid: true } }, { body: { ...request, model: 'wan' } },
-    { body: { ...request, replacementIdentity: 'invalid' } }, { body: { ...request, preparedId: '../other' } }]) {
-    assert.notEqual((await invoke(f, { body: request, ...change })).statusCode, 200); assert.equal(calls, 0);
-  }
-  const result = await invoke(f, { body: request }); assert.equal(result.statusCode, 200); assert.equal(result.body.allowed, true);
-  assert.equal(calls, 1); assert.equal(f.calls(), 0);
-  assert.equal((await invoke(f, { body: { ...input, model: 'kling', recipe: adapter.modelVersion } })).statusCode, 409);
-  const unavailable = fixture({ adapter: { ...adapter, model: 'kling', available: false } });
-  assert.equal((await invoke(unavailable, { body: request })).statusCode, 400);
+test('retired Kling recovery cannot issue worker spending grants', async () => {
+  const f = fixture();
+  const result = await invoke(f, {body: {action: 'authorize-failed-shot-recovery', ...input, model: 'kling', recipe: 'lineage-realistic-kling-o3-v1'}});
+  assert.equal(result.statusCode, 410);
+  assert.equal(f.calls(), 0);
 });

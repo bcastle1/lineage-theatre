@@ -208,6 +208,7 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
   if (!Array.isArray(clips) || clips.length !== manifest.shots.length || new Set(clips.map(c => c.shotId)).size !== clips.length) throw new Error("Supply exactly one reviewed clip for each manifest shot.");
   const output = resolve(outputPath);
   if (extname(output).toLowerCase() !== ".mp4") throw new Error("The assembled film must use an MP4 output path.");
+  const seedance = manifest.productionPlan?.provider === 'seedance';
   const inputs = [], filters = [], segments = [], reviewed = [];
   for (const shot of manifest.shots) {
     const clip = clips.find(c => c.shotId === shot.id);
@@ -216,6 +217,8 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
     if (path === output || size < 16 || size > 250 * 1024 * 1024) throw new Error("A clip is too large or conflicts with the output file.");
     const info = await mediaInfo(ffmpeg, path, { allowUnspecifiedSar: true }), seconds = shot.targetDurationMs / 1000;
     if (!Number.isFinite(seconds) || seconds <= 0 || info.durationSeconds < seconds - 0.05 || info.decodedDurationSeconds < seconds - 0.1) throw new Error(`Clip ${shot.id} is shorter than its reviewed timeline.`);
+    if (seedance && (info.width !== 1920 || info.height !== 1080 || info.videoCodec !== 'h264' || !info.hasAudio || clip.audioPath !== undefined))
+      throw new Error('Seedance scenes require 1080p H.264 video with embedded audio.');
     let audioPath = info.hasAudio ? path : null;
     if (clip.audioPath !== undefined) {
       if (typeof clip.audioPath !== "string" || ![".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".mp4", ".webm"].includes(extname(clip.audioPath).toLowerCase())) throw new Error(`Invalid reviewed audio file for ${shot.id}.`);
@@ -261,6 +264,7 @@ export async function assembleFilm({ manifest, manifestHash, clips, outputPath, 
   const bytes = await readFile(output);
   const report = { manifestHash, playable: true, technicalSample, verification: "FFmpeg fully decoded every source and the assembled output", ...info, contentType: "video/mp4", sizeBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), outputPath: output };
   await writeFile(`${output}.vtt`, filmCaptions(manifest), { flag: "wx" });
+  if (seedance) report.audioReview = { passed: true, source: 'seedance-native', verification: 'audio-decode-and-duration', transcriptVerified: false };
   await writeFile(`${output}.verification.json`, JSON.stringify(report, null, 2), { flag: "wx" });
   return report;
 }

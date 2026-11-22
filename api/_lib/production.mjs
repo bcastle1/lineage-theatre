@@ -7,7 +7,7 @@ export function productionReadiness({ env = process.env, pricingSettings={markup
   try {
     const ready = filmService.readiness();
     adapter = ready.adapter;
-    productionProvider = ready.productionProvider === "kling" ? "kling" : null;
+    productionProvider = ["seedance", "kling"].includes(ready.productionProvider) ? ready.productionProvider : null;
     available = ready.available === true && adapter === "fal" && ready.environment === "production";
   } catch { /* Configuration failures cannot enable customer production. */ }
   return {

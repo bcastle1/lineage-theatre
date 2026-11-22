@@ -4,7 +4,7 @@ import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { FAL_MODELS, falRequestPath } from '../api/_lib/fal-client.mjs';
-import { createFailedShotRecovery, failedShotRecoveryPath, parseRecoveryBilling, promptLengthRejection, verifyPromptRejectedReceipt } from '../api/_lib/fal-failed-shot-recovery.mjs';
+import { createFailedShotRecovery, failedShotRecoveryId, failedShotRecoveryPath, parseRecoveryBilling, promptLengthRejection, verifyPromptRejectedReceipt } from '../api/_lib/fal-failed-shot-recovery.mjs';
 
 const at = Date.parse('2026-10-20T20:00:00Z'), id = '11111111-1111-4111-8111-111111111111';
 const sha = value => digest(JSON.stringify(value));
@@ -52,49 +52,54 @@ function fixture(options = {}) {
         state: options.uncertain ? 'uncertain' : 'queued', ...(options.uncertain ? {} : { requestId: `replacement-${submitted.length}` }) };
       seed(falRequestPath(request.identity), r); if (options.submitLostReply) throw Error('lost submit reply'); return r; }
   };
-  const authorize = async request => { authorized.push(request); const claim = (await read(failedShotRecoveryPath(request.recoveryId))).value;
-    options.authEffect?.({ seed, records, jobPath, queuePath });
-    return { ...request, allowed: true, environment: 'production', originalOrderId: grant.originalOrderId, quoteReference: 'fictional-quote', budgetCents: 1980,
-      inputHash: claim.inputHash, replacementMaximumCents: claim.replacementMaximumCents, totalReplacementMaximumCents: claim.totalReplacementMaximumCents,
-      expiresAt: new Date(at + 60000).toISOString(), ...options.authorization }; };
-  const service = createFailedShotRecovery({ read, write, now: () => at, client, authorize,
+  const seedReplacements = (state = 'queued') => {
+    for (const [index, selected] of input.failedRequests.entries()) {
+      const i = selected.shotIndex - 1, identity = identities[i], recoveryId = failedShotRecoveryId(identity, selected.requestId);
+      const replacementIdentity = digest(`${recoveryId}:replacement-v1`);
+      const inputHash = sha({ prompt: 'The exact fictional garden narration.', duration:'10', generate_audio:true, image_urls:[] });
+      const claim = { version:1, kind:'kling-failed-shot-recovery-v1',recoveryId, ownerHash, preparedId:id, manifestHash, correctionId,
+        model:'kling', recipe:FAL_RECIPE_VERSION, maximumCostCents:1980, maximumTotalCostCents:1980, originalIdentity:identity,
+        originalRequestId:selected.requestId,originalInputHash:digest(`old-body-${i}`),endpoint:FAL_MODELS.kling,
+        replacementIdentity,inputHash,shotId:job.shots[i].id,shotIndex:i+1,providerSeconds:10,replacementMaximumCents:150,
+        terminalFailure:'PROMPT_LENGTH_422',zeroChargeCents:0,billingEvidenceSha256:input.billing.sha256,
+        rejectionEvidenceSha256:input.rejectionEvidenceSha256,billingObservedAt:input.billing.observedAt,priorSpendCents:1400,
+        totalReplacementMaximumCents:300,selectedRequests:input.failedRequests,
+        originalRequests:input.billing.rows.map(row=>({requestId:row.requestId,amountCents:row.amountCents})),createdAt:new Date(at).toISOString() };
+      seed(failedShotRecoveryPath(recoveryId),claim);
+      seed(falRequestPath(replacementIdentity),{version:1,identity:replacementIdentity,endpoint:FAL_MODELS.kling,inputHash,state,
+        ...(state==='uncertain' ? {} : {requestId: `existing-replacement-${index}`})});
+    }
+  };
+  const service = createFailedShotRecovery({ read, write, now: () => at, client,
     correctionContext: async () => ({ grant, recheck: async () => {} }), verifyRejected: async () => { if (options.notRejected) throw Error('not rejected'); return true; },
     buildInput: async (_, shot) => ({ prompt: 'The exact fictional garden narration.', duration: String(shot.seconds), generate_audio: true, image_urls: [] }),
     fetchImpl: async (_, request) => { assert.equal(request.method, 'HEAD'); return new Response(null, { headers: { 'content-type': 'video/mp4', 'content-length': '100' } }); } });
-  return { service, input, records, read, seed, jobPath, queuePath, job, grant, writes, submitted, polled, authorized, identities,
+  return { service, input, records, read, seed, jobPath, queuePath, job, grant, writes, submitted, polled, authorized, identities, seedReplacements,
     allowQueue: () => { failQueue = false; }, allowClaim: () => { failClaim = false; } };
 }
 
-test('readiness verifies the exact evidence without writes, provider submissions or polling', async () => {
-  const h = fixture(), r = await h.service.run(h.input);
-  assert.equal(r.status, 'ready-for-explicit-recovery'); assert.equal(r.priorSpendCents, 1400); assert.equal(r.replacementMaximumCents, 300);
-  assert.equal(h.writes.length, 0); assert.equal(h.submitted.length, 0); assert.equal(h.polled.length, 0);
-});
-test('only rejected shots submit once; queued originals reconcile first; all12 resume without changing the first8 clips or script', async () => {
-  const h = fixture(), original = structuredClone(h.job);
-  const first = await h.service.run(h.input, { execute: true });
-  assert.equal(first.status, 'replacement-pending'); assert.equal(h.submitted.length, 2); assert.ok(h.polled.includes(h.identities[11]));
-  assert.equal(h.authorized.length, 2);
-  const second = await h.service.run(h.input, { execute: true }); assert.equal(second.status, 'awaiting-assembly'); assert.equal(h.submitted.length, 2);
-  const saved = (await h.read(h.jobPath)).value;
-  assert.deepEqual(saved.manifest, original.manifest); assert.deepEqual(saved.shots.slice(0, 8), original.shots.slice(0, 8));
-  assert.deepEqual(saved.shots.map(s => s.requestKey), original.shots.map(s => s.requestKey)); assert.equal(saved.shots.filter(s => s.status === 'completed').length, 12);
-  assert.equal((await h.read(h.queuePath)).value.state, 'pending'); assert.ok(h.writes.every(path => path.startsWith('production/')));
-});
-test('unknown submission outcome remains held and never authorizes another POST', async () => {
-  const h = fixture({ uncertain: true }); await h.service.run(h.input, { execute: true }); await h.service.run(h.input, { execute: true });
-  assert.equal(h.submitted.length, 2); assert.equal(h.authorized.length, 2); assert.equal((await h.read(h.jobPath)).value.status, 'failed');
-});
-test('lost POST reply reconciles the saved replacement without spending again', async () => {
-  const h = fixture({ submitLostReply: true }); await assert.rejects(h.service.run(h.input, { execute: true }));
-  assert.equal(h.submitted.length, 1); await assert.rejects(h.service.run(h.input, { execute: true })); assert.equal(h.submitted.length, 2);
-  await h.service.run(h.input, { execute: true }); assert.equal(h.submitted.length, 2);
-});
-test('failed immutable claim, mismatched grant and changed queue prevent generation', async () => {
-  for (const options of [{ failClaim: true }, { authorization: { inputHash: digest('different') } }, { notRejected: true },
-    { authEffect: ({ seed, records, queuePath }) => seed(queuePath, { ...records.get(queuePath).value, state: 'pending' }) }]) {
-    const h = fixture(options); await assert.rejects(h.service.run(h.input, { execute: true })); assert.equal(h.submitted.length, 0);
+test('missing legacy replacements never generate new Kling requests', async () => {
+  const h = fixture();
+  for (const execute of [false, true]) {
+    const result = await h.service.run(h.input, {execute});
+    assert.equal(result.status,'legacy-replacement-missing'); assert.equal(result.generationSubmitted,false);
   }
+  assert.equal(h.submitted.length,0); assert.equal(h.writes.length,0);
+});
+test('existing replacement receipts resume all twelve paid clips without changing the screenplay or buying another render', async () => {
+  const h=fixture(); h.seedReplacements();
+  assert.equal((await h.service.run(h.input)).status,'ready-to-reconcile');
+  const result=await h.service.run(h.input,{execute:true});
+  assert.equal(result.status,'awaiting-assembly'); assert.equal(result.generationSubmitted,false);
+  assert.deepEqual((await h.read(h.jobPath)).value.manifest,h.job.manifest);
+  assert.deepEqual((await h.read(h.jobPath)).value.shots.slice(0,8),h.job.shots.slice(0,8));
+  assert.equal((await h.read(h.queuePath)).value.state,'pending'); assert.equal(h.submitted.length,0);
+});
+test('uncertain replacement receipts are held without a new submission',async()=>{
+  const h=fixture(); h.seedReplacements('uncertain');
+  const result=await h.service.run(h.input,{execute:true});
+  assert.equal(result.status,'replacement-pending'); assert.equal(h.submitted.length,0);
+  assert.equal((await h.read(h.jobPath)).value.status,'failed');
 });
 test('stale zero billing for successful clips, wrong request IDs, uncertain originals and excess budget fail closed', async () => {
   for (const change of [h => { h.input.billing.rows[0].quantity = 0; h.input.billing.rows[0].amountCents = 0; },
@@ -107,9 +112,9 @@ test('stale zero billing for successful clips, wrong request IDs, uncertain orig
   }
 });
 test('queue-write failure resumes the already-verified job on exact retry without more requests', async () => {
-  const h = fixture({ failQueue: true }); await h.service.run(h.input, { execute: true });
+  const h = fixture({ failQueue: true }); h.seedReplacements();
   await assert.rejects(h.service.run(h.input, { execute: true })); assert.equal((await h.read(h.jobPath)).value.status, 'awaiting-assembly');
-  h.allowQueue(); await h.service.run(h.input, { execute: true }); assert.equal((await h.read(h.queuePath)).value.state, 'pending'); assert.equal(h.submitted.length, 2);
+  h.allowQueue(); await h.service.run(h.input, { execute: true }); assert.equal((await h.read(h.queuePath)).value.state, 'pending'); assert.equal(h.submitted.length, 0);
 });
 test('billing receipt parser pins bytes, account, exact price and amounts without accepting an earlier zero-cost successful row', () => {
   const source = { account: 'fictional-account', endpoint: FAL_MODELS.kling, observedAt: new Date(at).toISOString(),

@@ -34,7 +34,7 @@ export async function checkWorkerRuntime({ ffmpeg = process.env.FFMPEG_PATH || "
     work = await mkdtemp(join(root, "lineage-runtime-check-"));
     const output = join(work, "SAMPLE-ONLY-synthetic-runtime.mp4");
     await run(ffmpeg, ["-hide_banner", "-nostdin", "-loglevel", "error", "-n",
-      "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+      "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
       "-t", "1", "-c:v", "libx264", "-threads", "2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
       "-metadata", "comment=SAMPLE ONLY - SYNTHETIC RUNTIME ACCEPTANCE. Not a generated customer film.", output]);
     const bytes = await readFile(output);

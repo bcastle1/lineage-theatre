@@ -112,3 +112,31 @@ test("crash cleanup removes only aged marked directories of dead processes on th
     assert.deepEqual((await readdir(root)).sort(), ["lineage-worker-active", "lineage-worker-new", "lineage-worker-unknown", "unrelated"]);
   } finally { if (dirname(resolve(root)) === resolve(tmpdir())) await rm(root, { recursive: true, force: true }); }
 });
+
+test('Seedance finishing preserves provider-native audio and requires a decoded native-audio receipt', async () => {
+  const root = await mkdtemp(join(tmpdir(), "lineage-native-audio-test-"));
+  const manifest = {productionPlan:{provider:'seedance',version:1},targetDurationSeconds:5,shots:[{id:'shot-001'}]};
+  const manifestHash = digest(JSON.stringify(manifest)), sha = createHash('sha256').update(bytes).digest('hex');
+  const job={status:'awaiting-assembly',manifest,manifestHash,shots:[{id:'shot-001',status:'completed',output}]};
+  const input = {email:'customer@example.invalid',id:'00000000-0000-4000-8000-000000000001',job,stillOwned:async()=>true};
+  const audioReview = {passed:true,source:'seedance-native',verification:'audio-decode-and-duration',transcriptVerified:false};
+  let receipt=audioReview, uploads=0, assemblyCalls=0;
+  const options = {tempRoot: root, adapter:{id:'fal',model:'seedance',available:true,outputHosts:['media.example.invalid']},
+    fetchImpl:async()=>new Response(bytes,{headers:{'content-type':'video/mp4'}}),
+    reviewSpeech:()=>assert.fail('No speech model may be called'), soundtrackFallback:()=>assert.fail('No soundtrack model may be called'),
+    assemble:async({clips,outputPath})=>{
+      assemblyCalls++; assert.equal(clips.length,1); assert.equal(clips[0].audioPath,undefined);
+      await writeFile(outputPath,bytes); await writeFile(outputPath+'.vtt','WEBVTT\n');
+      return {manifestHash,sha256:sha,sizeBytes:bytes.length,contentType:'video/mp4',durationSeconds:5,width:1920,height:1080,
+        frameRate:24,hasAudio:true,playable:true,technicalSample:false,audioReview:receipt};
+    },putBlob:async()=>{uploads++;}};
+  try {
+    const finish = createWorkerAssembly(options);
+    assert.deepEqual((await finish(input)).audioReview,audioReview); assert.equal(uploads,2);
+    receipt=undefined;
+    await assert.rejects(finish(input),/Assembly verification failed/);
+    await assert.rejects(createWorkerAssembly({...options,prepareClips:()=>assert.fail('No soundtrack repair')})(input),/provider soundtrack/);
+    await assert.rejects(finish({...input,job:{...job,shots:[{...job.shots[0],output:{...output,audio:output}}]}}),/embedded provider audio/);
+    assert.equal(uploads,2); assert.equal(assemblyCalls,2);
+  } finally { if (dirname(resolve(root)) === resolve(tmpdir())) await rm(root, {recursive:true,force:true}); }
+});

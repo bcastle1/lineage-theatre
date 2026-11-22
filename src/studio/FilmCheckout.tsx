@@ -19,8 +19,8 @@ import "./checkout.css";
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const problem = (error: unknown) => error instanceof Error ? error.message : "This request could not be completed. Please try again.";
 
-export default function FilmCheckout({ film, productionAvailable, productionProvider, generationAttemptAllowed = false, persistPaymentReference, clearExpiredPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
-  film: Film; productionAvailable: boolean; productionProvider?: "kling"; generationAttemptAllowed?: boolean;
+export default function FilmCheckout({ film, productionAvailable, generationAttemptAllowed = false, persistPaymentReference, clearExpiredPaymentReference, onNewFilmCheckout, onPrepared, onBusyChange }: {
+  film: Film; productionAvailable: boolean; generationAttemptAllowed?: boolean;
   persistPaymentReference: (reference: FilmPaymentReference) => void;
   clearExpiredPaymentReference: (reference: FilmPaymentReference, order: FilmOrder) => void;
   onNewFilmCheckout: () => void;
@@ -400,7 +400,7 @@ export default function FilmCheckout({ film, productionAvailable, productionProv
       </div>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
       <p className="field-note">{!quote.sandbox
-        ? `Your saved film enters ${productionProvider === "kling" ? "Kling production" : "production"} automatically after QuickBooks confirms payment. Follow its progress here or in your Film library. The finished film opens when its video is verified.`
+        ? "Production starts automatically when QuickBooks confirms payment. Follow its progress here or in your film library. The finished film opens after verification."
         : "A test payment does not start production of this film."}</p>
       {!quote.sandbox && !checkoutProductionReady && <div className="feedback warning" role="status">
         <p>Production availability must be confirmed before a payment page can be created. Your saved film and price remain available.</p>

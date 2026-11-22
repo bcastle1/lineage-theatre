@@ -60,7 +60,7 @@ export type Notice = { tone: "success" | "error" | "info"; text: string };
 export type Capabilities = {
   story: boolean;
   production: boolean;
-  productionProvider?: "kling";
+  productionProvider?: "seedance" | null;
   generationAttempt?: boolean;
   billing: boolean;
   pricing?: {

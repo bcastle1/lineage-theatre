@@ -82,7 +82,7 @@ if (process.argv.some(argument => argument.startsWith("--env-file"))) throw new 
 
 // Remove inherited provider settings before importing application services.
 for (const name of Object.keys(process.env)) {
-  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|PAYMENT_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_|FAL_|KLING_|CRON_|RESEND_|SMTP_)/.test(name)) delete process.env[name];
+  if (/^(?:OPENAI_|MAGICLIGHT_|QUICKBOOKS_|PAYMENT_|RECAPTCHA_|BLOB_|LINEAGE_|MICROSOFT_|GRAPH_|VERCEL_|VITE_|GITHUB_|FAL_|FILM_|KLING_|CRON_|RESEND_|SMTP_)/.test(name)) delete process.env[name];
 }
 process.env.LINEAGE_SESSION_SECRET = "synthetic-workflow-session-key-local-only-never-production";
 process.env.LINEAGE_MFA_ENCRYPTION_KEY = "cd".repeat(32);
@@ -97,8 +97,9 @@ const [{ createAuthHandler }, { createStudioHandler, connections: studioConnecti
   { OWNER_EMAIL }, { createFilmProductionService, fictionalOperatorProject, productionJobPath },
   { createPaymentsService }, securityHelpers, { parseRange },
   { readPricingSettings }, { createFilmPricingService },
-  { createFalProductionAdapter, FAL_RECIPE_VERSION }, { FAL_MODELS }, { createFalFunding, FAL_FUNDING_PATH },
-  { createHostedCheckoutService, HOSTED_CHECKOUT_SETTINGS_PATH }, { createAutomaticProduction, automaticProductionPath }] = await Promise.all([
+  { createFalProductionAdapter, SEEDANCE_RECIPE_VERSION }, { FAL_MODELS }, { createFalFunding, FAL_FUNDING_PATH },
+  { createHostedCheckoutService, HOSTED_CHECKOUT_SETTINGS_PATH }, { createAutomaticProduction, automaticProductionPath },
+  { testSeedanceQualification }] = await Promise.all([
   import("../api/auth.mjs"), import("../api/studio.mjs"), import("../api/admin.mjs"),
   import("../api/_lib/auth.mjs"), import("../api/_lib/access.mjs"),
   import("../api/_lib/film-production.mjs"), import("../api/_lib/payments.mjs"),
@@ -107,6 +108,7 @@ const [{ createAuthHandler }, { createStudioHandler, connections: studioConnecti
   import("../api/_lib/admin.mjs"), import("../api/_lib/film-pricing.mjs"),
   import("../api/_lib/fal-production.mjs"), import("../api/_lib/fal-client.mjs"), import("../api/_lib/fal-funding.mjs"),
   import("../api/_lib/hosted-checkout.mjs"), import("../api/_lib/automatic-production.mjs"),
+  import("../tests/fixtures/seedance-qualification.mjs"),
 ]);
 const records = new Map();
 let revision = 0;
@@ -155,8 +157,8 @@ const listRecords = async ({ prefix, cursor, limit: size = 30 }) => {
   return { blobs: paths.slice(offset, offset + size).map(pathname => ({ pathname })), hasMore: offset + size < paths.length, cursor: String(offset + size) };
 };
 
-// Default and checkout modes price films exactly as production does since
-// 2026-10-18: the real Kling adapter, its live-rate check, the self-hosted
+// Default and checkout modes price films using the real Seedance adapter,
+// its live-rate check, the self-hosted
 // worker heartbeat and fal funding. Each of those is served here by an
 // in-process fake. The fake answers only the two fal read endpoints the
 // pricing and funding code use; it can never submit, poll or download.
@@ -169,18 +171,19 @@ const syntheticFalFetch = async (url, options = {}) => {
   assert.equal(options.method ?? "GET", "GET");
   syntheticFalReads++;
   if (target.pathname === "/v1/models/pricing") {
-    assert.deepEqual(target.searchParams.getAll("endpoint_id"), [FAL_MODELS.kling, FAL_MODELS.reference]);
-    // The reviewed public list prices that api/_lib/fal-pricing.mjs accepts.
-    return new Response(JSON.stringify({ prices: [
-      { endpoint_id: FAL_MODELS.kling, currency: "USD", unit: "seconds", unit_price: 0.14 },
-      { endpoint_id: FAL_MODELS.reference, currency: "USD", unit: "images", unit_price: 0.15 } ] }), { status: 200 });
+    const endpoints = [FAL_MODELS.seedance, FAL_MODELS.seedanceText];
+    assert.deepEqual(target.searchParams.getAll("endpoint_id").sort(), endpoints.toSorted());
+    return Response.json({ prices: endpoints.map(endpoint_id => ({
+      endpoint_id, currency: "USD", unit: "1000 tokens", unit_price: 0.0214,
+    })) });
   }
   if (target.pathname === "/v1/account/billing" && target.searchParams.get("expand") === "credits")
     return new Response(JSON.stringify({ username: syntheticFalBillingAccount,
       credits: { currency: "USD", current_balance: syntheticFalBalanceCents / 100 } }), { status: 200 });
   return new Response("{}", { status: 404 });
 };
-const syntheticFalAdapter = createFalProductionAdapter({ model: "kling", requireWorker: true, read, fetchImpl: syntheticFalFetch,
+const syntheticFalAdapter = createFalProductionAdapter({ model: "seedance", qualification: testSeedanceQualification(),
+  requireWorker: true, read, fetchImpl: syntheticFalFetch,
   key: () => "synthetic-fal-key-local-only", client: { get: refuseProvider, poll: refuseProvider, submit: refuseProvider },
   validateStartFrame: refuseProvider, verifyStartFrame: refuseProvider, normalizeReference: refuseProvider,
   normalizeKlingReference: refuseProvider, selectedPhoto: refuseProvider });
@@ -188,8 +191,8 @@ const syntheticFalAdapter = createFalProductionAdapter({ model: "kling", require
 // refuses a heartbeat older than three minutes, so it is refreshed while open.
 const writeWorkerHeartbeat = async (checkedAt = new Date()) => {
   const previous = await read("production/worker-health.json");
-  await write("production/worker-health.json", { version: 1, ready: syntheticWorkerReady, model: "kling", recipe: FAL_RECIPE_VERSION,
-    referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, characterBindingVersion: 3,
+  await write("production/worker-health.json", { version: 1, ready: syntheticWorkerReady, model: "seedance", recipe: SEEDANCE_RECIPE_VERSION,
+    referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, workerProtocol: 2,
     checkedAt: checkedAt.toISOString(), syntheticFixture: { memoryOnly: true, workerRunning: false } }, previous?.etag);
 };
 if (syntheticProvider) {
@@ -563,7 +566,7 @@ const server = createServer(async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       if (generationReviewFixture) return res.end(`<!doctype html><html><head><title>Synthetic generated-film review fixture</title></head><body><h1>SYNTHETIC GENERATION REVIEW FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4. It is not a newly generated film, does not match the fictional garden screenplay, and represents no real payment. Technical verification metadata is deliberately simulated to test the review interface; the worker and provider do not run.</p><p>Sign in as the fictional owner erik@brocotech.ai using its public password below. Open the saved film link, preview the demonstration, then approve only as a synthetic interface test. Every record disappears on exit.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/#library?film=${generationProject.productionPreparation.id}">Open synthetic review film</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
       if (deliveryFixture) return res.end(`<!doctype html><html><head><title>Illustrative private playback fixture</title></head><body><h1>SYNTHETIC PLAYBACK FIXTURE ONLY</h1><p>This local fixture reuses the existing Thomas Wilson demonstration MP4 to exercise private delivery. It is not a newly generated film, does not depict the fictional garden screenplay, and represents no real payment.</p><p>Sign in with customer@example.invalid and the public fixture password below, then open Create &amp; watch. The prepared job and fabricated confirmed payment use the live record format solely to test payment-gated delivery. Every record exists only in memory; there is no real transaction, production credential, or external provider call.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table><p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
-      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? `<h2>Fake QuickBooks-hosted invoice checkout</h2><p>Each preloaded film can be priced, quoted and checked out. Pricing uses the real Kling adapter against an in-process fake of fal's price list and a fake worker heartbeat; checkout reserves fake fal funding and creates an invoice in an in-process fake QuickBooks company. The payment tab opens a local fake invoice page with a button that records a synthetic payment. Then use the app's payment check: production is handed to a recording queue, never to the worker or a provider. No request leaves this computer.</p><table><tr><th>Fake invoice</th><th>Amount</th><th>Balance</th></tr>${[...syntheticQuickBooks.invoices.values()].map(invoice => `<tr><td><a href="/__workflow/invoice?link=${encodeURIComponent(invoice.InvoiceLink)}">${invoice.DocNumber}</a></td><td>$${invoice.TotalAmt.toFixed(2)}</td><td>$${invoice.Balance.toFixed(2)}</td></tr>`).join("")}</table>` : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
+      return res.end(`<!doctype html><html><head><title>Synthetic workflow test</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY</h1><p>Public test credentials and authenticator codes. Every account is fictional and stored in memory. No external provider or email can be called.</p><table><tr><th>Account</th><th>Public test password</th><th>Current fixture authenticator code</th></tr>${visible.join("")}</table>${checkoutFixtures ? `<h2>Fake QuickBooks-hosted invoice checkout</h2><p>Each preloaded film can be priced, quoted and checked out. Pricing uses the real Seedance adapter against an in-process fake of fal's price list and a fake worker heartbeat; checkout reserves fake fal funding and creates an invoice in an in-process fake QuickBooks company. The payment tab opens a local fake invoice page with a button that records a synthetic payment. Then use the app's payment check: production is handed to a recording queue, never to the worker or a provider. No request leaves this computer.</p><table><tr><th>Fake invoice</th><th>Amount</th><th>Balance</th></tr>${[...syntheticQuickBooks.invoices.values()].map(invoice => `<tr><td><a href="/__workflow/invoice?link=${encodeURIComponent(invoice.InvoiceLink)}">${invoice.DocNumber}</a></td><td>$${invoice.TotalAmt.toFixed(2)}</td><td>$${invoice.Balance.toFixed(2)}</td></tr>`).join("")}</table>` : ''}<p><a href="/">Open app</a> · <a href="/__workflow/status">Read test status</a> · <a href="/__workflow">Refresh authenticator codes</a></p></body></html>`);
     }
     if (checkOnly) { res.statusCode = 404; return res.end("Synthetic route-check mode."); }
     vite.middlewares(req, res);
@@ -626,13 +629,10 @@ async function currentAgreementConsent() {
   assert.ok(agreement && typeof agreement.body === "string" && agreement.body.length > 0);
   return { sourceAgreementAccepted: true, sourceAgreementVersion: agreement.version, sourceAgreementHash: agreement.contentHash };
 }
-// Pricing has used a live provider quote since 2026-10-18 (a485316). The
-// fictional garden plans as three Kling shots of 5.5, 5.0 and 4.5 seconds,
-// billed as 6 + 5 + 5 = 16 seconds at the reviewed $0.15/second, plus seven
-// $0.30 reference images (two cast references, two cast elements and three
-// start frames for character binding v3): 240 + 210 = 450 cents provider cost,
-// plus the default 50% markup (225 cents) = 675 cents.
-const expectedProviderCostCents = 450, expectedFixturePriceCents = 675;
+// The 15-second garden film requests 16 provider seconds after rounding its
+// three shots to whole seconds. The quote reserves $1.20 per second for
+// 1080p native audio, then applies the default 50% markup.
+const expectedProviderCostCents = 1920, expectedFixturePriceCents = 2880;
 function assertProviderQuotePrice(price, prepared) {
   assert.equal(price.status, 200, JSON.stringify(price.body));
   assert.equal(price.body.preparedId, prepared.id);
@@ -679,8 +679,8 @@ async function check() {
   assert.equal((await route("/api/admin?action=overview", { cookie: customer })).status, 403);
   assert.equal((await route("/api/admin?action=overview", { cookie: owner })).status, 200);
   const capabilities = await route("/api/studio?action=capabilities", { cookie: customer });
-  // The synthetic Kling adapter, price list and worker make production configured; billing stays off.
-  assert.equal(capabilities.body.production, true); assert.equal(capabilities.body.productionProvider, "kling");
+  // The synthetic Seedance adapter, price list and worker make production configured; billing stays off.
+  assert.equal(capabilities.body.production, true); assert.equal(capabilities.body.productionProvider, "seedance");
   assert.equal(capabilities.body.billing, false);
   assert.deepEqual(await pricingSettings(), { markupBasisPoints: 5000, planningCreditsPerClip: 286,
     planningSecondsPerClip: 6, planningRendersPerClip: 1, revision: 0, updatedAt: null, updatedBy: null });
@@ -721,7 +721,7 @@ async function check() {
   assert.equal((await route("/api/studio?action=capabilities", { cookie: customer })).status, 401);
   assert.equal(syntheticQueue.length, 0);
   await checkEgressGuard();
-  console.log("PASS: real-handler synthetic workflow, $6.75 provider-quote price (fake fal price list, fake worker heartbeat; a stale heartbeat blocks pricing) with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, no generation, and logout replay; zero outbound calls, egress guard verified.");
+  console.log("PASS: real-handler synthetic workflow, Seedance film quote (fake fal price list, fake worker heartbeat; a stale heartbeat blocks pricing) with 50% markup while billing is disabled, required versioned source agreement and administrator edits, registration approval and policy changes, shared payment/film access, consent, idempotency, ownership, no generation, and logout replay; zero outbound calls, egress guard verified.");
 }
 async function checkSourceAgreement(owner, customer) {
   const published = await route("/api/auth?action=agreement");
@@ -955,7 +955,7 @@ async function checkCheckout() {
   assert.doesNotMatch(JSON.stringify([...records.values()]), /synthetic-fal-key-local-only|synthetic-billing-key-local-only|"cvc"/,
     "Provider keys and card data are never stored");
   await checkEgressGuard();
-  console.log("PASS: actual-handler QuickBooks-hosted invoice checkout against in-process fakes of QuickBooks, fal pricing, fal funding and the worker heartbeat: fixed $6.75 provider-quote price reaches the invoice unchanged; production consent required; stale worker and short funding block the invoice; one invoice per checkout key; CAPTCHA replay refused; GET-only order reads; verified capture, receipt and a single automatic production hand-off; unpaid invoices never produce; ownership; zero outbound calls, egress guard verified.");
+  console.log("PASS: actual-handler QuickBooks-hosted invoice checkout against in-process fakes of QuickBooks, fal pricing, fal funding and the worker heartbeat: fixed Seedance film quote reaches the invoice unchanged; production consent required; stale worker and short funding block the invoice; one invoice per checkout key; CAPTCHA replay refused; GET-only order reads; verified capture, receipt and a single automatic production hand-off; unpaid invoices never produce; ownership; zero outbound calls, egress guard verified.");
 }
 function mediaRoute(path, { cookie, method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {

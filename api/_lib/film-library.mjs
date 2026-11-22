@@ -153,7 +153,8 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
           || value.status === "failed" || value.status === "completed" && !mediaReady };
       production.progress = await progress.snapshot({ job: value, email: actor.email, queue: queued, mediaReady, needsAttention: production.needsAttention });
       const health = production.progress.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
-      Object.assign(production, productionQueueMessage({ progress: production.progress, ticket, automaticPending, health, now: now() }));
+      Object.assign(production, productionQueueMessage({ progress: production.progress, ticket, automaticPending, health,
+        model: value.provider?.model || value.manifest?.productionPlan?.provider, recipe: value.provider?.recipe, now: now() }));
       if (production.progress.stage === "queued") production.status = "queued";
       if (production.progress.stage === "attention") production.needsAttention = true;
       if (value.status === "prepared" && ["creating", "finishing"].includes(production.progress.stage)) production.status = "processing";

@@ -1,11 +1,10 @@
 import { timingSafeEqual } from 'node:crypto';
 import { digest, json, readBody, readRecord, limitAction, userPath } from './_lib/auth.mjs';
 import { payments } from './_lib/payments.mjs';
-import { falProductionAdapter } from './_lib/fal-production.mjs';
+import { falProductionAdapter, SEEDANCE_RECIPE_VERSION, FAL_RECIPE_VERSION } from './_lib/fal-production.mjs';
 import { productionQueuePath } from './_lib/production-queue.mjs';
 import { falReviewedDelivery } from './_lib/fal-reviewed-delivery.mjs';
 import { productionAuthorizationDiagnostic } from './_lib/production-authorization-diagnostics.mjs';
-import { paidFilmCorrections } from './_lib/paid-film-correction.mjs';
 import { productionJobPath } from './_lib/film-production.mjs';
 import { createFilmVisualReviewService } from './_lib/film-visual-review.mjs';
 import { createStartFrameReviewService } from './_lib/film-start-frame-review.mjs';
@@ -17,7 +16,7 @@ import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 // allocation, recorded-reversal, owner, manifest and full-film budget checks.
 export function createProductionWorkerHandler({ env = process.env, paymentService = payments,
   adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
-  corrections = paidFilmCorrections, visualReviewFactory = createFilmVisualReviewService,
+  visualReviewFactory = createFilmVisualReviewService,
   startFrameReviewFactory = createStartFrameReviewService } = {}) {
   return async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); }
@@ -30,7 +29,10 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       const body = await readBody(req, 1_500_000);
       if (['review-film-visuals', 'review-start-frame'].includes(body?.action)) {
         const startFrame = body.action === 'review-start-frame';
-        if (Object.keys(body).sort().join(',') !== (startFrame
+        const protocol = body.workerProtocol === 2;
+        const keys = Object.keys(body).filter(key => key !== 'workerProtocol').sort().join(',');
+        if ('workerProtocol' in body && !protocol) return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (keys !== (startFrame
           ? 'action,email,manifestHash,preparedId,referenceIdentity,shotId' : 'action,email,frames,manifestHash,preparedId,shotId')
           || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
           || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
@@ -46,7 +48,10 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           if (!current || current.id !== body.preparedId || current.ownerHash !== digest(body.email) || current.manifestHash !== body.manifestHash
             || digest(JSON.stringify(current.manifest)) !== body.manifestHash
             || (startFrame ? !['processing', 'uncertain'].includes(current.status) : current.status !== 'awaiting-assembly')
-            || current.manifest?.visualContinuity?.version !== 1 || current.provider?.model !== 'kling'
+            || current.manifest?.visualContinuity?.version !== 1 || current.provider?.id !== 'fal'
+            || !(current.provider.model === 'kling' && current.provider.recipe === FAL_RECIPE_VERSION
+              || protocol && !startFrame && current.provider.model === 'seedance' && current.provider.recipe === SEEDANCE_RECIPE_VERSION
+              && current.manifest.productionPlan?.provider === 'seedance' && current.manifest.productionPlan.version === 1)
             || digest(JSON.stringify(current.shots)) !== digest(JSON.stringify(job?.shots))
             || digest(JSON.stringify(current.provider)) !== digest(JSON.stringify(job.provider)) || current.mode !== job.mode
             || digest(JSON.stringify(current.authorization || null)) !== digest(JSON.stringify(job.authorization || null))
@@ -107,21 +112,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           ? { email: body.email, productionId: body.preparedId, manifestHash: body.manifestHash, shotId: body.shotId, referenceIdentity: body.referenceIdentity }
           : { email: body.email, id: body.preparedId, job, shotId: body.shotId, frames: body.frames }));
       }
-      if (body?.action === 'authorize-failed-shot-recovery') {
-        const fields = ['action', 'email', 'preparedId', 'manifestHash', 'correctionId', 'recoveryId',
-          'originalIdentity', 'originalRequestId', 'replacementIdentity', 'model', 'recipe'];
-        if (Object.keys(body).sort().join(',') !== fields.sort().join(',')
-          || body.model !== 'kling' || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
-          || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
-          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
-          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId || '')
-          || !['manifestHash', 'correctionId', 'recoveryId', 'originalIdentity', 'replacementIdentity'].every(key => /^[a-f0-9]{64}$/.test(body[key] || ''))
-          || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.originalRequestId || ''))
-          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
-        if (!await limiter('production-worker:failed-shot-recovery', 20, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
-        const { action, model, recipe, ...input } = body;
-        return json(res, 200, await corrections.authorizeFailedShotRecovery(input));
-      }
+      if (body?.action === 'authorize-failed-shot-recovery')
+        return json(res, 410, { code: 'LEGACY_GENERATION_RETIRED' });
       if (body?.action === 'deliver-reviewed-film') {
         if (Object.keys(body).some(key => !['action', 'artifactSha256', 'orderId', 'previousArtifactSha256', 'model'].includes(key))
           || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.artifactSha256 || '')
@@ -133,7 +125,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           ...('model' in body ? { model: body.model } : {}),
           ...('previousArtifactSha256' in body ? { previousArtifactSha256: body.previousArtifactSha256 } : {}) }));
       }
-      if (!body || Object.keys(body).sort().join(',') !== 'email,manifestHash,model,orderId,preparedId,recipe'
+      if (!body || Object.keys(body).sort().join(',') !== 'email,manifestHash,model,orderId,preparedId,recipe,workerProtocol'
+        || body.workerProtocol !== 2 || body.model !== 'seedance' || body.recipe !== SEEDANCE_RECIPE_VERSION
         || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
         || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim()
         || !/^[a-f0-9]{64}$/.test(body.orderId || '') || !/^[a-f0-9]{64}$/.test(body.manifestHash || ''))
@@ -142,6 +135,12 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       if (ticket?.state !== 'pending' || ticket.email !== body.email || ticket.id !== body.preparedId
         || ticket.orderId !== body.orderId || ticket.manifestHash !== body.manifestHash || !(ticket.lease?.expiresAt > now()))
         return json(res, 409, { code: 'WORKER_QUEUE_REQUIRED' });
+      const job = (await read(productionJobPath(body.email, body.preparedId)))?.value;
+      if (job?.id !== body.preparedId || job.ownerHash !== digest(body.email) || job.manifestHash !== body.manifestHash
+        || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash
+        || job.manifest.productionPlan?.provider !== 'seedance' || job.manifest.productionPlan.version !== 1
+        || job.provider?.id !== 'fal' || job.provider.model !== body.model || job.provider.recipe !== body.recipe)
+        return json(res, 409, { code: 'WORKER_MODEL_MISMATCH' });
       if (!await limiter('production-worker:authorize', 120, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
       const { email, preparedId, manifestHash, orderId } = body;
       return json(res, 200, await paymentService.authorizeProduction({ email, preparedId, manifestHash, orderId }));

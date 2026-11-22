@@ -1,6 +1,4 @@
-// Isolated, merchant-funded comparison. This script never writes a production
-// job, payment, qualification or Blob record. Keep its private directory intact:
-// an exclusive claim permits at most one POST per candidate, even after a crash.
+// Inspect saved merchant-funded comparisons and poll their original receipts.
 import { open, readFile, mkdir, lstat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,11 +51,11 @@ async function boundedJson(response) {
     return JSON.parse(Buffer.concat(parts).toString('utf8'));
   } finally { await reader.cancel().catch(() => {}); }
 }
-async function request(url, method = 'GET', input) {
+async function request(url) {
   requireValue(typeof process.env.FAL_KEY === 'string' && process.env.FAL_KEY.length > 0, 'FAL_KEY_REQUIRED');
-  const result = await fetch(url, { method, redirect: 'error', credentials: 'omit', cache: 'no-store',
-    headers: { Authorization: `Key ${process.env.FAL_KEY}`, Accept: 'application/json', ...(input ? { 'Content-Type': 'application/json' } : {}) },
-    ...(input ? { body: JSON.stringify(input) } : {}), signal: AbortSignal.timeout(30_000) });
+  const result = await fetch(url, { method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store',
+    headers: { Authorization: `Key ${process.env.FAL_KEY}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000) });
   if (!result.ok) { await result.body?.cancel(); fail(`PROVIDER_HTTP_${result.status}`); }
   return boundedJson(result);
 }
@@ -250,45 +248,6 @@ async function loadPlan(directory) {
     && jsonHash(plan) === saved.planSha256 && jsonHash(plan.endpoints) === jsonHash(ENDPOINTS), 'PLAN_INVALID');
   return saved;
 }
-async function submit(args, directory) {
-  const { plan, planSha256 } = await loadPlan(directory);
-  requireValue(args['approve-plan-sha256'] === planSha256 && Date.parse(plan.expiresAt) > Date.now(), 'CURRENT_PLAN_APPROVAL_REQUIRED');
-  for (const [model, endpoint] of Object.entries(ENDPOINTS)) {
-    const claimPath = join(directory, `${model}-claim.json`), existing = await localJson(claimPath, true);
-    if (existing) {
-      requireValue(existing.planSha256 === planSha256 && existing.endpoint === endpoint, 'CLAIM_CONFLICT');
-      emit({ model, status: 'already-claimed-no-resubmission' }); continue;
-    }
-    const current = await source(plan.source.preparedId, plan.sourceSelection);
-    requireValue(jsonHash(current.binding) === jsonHash(plan.source), 'SOURCE_CHANGED');
-    const selected = excerpt(plan.selection, current.shot);
-    const payloads = inputs(current, selected);
-    requireValue(jsonHash(inputProof(payloads, current)) === jsonHash(plan.inputProof), 'INPUT_CHANGED');
-    const live = await pricing(), cost = auditedRates(plan.rates, live, selected.durationSeconds);
-    requireValue(cost === plan.maximumEstimatedCostCents && Number.isSafeInteger(plan.maximumCostCents)
-      && cost <= plan.maximumCostCents && plan.maximumCostCents <= MAXIMUM_APPROVED_COST_CENTS, 'BUDGET_CHANGED');
-    requireValue(Date.parse(plan.expiresAt) > Date.now(), 'CURRENT_PLAN_APPROVAL_REQUIRED');
-    const claim = { version: 1, evaluationId: plan.evaluationId, planSha256, model, endpoint,
-      inputSha256: plan.inputProof[model].sha256, claimedAt: stamp(), state: 'submission-claimed', pricing: live };
-    await saveExclusive(claimPath, claim);
-    try {
-      const response = await request(`https://queue.fal.run/${endpoint}`, 'POST', payloads[model]);
-      // Preserve the provider's request identity before validating convenience
-      // URLs, so an unexpected receipt remains available for manual reconciliation.
-      await saveExclusive(join(directory, `${model}-response.json`), { planSha256, receivedAt: stamp(),
-        requestId: response.request_id, statusUrl: response.status_url, responseUrl: response.response_url });
-      const receipt = { ...claim, state: 'queued', requestId: response.request_id, receivedAt: stamp(),
-        statusUrl: falRequestUrl(response.status_url, endpoint, response.request_id, 'status'),
-        responseUrl: falRequestUrl(response.response_url, endpoint, response.request_id, 'result') };
-      await saveExclusive(join(directory, `${model}-receipt.json`), receipt);
-      emit({ model, status: 'queued', requestId: receipt.requestId });
-    } catch (error) {
-      await saveExclusive(join(directory, `${model}-uncertain.json`), { planSha256, state: 'uncertain', at: stamp(),
-        code: /^PROVIDER_[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'SUBMISSION_RECEIPT_UNCONFIRMED' }).catch(() => {});
-      emit({ model, status: 'uncertain-no-resubmission' }); return;
-    }
-  }
-}
 async function poll(directory) {
   const { plan, planSha256 } = await loadPlan(directory);
   for (const [model, endpoint] of Object.entries(ENDPOINTS)) {
@@ -338,8 +297,9 @@ async function poll(directory) {
 }
 async function main() {
   const [action, ...values] = process.argv.slice(2), args = {};
-  requireValue(['prepare', 'submit', 'poll'].includes(action) && values.length % 2 === 0, 'COMMAND_INVALID');
-  const allowed = { prepare: ['directory', 'prepared-id', 'config', 'maximum-cost-cents'], submit: ['directory', 'approve-plan-sha256'], poll: ['directory'] }[action];
+  if (action === 'submit') fail('MULTI_MODEL_COMPARISON_RETIRED');
+  requireValue(['prepare', 'poll'].includes(action) && values.length % 2 === 0, 'COMMAND_INVALID');
+  const allowed = { prepare: ['directory', 'prepared-id', 'config', 'maximum-cost-cents'], poll: ['directory'] }[action];
   for (let i = 0; i < values.length; i += 2) {
     const name = values[i].replace(/^--/, '');
     requireValue(values[i].startsWith('--') && allowed.includes(name) && !(name in args) && values[i + 1], 'ARGUMENT_INVALID'); args[name] = values[i + 1];
@@ -348,7 +308,6 @@ async function main() {
   const directory = resolve(args.directory); await mkdir(directory, { recursive: true, mode: 0o700 });
   const info = await lstat(directory); requireValue(info.isDirectory() && !info.isSymbolicLink(), 'DIRECTORY_INVALID');
   if (action === 'prepare') await prepare(args, directory);
-  else if (action === 'submit') await submit(args, directory);
   else await poll(directory);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

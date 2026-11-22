@@ -108,7 +108,7 @@ test('compact continuity prompts retain all approved creative fields and wardrob
   assert.ok(Buffer.byteLength(JSON.stringify(prompt), 'utf8') < 2400);
   const original = fixture(); original.shots[0].visual += 'é'.repeat(1400);
   const oversized = planKlingShots(original), before = JSON.stringify(oversized);
-  const adapter = createFalProductionAdapter({ client: { get: async () => null, submit: () => assert.fail('No provider request') },
+  const adapter = createFalProductionAdapter({ model: 'kling', client: { get: async () => null, submit: () => assert.fail('No provider request') },
     read: async () => null, selectedPhoto: () => assert.fail('No new source read') });
   await assert.rejects(adapter.submitShot({ manifest: oversized, manifestHash: digest(before), shot: oversized.shots[0],
     productionId: 'fictional-production', idempotencyKey: digest('continuity-preflight'), authorizeSpend: () => assert.fail('No new spending') }), FalProductionPlanError);
@@ -135,7 +135,7 @@ test('new continuity quotes require a ready appearance-checking worker while old
     requiredDeliveryChecks: ['full-decode', 'exact-duration', 'script-speech', 'private-artifact'], reviewedAt: new Date(now).toISOString() };
   const heartbeat = { recipe: FAL_RECIPE_VERSION, model: 'kling', ready: true, deliveryChecksVersion: 1, checkedAt: new Date(now).toISOString() };
   let prices = 0;
-  const adapter = createFalProductionAdapter({ qualification, key: 'fixture', now: () => now, requireWorker: true,
+  const adapter = createFalProductionAdapter({ model: 'kling', qualification, key: 'fixture', now: () => now, requireWorker: true,
     read: async () => ({ value: heartbeat }), pricing: async () => { prices++; return { videoMicroUsdPerSecond: 1200000,
       referenceMicroUsd: 300000, expiresAt: new Date(now + 3600000).toISOString() }; } });
   await assert.rejects(adapter.validateManifest(planKlingShots(fixture())), /appearance and wardrobe checks/);

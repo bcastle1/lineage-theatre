@@ -1,8 +1,7 @@
 // Isolated local soundtrack construction. No payment, Blob, provider, or job API.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -223,71 +222,13 @@ export function verifyBoundarySilencePcm(turn, original, selected) {
   return true;
 }
 
-export async function rebuildFilmSoundtrack({ manifest, manifestHash, clips, workDir,
-  narratorVoice = 'am_michael', characterVoices = {}, speakerAliases = {}, music,
-  python = process.env.LINEAGE_TTS_PYTHON || '/opt/soundtrack/bin/python', ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg',
-  fluidsynth = process.env.FLUIDSYNTH_PATH || '/usr/bin/fluidsynth',
-  modelDirectory = process.env.LINEAGE_TTS_MODEL_DIR || '/opt/soundtrack/models/kokoro',
-  soundfont = process.env.LINEAGE_SOUNDFONT || '/usr/share/sounds/sf2/FluidR3_GM.sf2' } = {}) {
-  const plan = soundtrackPlan({ manifest, manifestHash, narratorVoice, characterVoices, speakerAliases, music });
-  requireValue(Array.isArray(clips) && clips.length === plan.scenes.length && typeof workDir === 'string'
-    && new Set(clips.map(clip => clip?.shotId)).size === clips.length, 'INPUT_INVALID');
-  for (const clip of clips) requireValue(plan.scenes.some(scene => scene.shotId === clip?.shotId) && typeof clip.path === 'string', 'INPUT_INVALID');
-  const root = await realpath(resolve(workDir)), directory = join(root, 'soundtrack');
-  requireValue((await stat(root)).isDirectory(), 'INPUT_INVALID');
-  try { await mkdir(directory, { recursive: false, mode: 0o700 }); } catch { throw error('OUTPUT_EXISTS'); }
-  const result = await buildLocal(plan, directory, { python, ffmpeg, fluidsynth, modelDirectory, soundfont });
-  requireValue(Array.isArray(result.scenes) && result.scenes.length === plan.scenes.length
-    && Boolean(result.score) === plan.musicRequested && result.durationMs === plan.durationMs, 'OUTPUT_INVALID');
-  const verifyFile = async value => {
-    requireValue(plain(value) && typeof value.file === 'string' && !isAbsolute(value.file) && HASH.test(value.sha256 || '')
-      && Number.isSafeInteger(value.sizeBytes) && value.sizeBytes > 16 && value.sizeBytes <= 250 * 1024 * 1024, 'OUTPUT_INVALID');
-    const path = await realpath(join(directory, value.file)), within = relative(directory, path);
-    requireValue(within && !within.startsWith('..') && !isAbsolute(within), 'OUTPUT_INVALID');
-    const bytes = await readFile(path);
-    requireValue(bytes.length === value.sizeBytes && hash(bytes) === value.sha256, 'OUTPUT_INVALID');
-    return path;
-  };
-  const repaired = [];
-  for (const [index, scene] of result.scenes.entries()) {
-    const expected = plan.scenes[index];
-    requireValue(scene.shotId === expected.shotId && scene.durationMs === expected.durationMs
-      && Array.isArray(scene.turns) && scene.turns.length === expected.turns.length, 'OUTPUT_INVALID');
-    const audioPath = await verifyFile(scene.mix); await verifyFile(scene.speech);
-    let previousEnd = 0;
-    for (const [turnIndex, turn] of scene.turns.entries()) {
-      const intended = expected.turns[turnIndex];
-      requireValue(turn.textSha256 === intended.textSha256 && turn.voice === intended.voice && turn.speakerId === intended.speakerId
-        && Number.isFinite(turn.startSeconds) && Number.isFinite(turn.endSeconds) && turn.startSeconds >= previousEnd
-        && turn.endSeconds > turn.startSeconds && turn.endSeconds <= expected.durationMs / 1000 - 0.19, 'OUTPUT_INVALID');
-      const audioPath = await verifyFile(turn.audio);
-      if (validateBoundarySilence(turn)) {
-        const originalPath = await verifyFile(turn.originalAudio);
-        verifyBoundarySilencePcm(turn, await readFile(originalPath), await readFile(audioPath));
-      }
-      previousEnd = turn.endSeconds;
-    }
-    repaired.push({ ...clips.find(clip => clip.shotId === expected.shotId), audioPath });
-  }
-  if (result.score) { await verifyFile(result.score.midi); await verifyFile(result.score.audio); }
-  const provenance = { ...result, status: 'constructed-needs-review', providerGenerationCalls: 0,
-    narratorVoice: plan.narratorVoice, characterVoices: plan.characterVoices, playbackAndSpeechReviewRequired: true };
-  await writeFile(join(directory, 'provenance.json'), JSON.stringify(provenance, null, 2), { flag: 'wx', mode: 0o600 });
-  return { clips: repaired, provenance };
+// Paid films now retain their Seedance native soundtrack. Legacy timing and
+// waveform diagnostics above remain available for previously created media.
+export async function rebuildFilmSoundtrack() {
+  throw error('SOUNDTRACK_MODEL_RETIRED');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [input, workDir] = process.argv.slice(2);
-  (async () => {
-    requireValue(input && workDir && process.argv.length === 4, 'INPUT_INVALID');
-    const bytes = await readFile(resolve(input)); requireValue(bytes.length <= 300_000, 'INPUT_INVALID');
-    const value = JSON.parse(bytes.toString('utf8'));
-    const result = await rebuildFilmSoundtrack({ ...value, workDir });
-    process.stdout.write(`${JSON.stringify({ status: 'constructed-needs-review', sceneCount: result.clips.length, providerGenerationCalls: 0 })}\n`);
-  })().catch(failure => {
-    const diagnostic = soundtrackFailureDiagnostic(failure?.diagnostic);
-    process.stdout.write(`${JSON.stringify({ status: 'failed', reason: reasonCodes.has(failure?.reason) ? failure.reason : 'RUNTIME_FAILED',
-      ...(diagnostic ? { diagnostic } : {}) })}\n`);
-    process.exitCode = 1;
-  });
+  process.stdout.write(`${JSON.stringify({ status: 'failed', reason: 'SOUNDTRACK_MODEL_RETIRED' })}\n`);
+  process.exitCode = 1;
 }

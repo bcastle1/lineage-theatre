@@ -3,7 +3,7 @@ import { falRequestPath, FAL_MODELS, falMediaUrl } from './fal-client.mjs';
 import { falReferenceData, klingReferenceData } from './fal-reference.mjs';
 import { validatedPhotoDataUrl } from './production-photo-reference.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
-import { VISUAL_REVIEW_MODEL, boundedVisualJson, imageData, visualReferenceImages, visualSceneContext,
+import { VISUAL_REVIEW_MODEL, acceptsVisualReceiptModel, boundedVisualJson, imageData, visualReferenceImages, visualSceneContext,
   castVisualReviewSchema, verifiedVisualDecision, CAST_REVIEW_DIRECTION } from './film-visual-review.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -64,7 +64,7 @@ const proofFor = context => ({ version: 1, manifestHash: context.binding.manifes
   shotId: context.shot.id, referenceIdentity: context.binding.referenceIdentity,
   bindingHash: context.bindingHash, normalizedImageHash: context.normalizedImageHash, receiptPath: context.receiptPath });
 function validateReceipt(context, receipt) {
-  requireValue(receipt?.version === 1 && receipt.state === 'reviewed' && receipt.model === VISUAL_REVIEW_MODEL
+  requireValue(receipt?.version === 1 && receipt.state === 'reviewed' && acceptsVisualReceiptModel(context.job, receipt.model)
     && receipt.bindingHash === context.bindingHash && digest(JSON.stringify(receipt.binding)) === context.bindingHash);
   return { ...proofFor(context), passed: verifiedVisualDecision(receipt.decision, true).passed };
 }
@@ -143,7 +143,7 @@ export function createStartFrameReviewService({ read = readRecord, write = write
       createdAt: new Date(now()).toISOString() }, old?.etag); }
     catch { const saved = await read(context.receiptPath); if (saved?.value.state === 'reviewed') return validateReceipt(context, saved.value); fail('VISUAL_REVIEW_UNCERTAIN'); }
     const claim = await read(context.receiptPath);
-    requireValue(claim?.value.state === 'submitting' && claim.value.bindingHash === context.bindingHash
+    requireValue(claim?.value.state === 'submitting' && claim.value.model === VISUAL_REVIEW_MODEL && claim.value.bindingHash === context.bindingHash
       && typeof claim.etag === 'string' && claim.etag, 'VISUAL_REVIEW_UNCERTAIN');
     let result;
     try {

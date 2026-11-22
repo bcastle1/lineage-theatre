@@ -12,17 +12,17 @@ export class VisualContinuityPlanError extends Error {
 }
 const requireValue = value => { if (!value) throw new VisualContinuityPlanError(); };
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-const referenceFor = character => character.referencePhotoId === undefined
-  ? { kind: 'generated-character', characterId: character.id }
+const referenceFor = (character, provider) => character.referencePhotoId === undefined
+  ? { kind: provider === 'seedance' ? 'screenplay-description' : 'generated-character', characterId: character.id }
   : { kind: 'selected-photo', sourceId: character.referencePhotoId };
 
-export function createVisualContinuity(manifest) {
+export function createVisualContinuity(manifest, provider = manifest.productionPlan?.provider) {
   const used = new Set(manifest.shots.flatMap(shot => shot.characterIds));
   return {
     version: VISUAL_CONTINUITY_VERSION,
     policy: VISUAL_CONTINUITY_POLICY,
     characters: manifest.screenplay.characters.filter(character => used.has(character.id)).map(character => ({
-      characterId: character.id, appearance: character.description, reference: referenceFor(character),
+      characterId: character.id, appearance: character.description, reference: referenceFor(character, provider),
     })),
     scenes: manifest.shots.map((shot, index) => ({
       sceneId: `scene-${String(index + 1).padStart(3, '0')}`, sceneIndex: shot.sceneIndex,
@@ -46,7 +46,7 @@ export function validateVisualContinuity(manifest) {
     && Array.isArray(contract.characters) && Array.isArray(contract.scenes));
   const used = new Set(manifest.shots.flatMap(shot => shot.characterIds));
   const expectedCharacters = manifest.screenplay.characters.filter(character => used.has(character.id)).map(character => ({
-    characterId: character.id, appearance: character.description, reference: referenceFor(character),
+    characterId: character.id, appearance: character.description, reference: referenceFor(character, manifest.productionPlan.provider),
   }));
   requireValue(same(contract.characters, expectedCharacters));
   const scenes = new Map();

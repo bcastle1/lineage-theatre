@@ -4,7 +4,7 @@ import { get } from "@vercel/blob";
 import { digest, readRecord, userPath } from "./auth.mjs";
 import { isOwner } from "./access.mjs";
 import { buildFilmManifest, fictionalOperatorProject } from "./film-production.mjs";
-import { planKlingShots } from "./kling-film-plan.mjs";
+import { planKlingShots, planSeedanceShots } from "./kling-film-plan.mjs";
 import { savedKlingPlanningOptions } from "./kling-character-binding.mjs";
 import { parseRange, MAX_FILM_BYTES } from "./archive.mjs";
 import { readPaidFilmCorrection } from "./paid-film-correction.mjs";
@@ -45,7 +45,8 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
   if (job.mode === "operator-test") {
     const current = (await read(userPath(email)))?.value;
     const built = buildFilmManifest(fictionalOperatorProject());
-    const fixedManifest = job.provider?.id === "fal" && job.provider.model === "kling"
+    const fixedManifest = job.provider?.id === "fal" && job.provider.model === "seedance" && job.manifest.productionPlan?.provider === "seedance"
+      ? planSeedanceShots(built.manifest) : job.provider?.id === "fal" && job.provider.model === "kling"
       ? planKlingShots(built.manifest, savedKlingPlanningOptions(job.manifest)) : built.manifest;
     const fixed = { manifest: fixedManifest, manifestHash: digest(JSON.stringify(fixedManifest)) };
     if (!isOwner(actor) || actor.email !== email || actor.mustChangePassword || !isOwner(current)
@@ -62,7 +63,7 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
       if (!context || job.authorization.originalOrderId !== context.grant.originalOrderId
         || job.authorization.quoteReference !== context.grant.quote.quoteReference
         || job.authorization.budgetCents !== context.grant.quote.maximumCostCents
-        || job.provider?.id !== "fal" || job.provider.model !== "kling" || job.provider.recipe !== context.grant.recipe) throw paymentRequired();
+        || job.provider?.id !== "fal" || job.provider.model !== context.grant.model || job.provider.recipe !== context.grant.recipe) throw paymentRequired();
       await context.recheck();
       return;
     } catch { throw paymentRequired(); }

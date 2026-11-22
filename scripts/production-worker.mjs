@@ -14,9 +14,7 @@ import { createHostedCheckoutService } from "../api/_lib/hosted-checkout.mjs";
 import { assembleFilm } from "./assemble-film.mjs";
 import { falProductionAdapter } from "../api/_lib/fal-production.mjs";
 import { createRemoteProductionAuthorization } from "../api/_lib/remote-production-authorization.mjs";
-import { reviewFilmSpeech } from './review-film-speech.mjs';
-import { finishingFailure, markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
-import { createAutomaticSoundtrackFallback } from './automatic-film-soundtrack.mjs';
+import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { createFilmVisualReviewer } from './review-film-visuals.mjs';
 import { verifyFilmVisualReceipts } from '../api/_lib/film-visual-review.mjs';
 
@@ -77,10 +75,16 @@ export async function downloadProductionAudio(output, allowedHosts, { fetchImpl 
   return downloadProductionMedia(validateProviderAudio(output, allowedHosts), fetchImpl);
 }
 
+function checkedSeedanceAudio(report) {
+  return report?.audioReview?.passed === true && report.audioReview.source === 'seedance-native'
+    && report.audioReview.verification === 'audio-decode-and-duration' && report.audioReview.transcriptVerified === false;
+}
+
 export async function verifyPublishedFilm({ email, id, manifestHash, artifact, manifest }, { getBlob = get, read = readRecord } = {}) {
   try {
   verifiedMediaProfile(artifact);
   if (!artifact || artifact.technicalSample !== false || artifact.playable !== true || artifact.hasAudio !== true
+    || manifest.productionPlan?.provider === 'seedance' && !checkedSeedanceAudio(artifact)
     || artifact.manifestHash !== manifestHash || !/^[a-f0-9]{64}$/.test(artifact.sha256 || "")
     || artifact.pathname !== `production/media/${digest(email)}/${id}/${artifact.sha256}.mp4`
     || artifact.contentType !== "video/mp4" || !Number.isFinite(artifact.durationSeconds)
@@ -98,13 +102,15 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
 }
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
-  assemble = assembleFilm, reviewSpeech = reviewFilmSpeech, reviewVisuals = createFilmVisualReviewer(), prepareClips, soundtrackFallback,
+  assemble = assembleFilm, reviewVisuals = createFilmVisualReviewer(), prepareClips,
   ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
     try {
     if (job.status !== "awaiting-assembly" || job.shots.length !== job.manifest.shots.length
       || job.shots.some(shot => shot.status !== "completed") || adapter.available !== true) throw finishingError("The film is not ready for assembly.", "ASSEMBLY_NOT_READY");
+    if (prepareClips !== undefined) throw finishingError('This worker uses the provider soundtrack.', 'NATIVE_AUDIO_REQUIRED');
+    const seedance = job.manifest.productionPlan?.provider === 'seedance';
     const root = resolve(tempRoot);
     await mkdir(root, { recursive: true });
     const work = await mkdtemp(join(root, "lineage-worker-"));
@@ -114,6 +120,8 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       stage = 'download';
       for (const [index, shot] of job.shots.entries()) {
         if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
+        if (seedance && shot.output?.audio !== undefined)
+          throw finishingError('Seedance scenes require embedded provider audio.', 'NATIVE_AUDIO_REQUIRED');
         const bytes = await downloadProductionClip(shot.output, adapter.outputHosts, { fetchImpl });
         const path = join(work, `clip-${index}.${shot.output.contentType === "video/mp4" ? "mp4" : "webm"}`);
         await writeFile(path, bytes, { flag: "wx" });
@@ -134,38 +142,6 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         ? await reviewVisuals({ email, id, job, clips, work, ffmpeg, stillOwned }) : null;
       if (job.manifest.visualContinuity && visualReview?.passed !== true)
         throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
-      stage = 'speech-review';
-      // Only an explicitly configured operator repair supplies this hook. The
-      // ordinary worker reviews native audio before considering local fallback.
-      if (prepareClips !== undefined) {
-        if (typeof prepareClips !== 'function' || !await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
-        await prepareClips({ email, id, job, clips, work, ffmpeg, stillOwned });
-        if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
-      }
-      let speechReview = null;
-      if (adapter.id === 'fal') {
-        const nativeClips = clips.map(clip => ({ ...clip }));
-        try {
-          speechReview = await reviewSpeech({ manifest: job.manifest, clips: nativeClips, ffmpeg });
-          for (const [index, clip] of nativeClips.entries()) if (clip.audioPath) clips[index].audioPath = clip.audioPath;
-        }
-        catch (error) {
-          // The operator repair has its own reviewed soundtrack path. Normal
-          // fallback is confined to a completed paid film with mismatched speech.
-          if (prepareClips !== undefined || typeof soundtrackFallback !== 'function'
-            || finishingFailure(error)?.reason !== 'SPEECH_SCRIPT_MISMATCH') throw error;
-          // Earlier scenes may have produced reviewed native-audio files before
-          // a later mismatch. Remove only those exact outputs from this run so
-          // authored review can use its normal exclusive output filenames.
-          for (const [index, clip] of nativeClips.entries()) {
-            const generated = resolve(work, `${clip.shotId}-reviewed.wav`);
-            if (clip.audioPath !== clips[index].audioPath && typeof clip.audioPath === 'string'
-              && resolve(clip.audioPath) === generated && dirname(generated) === resolve(work)) await rm(generated, { force: true });
-          }
-          speechReview = await soundtrackFallback({ email, id, job, clips, work, ffmpeg, stillOwned });
-        }
-      }
-      if(adapter.id==='fal'&&speechReview?.passed!==true)throw finishingError('Film narration was not verified.', 'SPEECH_REVIEW_REQUIRED');
       stage = 'assembly';
       const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
       verifiedMediaProfile(report);
@@ -173,6 +149,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
         || report.manifestHash !== job.manifestHash || !Number.isFinite(report.durationSeconds)
         || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
+        || seedance && !checkedSeedanceAudio(report)
         || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw finishingError("Assembly verification failed.", "ASSEMBLY_REPORT_INVALID");
       if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
       const pathname = `production/media/${digest(email)}/${id}/${report.sha256}.mp4`;
@@ -183,7 +160,7 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         await putBlob(pathname, bytes, { access: "private", addRandomSuffix: false, allowOverwrite: false,
           contentType: "video/mp4", cacheControlMaxAge: 60 });
       } catch { /* A complete matching private readback is the only success signal. */ }
-      const artifact = { ...report, pathname, ...(speechReview?{speechReview}:{}), ...(visualReview?{visualReview}:{}) };
+      const artifact = { ...report, pathname, ...(visualReview ? { visualReview } : {}) };
       // acceptAssembly verifies the private readback before marking completion,
       // including a lost upload response. Avoid downloading the same film twice.
       // Retain captions privately; failed caption publication cannot claim success.
@@ -217,8 +194,7 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
     authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
     verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
   const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
-  const soundtrackFallback = dependencies.soundtrackFallback ?? createAutomaticSoundtrackFallback({ ...dependencies, read, write });
-  const assemble = createWorkerAssembly({ ...dependencies, adapter, soundtrackFallback });
+  const assemble = createWorkerAssembly({ ...dependencies, adapter });
   return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
 }
 
@@ -229,7 +205,8 @@ async function main() {
   const worker = createProductionWorker();
   const readiness = worker.readiness();
   if (args[0] === "--check") {
-    process.stdout.write(`${JSON.stringify({ available: readiness.available, provider: readiness.adapter,
+    process.stdout.write(`${JSON.stringify({ available: readiness.available, provider: readiness.adapter, model: falProductionAdapter.model,
+      recipe: falProductionAdapter.modelVersion, workerProtocol: 2,
       storageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN), gaps: readiness.gaps })}\n`);
     return;
   }
@@ -238,7 +215,10 @@ async function main() {
   const healthPath='production/worker-health.json';
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
-    await writeRecord(healthPath,{version:1,ready:true,model:falProductionAdapter.model,recipe:falProductionAdapter.modelVersion,referencePhotoVersion:1,deliveryChecksVersion:1,visualChecksVersion:1,characterBindingVersion:3,checkedAt:new Date().toISOString()},old?.etag);
+    await writeRecord(healthPath, {
+      version: 1, ready: true, workerProtocol: 2, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
+      referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, checkedAt: new Date().toISOString(),
+    }, old?.etag);
   };
   await heartbeat();
   const pulse=setInterval(()=>void heartbeat().catch(()=>{}),30000);pulse.unref();

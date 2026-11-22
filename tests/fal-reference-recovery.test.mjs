@@ -80,6 +80,7 @@ function fixture(options = {}) {
     originalRequestId: S.originalRequestId, budgetMode: 'verified-zero-charge',
     billingEvidence: zeroEvidence(), replacementApproval: replacementApproval() };
   const client = createFalClient({ key: 'synthetic-offline-key', read, write, now: () => clock,
+    submissionEndpoints: [FAL_MODELS.reference],
     fetchImpl: async (url, request) => {
       if (request.method === 'POST') {
         assert.equal(url, `https://queue.fal.run/${FAL_MODELS.reference}`);

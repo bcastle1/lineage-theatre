@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { STORY_MODEL } from './story.mjs';
 import { digest, readRecord, writeRecord } from './auth.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { falReferenceData } from './fal-reference.mjs';
@@ -6,7 +7,13 @@ import { falRequestPath, FAL_MODELS } from './fal-client.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
-export const VISUAL_REVIEW_MODEL = 'gpt-6-astra';
+export const VISUAL_REVIEW_MODEL = STORY_MODEL;
+const seedancePlan = manifest => manifest?.productionPlan?.provider === 'seedance';
+const reviewsCast = manifest => seedancePlan(manifest) || manifest.productionPlan?.characterBindingVersion === 3;
+
+// Historical reviews remain valid only on their original immutable Kling film.
+export const acceptsVisualReceiptModel = (job, model) => model === VISUAL_REVIEW_MODEL
+  || (model === 'gpt-6-astra' && job?.provider?.model === 'kling' && !seedancePlan(job.manifest));
 export const VISUAL_REVIEW_VERSION = 1;
 export const visualSampleTimes = shot => [.15, .5, .85].map(fraction => Math.round(shot.targetDurationMs * fraction));
 const failure = code => Object.assign(new Error('The film needs visual continuity verification.'), { code });
@@ -76,9 +83,14 @@ export async function imageData(data) {
   return `data:image/jpeg;base64,${normalized.toString('base64')}`;
 }
 export async function visualReferenceImages(job, shot, { read, selectedPhoto = productionPhotoData, generatedPhoto = falReferenceData }) {
-  return Promise.all(shot.characterIds.map(async id => {
+  const characters = shot.characterIds.map(id => {
     const character = job.manifest.screenplay.characters.find(c => c.id === id);
     requireValue(character);
+    return character;
+  });
+  const referenced = seedancePlan(job.manifest) ? characters.filter(c => c.referencePhotoId) : characters;
+  return Promise.all(referenced.map(async character => {
+    const id = character.id;
     let data;
     if (character.referencePhotoId) data = await selectedPhoto(job.manifest, character, { read });
     else {
@@ -106,14 +118,15 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
   generatedPhoto = falReferenceData, authorize = async () => false } = {}) {
   return async input => {
     const { email, id, job, shotId, frames } = input;
-    requireValue(job.ownerHash === digest(email) && job.id === id && job.provider?.model === 'kling');
+    requireValue(job.ownerHash === digest(email) && job.id === id
+      && job.provider?.model === (seedancePlan(job.manifest) ? 'seedance' : 'kling'));
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
     const { binding, bindingHash, shot } = visualReviewBinding(job, shotId, frames);
-    const checkCast = job.manifest.productionPlan?.characterBindingVersion === 3;
+    const checkCast = reviewsCast(job.manifest);
     const path = visualReceiptPath(job.ownerHash, id, bindingHash);
     const old = await read(path);
     const receipt = value => {
-      requireValue(value?.version === 1 && value.model === VISUAL_REVIEW_MODEL && value.state === 'reviewed'
+      requireValue(value?.version === 1 && acceptsVisualReceiptModel(job, value.model) && value.state === 'reviewed'
         && value.bindingHash === bindingHash && digest(JSON.stringify(value.binding)) === bindingHash);
       const { passed } = verifiedVisualDecision(value.decision, checkCast);
       return { version: 1, bindingHash, manifestHash: job.manifestHash, shotId, passed, receiptPath: path };
@@ -149,7 +162,7 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
       const response = await fetchImpl('https://api.openai.com/v1/responses', { method: 'POST', redirect: 'error',
         headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(100_000),
         body: JSON.stringify({ model: VISUAL_REVIEW_MODEL, store: false, reasoning: { effort: 'low' }, max_output_tokens: 1800,
-          instructions: instructions + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
+          instructions: instructions + (seedancePlan(job.manifest) ? ' For characters without an approved photo, compare the saved description, wardrobe direction and consistency across samples. Do not assume an unseen photographic likeness.' : '') + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
       if (!response.ok) {
         await response.body?.cancel();
         // A confirmed rate-limit rejection is not an executed review. Retry at
@@ -189,12 +202,12 @@ export async function verifyFilmVisualReceipts({ email, id, manifestHash, manife
     requireValue(proof.shotId === shot.id && proof.passed === true && proof.manifestHash === manifestHash
       && proof.receiptPath === visualReceiptPath(digest(email), id, proof.bindingHash));
     const stored = (await read(proof.receiptPath))?.value;
-    requireValue(stored?.version === 1 && stored.binding?.version === 1 && stored.model === VISUAL_REVIEW_MODEL && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
+    requireValue(stored?.version === 1 && stored.binding?.version === 1 && acceptsVisualReceiptModel(job, stored.model) && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
       && digest(JSON.stringify(stored.binding)) === proof.bindingHash && stored.binding.manifestHash === manifestHash
       && stored.binding.shotId === shot.id && job.shots[index].id === shot.id && job.shots[index].status === 'completed'
       && stored.binding.outputHash === digest(JSON.stringify(job.shots[index].output))
       && stored.binding.precedingOutputHash === (index > 0 && manifest.shots[index - 1].sceneIndex === shot.sceneIndex
         ? digest(JSON.stringify(job.shots[index - 1].output)) : null)
-      && verifiedVisualDecision(stored.decision, manifest.productionPlan?.characterBindingVersion === 3).passed);
+      && verifiedVisualDecision(stored.decision, reviewsCast(manifest)).passed);
   }
 }

@@ -162,15 +162,12 @@ export function createAdminHandler(overrides={}) {
       await audit(actor.email,"production.live_test.imported","magiclight",{ready:result.media.ready});
       return json(res,200,result);
     }
-    if(["submitMagicLightLiveTest","checkMagicLightLiveTest"].includes(action)) {
-      if(!isOwner(actor)) return resultError(res,403,"Only the owner can run the live generation test.");
-      const submitting=action==="submitMagicLightLiveTest";
-      const allowed=submitting?["action","consent"]:["action"];
-      if(Object.keys(body).some(key=>!allowed.includes(key))||(submitting&&body.consent!==true))
-        return resultError(res,400,"Confirm the fixed live test before submitting. The test accepts no other input.");
+    if(action==="checkMagicLightLiveTest") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can check the saved generation test.");
+      if(Object.keys(body).some(key=>key!=="action")) return resultError(res,400,"This check uses only the saved test.");
       if(!(await limitAction(`magiclight-live-test:${actor.email}`,6,60_000))) return resultError(res,429,"Please wait before checking the live test again.");
-      const result=submitting?await liveTest.submit(actor,{consent:true}):await liveTest.check(actor);
-      await audit(actor.email,submitting?"production.live_test.requested":"production.live_test.checked","magiclight",{
+      const result=await liveTest.check(actor);
+      await audit(actor.email,"production.live_test.checked","magiclight",{
         status:result.test?.status||"not-submitted",submissionCount:result.test?.submissionCount||0,
       });
       return json(res,200,result);

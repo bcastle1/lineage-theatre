@@ -7,8 +7,7 @@ export type GenerationAttempt = GenerationIdentity & {
   status: "submitting" | "processing" | "verifying" | "failed" | "uncertain";
   submittedAt: string; checkedAt?: string | null; elapsedSeconds: number; estimateAvailable: false;
   diagnostic?: GenerationDiagnostic;
-  recovery?: { kind: "provider-review-required"; canRetry: false }
-    | { kind: "replacement-available"; canRetry: true; expectedChangeId: string };
+  recovery?: { kind: "provider-review-required"; canRetry: false };
 };
 const invalidStatus = () => new Error("The generation status could not be verified.");
 function normalizeDiagnostic(value: unknown): GenerationDiagnostic | undefined {
@@ -42,7 +41,7 @@ export function normalizeGenerationAttempt(value: unknown, expected: GenerationI
     if (request.kind === "provider-review-required" && request.canRetry === false) recovery = { kind: request.kind, canRetry: false };
     else if (record.status === "uncertain" && request.kind === "replacement-available" && request.canRetry === true
       && typeof request.expectedChangeId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(request.expectedChangeId))
-      recovery = { kind: request.kind, canRetry: true, expectedChangeId: request.expectedChangeId };
+      recovery = { kind: "provider-review-required", canRetry: false };
     else throw invalidStatus();
   }
   return { ...expected, status: record.status as GenerationAttempt["status"], submittedAt: record.submittedAt,
@@ -54,16 +53,9 @@ export function generationStatusLabel(attempt: GenerationAttempt): string {
   return { submitting: "Submitting generation request", processing: "Generation requested", verifying: "Checking generated video",
     failed: "Generation needs attention", uncertain: "Generation request needs review" }[attempt.status];
 }
-export function generationReplacementRequest(attempt: GenerationAttempt | null, expected: GenerationIdentity, consent: boolean) {
-  if (consent !== true || attempt?.status !== "uncertain" || attempt.recovery?.kind !== "replacement-available"
-    || attempt.recovery.canRetry !== true || Object.entries(expected).some(([key, value]) => attempt[key as keyof GenerationIdentity] !== value)
-    || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(attempt.recovery.expectedChangeId)) return null;
-  return { action: "replaceFilmGeneration" as const, preparedId: expected.preparedId, orderId: expected.orderId,
-    expectedChangeId: attempt.recovery.expectedChangeId, consent: true as const, acknowledgePossibleDuplicate: true as const };
-}
 export function generationAttemptExplanation(attempt: GenerationAttempt): string {
   if (attempt.status === "verifying") return "A video result was returned. Watch film unlocks after its technical checks and content review are complete.";
-  if (attempt.status === "failed") return "The generation provider reported that this request failed. Your payment and saved screenplay are preserved. Review this request before authorizing any replacement.";
+  if (attempt.status === "failed") return "The generation provider reported that this request failed. Your payment and saved screenplay are preserved. An operator can review the saved request.";
   if (attempt.status === "uncertain" || attempt.recovery) return "Generation has not been confirmed. This saved request needs review; time since the request does not indicate production progress. Your payment is recorded.";
   if (attempt.status === "submitting") return "The generation request is being checked. Acceptance has not yet been confirmed. No additional request will be sent automatically.";
   return "The generation provider accepted the saved request. This page checks that same request for a result. You can return to this film in your library.";
