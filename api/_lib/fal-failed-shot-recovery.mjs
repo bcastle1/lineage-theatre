@@ -6,7 +6,7 @@ import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 import { falPlan, characterViewIdentity, startFrameIdentity, FAL_RECIPE_VERSION } from './fal-production.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { klingReferenceData } from './fal-reference.mjs';
-import { normalizeKlingInputReferences, klingCharacterBindingVersion, requireActiveKlingCharacterBinding } from './kling-character-binding.mjs';
+import { normalizeKlingInputReferences, klingCharacterBindingVersion } from './kling-character-binding.mjs';
 
 const HASH = /^[a-f0-9]{64}$/, REQUEST = /^[A-Za-z0-9_-]{8,100}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -63,22 +63,11 @@ export async function verifyPromptRejectedReceipt(receipt, { key = () => process
   requireValue(promptLengthRejection(await boundedResponse(resultResponse, 2_000_000)));
   return true;
 }
-async function remoteAuthorize(input) {
-  const secret = process.env.LINEAGE_WORKER_SECRET; requireValue(HASH.test(secret || ''));
-  const response = await fetch('https://lineagetheater.com/api/production-worker', { method: 'POST', redirect: 'error', credentials: 'omit', cache: 'no-store',
-    headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'authorize-failed-shot-recovery', ...input,
-      model: 'kling', recipe: FAL_RECIPE_VERSION }), signal: AbortSignal.timeout(120_000) });
-  if (!response.ok) { await response.body?.cancel(); throw Object.assign(fail(), { httpStatus: response.status }); }
-  return boundedResponse(response);
-}
-
-// Operator-only repair of provider-confirmed, unbilled prompt rejections. It
-// never changes the screenplay, original request identities or payment records.
+// Reconcile replacements already submitted before the Kling renderer was retired.
 export function createFailedShotRecovery({ read = readRecord, write = writeRecord, now = Date.now,
   client = createFalClient({ key: () => process.env.FAL_KLING_KEY, read, write, now }),
-  correctionContext = input => readPaidFilmCorrection({ ...input, read, now }), authorize = remoteAuthorize,
+  correctionContext = input => readPaidFilmCorrection({ ...input, read, now }),
   verifyRejected = receipt => verifyPromptRejectedReceipt(receipt), fetchImpl = fetch,
-  verifyStartFrame = async (input, options) => (await import('./film-start-frame-review.mjs')).verifyStartFrameReceipt(input, options),
   buildInput = async (job, shot, plan) => {
     const refs = {};
     for (const character of plan.characters.filter(character => shot.characterIds.includes(character.id))) {
@@ -192,7 +181,8 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
     for (const row of c.selected) {
       stage = 'input-validation';
       const recoveryId = failedShotRecoveryId(row.identity, row.receipt.requestId), replacementIdentity = digest(`${recoveryId}:replacement-v1`);
-      if (!await client.get(replacementIdentity)) requireActiveKlingCharacterBinding(c.job.manifest);
+      const existing = await client.get(replacementIdentity);
+      if (!existing) return { status: 'legacy-replacement-missing', generationSubmitted: false };
       const body = await buildInput(c.job, c.plan.shots[row.index], c.plan);
       requireValue(typeof body.prompt === 'string' && Buffer.byteLength(body.prompt) < 2400 && Buffer.byteLength(JSON.stringify(body.prompt)) < 2400
         && body.duration === String(c.plan.shots[row.index].seconds) && body.generate_audio === true);
@@ -207,12 +197,14 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
         priorSpendCents: c.priorSpendCents, totalReplacementMaximumCents: c.totalReplacementMaximumCents,
         selectedRequests: input.failedRequests, originalRequests: c.originals.map(item => ({ requestId: item.receipt.requestId, amountCents: item.billing.amountCents })),
         createdAt: saved?.value.createdAt || new Date(now()).toISOString() };
-      requireValue(!saved || hash(saved.value) === hash(claim)); planned.push({ row, claim, body });
+      requireValue(saved?.etag && hash(saved.value) === hash(claim));
+      requireValue(existing.identity === replacementIdentity && existing.inputHash === claim.inputHash && existing.endpoint === FAL_MODELS.kling);
+      planned.push({ row, claim });
     }
     if (!execute) {
       stage = 'reconcile';
       for (const row of c.selected) await verifyRejected({ ...row.receipt, state: 'failed', failureCode: 'FAL_RENDER_FAILED' });
-      return { status: 'ready-for-explicit-recovery', clips: planned.map(({ claim }) => ({ clip: claim.shotIndex, originalRequestId: claim.originalRequestId, recoveryId: claim.recoveryId,
+      return { status: 'ready-to-reconcile', clips: planned.map(({ claim }) => ({ clip: claim.shotIndex, originalRequestId: claim.originalRequestId, recoveryId: claim.recoveryId,
       replacementMaximumCents: claim.replacementMaximumCents })), priorSpendCents: c.priorSpendCents, replacementMaximumCents: c.totalReplacementMaximumCents, maximumTotalCostCents: c.correction.grant.maximumCostCents, generationSubmitted: false };
     }
     // Poll only already-persisted request IDs. A missing or uncertain receipt is
@@ -222,47 +214,15 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
       const receipt = ['completed', 'failed'].includes(row.receipt.state) ? row.receipt : await client.poll(row.identity);
       requireValue(receipt?.state === 'completed' && receipt.requestId === row.receipt.requestId);
     }
-    let submitted = false;
     for (const item of planned) {
-      const { claim, row, body } = item;
+      const { claim, row } = item;
       stage = 'reconcile';
       await recheck(c); await verifyRejected(row.receipt);
       stage = 'claim';
       let replacement = await client.get(claim.replacementIdentity);
-      if (!replacement && klingCharacterBindingVersion(c.job.manifest) === 3) {
-        const heartbeat = (await read('production/worker-health.json'))?.value;
-        requireValue(heartbeat?.ready === true && heartbeat.model === 'kling' && heartbeat.recipe === FAL_RECIPE_VERSION
-          && heartbeat.characterBindingVersion === 3 && heartbeat.visualChecksVersion === 1 && heartbeat.deliveryChecksVersion === 1
-          && Number.isFinite(Date.parse(heartbeat.checkedAt)) && Date.parse(heartbeat.checkedAt) <= now()
-          && now() - Date.parse(heartbeat.checkedAt) <= 180000);
-        const verified = await verifyStartFrame({ email: input.email, manifest: c.job.manifest, productionId: input.preparedId,
-          manifestHash: input.manifestHash, shotId: row.shot.id,
-          referenceIdentity: startFrameIdentity(input.preparedId, input.manifestHash, row.shot.id), normalizedImageData: body.start_image_url }, { read });
-        requireValue(verified?.passed === true);
-      }
-      await immutable(failedShotRecoveryPath(claim.recoveryId), claim);
-      if (!replacement) {
-        stage = 'auth';
-        const grant = await authorize({ email: input.email, preparedId: input.preparedId, manifestHash: input.manifestHash, correctionId: input.correctionId,
-          recoveryId: claim.recoveryId, originalIdentity: claim.originalIdentity, originalRequestId: claim.originalRequestId, replacementIdentity: claim.replacementIdentity });
-        requireValue(grant?.allowed === true && grant.manifestHash === input.manifestHash && grant.preparedId === input.preparedId
-          && grant.correctionId === input.correctionId && grant.originalIdentity === claim.originalIdentity && grant.originalRequestId === claim.originalRequestId
-          && grant.originalOrderId === c.correction.grant.originalOrderId && grant.environment === 'production'
-          && grant.inputHash === claim.inputHash && grant.replacementMaximumCents === claim.replacementMaximumCents
-          && grant.totalReplacementMaximumCents === claim.totalReplacementMaximumCents
-          && grant.quoteReference === c.job.authorization.quoteReference && grant.recoveryId === claim.recoveryId
-          && grant.replacementIdentity === claim.replacementIdentity && grant.budgetCents === claim.maximumCostCents
-          && Number.isFinite(Date.parse(grant.expiresAt)) && Date.parse(grant.expiresAt) > now() && Date.parse(grant.expiresAt) <= now() + 60_000);
-        await recheck(c);
-        const current = await read(falRequestPath(row.identity)); requireValue(current?.etag === row.record.etag);
-        requireValue(Date.parse(grant.expiresAt) > now());
-        stage = 'submission';
-        replacement = await client.submit({ identity: claim.replacementIdentity, endpoint: FAL_MODELS.kling, input: body }); submitted = true;
-      } else {
-        requireValue(replacement.identity === claim.replacementIdentity && replacement.endpoint === FAL_MODELS.kling && replacement.inputHash === claim.inputHash);
-        stage = 'poll';
-        if (replacement.requestId && !['completed', 'failed'].includes(replacement.state)) replacement = await client.poll(claim.replacementIdentity);
-      }
+      requireValue(replacement?.identity === claim.replacementIdentity && replacement.endpoint === FAL_MODELS.kling && replacement.inputHash === claim.inputHash);
+      stage = 'poll';
+      if (replacement.requestId && !['completed', 'failed'].includes(replacement.state)) replacement = await client.poll(claim.replacementIdentity);
       requireValue(replacement?.identity === claim.replacementIdentity && replacement.endpoint === FAL_MODELS.kling && replacement.inputHash === claim.inputHash);
       if (replacement.state === 'completed') {
         stage = 'claim';
@@ -273,7 +233,7 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
       }
       item.replacement = replacement;
     }
-    if (!planned.every(item => item.replacement.state === 'completed')) return { status: 'replacement-pending', generationSubmitted: submitted,
+    if (!planned.every(item => item.replacement.state === 'completed')) return { status: 'replacement-pending', generationSubmitted: false,
       replacements: planned.map(item => ({ clip: item.claim.shotIndex, state: item.replacement.state, requestId: item.replacement.requestId || null })) };
     stage = 'resume';
     c = await context(input); const outputs = [];
@@ -299,7 +259,7 @@ export function createFailedShotRecovery({ read = readRecord, write = writeRecor
     const queue = await read(c.queuePath); requireValue(queue?.etag === c.queueRecord.etag);
     const { lease, ...old } = queue.value;
     await write(c.queuePath, { ...old, state: 'pending', attempts: 0, nextAttemptAt: now(), lastResult: 'RECOVERY_VERIFIED', lastFailure: null }, queue.etag);
-    return { status: 'awaiting-assembly', resumed: true, generationSubmitted: submitted, completedClips: 12, durationSeconds: 120 };
+    return { status: 'awaiting-assembly', resumed: true, generationSubmitted: false, completedClips: 12, durationSeconds: 120 };
     } catch (error) {
       throw Object.assign(fail(), { stage, ...(Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? { httpStatus: error.httpStatus } : {}) });
     }

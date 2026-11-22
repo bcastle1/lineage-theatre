@@ -5,7 +5,8 @@ import { accessStatusForUser } from "./access.mjs";
 import { filmProduction, productionJobPath, FilmProductionError } from "./film-production.mjs";
 import { payments } from "./payments.mjs";
 import { createProductionProgress } from "./production-progress.mjs";
-import { FAL_RECIPE_VERSION } from "./fal-production.mjs";
+import { heartbeatSupports } from "./worker-models.mjs";
+import { falRecipeVersion } from "./fal-production.mjs";
 import { finishingFailure, sanitizeFinishingFailure, storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
 import { validateStoredProductionMedia, requireFinishedFilmPayment } from "./production-media.mjs";
 
@@ -28,14 +29,13 @@ function approved(actor, email = actor?.email) {
 
 // A queue ticket stays pending while shots are rendering. Only the confirmed
 // progress stage can tell the customer that production is still waiting to start.
-export function productionQueueMessage({ progress, ticket, automaticPending = false, health, now = Date.now() }) {
+export function productionQueueMessage({ progress, ticket, automaticPending = false, health, model = "seedance", recipe = falRecipeVersion(model), now = Date.now() }) {
   if (progress?.stage !== "queued") return {};
   if (automaticPending) return {
     message: "Your paid film is scheduled. The studio is saving its place in the production queue and will retry automatically. You do not need to pay again.",
   };
   const checkedAt = typeof health?.checkedAt === "string" ? Date.parse(health.checkedAt) : NaN;
-  const workerReady = health?.version === 1 && health.ready === true && health.model === "kling"
-    && health.recipe === FAL_RECIPE_VERSION && health.deliveryChecksVersion === 1
+  const workerReady = health?.version === 1 && heartbeatSupports(health, model, recipe) && health.deliveryChecksVersion === 1
     && Number.isFinite(checkedAt) && checkedAt <= now && now - checkedAt <= 180_000;
   return { workerReady, message: !workerReady
     ? "Your film is queued. The studio is waiting for the production worker to confirm it is available. Your payment is saved; you do not need to pay again."
@@ -164,7 +164,8 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       || storedFinishingFailure(saved)?.state === "attention");
     const snapshot = await progress.snapshot({ job: saved, email, queue: queued, mediaReady, needsAttention });
     const health = snapshot.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
-    const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health, now: now() });
+    const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health,
+      model: saved.provider?.model || saved.manifest?.productionPlan?.provider, recipe: saved.provider?.recipe, now: now() });
     return { ...job, mediaReady, progress: snapshot,
       ...(mediaReady ? { status: "completed", preparationOnly: false } : {}),
       ...(job.status === "prepared" && ["creating", "finishing"].includes(snapshot.stage) ? { status: "processing", preparationOnly: false } : {}),
