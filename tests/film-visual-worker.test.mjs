@@ -47,7 +47,7 @@ test('frame extraction uses local-only ffmpeg protocols, fixed sampling time and
 });
 
 test('invalid frame positions, failed extraction and output limits cannot produce reviewable frames', async () => {
-  for (const change of [{ atMs: -1 }, { atMs: Infinity }, { atMs: 15001 }, { atMs: 1.5 }, { path: '' }])
+  for (const change of [{ atMs: -1 }, { atMs: Infinity }, { atMs: 30001 }, { atMs: 1.5 }, { path: '' }])
     await assert.rejects(extractVisualFrame({ path: 'fixture.mp4', atMs: 1000, ...change,
       spawnImpl: () => assert.fail('Do not start invalid extraction') }), failureReason('VISUAL_REVIEW_REQUIRED'));
   for (const scenario of ['short', 'oversized', 'failed', 'unavailable']) {
@@ -128,7 +128,7 @@ test('remote visual review uses the authenticated fixed worker endpoint and boun
     calls++; assert.equal(url, 'https://lineagetheater.com/api/production-worker'); assert.equal(options.redirect, 'error');
     assert.equal(options.credentials, 'omit'); assert.equal(options.cache, 'no-store'); assert.equal(options.method, 'POST');
     assert.equal(options.headers.Authorization, `Bearer ${'a'.repeat(64)}`);
-    assert.deepEqual(JSON.parse(options.body), { action: 'review-film-visuals', ...input });
+    assert.deepEqual(JSON.parse(options.body), { action: 'review-film-visuals', workerProtocol: 2, ...input });
     return new Response(JSON.stringify(f.proof(input.shotId)));
   } });
   assert.deepEqual(await review(input), f.proof('shot-1')); assert.equal(calls, 1);

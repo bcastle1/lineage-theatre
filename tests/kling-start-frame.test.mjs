@@ -30,7 +30,7 @@ function fixture(options = {}) {
   }
   const proof = { version: 1, passed: true, manifestHash, shotId: shot.id, referenceIdentity: frameIdentity,
     bindingHash: digest('fixture-binding'), normalizedImageHash: digest(normalized(startUrl)), receiptPath: 'production/start-frame-reviews/fixture.json' };
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' ? { value: health(options.workerVersion || 3) } : null,
     normalizeKlingReference: async url => { normalization.push(url); return options.changedBytes && url === startUrl ? 'changed-image' : normalized(url); },
     client: { get: async identity => records.get(identity), poll: async identity => records.get(identity), submit: async request => {
@@ -56,7 +56,7 @@ test('version 3 prices every composed frame and refuses older worker capability 
   assert.equal(manifest.productionPlan.characterBindingVersion, 3);
   assert.equal(manifestHash, '601d70f77e912b17cd1f76ee1522f6c42109f693d09b352b524284e6dd6c270f');
   assert.equal(falPlan(manifest, 'kling').referenceCount, 7);
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async () => ({ value: health(version) }), pricing: async () => { prices++; return {
       videoMicroUsdPerSecond: 150000, referenceMicroUsd: 300000, expiresAt: new Date(NOW + 60000).toISOString() }; } });
   await assert.rejects(adapter.quote({ manifest, manifestHash })); assert.equal(prices, 0);

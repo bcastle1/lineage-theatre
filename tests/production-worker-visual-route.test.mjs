@@ -5,8 +5,8 @@ import { createProductionWorkerHandler } from '../api/production-worker.mjs';
 import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { buildFilmManifest, fictionalOperatorProject, productionJobPath } from '../api/_lib/film-production.mjs';
-import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
-import { FAL_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
+import { planKlingShots, planSeedanceShots } from '../api/_lib/kling-film-plan.mjs';
+import { FAL_RECIPE_VERSION, SEEDANCE_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
@@ -17,9 +17,9 @@ import { createStartFrameReviewService } from '../api/_lib/film-start-frame-revi
 const secret = 'a'.repeat(64), now = 1_800_000_000_000, id = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
-async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false } = {}) {
+async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false, seedance = false } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
-  const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, {
+  const manifest = seedance ? planSeedanceShots(buildFilmManifest(fictionalOperatorProject()).manifest) : planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, {
     characterBinding: bindingVersion !== null, ...(bindingVersion === null ? {} : { characterBindingVersion: bindingVersion }),
   });
   if (changeManifest) changeManifest(manifest);
@@ -27,7 +27,7 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
   const job = { id, filmId: manifest.filmId, ownerHash: digest(email), mode: operator ? 'operator-test' : 'customer',
     status: startFrame ? 'processing' : 'awaiting-assembly', manifest, manifestHash,
     ...(startFrame ? { lease: { token: 'current-generation-lease', expiresAt: now + 90_000 } } : {}),
-    provider: { id: 'fal', model: 'kling', recipe: FAL_RECIPE_VERSION },
+    provider: { id: 'fal', model: seedance ? 'seedance' : 'kling', recipe: seedance ? SEEDANCE_RECIPE_VERSION : FAL_RECIPE_VERSION },
     authorization: { environment: 'production', manifestHash, budgetCents: bindingVersion === 3 ? 450 : 300, quoteReference: 'b'.repeat(64) },
     shots: manifest.shots.map(shot => ({ id: shot.id, status: startFrame ? 'processing' : 'completed', requestKey: digest(`${id}:${manifestHash}:${shot.id}`),
       output: { url: `https://v3.fal.media/${shot.id}.mp4`, contentType: 'video/mp4', sizeBytes: 1024, durationSeconds: shot.targetDurationMs / 1000 } })) };
@@ -64,7 +64,7 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     result: { images: [{ url: 'https://v3.fal.media/start-frame.jpg' }] } }, etag: 'starting-frame' });
   const body = startFrame
     ? { action: 'review-start-frame', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, referenceIdentity }
-    : { action: 'review-film-visuals', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
+    : { action: 'review-film-visuals', ...(seedance ? { workerProtocol:2 } : {}), email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
   const env = { LINEAGE_WORKER_SECRET: secret, OPENAI_API_KEY: 'synthetic-visual-key' };
   let modelCalls = 0, paymentCalls = 0, reviewCalls = 0, limiterCalls = 0, afterInference, afterReference;
   const read = async path => { reads.push(path); return clone(records.get(path) ?? null); };
@@ -87,14 +87,14 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     visualReviewFactory: options => {
       reviewCalls++;
       return createFilmVisualReviewService({ ...options, write,
-        generatedPhoto: async () => { if (afterReference) await afterReference(); return image; },
+        generatedPhoto: async () => { assert.equal(seedance, false); if (afterReference) await afterReference(); return image; },
         selectedPhoto: async () => assert.fail('The fixed fictional fixture has no private real-person photograph'),
         fetchImpl: async (url, request) => {
           modelCalls++; assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(request.redirect, 'error');
-          assert.equal(JSON.parse(request.body).store, false);
+          assert.equal(JSON.parse(request.body).store, false); assert.equal(JSON.parse(request.body).model, VISUAL_REVIEW_MODEL);
           if (afterInference) await afterInference();
           return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
-            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(bindingVersion === 3 ? { ...decision, cast: 'consistent' } : decision) }] }] }));
+            output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(seedance || bindingVersion === 3 ? { ...decision, cast: 'consistent' } : decision) }] }] }));
         } });
     },
     startFrameReviewFactory: options => {
@@ -299,4 +299,13 @@ test('missing worker or model credentials and invalid JPEG evidence remain unava
   assert.equal((await model.invoke()).statusCode, 503); assert.equal(model.counts().modelCalls, 0); assert.equal(model.writes.length, 0);
   const invalid = await fixture(); invalid.body.frames[0].dataUrl = `data:image/jpeg;base64,${Buffer.alloc(200).toString('base64')}`;
   assert.notEqual((await invalid.invoke()).statusCode, 200); assert.equal(invalid.counts().modelCalls, 0); assert.equal(invalid.writes.length, 0);
+});
+
+test('new Seedance films use Astra for continuity and require a worker that preserves provider-native audio', async () => {
+  const f = await fixture({seedance:true});
+  const { workerProtocol, ...oldRequest } = f.body;
+  assert.equal((await f.invoke({body:oldRequest})).statusCode,409);
+  assert.equal(f.counts().modelCalls,0);
+  const result = await f.invoke();
+  assert.equal(result.statusCode,200); assert.equal(result.body.passed,true); assert.equal(f.counts().modelCalls,1);
 });

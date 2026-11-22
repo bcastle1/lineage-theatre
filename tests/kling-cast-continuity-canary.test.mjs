@@ -159,6 +159,7 @@ test('live price and immutable grant are rechecked immediately before submission
 function durableClient(fetchImpl, records = new Map()) {
   let revision = 0;
   const client = createFalClient({ key: 'synthetic-offline-key', now: () => at,
+    submissionEndpoints: [FAL_MODELS.reference, FAL_MODELS.kling],
     read: async path => structuredClone(records.get(path) || null),
     write: async (path, value, etag) => {
       const previous = records.get(path); if (previous && previous.etag !== etag) throw Error('conflict');

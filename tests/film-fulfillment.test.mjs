@@ -8,7 +8,7 @@ const moduleUrl = source => `data:text/javascript;base64,${Buffer.from(source).t
 const progressUrl = moduleUrl(await compile("film-production-progress"));
 const load = async name => import(moduleUrl((await compile(name)).replaceAll('"./film-production-progress"', JSON.stringify(progressUrl))));
 const { filmReadyToWatch, filmFulfillmentProgress, generationTimeEstimate } = await load("film-fulfillment");
-const { normalizeGenerationAttempt, generationStatusLabel, generationAttemptExplanation, generationDiagnosticExplanation, generationReplacementRequest } = await load("generation-attempt");
+const { normalizeGenerationAttempt, generationStatusLabel, generationAttemptExplanation, generationDiagnosticExplanation } = await load("generation-attempt");
 const identity = { preparedId: "00000000-0000-4000-8000-000000000001", filmId: "paid-film", manifestHash: "a".repeat(64), orderId: "b".repeat(64) };
 const paid = { status: "captured", charged: true, receiptAvailable: true, requiresReview: false, refundedCents: 0, sandbox: false };
 const finished = { kind: "plan", id: identity.preparedId, filmId: identity.filmId, manifestHash: identity.manifestHash,
@@ -69,23 +69,17 @@ test("owner diagnostics keep only fixed codes and numerical evidence, without en
   for (const recovery of [{ kind: "provider-review-required", canRetry: true }, { kind: "retry", canRetry: false }, []])
     assert.throws(() => normalizeGenerationAttempt({ ...value, recovery }, identity), /could not be verified/);
 });
-test("one replacement needs explicit duplicate consent and the exact server recovery revision", () => {
+test("a historical replacement offer requires operator review and cannot restart rendering", () => {
   const change = "00000000-0000-4000-8000-000000000009";
   const value = { ...identity, status: "uncertain", submittedAt: "2026-09-27T23:00:00Z", elapsedSeconds: 3600, estimateAvailable: false,
     recovery: { kind: "replacement-available", canRetry: true, expectedChangeId: change } };
   const safe = normalizeGenerationAttempt(value, identity);
-  assert.deepEqual(safe.recovery, value.recovery);
-  assert.equal(generationReplacementRequest(safe, identity, false), null);
-  assert.deepEqual(generationReplacementRequest(safe, identity, true), { action: "replaceFilmGeneration", preparedId: identity.preparedId,
-    orderId: identity.orderId, expectedChangeId: change, consent: true, acknowledgePossibleDuplicate: true });
+  assert.deepEqual(safe.recovery, { kind: "provider-review-required", canRetry: false });
   for (const status of ["processing", "submitting", "verifying", "failed"])
     assert.throws(() => normalizeGenerationAttempt({ ...value, status }, identity), /could not be verified/);
   for (const recovery of [{ kind: "replacement-available", canRetry: false, expectedChangeId: change },
     { kind: "replacement-available", canRetry: true }, { kind: "replacement-available", canRetry: true, expectedChangeId: "private" }])
     assert.throws(() => normalizeGenerationAttempt({ ...value, recovery }, identity), /could not be verified/);
-  for (const key of Object.keys(identity)) assert.equal(generationReplacementRequest(safe, { ...identity, [key]: "different" }, true), null);
-  assert.equal(generationReplacementRequest({ ...safe, recovery: { kind: "provider-review-required", canRetry: false } }, identity, true), null);
-  assert.equal(generationReplacementRequest({ ...safe, recovery: undefined }, identity, true), null);
 });
 test("legacy unconfirmed requests explain the missing response and never imply active rendering", () => {
   const value = { ...identity, status: "uncertain", submittedAt: "2026-09-27T23:00:00Z", elapsedSeconds: 3600, estimateAvailable: false,

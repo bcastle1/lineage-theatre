@@ -25,10 +25,10 @@ function storage() {
       records.set(path, { value: structuredClone(value), etag: String(++serial) });
     } };
 }
-const receipt = { request_id: 'fixture-request-123', status_url: 'https://queue.fal.run/fal-ai/kling-video/requests/fixture-request-123/status',
-  response_url: 'https://queue.fal.run/fal-ai/kling-video/requests/fixture-request-123' };
+const receipt = { request_id: 'fixture-request-123', status_url: 'https://queue.fal.run/bytedance/seedance-2.5/requests/fixture-request-123/status',
+  response_url: 'https://queue.fal.run/bytedance/seedance-2.5/requests/fixture-request-123' };
 const json = value => new Response(JSON.stringify(value));
-const submit = { identity: digest('fictional request'), endpoint: FAL_MODELS.kling, input: { prompt: 'Fictional test.' } };
+const submit = { identity: digest('fictional request'), endpoint: FAL_MODELS.seedanceText, input: { prompt: 'Fictional test.' } };
 function klingFixture() {
   const {manifest}=buildFilmManifest(fictionalOperatorProject());
   manifest.shots.forEach((shot,index)=>{shot.startMs=index*12000;shot.targetDurationMs=12000;});
@@ -72,10 +72,10 @@ test('missing configuration is detected before reserving a new paid operation', 
 });
 
 test('fal status and media URLs cannot forward credentials to arbitrary hosts or another request', () => {
-  for (const url of ['https://evil.invalid/r', 'http://queue.fal.run/r', receipt.status_url + '?token=unsafe', receipt.status_url.replace('fixture-request-123', 'another-request-1'), receipt.status_url.replace('/fal-ai/kling-video/', '/other/model/'), receipt.status_url.replace('https://', 'https://user:secret@')]) {
-    assert.throws(() => falRequestUrl(url, FAL_MODELS.kling, receipt.request_id, 'status'));
+  for (const url of ['https://evil.invalid/r', 'http://queue.fal.run/r', receipt.status_url + '?token=unsafe', receipt.status_url.replace('fixture-request-123', 'another-request-1'), receipt.status_url.replace('/bytedance/seedance-2.5/', '/other/model/'), receipt.status_url.replace('https://', 'https://user:secret@')]) {
+    assert.throws(() => falRequestUrl(url, FAL_MODELS.seedanceText, receipt.request_id, 'status'));
   }
-  assert.equal(falRequestUrl(receipt.status_url, FAL_MODELS.kling, receipt.request_id, 'status'), receipt.status_url);
+  assert.equal(falRequestUrl(receipt.status_url, FAL_MODELS.seedanceText, receipt.request_id, 'status'), receipt.status_url);
   for (const url of ['https://fal.media.evil.invalid/file.mp4', 'http://v3.fal.media/file.mp4', 'https://127.0.0.1/file.mp4', 'https://user:secret@v3.fal.media/file.mp4']) assert.throws(() => falMediaUrl(url));
 });
 
@@ -146,7 +146,7 @@ test('reviewed editorial replacements stay bound to the original paid shot and c
   const choice={version:1,originalIdentity:identity,productionId:'fixture-production',manifestHash,model:'seedance',approvedBy:OWNER_EMAIL,promptVersion:FAL_LEGACY_RECIPE_VERSION,replacementIdentity:replacement,requestId:'fixture-replacement-id'};
   const read=async path=>({value:path===userPath(OWNER_EMAIL)?{email:OWNER_EMAIL,role:'owner'}:choice});
   const client={get:async id=>id===replacement?{state:'completed',endpoint:FAL_MODELS.seedance,requestId:choice.requestId,result:{video:{url:'https://v3.fal.media/reviewed.mp4'}}}:null,submit:()=>assert.fail('No new spending'),poll:()=>assert.fail('A completed choice does not need polling')};
-  const adapter=createFalProductionAdapter({model:'seedance',client,read,fetchImpl:async()=>new Response(null,{headers:{'content-type':'video/mp4','content-length':'100'}})});
+  const adapter=falAdapterForSavedProvider({id:'fal', model:'seedance', recipe:FAL_LEGACY_RECIPE_VERSION}, {client,read,fetchImpl:async()=>new Response(null,{headers:{'content-type':'video/mp4','content-length':'100'}})});
   const input={manifest,manifestHash,shot:manifest.shots[0],productionId:choice.productionId,idempotencyKey:key};
   assert.equal((await adapter.reconcileShot(input)).status,'completed');
   choice.manifestHash='c'.repeat(64);await assert.rejects(adapter.reconcileShot(input));
@@ -154,7 +154,7 @@ test('reviewed editorial replacements stay bound to the original paid shot and c
 
 test('unsupported plans and missing quality evidence cannot enable production', async () => {
   const { manifest } = buildFilmManifest(fictionalOperatorProject());
-  assert.equal(createFalProductionAdapter({ key: 'fixture-key', qualification: null }).available, false);
+  assert.equal(createFalProductionAdapter({ model: 'kling', key: 'fixture-key', qualification: null }).available, false);
   for (const change of [m => { m.shots[0].targetDurationMs = 31000; }, m => { m.shots[0].characterIds = ['missing']; }, m => { m.shots[0].narration = 'word '.repeat(500); }, m => { m.shots[1].startMs++; }]) {
     const changed = structuredClone(manifest); change(changed); assert.throws(() => falPlan(changed, 'seedance'));
   }
@@ -224,7 +224,7 @@ test('Kling qualification is scoped technical evidence and requires the current 
     const changed=structuredClone(q);mutate(changed);assert.equal(qualifiedFalRelease(changed,'kling'),false);
   }
   const heartbeat={recipe:FAL_RECIPE_VERSION,model:'kling',ready:true,checkedAt:new Date(at).toISOString()};
-  const adapter=createFalProductionAdapter({qualification:q,key:'fixture',requireWorker:true,read:async()=>({value:heartbeat}),
+  const adapter=createFalProductionAdapter({ model: 'kling',qualification:q,key:'fixture',requireWorker:true,read:async()=>({value:heartbeat}),
     now:()=>at,pricing:async()=>q.rates});
   await assert.rejects(adapter.validateManifest(klingFixture().manifest),/temporarily unavailable/);
   heartbeat.deliveryChecksVersion=1;
@@ -233,14 +233,32 @@ test('Kling qualification is scoped technical evidence and requires the current 
   assert.deepEqual(adapter.evidence.knownLimitations,q.knownLimitations);
 });
 
-test('legacy endpoints cannot make a new POST but their exact saved operations remain readable',async()=>{
-  for(const endpoint of [FAL_MODELS.wan,FAL_MODELS.seedance]){
+test('retired endpoints cannot make a new POST but their exact saved operations remain readable',async()=>{
+  for(const endpoint of [FAL_MODELS.wan,FAL_MODELS.kling,FAL_MODELS.reference]){
     const data=storage(),client=createFalClient({...data,key:'fixture',fetchImpl:()=>assert.fail('No legacy submission')});
     await assert.rejects(client.submit({...submit,endpoint}),{code:'FAL_LEGACY_SUBMISSION_DISABLED'});
     assert.equal(data.records.size,0);
     const saved={version:1,identity:submit.identity,endpoint,inputHash:digest(JSON.stringify(submit.input)),state:'completed',result:{}};
     await data.write(`production/fal/requests/${submit.identity}.json`,saved);
     assert.deepEqual(await client.submit({...submit,endpoint}),saved);
+  }
+});
+
+test('both Seedance US routes submit once and poll their exact saved queue receipts', async () => {
+  for (const endpoint of [FAL_MODELS.seedance, FAL_MODELS.seedanceText]) {
+    const data = storage(), calls = [];
+    const client = createFalClient({ ...data, key: 'fixture-key', fetchImpl: async (url, options) => {
+      calls.push([options.method, url]);
+      if (options.method === 'POST') return json(receipt);
+      return url.endsWith('/status') ? json({ status: 'COMPLETED', request_id: receipt.request_id })
+        : json({ video: { url: 'https://v3.fal.media/synthetic-seedance.mp4' } });
+    } });
+    const request = { ...submit, identity: digest(endpoint), endpoint };
+    assert.equal((await client.submit(request)).requestId, receipt.request_id);
+    assert.equal((await client.submit(request)).requestId, receipt.request_id);
+    assert.equal((await client.poll(request.identity)).state, 'completed');
+    assert.equal((await client.poll(request.identity)).state, 'completed');
+    assert.deepEqual(calls, [['POST', `https://queue.fal.run/${endpoint}`], ['GET', receipt.status_url], ['GET', receipt.response_url]]);
   }
 });
 
@@ -279,7 +297,7 @@ test('historical unfinished references are reconciled without creating a missing
 
 test('a wrong-model durable request cannot be reused or polled under a Kling identity',async()=>{
   const {manifest,manifestHash}=klingFixture(),idempotencyKey=digest('wrong-model');
-  const adapter=createFalProductionAdapter({client:{get:async()=>({endpoint:FAL_MODELS.wan,state:'queued',requestId:'wrong-model-request'}),
+  const adapter=createFalProductionAdapter({ model: 'kling',client:{get:async()=>({endpoint:FAL_MODELS.wan,state:'queued',requestId:'wrong-model-request'}),
     poll:()=>assert.fail('Do not poll a mismatched record'),submit:()=>assert.fail()},read:async()=>null});
   await assert.rejects(adapter.reconcileShot({manifest,manifestHash,shot:manifest.shots[0],productionId:'fixture',idempotencyKey}));
 });
@@ -352,7 +370,7 @@ test('stricter prompt validation cannot replay or prevent reconciliation of save
     const client={get:async id=>{assert.equal(id,identity);return saved;},
       poll:async id=>{assert.equal(id,identity);polls++;return saved;},
       submit:()=>assert.fail('A saved request must never be resubmitted')};
-    const adapter=createFalProductionAdapter({client,read:async()=>null,fetchImpl:async(url,options)=>{
+    const adapter=createFalProductionAdapter({ model: 'kling',client,read:async()=>null,fetchImpl:async(url,options)=>{
       assert.equal(url,saved.result.video.url);assert.equal(options.method,'HEAD');
       return new Response(null,{headers:{'content-type':'video/mp4','content-length':'32'}});
     }});
@@ -365,7 +383,7 @@ test('stricter prompt validation cannot replay or prevent reconciliation of save
 test('an oversized new Kling prompt fails before any reference or video spending',async()=>{
   const {manifest}=klingFixture();manifest.shots[0].visual='é'.repeat(1100);
   const manifestHash=digest(JSON.stringify(manifest));
-  const adapter=createFalProductionAdapter({client:{get:async()=>null,submit:()=>assert.fail('No paid request')},
+  const adapter=createFalProductionAdapter({ model: 'kling',client:{get:async()=>null,submit:()=>assert.fail('No paid request')},
     read:async()=>null,selectedPhoto:()=>assert.fail('No photo access is needed')});
   await assert.rejects(adapter.submitShot({manifest,manifestHash,shot:manifest.shots[0],productionId:'new-fixture',
     idempotencyKey:digest('oversized fresh request'),authorizeSpend:()=>assert.fail('No spending authorization')}),FalProductionPlanError);

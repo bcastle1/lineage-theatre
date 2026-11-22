@@ -65,6 +65,7 @@ async function fixture(decision = pass) {
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }));
     } });
   const client = createFalClient({ key: 'synthetic-fal-key', read, write, now: () => NOW,
+    submissionEndpoints: [FAL_MODELS.reference, FAL_MODELS.kling],
     fetchImpl: async (url, options) => {
       if (options.method === 'GET') {
         assert.equal(url, 'https://queue.fal.run/fal-ai/kling-video/requests/integration-video/status');
@@ -76,7 +77,7 @@ async function fixture(decision = pass) {
         status_url: 'https://queue.fal.run/fal-ai/kling-video/requests/integration-video/status',
         response_url: 'https://queue.fal.run/fal-ai/kling-video/requests/integration-video' }));
     } });
-  const adapter = createFalProductionAdapter({ key: 'synthetic-fal-key', read, client, now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-fal-key', read, client, now: () => NOW,
     normalizeKlingReference: url => klingReferenceData(url, { fetchImpl: mediaFetch }),
     validateStartFrame: input => review({ ...input, productionId: input.preparedId }) });
   const request = { email, productionId, manifest, manifestHash, shot,

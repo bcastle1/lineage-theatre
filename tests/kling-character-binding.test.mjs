@@ -144,7 +144,7 @@ test('compact element prompts preserve all cast bindings, scene context and spee
   assert.ok(Buffer.byteLength(input.prompt) < 2400); assert.ok(Buffer.byteLength(JSON.stringify(input.prompt)) < 2400);
   const project = fictionalOperatorProject(); project.scenes[0].visual += 'é'.repeat(2000);
   const tooLong = build(project);
-  const adapter = createFalProductionAdapter({ read: async () => null,
+  const adapter = createFalProductionAdapter({ model: 'kling', read: async () => null,
     client: { get: async () => null, submit: () => assert.fail('No provider submission') } });
   await assert.rejects(adapter.submitShot({ manifest: tooLong, manifestHash: digest(JSON.stringify(tooLong)),
     shot: tooLong.shots[0], productionId: 'fixture-production', idempotencyKey: digest('oversize-binding'),
@@ -171,7 +171,7 @@ test('retired version 1 never reprices or creates another request but its origin
   const idempotencyKey = digest('fixture-production:' + manifestHash + ':' + manifest.shots[0].id);
   const identity = digest(`${FAL_RECIPE_VERSION}:kling:${idempotencyKey}`); let saved, polled = 0;
   assert.equal(identity, '5d5593f5df8ec1506ebd268206e0c860ba3424158afb4ae424c845e8a4a9b5be');
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW, read: async () => null,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW, read: async () => null,
     pricing: () => assert.fail('No pricing for retired contracts'),
     client: { get: async id => id === identity ? saved : null,
       poll: async id => { assert.equal(id, identity); polled++; return saved; }, submit: () => assert.fail('No new provider operations') } });
@@ -189,7 +189,7 @@ test('retired version 1 finishes polling an existing reference even when another
   const manifest = historicalManifest(historical[2]), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production';
   const identity = digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${manifest.screenplay.characters[0].id}`);
   let saved = { endpoint: FAL_MODELS.reference, state: 'queued', requestId: 'original-reference-request' }, polls = 0;
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', read: async () => null,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', read: async () => null,
     selectedPhoto: () => assert.fail('No photo read for retired work'),
     client: { get: async id => id === identity ? saved : null,
       poll: async id => { assert.equal(id, identity); polls++; return saved; }, submit: () => assert.fail('No POST') } });
@@ -203,7 +203,7 @@ test('retired version 1 finishes polling an existing reference even when another
 test('additional views depend on the exact completed main image and all seven operations retain stable identities', async () => {
   const manifest = build(), manifestHash = digest(JSON.stringify(manifest)), productionId = 'fixture-production';
   const records = new Map(), submissions = []; let health = healthy();
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' ? { value: health } : null,
     normalizeKlingReference: async url => 'normalized:' + url,
     client: { get: async id => records.get(id), poll: async id => records.get(id), submit: async request => {
@@ -245,7 +245,7 @@ test('uncertain additional views never retry and duplicate returned images canno
         : { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: outcome === 'duplicate-url'
           ? frontRefs(manifest)[character.id] : refs(manifest)[character.id].referenceImageUrls[0] }] } });
     }
-    const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+    const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
       read: async path => path === 'production/worker-health.json' ? { value: healthy() } : null,
       normalizeKlingReference: async url => outcome === 'duplicate-bytes' ? 'same-normalized-image' : url,
       client: { get: async id => records.get(id), submit: () => assert.fail('No new POST') } });
@@ -269,7 +269,7 @@ test('a selected photo remains the main image and only its conditioned additiona
   const other = manifest.screenplay.characters[1];
   records.set(digest(`${FAL_RECIPE_VERSION}:cast:${productionId}:${manifestHash}:${other.id}`),
     { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: frontRefs(manifest)[other.id] }] } });
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' ? { value: { ...healthy(), referencePhotoVersion: 1 } } : null,
     selectedPhoto: async (saved, cast) => { assert.equal(saved, manifest); assert.equal(cast.id, character.id); return photo; },
     client: { get: async id => records.get(id), submit: async request => { submissions.push(request); return { state: 'queued' }; } } });
@@ -282,7 +282,7 @@ test('a selected photo remains the main image and only its conditioned additiona
 });
 test('new binding requires a fresh capable worker before quotes or any new reference or video request', async () => {
   const manifest = build(), manifestHash = digest(JSON.stringify(manifest)); let health, prices = 0, submissions = 0;
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' && health ? { value: health } : null,
     pricing: async () => { prices++; return { videoMicroUsdPerSecond: 150000, referenceMicroUsd: 300000, expiresAt: new Date(NOW + 60000).toISOString() }; },
     client: { get: async () => null, submit: () => { submissions++; return { state: 'queued' }; } } });
@@ -306,7 +306,7 @@ test('provider dispatch normalizes each element image once and keeps completed r
   for (const character of manifest.screenplay.characters) records.set(characterViewIdentity(productionId, manifestHash, character.id),
     { state: 'completed', endpoint: FAL_MODELS.reference, result: { images: [{ url: refs(manifest)[character.id].referenceImageUrls[0] }] } });
   let submitted; const normalized = [];
-  const adapter = createFalProductionAdapter({ key: 'synthetic-key', now: () => NOW,
+  const adapter = createFalProductionAdapter({ model: 'kling', key: 'synthetic-key', now: () => NOW,
     read: async path => path === 'production/worker-health.json' ? { value: healthy() } : null,
     normalizeKlingReference: async url => { normalized.push(url); return 'normalized:' + url; },
     client: { get: async id => records.get(id), submit: async request => { submitted = request; return { state: 'queued' }; } } });

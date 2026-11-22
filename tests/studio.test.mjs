@@ -48,7 +48,7 @@ test("customer capabilities are an explicit allowlist, excluding detailed suppli
   assert.deepEqual(result.body,{
     story:true,production:false,productionProvider:null,billing:false,
     pricing:{currency:"USD",estimate:{status:"unavailable",amountCents:null,reason:"Your film's price will be confirmed before you approve a payment."},chargeReady:false},
-    quality:{label:"Video playback and script checks are required before delivery",verified:false},
+    quality:{label:"Video playback, audio duration and visual review are checked before delivery",verified:false},
   });
   assertCustomerSafe(result);
   const unverified=await harness({connections:async()=>({...ready(),story:"true",magiclight:"true",billing:1,quality:{verified:"true",label:"Unverified supplier tier"}})}).run("capabilities");
