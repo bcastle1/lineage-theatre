@@ -2,19 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { digest } from '../api/_lib/auth.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
-import { createFilmVisualReviewService, verifiedVisualDecision, visualSampleTimes, visualReviewBinding,
+import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, verifiedVisualDecision, visualSampleTimes, visualReviewBinding,
   visualReceiptPath, verifyFilmVisualReceipts, boundedVisualJson } from '../api/_lib/film-visual-review.mjs';
 
 // The pixels and model responses below are synthetic. No inference, real
 // photographs, payment, or provider requests are used by these tests.
 const email = 'visual-fixture@example.invalid', id = '11111111-1111-4111-8111-111111111111';
 const pass = () => ({ appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] });
-const jsonResult = decision => ({ status: 'completed', model: STORY_MODEL, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
+const jsonResult = decision => ({ status: 'completed', model: VISUAL_REVIEW_MODEL, output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
 const dataImage = async color => `data:image/jpeg;base64,${(await sharp({ create: { width: 96, height: 96, channels: 3, background: color } }).jpeg().toBuffer()).toString('base64')}`;
 
 async function fixture({ bindingVersion = 2 } = {}) {
@@ -156,9 +155,9 @@ test('racing requests, service restarts and successful cache reuse issue a singl
 
 test('unavailable, malformed, refused and incomplete model results never gain an approved receipt or repeat inference', async () => {
   const outcomes = [() => { throw new Error('lost network response'); }, () => new Response('{}', { status: 503 }),
-    () => new Response('{broken'), () => new Response(JSON.stringify({ model: STORY_MODEL, status: 'incomplete', output: [] })),
-    () => new Response(JSON.stringify({ model: STORY_MODEL, status: 'completed', output: [{ content: [{ type: 'refusal', refusal: 'No review' }] }] })),
-    () => new Response(JSON.stringify({ model: STORY_MODEL, status: 'completed', output: [{ content: [{ type: 'output_text', text: '{broken' }] }] })),
+    () => new Response('{broken'), () => new Response(JSON.stringify({ model: VISUAL_REVIEW_MODEL, status: 'incomplete', output: [] })),
+    () => new Response(JSON.stringify({ model: VISUAL_REVIEW_MODEL, status: 'completed', output: [{ content: [{ type: 'refusal', refusal: 'No review' }] }] })),
+    () => new Response(JSON.stringify({ model: VISUAL_REVIEW_MODEL, status: 'completed', output: [{ content: [{ type: 'output_text', text: '{broken' }] }] })),
     () => new Response(JSON.stringify({ ...jsonResult(pass()), model: 'different-model' })),
     () => new Response(JSON.stringify(jsonResult({ ...pass(), wardrobe: 'unsure' })))];
   for (const outcome of outcomes) {

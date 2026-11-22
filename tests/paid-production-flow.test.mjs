@@ -13,9 +13,8 @@ import { createAutomaticProduction, automaticProductionPath } from '../api/_lib/
 import { createFalFunding } from '../api/_lib/fal-funding.mjs';
 import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
-import { createFilmVisualReviewService } from '../api/_lib/film-visual-review.mjs';
+import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService } from '../api/_lib/film-visual-review.mjs';
 import { createFilmVisualReviewer } from '../scripts/review-film-visuals.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
 import { verifyPublishedFilm } from '../scripts/production-worker.mjs';
 import { streamProductionMedia } from '../api/_lib/production-media.mjs';
 
@@ -137,11 +136,11 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
       return (await payments.authorizeProduction({ email, preparedId: id, manifestHash: job.manifestHash, orderId: order.id })).allowed === true;
     },
     fetchImpl: async (url, options) => {
-      assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(JSON.parse(options.body).model, STORY_MODEL); calls.visualReviews++;
+      assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(JSON.parse(options.body).model, VISUAL_REVIEW_MODEL); calls.visualReviews++;
       if (visualResult === 'uncertain') throw new Error('synthetic lost model response');
       const decision = { cast: 'consistent', appearance: visualResult === 'mismatch' ? 'mismatch' : 'consistent', wardrobe: 'consistent',
         sceneAction: 'consistent', imageIntegrity: 'consistent', findings: visualResult === 'mismatch' ? ['appearance-drift'] : [] };
-      return json({ status: 'completed', model: STORY_MODEL, output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
+      return json({ status: 'completed', model: VISUAL_REVIEW_MODEL, output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] });
     } });
   const reviewVisuals = createFilmVisualReviewer({ extract: async () => imageData,
     review: async ({ email, preparedId, shotId, frames }) => visualService({ email, id: preparedId, shotId, frames,

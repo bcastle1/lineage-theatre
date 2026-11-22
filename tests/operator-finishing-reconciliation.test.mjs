@@ -9,7 +9,6 @@ import { FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
 import { digest, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { visualReceiptPath } from '../api/_lib/film-visual-review.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
 const now = Date.parse('2026-11-05T20:00:00Z'), id = '11111111-1111-4111-8111-111111111111', email = OWNER_EMAIL;
 function fixture() {
   const manifest = planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, { characterBindingVersion: 2 });
@@ -21,7 +20,7 @@ function fixture() {
       contentType: 'video/mp4', sizeBytes: 1000, durationSeconds: shot.targetDurationMs / 1000 } })) };
   const binding = { version: 1, manifestHash, shotId: job.shots[0].id, outputHash: digest(JSON.stringify(job.shots[0].output)),
     precedingOutputHash: null, frameHashes: ['a', 'b', 'c'].map(value => value.repeat(64)) }, bindingHash = digest(JSON.stringify(binding));
-  const receipt = { version: 1, state: 'reviewed', model: STORY_MODEL, binding, bindingHash, reviewedAt: new Date(now - 1000).toISOString(),
+  const receipt = { version: 1, state: 'reviewed', model: 'gpt-6-astra', binding, bindingHash, reviewedAt: new Date(now - 1000).toISOString(),
     decision: { appearance: 'consistent', wardrobe: 'mismatch', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: ['wardrobe-change'] } };
   const jobPath = productionJobPath(email, id), receiptPath = visualReceiptPath(ownerHash, id, bindingHash);
   const leasePath = `production/operator-canaries/${ownerHash}/${id}/finishing-lease.json`;

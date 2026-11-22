@@ -1,12 +1,12 @@
 import sharp from 'sharp';
 import { digest, readRecord, writeRecord } from './auth.mjs';
-import { STORY_MODEL } from './story.mjs';
 import { productionPhotoData } from './production-photo-reference.mjs';
 import { falReferenceData } from './fal-reference.mjs';
 import { falRequestPath, FAL_MODELS } from './fal-client.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
+export const VISUAL_REVIEW_MODEL = 'gpt-6-astra';
 export const VISUAL_REVIEW_VERSION = 1;
 export const visualSampleTimes = shot => [.15, .5, .85].map(fraction => Math.round(shot.targetDurationMs * fraction));
 const failure = code => Object.assign(new Error('The film needs visual continuity verification.'), { code });
@@ -113,7 +113,7 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     const path = visualReceiptPath(job.ownerHash, id, bindingHash);
     const old = await read(path);
     const receipt = value => {
-      requireValue(value?.version === 1 && value.model === STORY_MODEL && value.state === 'reviewed'
+      requireValue(value?.version === 1 && value.model === VISUAL_REVIEW_MODEL && value.state === 'reviewed'
         && value.bindingHash === bindingHash && digest(JSON.stringify(value.binding)) === bindingHash);
       const { passed } = verifiedVisualDecision(value.decision, checkCast);
       return { version: 1, bindingHash, manifestHash: job.manifestHash, shotId, passed, receiptPath: path };
@@ -137,18 +137,18 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
     // Claim before inference. Lost replies never cause unlimited repeated model
     // calls. A review is reused only for the exact source clips and frame bytes.
-    try { await write(path, { version: 1, state: 'submitting', binding, bindingHash, model: STORY_MODEL,
+    try { await write(path, { version: 1, state: 'submitting', binding, bindingHash, model: VISUAL_REVIEW_MODEL,
       attempts: (old?.value.attempts || 0) + 1, createdAt: new Date(now()).toISOString() }, old?.etag); }
     catch { const recovered = await read(path); if (recovered?.value.state === 'reviewed') return receipt(recovered.value); throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     const claim = await read(path);
-    requireValue(claim?.value?.state === 'submitting' && claim.value.version === 1 && claim.value.model === STORY_MODEL
+    requireValue(claim?.value?.state === 'submitting' && claim.value.version === 1 && claim.value.model === VISUAL_REVIEW_MODEL
       && claim.value.bindingHash === bindingHash && digest(JSON.stringify(claim.value.binding)) === bindingHash
       && typeof claim.etag === 'string' && claim.etag.length > 0);
     let result;
     try {
       const response = await fetchImpl('https://api.openai.com/v1/responses', { method: 'POST', redirect: 'error',
         headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(100_000),
-        body: JSON.stringify({ model: STORY_MODEL, store: false, reasoning: { effort: 'low' }, max_output_tokens: 1800,
+        body: JSON.stringify({ model: VISUAL_REVIEW_MODEL, store: false, reasoning: { effort: 'low' }, max_output_tokens: 1800,
           instructions: instructions + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
       if (!response.ok) {
         await response.body?.cancel();
@@ -161,8 +161,8 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
         throw failure('VISUAL_REVIEW_UNCERTAIN');
       }
       result = await boundedVisualJson(response);
-      requireValue(result.status === 'completed' && (result.model === STORY_MODEL || typeof result.model === 'string'
-        && result.model.startsWith(`${STORY_MODEL}-`) && /^\d{4}-\d{2}-\d{2}$/.test(result.model.slice(STORY_MODEL.length + 1)))
+      requireValue(result.status === 'completed' && (result.model === VISUAL_REVIEW_MODEL || typeof result.model === 'string'
+        && result.model.startsWith(`${VISUAL_REVIEW_MODEL}-`) && /^\d{4}-\d{2}-\d{2}$/.test(result.model.slice(VISUAL_REVIEW_MODEL.length + 1)))
         && !result.output?.some(item => item.type === 'refusal' || item.content?.some(part => part.type === 'refusal')));
     } catch (error) { if (error?.code === 'VISUAL_REVIEW_RATE_LIMITED') throw error; throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     const raw = result.output?.flatMap(item => item.content || []).filter(item => item.type === 'output_text').map(item => item.text).join('');
@@ -189,7 +189,7 @@ export async function verifyFilmVisualReceipts({ email, id, manifestHash, manife
     requireValue(proof.shotId === shot.id && proof.passed === true && proof.manifestHash === manifestHash
       && proof.receiptPath === visualReceiptPath(digest(email), id, proof.bindingHash));
     const stored = (await read(proof.receiptPath))?.value;
-    requireValue(stored?.version === 1 && stored.binding?.version === 1 && stored.model === STORY_MODEL && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
+    requireValue(stored?.version === 1 && stored.binding?.version === 1 && stored.model === VISUAL_REVIEW_MODEL && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
       && digest(JSON.stringify(stored.binding)) === proof.bindingHash && stored.binding.manifestHash === manifestHash
       && stored.binding.shotId === shot.id && job.shots[index].id === shot.id && job.shots[index].status === 'completed'
       && stored.binding.outputHash === digest(JSON.stringify(job.shots[index].output))

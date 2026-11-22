@@ -9,8 +9,7 @@ import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { FAL_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
-import { createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
 import { createStartFrameReviewService } from '../api/_lib/film-start-frame-review.mjs';
 
 // Exercise the real route, reference lookup, JPEG validation, receipt writing,
@@ -94,7 +93,7 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
           modelCalls++; assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(request.redirect, 'error');
           assert.equal(JSON.parse(request.body).store, false);
           if (afterInference) await afterInference();
-          return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+          return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
             output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(bindingVersion === 3 ? { ...decision, cast: 'consistent' } : decision) }] }] }));
         } });
     },
@@ -105,7 +104,7 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
         normalizeStartImage: async () => { if (afterReference) await afterReference(); return image; },
         fetchImpl: async () => {
           modelCalls++; if (afterInference) await afterInference();
-          return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+          return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
             output: [{ content: [{ type: 'output_text', text: JSON.stringify({ ...decision, cast: 'consistent' }) }] }] }));
         } });
     } });

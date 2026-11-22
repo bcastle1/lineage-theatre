@@ -18,11 +18,11 @@ import { localVideoHandler, aiVideoHandler } from "./_lib/local-video-handler.mj
 import { productionAuthorizationDiagnostic } from "./_lib/production-authorization-diagnostics.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
-  let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6 Astra story development."};
+  let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6.2 Astra story development."};
   if(key) {
     try {
       const response=await fetchImpl(`https://api.openai.com/v1/models/${STORY_MODEL}`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(10_000)});
-      story={available:response.ok,reason:response.ok?"GPT-6 Astra is connected. Generation remains subject to the project's quota.":"The connected OpenAI project cannot access GPT-6 Astra. Check model access and the server credential."};
+      story={available:response.ok,reason:response.ok?"GPT-6.2 Astra is connected. Generation remains subject to the project's quota.":"The connected OpenAI project cannot access GPT-6.2 Astra. Check model access and the server credential."};
     } catch {story={available:false,reason:"The Astra connection could not be checked. Your materials remain saved."};}
   }
   const production=productionReadiness({pricingSettings,filmService});

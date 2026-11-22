@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { digest } from '../api/_lib/auth.mjs';
-import { STORY_MODEL } from '../api/_lib/story.mjs';
+import { VISUAL_REVIEW_MODEL } from '../api/_lib/film-visual-review.mjs';
 import { buildFilmManifest, fictionalOperatorProject } from '../api/_lib/film-production.mjs';
 import { planKlingShots } from '../api/_lib/kling-film-plan.mjs';
 import { createFalProductionAdapter, FAL_RECIPE_VERSION, characterViewIdentity, startFrameIdentity } from '../api/_lib/fal-production.mjs';
@@ -61,7 +61,7 @@ async function fixture(decision = pass) {
       assert.ok(body.text.format.schema.required.includes('cast'));
       assert.equal(body.input[0].content.filter(part => part.type === 'input_image').length, 3);
       if (expireDuringReview) canReview = false;
-      return new Response(JSON.stringify({ status: 'completed', model: STORY_MODEL,
+      return new Response(JSON.stringify({ status: 'completed', model: VISUAL_REVIEW_MODEL,
         output: [{ content: [{ type: 'output_text', text: JSON.stringify(decision) }] }] }));
     } });
   const client = createFalClient({ key: 'synthetic-fal-key', read, write, now: () => NOW,
