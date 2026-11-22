@@ -1460,7 +1460,7 @@ export default function Admin({
                 </div>
                 {(
                   [
-                    ["Story development", "GPT-6 Astra", overview?.connections.story],
+                    ["Story development", "GPT-6.2 Astra", overview?.connections.story],
                     ["Film production", "Realistic film service", overview?.connections.magiclight],
                     ["Payments & refunds", "QuickBooks", overview?.connections.billing],
                   ] as const
