@@ -1461,7 +1461,7 @@ export default function Admin({
                 {(
                   [
                     ["Story development", "GPT-6.2 Astra", overview?.connections.story],
-                    ["Film production", "Realistic film service", overview?.connections.magiclight],
+                    ["Film production", "Seedance 2.5 US via fal", overview?.connections.magiclight],
                     ["Payments & refunds", "QuickBooks", overview?.connections.billing],
                   ] as const
                 ).map(([label, provider, connection]) => (
