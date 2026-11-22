@@ -1,29 +1,20 @@
-// Explicit operator recovery for an exact already-paid film identified by its
-// order, prepared-job reference and immutable manifest hash.
-// This entry point has no generation, quote, payment, or provider-submit calls.
-import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { constants as fsConstants } from 'node:fs';
+// Retrieve original clips and publish an existing, verified repair preview for a paid film.
+import { createHash } from 'node:crypto';
 import { get, put } from '@vercel/blob';
-import { mkdir, readFile, writeFile, lstat, realpath, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, lstat, realpath } from 'node:fs/promises';
 import { dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { digest, readRecord, writeRecord, userPath } from '../api/_lib/auth.mjs';
 import { OWNER_EMAIL, isOwner, accessStatusForUser } from '../api/_lib/access.mjs';
-import { createFilmProductionService, productionJobPath } from '../api/_lib/film-production.mjs';
+import { productionJobPath } from '../api/_lib/film-production.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { requireFinishedFilmPayment } from '../api/_lib/production-media.mjs';
-import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { falProductionAdapter, FAL_LEGACY_RECIPE_VERSION as FAL_RECIPE_VERSION } from '../api/_lib/fal-production.mjs';
-import { createWorkerAssembly, downloadProductionClip, verifyPublishedFilm } from './production-worker.mjs';
-import { reviewFilmSpeech } from './review-film-speech.mjs';
-import { rebuildFilmSoundtrack, soundtrackFailureDiagnostic } from './rebuild-film-soundtrack.mjs';
-import { assembleFilm, verifyFilmMedia, filmCaptions } from './assemble-film.mjs';
-import { createRepairSpeechResolver } from './repair-name-proof.mjs';
+import { downloadProductionClip } from './production-worker.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 const KIND = 'lineage-paid-soundtrack-repair-v1';
-const MAX_AGE = 24 * 3600_000, LEASE_MS = 30 * 60_000;
+const MAX_AGE = 24 * 3600_000;
 const hash = value => digest(JSON.stringify(value));
 const fail = code => Object.assign(new Error('The exact paid-film soundtrack recovery could not be confirmed.'), { code });
 const same = (a, b) => hash(a) === hash(b);
@@ -101,69 +92,6 @@ async function validateLocalSources(snapshot, root) {
   }
 }
 
-// Operator recovery uses the already-cached medium recognizer. Raw words and
-// timestamps stay in the private work directory even if exact matching fails.
-// No script text or recognition hint is supplied to the recognizer.
-function repairTranscriber(root, { python = process.env.PYTHON_PATH || 'python3', now = Date.now, receiptRoot = root } = {}) {
-  const reviewDirectory = join(receiptRoot, 'review', randomUUID());
-  return async (audioPath, { contextSilence = false } = {}) => {
-    const before = await localFile(audioPath, root);
-    await mkdir(reviewDirectory, { recursive: true, mode: 0o700 });
-    const transcript = await new Promise((resolveTranscript, reject) => {
-      const args = [fileURLToPath(new URL('./transcribe-film.py', import.meta.url)), before.path, '--model', 'medium.en',
-        ...(contextSilence ? ['--context-silence'] : [])];
-      const child = spawn(python, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-      const chunks = []; let length = 0, finished = false;
-      const end = (error, value) => { if (finished) return; finished = true; clearTimeout(timer); error ? reject(error) : resolveTranscript(value); };
-      const timer = setTimeout(() => { child.kill(); end(fail('REPAIR_TRANSCRIPTION_TIMEOUT')); }, 10 * 60_000);
-      child.stdout.on('data', chunk => {
-        length += chunk.length;
-        if (length > 500_000) { child.kill(); end(fail('REPAIR_TRANSCRIPTION_INVALID')); }
-        else chunks.push(chunk);
-      });
-      child.once('error', () => end(fail('REPAIR_TRANSCRIPTION_FAILED')));
-      child.once('close', code => {
-        if (code !== 0) { end(fail('REPAIR_TRANSCRIPTION_FAILED')); return; }
-        try { end(null, JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-        catch { end(fail('REPAIR_TRANSCRIPTION_INVALID')); }
-      });
-    });
-    const after = await localFile(audioPath, root);
-    if (after.sha256 !== before.sha256) throw fail('REPAIR_AUDIO_CHANGED');
-    const receipt = { version: 1, model: 'medium.en', sourceSha256: before.sha256, sourceFile: relative(root, before.path),
-      contextSilence, checkedAt: new Date(now()).toISOString(), transcript };
-    await writeFile(join(reviewDirectory, `${before.sha256}-${contextSilence ? 'context' : 'normal'}.json`),
-      JSON.stringify(receipt, null, 2), { flag: 'wx', mode: 0o600 });
-    return transcript;
-  };
-}
-
-async function finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices, provenance, ffmpeg, constructionRoot = root }, dependencies) {
-  const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
-  const speechReview = await reviewFilmSpeech({ manifest: snapshot.originalJob.manifest, clips, ffmpeg,
-    speakerAliases: voices.speakerAliases,
-    transcribe: repairTranscriber(root, { now }), resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest,
-      manifestHash: snapshot.manifestHash, voices, provenance, constructionRoot, receiptRoot: root }) });
-  if (speechReview?.passed !== true) throw fail('REPAIR_SPEECH_UNVERIFIED');
-  const selectedAudio = [];
-  for (const [index, clip] of clips.entries()) {
-    const audio = await localFile(clip.audioPath, root), visual = await localFile(clip.path, root);
-    if (visual.sha256 !== snapshot.sources[index].sha256 || audio.sha256 === visual.sha256) throw fail('REPAIR_SOURCE_CHANGED');
-    selectedAudio.push({ shotId: clip.shotId, filename: relative(root, audio.path), sha256: audio.sha256, sizeBytes: audio.sizeBytes });
-  }
-  const preview = await assembleFilm({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
-    clips, outputPath: join(root, 'preview.mp4'), ffmpeg, technicalSample: false });
-  const fresh = await context(snapshot, { read, now }); assertSnapshot(snapshot, fresh, now());
-  if (fresh.queue.etag !== snapshot.queueEtag) throw fail('REPAIR_QUEUE_CHANGED');
-  const build = { kind: KIND, version: 1, state: 'preview-ready', snapshotSha256, orderId: snapshot.orderId,
-    preparedId: snapshot.preparedId, manifestHash: snapshot.manifestHash, createdAt: new Date(now()).toISOString(),
-    voices, provenance, constructionRoot, sources: snapshot.sources, selectedAudio, speechReview, preview, recognitionModel: 'medium.en' };
-  const bytes = Buffer.from(JSON.stringify(build, null, 2)), buildPath = join(root, 'build.json');
-  await writeFile(buildPath, bytes, { flag: 'wx', mode: 0o600 });
-  return { state: 'preview-ready', buildPath, buildSha256: digest(bytes), previewPath: preview.outputPath,
-    previewSha256: preview.sha256, durationSeconds: preview.durationSeconds, speechVerified: true, providerSubmissions: 0 };
-}
-
 // Preparation is read-only against storage and the video provider. Its local
 // snapshot and unchanged source clips remain available if recovery fails.
 export async function preparePaidFilmSoundtrackRepair({ orderId, preparedId, manifestHash, outputDir }, dependencies = {}) {
@@ -192,77 +120,6 @@ export async function preparePaidFilmSoundtrackRepair({ orderId, preparedId, man
   return { state: 'prepared', snapshotPath, snapshotSha256: digest(bytes), sourceCount: sources.length };
 }
 
-// Build and inspect the real replacement soundtrack before any remote state is
-// changed. The subsequent apply copies these exact reviewed audio bytes.
-export async function buildPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha256, outputDir, voices,
-  ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg' }, dependencies = {}) {
-  const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
-  const snapshot = await readJsonSnapshot(snapshotPath, snapshotSha256), current = await context(snapshot, { read, now });
-  assertSnapshot(snapshot, current, now());
-  if (current.queue.etag !== snapshot.queueEtag || current.queue.value.lease?.expiresAt > now()) throw fail('REPAIR_QUEUE_CHANGED');
-  const sourceRoot = dirname(resolve(snapshotPath));
-  await validateLocalSources(snapshot, sourceRoot);
-  if (!voices || typeof voices !== 'object' || Array.isArray(voices)
-    || Object.keys(voices).some(key => !['narratorVoice', 'characterVoices', 'speakerAliases'].includes(key))) throw fail('REPAIR_VOICES_INVALID');
-  const root = resolve(outputDir);
-  await mkdir(dirname(root), { recursive: true }); await mkdir(root, { mode: 0o700 });
-  const clips = [];
-  for (const source of snapshot.sources) {
-    const path = join(root, source.filename);
-    await copyFile(join(sourceRoot, source.filename), path);
-    clips.push({ shotId: source.shotId, path });
-  }
-  const rebuilt = await rebuildFilmSoundtrack({ manifest: current.job.value.manifest, manifestHash: snapshot.manifestHash,
-    clips, workDir: root, ffmpeg, music: true, ...voices });
-  if (!Array.isArray(rebuilt?.clips) || rebuilt.clips.length !== snapshot.sources.length) throw fail('REPAIR_AUDIO_INVALID');
-  for (const [index, clip] of rebuilt.clips.entries()) if (clip.shotId !== clips[index].shotId
-    || clip.path !== clips[index].path || typeof clip.audioPath !== 'string' || clip.audioPath === clip.path) throw fail('REPAIR_AUDIO_INVALID');
-  const selectedAudio = [];
-  for (const [index, clip] of rebuilt.clips.entries()) {
-    const audio = await localFile(clip.audioPath, root), visual = await localFile(clip.path, root);
-    if (visual.sha256 !== snapshot.sources[index].sha256 || audio.sha256 === visual.sha256) throw fail('REPAIR_SOURCE_CHANGED');
-    selectedAudio.push({ shotId: clip.shotId, filename: relative(root, audio.path), sha256: audio.sha256, sizeBytes: audio.sizeBytes });
-  }
-  const constructed = { kind: KIND, version: 1, state: 'constructed-needs-review', snapshotSha256, orderId: snapshot.orderId,
-    preparedId: snapshot.preparedId, manifestHash: snapshot.manifestHash, createdAt: new Date(now()).toISOString(),
-    voices, provenance: rebuilt.provenance, sources: snapshot.sources, selectedAudio };
-  const bytes = Buffer.from(JSON.stringify(constructed, null, 2)), constructedPath = join(root, 'constructed.json');
-  await writeFile(constructedPath, bytes, { flag: 'wx', mode: 0o600 });
-  try { return await finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips: rebuilt.clips, voices, provenance: rebuilt.provenance, ffmpeg }, dependencies); }
-  catch (error) { error.repairRecovery = { constructedPath, constructedSha256: digest(bytes) }; throw error; }
-}
-
-export async function reviewConstructedFilmSoundtrack({ snapshotPath, snapshotSha256, constructedPath, constructedSha256, outputDir,
-  ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg' }, dependencies = {}) {
-  const read = dependencies.read || readRecord, now = dependencies.now || Date.now;
-  const snapshot = await readJsonSnapshot(snapshotPath, snapshotSha256), current = await context(snapshot, { read, now });
-  assertSnapshot(snapshot, current, now());
-  if (current.queue.etag !== snapshot.queueEtag || current.queue.value.lease?.expiresAt > now()) throw fail('REPAIR_QUEUE_CHANGED');
-  const constructed = await readJsonSnapshot(constructedPath, constructedSha256), originalRoot = dirname(resolve(constructedPath));
-  if (constructed.kind !== KIND || constructed.version !== 1 || constructed.state !== 'constructed-needs-review'
-    || constructed.snapshotSha256 !== snapshotSha256 || constructed.orderId !== snapshot.orderId
-    || constructed.preparedId !== snapshot.preparedId || constructed.manifestHash !== snapshot.manifestHash
-    || !same(constructed.sources, snapshot.sources) || !Array.isArray(constructed.selectedAudio)
-    || constructed.selectedAudio.length !== snapshot.sources.length) throw fail('REPAIR_CONSTRUCTION_CHANGED');
-  await validateLocalSources(snapshot, originalRoot);
-  const root = resolve(outputDir);
-  await mkdir(dirname(root), { recursive: true }); await mkdir(root, { mode: 0o700 });
-  const clips = [];
-  for (const [index, source] of snapshot.sources.entries()) {
-    const selected = constructed.selectedAudio[index];
-    if (selected.shotId !== source.shotId || typeof selected.filename !== 'string') throw fail('REPAIR_AUDIO_INVALID');
-    const audio = await localFile(resolve(originalRoot, selected.filename), originalRoot);
-    if (audio.sha256 !== selected.sha256 || audio.sizeBytes !== selected.sizeBytes) throw fail('REPAIR_AUDIO_CHANGED');
-    const path = join(root, source.filename), audioPath = join(root, `replacement-${index + 1}.wav`);
-    await copyFile(join(originalRoot, source.filename), path); await copyFile(audio.path, audioPath);
-    clips.push({ shotId: source.shotId, path, audioPath });
-  }
-  return finishSoundtrackBuild({ snapshot, snapshotSha256, root, clips, voices: constructed.voices, provenance: constructed.provenance,
-    constructionRoot: originalRoot, ffmpeg }, dependencies);
-}
-
-// An authenticated draft preview is separate from delivered paid-film media.
-// Uploading it neither completes the production job nor changes its queue.
 export async function publishPaidFilmSoundtrackPreview({ snapshotPath, snapshotSha256, buildPath, buildSha256 }, dependencies = {}) {
   const read = dependencies.read || readRecord, write = dependencies.write || writeRecord, now = dependencies.now || Date.now;
   const putBlob = dependencies.putBlob || put, getBlob = dependencies.getBlob || get;
@@ -321,161 +178,9 @@ export async function publishPaidFilmSoundtrackPreview({ snapshotPath, snapshotS
     completed: false, providerSubmissions: 0 };
 }
 
-export async function applyPaidFilmSoundtrackRepair({ snapshotPath, snapshotSha256, buildPath, buildSha256, reviewedPreviewSha256,
-  ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg' }, dependencies = {}) {
-  const read = dependencies.read || readRecord, write = dependencies.write || writeRecord, now = dependencies.now || Date.now;
-  const snapshotFile = resolve(snapshotPath), root = dirname(snapshotFile);
-  const snapshot = await readJsonSnapshot(snapshotFile, snapshotSha256);
-  const current = await context(snapshot, { read, now });
-  assertSnapshot(snapshot, current, now());
-  if (current.queue.etag !== snapshot.queueEtag || !same(current.queue.value, snapshot.originalQueue)
-    || current.queue.value.lease?.expiresAt > now()) throw fail('REPAIR_QUEUE_CHANGED');
-  await validateLocalSources(snapshot, root);
-  const build = await readJsonSnapshot(buildPath, buildSha256), buildRoot = dirname(resolve(buildPath));
-  if (build.kind !== KIND || build.version !== 1 || build.state !== 'preview-ready' || build.snapshotSha256 !== snapshotSha256
-    || build.orderId !== snapshot.orderId || build.preparedId !== snapshot.preparedId || build.manifestHash !== snapshot.manifestHash
-    || !same(build.sources, snapshot.sources) || build.speechReview?.passed !== true || !HASH.test(reviewedPreviewSha256 || '')
-    || build.preview?.sha256 !== reviewedPreviewSha256 || !Array.isArray(build.selectedAudio) || build.selectedAudio.length !== snapshot.sources.length)
-    throw fail('REPAIR_PREVIEW_UNCONFIRMED');
-  const preview = await localFile(join(buildRoot, 'preview.mp4'), buildRoot);
-  if (preview.sha256 !== reviewedPreviewSha256 || preview.sizeBytes !== build.preview.sizeBytes) throw fail('REPAIR_PREVIEW_CHANGED');
-  for (const [index, selected] of build.selectedAudio.entries()) {
-    if (selected.shotId !== snapshot.sources[index].shotId || typeof selected.filename !== 'string') throw fail('REPAIR_AUDIO_INVALID');
-    const audio = await localFile(resolve(buildRoot, selected.filename), buildRoot);
-    if (audio.sha256 !== selected.sha256 || audio.sizeBytes !== selected.sizeBytes) throw fail('REPAIR_AUDIO_CHANGED');
-  }
-  const operationPath = `production/soundtrack-repairs/${snapshot.orderId}/${snapshotSha256}.json`;
-  if (await read(operationPath)) throw fail('REPAIR_ALREADY_ATTEMPTED');
-  const token = randomUUID();
-  // Preserve attention state so ordinary workers cannot race into the original
-  // soundtrack. Only this exact operator recovery owns this renewable lease.
-  await write(current.queuePath, { ...current.queue.value, lease: { token, expiresAt: now() + LEASE_MS },
-    soundtrackRepair: { snapshotSha256, startedAt: new Date(now()).toISOString() } }, current.queue.etag);
-  let renewal = Promise.resolve(), lost = false, artifact, selectedAudio, originalAudio;
-  const provenance = build.provenance;
-  async function owns() {
-    const queue = await read(current.queuePath);
-    if (lost || queue?.value.lease?.token !== token || queue.value.lease.expiresAt <= now()
-      || queue.value.state !== 'attention' || queue.value.soundtrackRepair?.snapshotSha256 !== snapshotSha256) return false;
-    const fresh = await context(snapshot, { read, now });
-    assertSnapshot(snapshot, fresh, now());
-    return true;
-  }
-  async function renew() {
-    if (!await owns()) { lost = true; return; }
-    const queue = await read(current.queuePath);
-    if (queue?.value.lease?.token !== token || queue.value.lease.expiresAt <= now()) { lost = true; return; }
-    await write(current.queuePath, { ...queue.value, lease: { token, expiresAt: now() + LEASE_MS } }, queue.etag);
-  }
-  const timer = setInterval(() => { renewal = renewal.then(renew).catch(() => { lost = true; }); }, 30_000);
-  timer.unref?.();
-  async function saveReceipt(state, extra = {}) {
-    const previous = await read(operationPath);
-    if (previous && (previous.value.snapshotSha256 !== snapshotSha256 || previous.value.leaseToken !== token)) throw fail('REPAIR_RECEIPT_CHANGED');
-    await write(operationPath, { kind: KIND, version: 1, state, owner: OWNER_EMAIL, email: snapshot.email,
-      orderId: snapshot.orderId, preparedId: snapshot.preparedId, manifestHash: snapshot.manifestHash, snapshotSha256,
-      leaseToken: token, originalJob: snapshot.originalJob, originalQueue: snapshot.originalQueue, sources: snapshot.sources,
-      buildSha256, reviewedPreviewSha256, updatedAt: new Date(now()).toISOString(), ...extra }, previous?.etag);
-  }
-  async function finishQueue(completed) {
-    clearInterval(timer); await renewal;
-    const queue = await read(current.queuePath);
-    if (queue?.value.lease?.token !== token || queue.value.lease.expiresAt <= now()) throw fail('REPAIR_LEASE_LOST');
-    const { lease, ...value } = queue.value;
-    await write(current.queuePath, { ...value, state: completed ? 'completed' : 'attention', updatedAt: new Date(now()).toISOString(),
-      lastResult: completed ? 'COMPLETED' : 'REVIEW_REQUIRED', ...(completed ? { lastFailure: null } : {}),
-      soundtrackRepair: { ...value.soundtrackRepair, state: completed ? 'completed' : 'attention' } }, queue.etag);
-  }
-  try {
-    if (!await owns()) throw fail('REPAIR_LEASE_LOST');
-    await saveReceipt('running');
-    const prepareClips = async ({ job, clips, work }) => {
-      if (!same(job, snapshot.originalJob) || !await owns()) throw fail('REPAIR_JOB_CHANGED');
-      const originals = await Promise.all(clips.map(clip => localFile(clip.path, work)));
-      for (const [index, clip] of clips.entries()) if (clip.shotId !== snapshot.sources[index].shotId
-        || originals[index].sha256 !== snapshot.sources[index].sha256) throw fail('REPAIR_SOURCE_CHANGED');
-      originalAudio = new Set(clips.map(clip => clip.audioPath || clip.path));
-      const originalAudioHashes = new Set(await Promise.all(clips.map(async clip => (await localFile(clip.audioPath || clip.path, work)).sha256)));
-      for (const [index, clip] of clips.entries()) {
-        const selected = build.selectedAudio[index], audioPath = join(work, `replacement-${index + 1}.wav`);
-        const original = await localFile(resolve(buildRoot, selected.filename), buildRoot);
-        if (original.sha256 !== selected.sha256 || original.sizeBytes !== selected.sizeBytes) throw fail('REPAIR_AUDIO_CHANGED');
-        await copyFile(original.path, audioPath);
-        clip.audioPath = audioPath;
-        const visual = await localFile(clip.path, work), audio = await localFile(clip.audioPath, work);
-        if (visual.sha256 !== originals[index].sha256 || audio.sha256 !== selected.sha256 || originalAudioHashes.has(audio.sha256))
-          throw fail('REPAIR_SOURCE_CHANGED');
-      }
-    };
-    const reviewSpeech = async input => {
-      if (input.clips.some(clip => !clip.audioPath || originalAudio.has(clip.audioPath))) throw fail('REPAIR_SELECTED_AUDIO_INVALID');
-      // This is the ordinary recognizer on the selected replacement track.
-      // A synthesis receipt never substitutes for its real script comparison.
-      const reviewed = await reviewFilmSpeech({ ...input,
-        speakerAliases: build.voices.speakerAliases,
-        transcribe: repairTranscriber(dirname(input.clips[0].path), { now, receiptRoot: buildRoot }),
-        resolveSpeechDifferences: createRepairSpeechResolver({ manifest: snapshot.originalJob.manifest, manifestHash: snapshot.manifestHash,
-          voices: build.voices, provenance, constructionRoot: build.constructionRoot, receiptRoot: buildRoot }) });
-      selectedAudio = await Promise.all(input.clips.map(async clip => {
-        const audio = await localFile(clip.audioPath, dirname(clip.path));
-        const visual = await localFile(clip.path, dirname(clip.path));
-        const expected = snapshot.sources.find(source => source.shotId === clip.shotId);
-        const selected = build.selectedAudio.find(source => source.shotId === clip.shotId);
-        if (visual.sha256 !== expected?.sha256 || originalAudio.has(clip.audioPath) || audio.sha256 !== selected?.sha256)
-          throw fail('REPAIR_REVIEWED_AUDIO_CHANGED');
-        return { shotId: clip.shotId, sha256: audio.sha256, sizeBytes: audio.sizeBytes };
-      }));
-      return reviewed;
-    };
-    const assemble = async input => {
-      if (!await owns() || input.manifestHash !== snapshot.manifestHash
-        || hash(input.manifest) !== snapshot.manifestHash || input.technicalSample !== false)
-        throw fail('REPAIR_JOB_CHANGED');
-      const inspected = await localFile(join(buildRoot, 'preview.mp4'), buildRoot);
-      if (inspected.sha256 !== reviewedPreviewSha256 || inspected.sizeBytes !== build.preview.sizeBytes
-        || build.preview.manifestHash !== snapshot.manifestHash || build.preview.technicalSample !== false
-        || build.preview.playable !== true || build.preview.hasAudio !== true) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
-      // Deliver the exact inspected bytes after fresh decoding. A second
-      // encode is unnecessary and cannot establish preview-byte identity.
-      await copyFile(inspected.path, input.outputPath, fsConstants.COPYFILE_EXCL);
-      const report = await verifyFilmMedia({ manifest: input.manifest, manifestHash: input.manifestHash,
-        path: input.outputPath, ffmpeg: input.ffmpeg });
-      if (report.sha256 !== reviewedPreviewSha256 || report.sizeBytes !== build.preview.sizeBytes
-        || report.contentType !== build.preview.contentType || report.width !== build.preview.width
-        || report.height !== build.preview.height || report.frameRate !== build.preview.frameRate
-        || report.durationSeconds !== build.preview.durationSeconds) throw fail('REPAIR_REVIEWED_PREVIEW_CHANGED');
-      if (!await owns()) throw fail('REPAIR_LEASE_LOST');
-      await writeFile(`${input.outputPath}.vtt`, filmCaptions(input.manifest), { flag: 'wx', mode: 0o600 });
-      return { ...report, outputPath: resolve(input.outputPath) };
-    };
-    const assembly = createWorkerAssembly({ ...dependencies, adapter: falProductionAdapter, ffmpeg, prepareClips, reviewSpeech, assemble });
-    artifact = await assembly({ email: current.email, id: snapshot.preparedId, job: current.job.value, stillOwned: owns });
-    if (!artifact?.speechReview?.passed || artifact.sha256 !== reviewedPreviewSha256
-      || selectedAudio?.length !== snapshot.sources.length || !await owns()) throw fail('REPAIR_SPEECH_UNVERIFIED');
-    await saveReceipt('verified-artifact', { provenance, selectedAudio, artifact });
-    const film = createFilmProductionService({ readRecordImpl: read, writeRecordImpl: write, now,
-      verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
-    await film.acceptAssembly({ email: current.email, id: snapshot.preparedId, manifestHash: snapshot.manifestHash, artifact, stillOwned: owns });
-    const completed = await read(current.jobPath);
-    if (completed?.value.status !== 'completed' || completed.value.media?.sha256 !== artifact.sha256
-      || completed.value.manifestHash !== snapshot.manifestHash) throw fail('REPAIR_COMPLETION_UNCONFIRMED');
-    await finishQueue(true);
-    await saveReceipt('completed', { provenance, selectedAudio, artifact, completedJobRevision: completed.value.revision });
-    return { state: 'completed', preparedId: snapshot.preparedId, manifestHash: snapshot.manifestHash, sha256: artifact.sha256,
-      durationSeconds: artifact.durationSeconds, sourceCount: snapshot.sources.length, providerSubmissions: 0 };
-  } catch (error) {
-    clearInterval(timer); await renewal;
-    const completed = await read(current.jobPath).catch(() => null);
-    const delivered = Boolean(artifact && completed?.value.status === 'completed' && completed.value.media?.sha256 === artifact.sha256);
-    await finishQueue(delivered).catch(() => {});
-    await saveReceipt(delivered ? 'completed-receipt-needs-review' : 'attention', { ...(selectedAudio ? { selectedAudio } : {}),
-      ...(artifact ? { artifact } : {}), reason: 'SOUNDTRACK_RECOVERY_UNCONFIRMED' }).catch(() => {});
-    throw error;
-  } finally { clearInterval(timer); await renewal; }
-}
-
 async function main() {
   const [action, ...args] = process.argv.slice(2), parsed = {};
+  if (['build', 'review-built', 'apply'].includes(action)) throw fail('REPAIR_SOUNDTRACK_MODEL_RETIRED');
   for (let index = 0; index < args.length; index += 2) {
     if (!args[index]?.startsWith('--') || !args[index + 1] || Object.hasOwn(parsed, args[index])) throw fail('REPAIR_ARGUMENTS_INVALID');
     parsed[args[index]] = args[index + 1];
@@ -483,27 +188,14 @@ async function main() {
   let result;
   if (action === 'prepare' && Object.keys(parsed).length === 4 && ['--order-id', '--prepared-id', '--manifest-hash', '--output-dir'].every(key => parsed[key]))
     result = await preparePaidFilmSoundtrackRepair({ orderId: parsed['--order-id'], preparedId: parsed['--prepared-id'], manifestHash: parsed['--manifest-hash'], outputDir: parsed['--output-dir'] });
-  else if (action === 'build' && Object.keys(parsed).length === 4 && ['--snapshot', '--snapshot-sha256', '--voices', '--output-dir'].every(key => parsed[key]))
-    result = await buildPaidFilmSoundtrackRepair({ snapshotPath: parsed['--snapshot'], snapshotSha256: parsed['--snapshot-sha256'],
-      voices: JSON.parse(await readFile(resolve(parsed['--voices']), 'utf8')), outputDir: parsed['--output-dir'] });
-  else if (action === 'review-built' && Object.keys(parsed).length === 5 && ['--snapshot', '--snapshot-sha256', '--constructed', '--constructed-sha256', '--output-dir'].every(key => parsed[key]))
-    result = await reviewConstructedFilmSoundtrack({ snapshotPath: parsed['--snapshot'], snapshotSha256: parsed['--snapshot-sha256'],
-      constructedPath: parsed['--constructed'], constructedSha256: parsed['--constructed-sha256'], outputDir: parsed['--output-dir'] });
   else if (action === 'publish-preview' && Object.keys(parsed).length === 4 && ['--snapshot', '--snapshot-sha256', '--build', '--build-sha256'].every(key => parsed[key]))
     result = await publishPaidFilmSoundtrackPreview({ snapshotPath: parsed['--snapshot'], snapshotSha256: parsed['--snapshot-sha256'],
       buildPath: parsed['--build'], buildSha256: parsed['--build-sha256'] });
-  else if (action === 'apply' && Object.keys(parsed).length === 5 && ['--snapshot', '--snapshot-sha256', '--build', '--build-sha256', '--reviewed-preview-sha256'].every(key => parsed[key]))
-    result = await applyPaidFilmSoundtrackRepair({ snapshotPath: parsed['--snapshot'], snapshotSha256: parsed['--snapshot-sha256'],
-      buildPath: parsed['--build'], buildSha256: parsed['--build-sha256'], reviewedPreviewSha256: parsed['--reviewed-preview-sha256'] });
   else throw fail('REPAIR_ARGUMENTS_INVALID');
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
-  const failure = finishingFailure(error), recovery = error?.repairRecovery;
-  const reason = error?.code === 'SOUNDTRACK_REBUILD_REQUIRED' && /^[A-Z_]{1,80}$/.test(error?.reason || '') ? error.reason : null;
-  const diagnostic = soundtrackFailureDiagnostic(error?.diagnostic);
-  process.stdout.write(`${JSON.stringify({ state: 'not-confirmed', code: /^REPAIR_[A-Z_]+$/.test(error?.code || '') ? error.code : 'REPAIR_FAILED',
-    ...(failure ? { failure } : {}), ...(reason ? { reason } : {}), ...(diagnostic ? { diagnostic } : {}),
-    ...(typeof recovery?.constructedPath === 'string' && HASH.test(recovery.constructedSha256 || '') ? { recovery } : {}) })}\n`);
+  const code = /^REPAIR_[A-Z_]+$/.test(error?.code || '') ? error.code : 'REPAIR_FAILED';
+  process.stdout.write(`${JSON.stringify({ state: 'not-confirmed', code })}\n`);
   process.exitCode = 1;
 });

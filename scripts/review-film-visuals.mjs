@@ -6,7 +6,7 @@ import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs
 
 const failed = reason => markFinishingFailure(Object.assign(new Error('Visual continuity needs review before delivery.'), { code: reason }), 'visual-review', reason);
 export async function extractVisualFrame({ path, atMs, ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg', spawnImpl = spawn }) {
-  if (typeof path !== 'string' || !path || !Number.isSafeInteger(atMs) || atMs < 0 || atMs > 15_000) throw failed('VISUAL_REVIEW_REQUIRED');
+  if (typeof path !== 'string' || !path || !Number.isSafeInteger(atMs) || atMs < 0 || atMs > 30_000) throw failed('VISUAL_REVIEW_REQUIRED');
   return new Promise((resolve, reject) => {
     const child = spawnImpl(ffmpeg, ['-v', 'error', '-nostdin', '-ss', (atMs / 1000).toFixed(3),
       '-protocol_whitelist', 'file,pipe', '-i', path, '-frames:v', '1', '-vf', 'scale=768:768:force_original_aspect_ratio=decrease',
@@ -25,7 +25,7 @@ export function createRemoteVisualReview({ env = process.env, fetchImpl = fetch 
     const response = await fetchImpl('https://lineagetheater.com/api/production-worker', { method: 'POST', redirect: 'error',
       credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(170_000),
       headers: { Authorization: `Bearer ${env.LINEAGE_WORKER_SECRET}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'review-film-visuals', ...body }) });
+      body: JSON.stringify({ ...body, action: 'review-film-visuals', workerProtocol: 2 }) });
     if (!response.ok) {
       let result; try { result = await boundedVisualJson(response, 4096); } catch { /* Fixed fallback only. */ }
       throw failed(['VISUAL_REVIEW_UNCERTAIN', 'VISUAL_REVIEW_INVALID', 'VISUAL_REVIEW_AUTH_REQUIRED'].includes(result?.code)
