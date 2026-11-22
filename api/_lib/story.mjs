@@ -1,5 +1,5 @@
 // One explicit script model for every film workflow, including local LTX production.
-export const STORY_MODEL = "gpt-6-astra";
+export const STORY_MODEL = "gpt-6.2-astra";
 export const FAMILY_NARRATIVE_SOURCE_ID = "@family-narrative";
 const MAX_SOURCE_CHARACTERS = 1_000_000;
 const MAX_METADATA_CHARACTERS = 100_000;
@@ -114,7 +114,7 @@ export function validateStory(output, action, family) {
 }
 
 export async function generateStory(body, {fetchImpl=fetch, key=process.env.OPENAI_API_KEY}={}) {
-  if (!key) throw new Error("GPT-6 Astra is not connected. The administrator must connect the existing OpenAI project; your family sources are saved.");
+  if (!key) throw new Error("GPT-6.2 Astra is not connected. The administrator must connect the existing OpenAI project; your family sources are saved.");
   if (body?.storyConsent!==true) throw new Error("Confirm that OpenAI may read these family materials to develop your film.");
   if (!["themes","plan"].includes(body.action)) throw new Error("Astra needs a valid story-development action.");
   const {family,images,excludedTitles,sourceCoverage}=prepareStory(body);
@@ -124,13 +124,15 @@ export async function generateStory(body, {fetchImpl=fetch, key=process.env.OPEN
   try {
     response=await fetchImpl("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json"},signal:AbortSignal.timeout(170_000),body:JSON.stringify({model:STORY_MODEL,store:false,reasoning:{effort:"medium"},max_output_tokens:22000,instructions:storyInstructions(family,body.action),input:[{role:"user",content}],text:{format:{type:"json_schema",name:body.action==="themes"?"film_ideas":"film_screenplay",strict:true,schema:body.action==="themes"?themeSchema:planSchema}}})});
   } catch { throw new Error("Astra could not finish this request in time. Your sources and previous draft are saved. Try again."); }
-  if (!response.ok) throw new Error(response.status===429?"Astra's current quota or capacity is unavailable. Try later; no other model will be substituted.":[401,403,404].includes(response.status)?"The connected OpenAI project cannot access GPT-6 Astra. The administrator must check its key and model access.":"Astra could not complete the screenplay. Your sources and previous draft are saved.");
+  if (!response.ok) throw new Error(response.status===429?"Astra's current quota or capacity is unavailable. Try later; no other model will be substituted.":[401,403,404].includes(response.status)?"The connected OpenAI project cannot access GPT-6.2 Astra. The administrator must check its key and model access.":"Astra could not complete the screenplay. Your sources and previous draft are saved.");
   const result=await response.json();
   if(result.status&&result.status!=="completed") throw new Error("Astra did not finish the full screenplay. Try again; your saved draft has not been replaced.");
-  if (result.model !== STORY_MODEL && !new RegExp(`^${STORY_MODEL}-\\d{4}-\\d{2}-\\d{2}$`).test(result.model || ""))
-    throw new Error("The connected OpenAI project did not confirm GPT-6 Astra. Your saved draft has not been replaced.");
+  const confirmedSnapshot = typeof result.model === "string" && result.model.startsWith(`${STORY_MODEL}-`)
+    && /^\d{4}-\d{2}-\d{2}$/.test(result.model.slice(STORY_MODEL.length + 1));
+  if (result.model !== STORY_MODEL && !confirmedSnapshot)
+    throw new Error("The connected OpenAI project did not confirm GPT-6.2 Astra. Your saved draft has not been replaced.");
   const raw=result.output?.flatMap(o=>o.content??[]).filter(c=>c.type==="output_text").map(c=>c.text).join("");
   let output;
   try { output=JSON.parse(raw); } catch { throw new Error("Astra returned an unreadable screenplay. Your previous draft is saved."); }
-  return {...validateStory(output,body.action,family),sourceCoverage,generatedBy:"GPT-6 Astra",model:result.model,generatedAt:new Date().toISOString()};
+  return {...validateStory(output,body.action,family),sourceCoverage,generatedBy:"GPT-6.2 Astra",model:result.model,generatedAt:new Date().toISOString()};
 }
