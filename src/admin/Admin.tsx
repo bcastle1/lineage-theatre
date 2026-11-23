@@ -39,6 +39,7 @@ import HostedCheckoutSettings from "./HostedCheckoutSettings";
 import { readQuickBooksPanels, type CheckoutConnectionStatus, type HostedCheckoutSettingsValue } from "./quickbooks-panels";
 import ReceiptSettings from "./ReceiptSettings";
 import ProductionCorrectionPanel from "./ProductionCorrection";
+import PartialProductionCorrectionPanel from "./PartialProductionCorrection";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import MediaLibrary from "../studio/MediaLibrary";
 import "./admin.css";
@@ -2094,6 +2095,7 @@ export default function Admin({
             <HostedCheckoutSettings isOwner={isOwner} disabled={busy || loading} refreshedSettings={hostedCheckoutRefresh} onSaved={() => void refresh()} />
             <ReceiptSettings disabled={busy || loading} />
             {isOwner && <ProductionCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
+            {isOwner && <PartialProductionCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
             <section className="admin-card admin-orders" aria-labelledby="payment-records-title">
             <div className="admin-section-heading">
               <div>

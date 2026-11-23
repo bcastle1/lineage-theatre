@@ -124,6 +124,8 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         if (seedance && shot.output?.audio !== undefined)
           throw finishingError('Seedance scenes require embedded provider audio.', 'NATIVE_AUDIO_REQUIRED');
         const bytes = await downloadProductionClip(shot.output, adapter.outputHosts, { fetchImpl });
+        if (shot.output.sha256 && sha256(bytes) !== shot.output.sha256)
+          throw finishingError('The preserved scene checksum changed.', 'STORED_CHECKSUM_MISMATCH');
         const path = join(work, `clip-${index}.${shot.output.contentType === "video/mp4" ? "mp4" : "webm"}`);
         await writeFile(path, bytes, { flag: "wx" });
         const clip = { shotId: shot.id, path };
@@ -221,7 +223,7 @@ async function main() {
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
     await writeRecord(healthPath, {
-      version: 1, ready: true, workerProtocol: 2, preRenderAuthorizationVersion: 1, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
+      version: 1, ready: true, workerProtocol: 2, preRenderAuthorizationVersion: 1, partialCorrectionVersion: 1, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
       referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, checkedAt: new Date().toISOString(),
     }, old?.etag);
   };

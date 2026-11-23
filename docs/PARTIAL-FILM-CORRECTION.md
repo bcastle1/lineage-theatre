@@ -1,0 +1,17 @@
+# One-scene correction with retained clips
+
+This owner-only recovery creates a new immutable film version under the same film ID and original verified payment. It supports exactly four text-only Seedance scenes: three completed clips are retained, and one failed scene receives an explicitly approved visual-only revision. Narration, dialogue, sources, cast and timing remain unchanged. It never edits the original film or invoice.
+
+Prepare a private import request outside the repository. The authenticated owner submits `createPartialProductionCorrection` with the original order ID, deterministic target prepared ID and manifest hash, selected shot ID, approved visual, maximum new cost, three reuse proofs, reviewed billing evidence, reason and confirmation. The public pure helpers build the exact target manifest and identity. Do not put customer stories, provider URLs or billing exports in source control.
+
+Each reuse proof binds the original operation and request, input hash, immutable receipt hash, byte SHA-256 and size. Billing evidence binds the configured provider account, original order and manifest, private export hash, review timestamp and every original or replacement attempt. Every accepted attempt must be terminal; a current zero-dollar balance observation cannot classify a pending request. The only pre-acceptance exception is the separately recorded, reviewed scope rejection with no accepted request ID.
+
+The cost amounts are an owner-reviewed attestation to private request-level billing evidence. The service verifies its account, record bindings and spending limits; it does not fetch billing events or treat an aggregate wallet change as request-level evidence. The owner imports the reviewed file, sees the proposed scene and new-spend limit, and confirms before submission. An uncertain response keeps the exact request for reconciliation.
+
+Approval requires a failed original job, its attention queue without an active lease, fresh matching worker capability, live original-payment verification and the exact existing unreleased funding reservation. The full original execution budget remains intact; a separate single-scene ceiling and recorded prior spend limit the sole new request. Approval retries reverify payment and reservation without another grant or reservation.
+
+Deploy the web route before the matching worker. The worker advertises `partialCorrectionVersion: 1`; older workers cannot authorize a partial target. The adapter requires its saved request identity, verifies retained clip bytes before returning completion, and never substitutes a new request for missing reuse evidence. Assembly verifies those checksums again and performs the normal fresh visual review, native-audio verification and private-artifact checks. Lost submission replies remain uncertain and cannot trigger another request.
+
+Finished playback and download remain covered by the original payment and its normal access controls. Ordinary later funding admission may retire the original hold only after validating the exact completed correction and private media. No failed source record is rewritten as successful, and no hold is released merely because approval or rendering started.
+
+Validation uses synthetic fixtures only. Run `node --test tests/partial-film-correction.test.mjs tests/fal-funding-correction.test.mjs tests/production-worker-handler.test.mjs tests/production-worker.test.mjs tests/admin.test.mjs`. These tests prove code paths and invariants; they do not claim a live render, charge or delivered film.

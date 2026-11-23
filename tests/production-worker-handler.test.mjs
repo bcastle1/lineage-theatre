@@ -41,10 +41,33 @@ test('wrong secret, provider recipe, absent lease and unexpected fields cannot i
 test('remote authorization uses a fixed origin, no redirects and bounded response bytes',async()=>{
   const service=createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async(url,options)=>{
     assert.equal(url,'https://lineagetheater.com/api/production-worker');assert.equal(options.redirect,'error');
-    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2});return new Response('{"allowed":true}');
+    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2,partialCorrectionVersion:1});return new Response('{"allowed":true}');
   }});assert.equal((await service.authorizeProduction(input)).allowed,true);
   for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
     await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
+});
+
+test('an older worker cannot receive spending authorization for a partial correction', async () => {
+  const corrected = { ...job, partialCorrection: { version: 1, correctionId: input.orderId, planHash: 'e'.repeat(64) } };
+  const make = () => fixture({ read: async path => ({ value: path.startsWith('production/jobs/') ? corrected : ticket }) });
+  const oldWorker = make(), denied = await invoke(oldWorker);
+  assert.equal(denied.statusCode, 409);
+  assert.equal(denied.body.code, 'WORKER_PARTIAL_CORRECTION_REQUIRED');
+  assert.equal(oldWorker.calls(), 0);
+
+  for (const version of [0, 2, '1', null]) {
+    const unsupported = make();
+    const result = await invoke(unsupported, { body: { ...input, model: adapter.model,
+      recipe: adapter.modelVersion, workerProtocol: 2, partialCorrectionVersion: version } });
+    assert.equal(result.statusCode, 400);
+    assert.equal(unsupported.calls(), 0);
+  }
+
+  const currentWorker = make();
+  const result = await invoke(currentWorker, { body: { ...input, model: adapter.model,
+    recipe: adapter.modelVersion, workerProtocol: 2, partialCorrectionVersion: 1 } });
+  assert.equal(result.statusCode, 200);
+  assert.equal(currentWorker.calls(), 1);
 });
 test('reviewed delivery uses the worker credential, exact artifact binding and separate service even while generation is unqualified',async()=>{
   let delivered=0;const f=fixture({adapter:{...adapter,available:false},delivery:{deliver:async value=>{delivered++;assert.deepEqual(value,{orderId:input.orderId,artifactSha256:'d'.repeat(64)});return {status:'completed'};}}});

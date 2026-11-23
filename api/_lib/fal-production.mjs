@@ -11,6 +11,8 @@ import { validateVisualContinuity, VISUAL_CONTINUITY_DIRECTION } from './film-vi
 import { hasKlingCharacterBinding, klingCharacterBindingVersion, klingCharacterBindings, normalizeKlingInputReferences, validateKlingImageElement, requireActiveKlingCharacterBinding, KLING_CAST_BINDING_DIRECTION, KLING_CHARACTER_BINDING_VERSION } from './kling-character-binding.mjs';
 import { createRemoteStartFrameReview } from './film-start-frame-client.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
+import { createHash } from 'node:crypto';
+import { partialCorrectionExecution } from './partial-film-correction.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const FAL_RECIPE_VERSION = 'lineage-realistic-kling-o3-v1';
@@ -438,6 +440,38 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
     const renderEndpoint = seedanceFilm ? selected.endpoint : plan.endpoint;
     const identity = digest(`${recipe}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
     if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
+    const partialContext = typeof input.email === 'string' ? await partialCorrectionExecution({ email: input.email,
+      productionId, manifestHash, correctionId: input.correctionId, read, now }) : null;
+    if (partialContext) {
+      if (!seedanceFilm || input.correctionId !== partialContext.grant.id || productionId !== partialContext.job.id
+        || manifestHash !== partialContext.job.manifestHash
+        || idempotencyKey !== partialContext.job.shots.find(row => row.id === shot.id)?.requestKey) invalid();
+      const p = partialContext.partial, reused = p.reused.find(row => row.shotId === shot.id);
+      const expectedHash = digest(JSON.stringify(falShotInput(manifest, shot, 'seedance', {})));
+      if (reused) {
+        // Reuse is a verified input-and-byte binding, never a missing request
+        // that may fall through to fresh generation under a full-film budget.
+        if (reused.inputHash !== expectedHash || await client.get(identity)
+          || await read(`production/fal/choices/${identity}.json`)) invalid();
+        const saved = await client.get(reused.operationIdentity), url = falMediaUrl(saved?.result?.video?.url);
+        if (saved?.state !== 'completed' || saved.requestId !== reused.requestId || saved.inputHash !== expectedHash
+          || digest(JSON.stringify(saved)) !== reused.sourceRecordHash || digest(url) !== reused.sourceUrlHash) invalid();
+        const response = await fetchImpl(url, { method: 'GET', redirect: 'error', credentials: 'omit',
+          headers: { Accept: 'video/mp4' }, signal: AbortSignal.timeout(120_000) });
+        if (response.status !== 200 || response.headers.get('content-type')?.split(';')[0] !== 'video/mp4' || !response.body) invalid();
+        const reader = response.body.getReader(), sha = createHash('sha256'); let length = 0;
+        try { for (;;) { const next = await reader.read(); if (next.done) break; length += next.value.byteLength;
+          if (length > reused.sizeBytes || length > 250 * 1024 * 1024) invalid(); sha.update(next.value); }
+        } finally { await reader.cancel().catch(() => {}); }
+        if (length !== reused.sizeBytes || sha.digest('hex') !== reused.mediaSha256) invalid();
+        await partialContext.recheck();
+        return { status: 'completed', providerJobId, reviewedReuse: true,
+          output: { url, contentType: 'video/mp4', sizeBytes: length, durationSeconds: selected.seconds, sha256: reused.mediaSha256 } };
+      }
+      if (shot.id !== p.shotId || expectedHash !== p.newInputHash || selected.seconds !== p.generatedSeconds
+        || await read(`production/fal/choices/${identity}.json`)) invalid();
+      await partialContext.recheck();
+    }
     async function existingOperation(operationId, endpoint) {
       let saved = await client.get(operationId);
       if (saved && saved.endpoint !== endpoint) invalid();
@@ -448,6 +482,8 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
     async function operation(operationId, endpoint, body) {
       let saved = await existingOperation(operationId, endpoint);
       if (!saved) {
+        if (partialContext && (operationId !== identity || endpoint !== FAL_MODELS.seedanceText
+          || digest(JSON.stringify(body)) !== partialContext.partial.newInputHash)) invalid();
         requireActiveKlingCharacterBinding(manifest);
         if (klingCharacterBindingVersion(manifest) === 3 && (typeof input.email !== 'string' || !input.email.includes('@'))) invalid();
         if (!qualified() || (model !== 'kling' && !seedanceFilm)) throw new Error('This provider cannot start a new production request.');
@@ -455,6 +491,7 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
         // Reconciliation of existing identities does not depend on a new gate.
         if (seedanceFilm || hasKlingCharacterBinding(manifest)) await checkWorker(manifest, plan);
         if (typeof authorizeSpend !== 'function' || await authorizeSpend() !== true) throw new Error('Production spending is not authorized.');
+        if (partialContext) await partialContext.recheck();
         saved = await client.submit({ identity: operationId, endpoint, input: body });
       }
       return saved;
