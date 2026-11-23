@@ -42,6 +42,7 @@ import ProductionCorrectionPanel from "./ProductionCorrection";
 import PartialProductionCorrectionPanel from "./PartialProductionCorrection";
 import PartialProductionRetryPanel from "./PartialProductionRetry";
 import NarrationSuccessorCorrectionPanel from "./NarrationSuccessorCorrection";
+import ContextSuccessorCorrectionPanel from "./ContextSuccessorCorrection";
 import SourceAgreementEditor from "./SourceAgreementEditor";
 import MediaLibrary from "../studio/MediaLibrary";
 import "./admin.css";
@@ -2100,6 +2101,7 @@ export default function Admin({
             {isOwner && <PartialProductionCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
             {isOwner && <PartialProductionRetryPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
             {isOwner && <NarrationSuccessorCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
+            {isOwner && <ContextSuccessorCorrectionPanel disabled={busy || loading} actionLock={actionLock} onBusyChange={setBusy} />}
             <section className="admin-card admin-orders" aria-labelledby="payment-records-title">
             <div className="admin-section-heading">
               <div>

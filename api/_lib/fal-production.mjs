@@ -37,6 +37,11 @@ function productionPlan(manifest, model, validatePrompts = true) {
     || !Array.isArray(manifest.screenplay?.characters) || manifest.screenplay.characters.length > 16) invalid();
   let position = 0;
   const shots = manifest.shots.map(shot => {
+    if (Object.hasOwn(shot, 'providerContext') && (!seedancePlan || !shot.providerContext
+      || Object.keys(shot.providerContext).sort().join(',') !== 'filmContext,historicalBoundaries,version'
+      || shot.providerContext.version !== 1 || !['filmContext', 'historicalBoundaries'].every(key =>
+        typeof shot.providerContext[key] === 'string' && shot.providerContext[key].trim()
+        && shot.providerContext[key].length <= 2000 && !/[<>\x00-\x1f\x7f]/.test(shot.providerContext[key])))) invalid();
     if (!Number.isSafeInteger(shot.targetDurationMs) || shot.targetDurationMs < 1000 || shot.targetDurationMs > 30_000
       || shot.startMs !== position || !Array.isArray(shot.characterIds) || shot.characterIds.length > (seedancePlan ? 16 : 10)
       || typeof shot.visual !== 'string' || shot.visual.length > 12_000 || !shot.visual.trim()) invalid();
@@ -287,10 +292,10 @@ function seedancePrompt(manifest, shot, characters) {
   const direction = realisticCreativeText(shot.visual).replace(/\b(?:Small location caption|Caption|Display the following disclosure[^:]{0,120})\s*:\s*[""][^""]*[""]/gi, '');
   return [
     `Photorealistic ${manifest.style === 'Documentary' ? 'documentary' : 'cinema'} set in ${manifest.era}.`,
-    `Film context: ${manifest.screenplay.logline}`, ...cast,
+    `Film context: ${shot.providerContext?.filmContext ?? manifest.screenplay.logline}`, ...cast,
     ...(photoIndex ? [VISUAL_CONTINUITY_DIRECTION] : []),
     'Follow the named appearance and wardrobe for each character. Keep each person distinct; never duplicate or merge characters. Follow the scripted presence, action and period.',
-    `Scene: ${shot.title}. ${direction}`, `Historical boundaries: ${shot.dramatization || 'Do not add undocumented claims.'}`,
+    `Scene: ${shot.title}. ${direction}`, `Historical boundaries: ${shot.providerContext?.historicalBoundaries ?? (shot.dramatization || 'Do not add undocumented claims.')}`,
     `Narration, once verbatim in the same restrained adult English voice: ${shot.narration || '(none)'}`,
     `Dialogue, once verbatim, in distinct consistent voices with synchronized mouths: ${shot.dialogue || '(none)'}`,
     `Start speech immediately; finish before ${(shot.targetDurationMs / 1000 - 0.2).toFixed(2)}s. Hold the ending through ${shot.seconds}s. No added speech.`,
@@ -442,6 +447,9 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
     let identity = originalIdentity, providerJobId = `fal-${identity}`;
     const partialContext = typeof input.email === 'string' ? await partialCorrectionExecution({ email: input.email,
       productionId, manifestHash, correctionId: input.correctionId, read, now }) : null;
+    if (manifest.shots.some(row => Object.hasOwn(row, 'providerContext'))
+      && (partialContext?.partial?.version !== 3 || partialContext.partial.kind !== 'seedance-single-scene-context-successor-v1'
+        || !partialContext.job.contextSuccessor)) invalid();
     if (partialContext) {
       if (!seedanceFilm || input.correctionId !== partialContext.grant.id || productionId !== partialContext.job.id
         || manifestHash !== partialContext.job.manifestHash

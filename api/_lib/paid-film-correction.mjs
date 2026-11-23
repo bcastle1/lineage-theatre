@@ -6,6 +6,7 @@ import { buildPartialCorrectionManifest, partialCorrectionPreparedId, buildParti
   validatePartialCorrection, partialBillingEvidencePath } from './partial-film-correction.mjs';
 import { createPartialCorrectionRetry, readPartialCorrectionRetry } from './partial-correction-retry.mjs';
 import { createNarrationSuccessor, validateNarrationSuccessor, narrationSuccessorId, NARRATION_SUCCESSOR_KIND } from './narration-successor.mjs';
+import { createContextSuccessor, validateContextSuccessor, contextSuccessorId, CONTEXT_SUCCESSOR_KIND } from './context-successor.mjs';
 
 const HASH = /^[a-f0-9]{64}$/, UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const hash = value => digest(JSON.stringify(value));
@@ -77,8 +78,9 @@ export async function readPaidFilmCorrection({ email, job, correctionId, read = 
   const record = await read(productionCorrectionPath(id)), grant = record?.value;
   if (!record?.etag || grant?.version !== 1 || grant.id !== id || grant.kind !== 'merchant-funded-correction'
     || grant.status !== 'authorized' || grant.customerEmail !== email || grant.approvedBy !== email
-    || !HASH.test(grant.originalOrderId || '') || id !== (grant.partial?.kind === NARRATION_SUCCESSOR_KIND
-      ? narrationSuccessorId(correctionIdForOrder(grant.originalOrderId), grant.manifestHash) : correctionIdForOrder(grant.originalOrderId))
+    || !HASH.test(grant.originalOrderId || '') || id !== (grant.partial?.kind === CONTEXT_SUCCESSOR_KIND
+      ? contextSuccessorId(grant.partial.parentCorrectionId, grant.manifestHash) : grant.partial?.kind === NARRATION_SUCCESSOR_KIND
+        ? narrationSuccessorId(correctionIdForOrder(grant.originalOrderId), grant.manifestHash) : correctionIdForOrder(grant.originalOrderId))
     || !HASH.test(grant.sourceOrderHash || '') || !HASH.test(grant.originalManifestHash || '')
     || !UUID.test(grant.originalPreparedId || '') || !UUID.test(grant.preparedId || '') || !HASH.test(grant.manifestHash || '')
     || grant.originalPreparedId === grant.preparedId || grant.originalManifestHash === grant.manifestHash
@@ -101,8 +103,9 @@ export async function readPaidFilmCorrection({ email, job, correctionId, read = 
     || !original?.etag || !paid(value, email, now) || value.id !== grant.originalOrderId
     || value.preparedId !== grant.originalPreparedId || value.manifestHash !== grant.originalManifestHash
     || correctionSourceHash(value) !== grant.sourceOrderHash) throw invalid();
-  const successor = grant.partial?.kind === NARRATION_SUCCESSOR_KIND
-    ? await validateNarrationSuccessor({ grant, target: target.value, order: value, read, now }) : null;
+  const successor = grant.partial?.kind === CONTEXT_SUCCESSOR_KIND
+    ? await validateContextSuccessor({ grant, target: target.value, order: value, read, now }) : grant.partial?.kind === NARRATION_SUCCESSOR_KIND
+      ? await validateNarrationSuccessor({ grant, target: target.value, order: value, read, now }) : null;
   if (grant.partial && !successor) await validatePartialCorrection({ grant, source: source.value, target: target.value, order: value, read, now });
   const retry = grant.partial && !successor ? await readPartialCorrectionRetry({ grant, job: target.value, order: value }, { read, now }) : null;
   return { grant, order: value, job: target.value, ...(retry ? { retry } : {}), recheck: async () => {
@@ -140,7 +143,7 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
   },
   verifyPaidSale = input => import('./hosted-checkout.mjs').then(m => m.hostedCheckout.verifyPaidSale(input)),
   reserveFunding = createFalFunding({ read, write, now }).reserve,
-  verifyFunding = createFalFunding({ read, write, now }).verifyReservation, env = process.env, verifyRetryFailure, verifySuccessorFailure } = {}) {
+  verifyFunding = createFalFunding({ read, write, now }).verifyReservation, env = process.env, verifyRetryFailure, verifySuccessorFailure, verifyContextFailure } = {}) {
   async function immutable(path, value) {
     try { await write(path, value); } catch { /* An uncertain write is reconciled by exact readback; never overwritten. */ }
     const saved = await read(path);
@@ -175,7 +178,8 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
       const recheck = async () => {
         if (correctionSourceHash(proof?.order) !== grant.sourceOrderHash || !time(proof?.expiresAt) || Date.parse(proof.expiresAt) <= now()
           || !quoteValid(quote, grant, now)) throw invalid();
-        await heldPartial(grant.customerEmail, grant.partial); await context.recheck(); await proof.recheck();
+        await Promise.all([heldPartial(grant.customerEmail, grant.partial), context.recheck(), proof.recheck()]);
+        if (Date.parse(proof.expiresAt) <= now() || !quoteValid(quote, grant, now)) throw invalid();
       };
       await recheck(); return { recheck };
     };
@@ -187,6 +191,9 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
   const successorService = createNarrationSuccessor({ read, write, now, env, price: partialQuote,
     authorizeParent: verifyCorrectionAuthorization, ...(verifySuccessorFailure ? { verifyFailure: verifySuccessorFailure } : {}) });
   const approveNarrationSuccessor = input => successorService.approve(input);
+  const contextService = createContextSuccessor({ read, write, now, env, price: partialQuote,
+    authorizeParent: verifyCorrectionAuthorization, ...(verifyContextFailure ? { verifyFailure: verifyContextFailure } : {}) });
+  const approveContextSuccessor = input => contextService.approve(input);
   async function approvePartial({ actor, originalOrderId, preparedId, manifestHash, shotId, visual,
     maximumNewCostCents, reuseEvidence, billingEvidence, reason, confirmed } = {}) {
     const email = actor?.email, owner = email && await read(userPath(email));
@@ -334,8 +341,8 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
       || executionQuote.providerCostCents > context.retry.grant.maximumNewCostCents)) throw invalid();
     const proof = await verifyPaidSale({ email, orderId: grant.originalOrderId, preparedId: grant.originalPreparedId, manifestHash: grant.originalManifestHash });
     if (correctionSourceHash(proof?.order) !== grant.sourceOrderHash || !time(proof.expiresAt) || Date.parse(proof.expiresAt) <= now()) throw invalid();
-    await context.recheck(); await proof.recheck();
-    if (grant.partial) { await heldPartial(email, grant.partial); await context.recheck(); }
+    await Promise.all([context.recheck(), proof.recheck(), ...(grant.partial ? [heldPartial(email, grant.partial)] : [])]);
+    if (grant.partial) await context.recheck();
     const until = Math.min(Date.parse(proof.expiresAt), Date.parse(executionQuote.expiresAt), now() + 60_000);
     if (until <= now()) throw invalid();
     const expiresAt = new Date(until).toISOString();
@@ -346,7 +353,7 @@ export function createPaidFilmCorrections({ read = readRecord, write = writeReco
   async function authorizeFailedShotRecovery() {
     throw new PaidFilmCorrectionError('Kling shot replacement has retired.', 410, 'KLING_SHOT_RECOVERY_RETIRED');
   }
-  return { approve, approvePartial, approvePartialRetry, approveNarrationSuccessor, authorizeProduction, authorizeFailedShotRecovery };
+  return { approve, approvePartial, approvePartialRetry, approveNarrationSuccessor, approveContextSuccessor, authorizeProduction, authorizeFailedShotRecovery };
 }
 function sameReuseEvidence(reused, expected) {
   return Array.isArray(reused) && hash(reused.map(({ shotId, operationIdentity, requestId, inputHash, sourceRecordHash, mediaSha256, sizeBytes }) =>

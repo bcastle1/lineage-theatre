@@ -24,6 +24,17 @@ export const narrationSuccessorId = (parentId, manifestHash) => {
   check(HASH.test(parentId || '') && HASH.test(manifestHash || ''));
   return digest(`seedance-narration-successor-v1:${parentId}:${manifestHash}`);
 };
+async function readContextLink(grantId, read) {
+  const link = await read(narrationSuccessorPath(grantId));
+  if (link) {
+    const { contextSuccessorId } = await import('./context-successor.mjs');
+    check(link.etag && exact(link.value, ['version', 'parentCorrectionId', 'correctionId', 'preparedId', 'manifestHash', 'grantHash'])
+      && link.value.version === 1 && link.value.parentCorrectionId === grantId
+      && link.value.correctionId === contextSuccessorId(grantId, link.value.manifestHash)
+      && UUID.test(link.value.preparedId || '') && HASH.test(link.value.grantHash || ''));
+  }
+  return link;
+}
 export function narrationSuccessorPreparedId(email, parentPreparedId, manifestHash) {
   check(typeof email === 'string' && UUID.test(parentPreparedId || '') && HASH.test(manifestHash || ''));
   const id = digest(`seedance-narration-successor-v1:${email}:${parentPreparedId}:${manifestHash}`).slice(0, 32);
@@ -97,9 +108,9 @@ async function parentContext(email, parentId, read, now) {
   falRequestUrl(receipt.statusUrl, receipt.endpoint, receipt.requestId, 'status');
   falRequestUrl(receipt.responseUrl, receipt.endpoint, receipt.requestId, 'result');
   return { ...context, queue, failed, recheck: async () => {
-    await context.recheck();
-    check((await read(queuePath(email, context.job.id)))?.etag === queue.etag
-      && (await read(falRequestPath(retry.operationIdentity)))?.etag === failed.etag);
+    const [, currentQueue, currentFailed] = await Promise.all([context.recheck(), read(queuePath(email, context.job.id)),
+      read(falRequestPath(retry.operationIdentity))]);
+    check(currentQueue?.etag === queue.etag && currentFailed?.etag === failed.etag);
   } };
 }
 function plan(parent, target, narration, maximumNewCostCents, evidence, proof, now) {
@@ -139,8 +150,12 @@ export async function validateNarrationSuccessor({ grant, target, order, read = 
   check(p?.version === 2 && p.kind === NARRATION_SUCCESSOR_KIND && p.parentCorrectionId === legacyId(order.id)
     && grant.id === narrationSuccessorId(p.parentCorrectionId, grant.manifestHash));
   const parent = await parentContext(grant.customerEmail, p.parentCorrectionId, read, now);
-  const evidence = await read(partialBillingEvidencePath(p.billingEvidenceHash)), link = await read(narrationSuccessorPath(p.parentCorrectionId));
-  const intent = await read(intentPathFor(p.parentCorrectionId));
+  const [evidence, link, intent] = await Promise.all([read(partialBillingEvidencePath(p.billingEvidenceHash)),
+    read(narrationSuccessorPath(p.parentCorrectionId)), read(intentPathFor(p.parentCorrectionId))]);
+  // Only the separately reviewed context revision may follow this narration
+  // version. Its complete chain is validated by the child and funding reader;
+  // the parent must also remain readable during child publication.
+  const childLink = await readContextLink(grant.id, read);
   check(intent?.etag && hash(intent.value) === hash({ version: 1, parentCorrectionId: p.parentCorrectionId,
     correctionId: grant.id, preparedId: target.id, manifestHash: target.manifestHash, shotId: p.shotId, narration: p.narration,
     failedOperationIdentity: p.failedOperationIdentity, failedRequestId: p.failedRequestId, failedRecordHash: p.failedRecordHash,
@@ -148,7 +163,7 @@ export async function validateNarrationSuccessor({ grant, target, order, read = 
     approvedBy: grant.approvedBy, providerProof: p.providerProof, approvedAt: grant.approvedAt }));
   check(evidence?.etag && link?.etag && hash(link.value) === hash({ version: 1, parentCorrectionId: p.parentCorrectionId,
     correctionId: grant.id, preparedId: target.id, manifestHash: target.manifestHash, grantHash: hash(grant) })
-    && !(await read(narrationSuccessorPath(grant.id))) && target.partialCorrection?.version === 1
+    && target.partialCorrection?.version === 1
     && target.partialCorrection.correctionId === grant.id && target.partialCorrection.planHash === hash(p)
     && target.narrationSuccessor?.version === 1 && target.narrationSuccessor.parentCorrectionId === p.parentCorrectionId
     && !target.partialCorrectionRetry && grant.originalOrderId === parent.grant.originalOrderId
@@ -158,11 +173,10 @@ export async function validateNarrationSuccessor({ grant, target, order, read = 
     && grant.quote.partialPlanHash === hash(p) && grant.quote.maximumCostCents <= grant.maximumCostCents
     && grant.quote.providerCostCents <= p.maximumNewCostCents && Date.parse(p.providerProof.verifiedAt) <= Date.parse(grant.approvedAt));
   return { recheck: async () => {
-    await parent.recheck();
-    check((await read(narrationSuccessorPath(p.parentCorrectionId)))?.etag === link.etag
-      && (await read(intentPathFor(p.parentCorrectionId)))?.etag === intent.etag
-      && (await read(partialBillingEvidencePath(p.billingEvidenceHash)))?.etag === evidence.etag
-      && !(await read(narrationSuccessorPath(grant.id))));
+    const [, currentChild, currentLink, currentIntent, currentEvidence] = await Promise.all([parent.recheck(), readContextLink(grant.id, read),
+      read(narrationSuccessorPath(p.parentCorrectionId)), read(intentPathFor(p.parentCorrectionId)), read(partialBillingEvidencePath(p.billingEvidenceHash))]);
+    check(currentLink?.etag === link.etag && currentIntent?.etag === intent.etag && currentEvidence?.etag === evidence.etag
+      && (!childLink || currentChild?.etag === childLink.etag));
   } };
 }
 
@@ -181,7 +195,22 @@ export async function readCorrectionFulfillment({ email, orderId, read = readRec
   const child = await readPaidFilmCorrection({ email, correctionId: link.value.correctionId, read, now });
   check(child?.grant.partial?.kind === NARRATION_SUCCESSOR_KIND && child.grant.originalOrderId === orderId
     && child.grant.preparedId === link.value.preparedId && hash(child.grant) === link.value.grantHash);
-  return { ...child, recheck: async () => { await child.recheck(); check((await read(narrationSuccessorPath(parentId)))?.etag === link.etag); } };
+  const nextPath = narrationSuccessorPath(child.grant.id), next = await read(nextPath);
+  if (!next) return { ...child, recheck: async () => {
+    await child.recheck(); check((await read(narrationSuccessorPath(parentId)))?.etag === link.etag && !(await read(nextPath)));
+  } };
+  const { contextSuccessorId, CONTEXT_SUCCESSOR_KIND } = await import('./context-successor.mjs');
+  check(next.etag && next.value?.version === 1 && next.value.parentCorrectionId === child.grant.id
+    && next.value.correctionId === contextSuccessorId(child.grant.id, next.value.manifestHash));
+  const terminal = await readPaidFilmCorrection({ email, correctionId: next.value.correctionId, read, now });
+  check(terminal?.grant.partial?.version === 3 && terminal.grant.partial.kind === CONTEXT_SUCCESSOR_KIND
+    && terminal.grant.originalOrderId === orderId && terminal.grant.preparedId === next.value.preparedId
+    && hash(terminal.grant) === next.value.grantHash && !(await read(narrationSuccessorPath(terminal.grant.id))));
+  return { ...terminal, recheck: async () => {
+    await terminal.recheck(); await child.recheck();
+    check((await read(narrationSuccessorPath(parentId)))?.etag === link.etag && (await read(nextPath))?.etag === next.etag
+      && !(await read(narrationSuccessorPath(terminal.grant.id))));
+  } };
 }
 
 export function createNarrationSuccessor({ read = readRecord, write = writeRecord, now = Date.now, env = process.env,

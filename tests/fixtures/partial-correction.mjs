@@ -35,6 +35,8 @@ export async function partialFixture(options = {}) {
     if (url.endsWith('/status')) return Response.json({ status: 'COMPLETED', request_id: url.split('/').at(-2) });
     if (options.retryModeration422 && url.endsWith('offline-new-corrected-scene-2'))
       return Response.json({ detail: [{ type: 'content_policy_violation', msg: 'Output video has sensitive content.', loc: ['body'] }] }, { status: 422 });
+    if (options.narrationModeration422 && url.endsWith('offline-new-corrected-scene-3'))
+      return Response.json({ detail: [{ type: 'content_policy_violation', msg: 'Output video has sensitive content.', loc: ['body'] }] }, { status: 422 });
     if (options.initialNewFailure && url.endsWith('offline-new-corrected-scene-1') || options.retryFailure)
       return Response.json({ detail: [{ type: 'downstream_service_error', msg: 'Downstream service error', loc: ['body'] }] }, { status: 500 });
     return Response.json({ video: { url: 'https://v3.fal.media/fictional-new.mp4', content_type: 'video/mp4', file_size: 128 } });
@@ -101,12 +103,13 @@ export async function partialFixture(options = {}) {
   service = createPaidFilmCorrections({ env, read, write, now, verifyFunding: funding.verifyReservation,
     ...(options.verifyRetryFailure ? { verifyRetryFailure: options.verifyRetryFailure } : {}),
     ...(options.verifySuccessorFailure ? { verifySuccessorFailure: options.verifySuccessorFailure } : {}),
+    ...(options.verifyContextFailure ? { verifyContextFailure: options.verifyContextFailure } : {}),
     reserveFunding: () => assert.fail('Partial correction must not reserve again'),
     verifyPaidSale: async input => {
       verifications.push(input); if (options.reversed) throw Error('Synthetic reversed payment');
       const record = await read(`payments/orders/${orderId}.json`);
       return { order: record.value, expiresAt: options.proofExpiry ?? new Date(clock + 60000).toISOString(),
-        recheck: async () => assert.equal((await read(`payments/orders/${orderId}.json`)).etag, record.etag) };
+        recheck: async () => { assert.equal((await read(`payments/orders/${orderId}.json`)).etag, record.etag); await options.onProofRecheck?.(); } };
     }, quoteProvider: async input => {
       const job = (await read(jobPath(input.preparedId))).value;
       const validation = await adapter.validateManifest(job.manifest), quote = await adapter.quote({ manifest: job.manifest, manifestHash: job.manifestHash });
