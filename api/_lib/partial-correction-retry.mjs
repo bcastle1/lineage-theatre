@@ -146,7 +146,7 @@ export function createPartialCorrectionRetry({ read = readRecord, write = writeR
       && reason.length <= 500 && !/[<>\x00-\x1f\x7f]/.test(reason));
     let context = await correctionContext({ email: actor.email, correctionId });
     const { grant, job } = context, p = grant.partial;
-    check(p && job.id === preparedId && job.manifestHash === manifestHash && p.shotId === shotId
+    check(p?.version === 1 && !job.narrationSuccessor && job.id === preparedId && job.manifestHash === manifestHash && p.shotId === shotId
       && p.billingAccount === env.FAL_BILLING_ACCOUNT && Number.isSafeInteger(maximumNewCostCents)
       && maximumNewCostCents > 0 && maximumNewCostCents <= p.maximumNewCostCents);
     retained(job, grant);
