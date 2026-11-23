@@ -6,10 +6,11 @@ import { productionQueuePath } from './_lib/production-queue.mjs';
 import { falReviewedDelivery } from './_lib/fal-reviewed-delivery.mjs';
 import { productionAuthorizationDiagnostic } from './_lib/production-authorization-diagnostics.mjs';
 import { productionJobPath } from './_lib/film-production.mjs';
-import { createFilmVisualReviewService } from './_lib/film-visual-review.mjs';
+import { createFilmVisualReviewService, visualReviewBinding, visualReceiptPath } from './_lib/film-visual-review.mjs';
 import { createStartFrameReviewService } from './_lib/film-start-frame-review.mjs';
 import { accessStatusForUser, isOwner } from './_lib/access.mjs';
 import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
+import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -42,7 +43,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
             : !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 4))
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         const path = productionJobPath(body.email, body.preparedId), job = (await read(path))?.value;
-        let paymentPermission = null, pinnedLease = null, pinnedGrant = null;
+        let paymentPermission = null, pinnedLease = null, pinnedGrant = null, pinnedReviewClaim = null;
         const authorize = async () => {
           const current = (await read(path))?.value, actor = (await read(userPath(body.email)))?.value;
           if (!current || current.id !== body.preparedId || current.ownerHash !== digest(body.email) || current.manifestHash !== body.manifestHash
@@ -77,12 +78,36 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
               ? current.manifestHash === '242696e7d84c765468f5e33717b32480326da65488f0d7ff8573b2938ad70358'
                 && grant?.characterBindingVersion === 2 && grant.maximumCostCents === 360 && grant.maximumReferenceRequests === 4
               : [undefined, 1].includes(bindingVersion) && grant?.maximumCostCents === 300 && grant.maximumReferenceRequests === 2;
-            const valid = isOwner(actor) && grant?.version === 1 && grant.kind === 'fictional-kling-quality-canary-v1'
+            const validKling = current.provider.model === 'kling' && current.provider.recipe === FAL_RECIPE_VERSION
+              && grant?.version === 1 && grant.kind === 'fictional-kling-quality-canary-v1'
               && grant.ownerHash === current.ownerHash && grant.preparedId === current.id
               && grant.manifestHash === body.manifestHash && grant.recipe === current.provider.recipe
               && grant.fictionalOnly === true && grant.funding === 'existing-merchant-provider-credit'
-              && boundedCanary && grant.maximumVideoRequests === 3
-              && Date.parse(grant.expiresAt) > now() && typeof lease?.token === 'string' && lease.token.length > 0
+              && boundedCanary && grant.maximumVideoRequests === 3 && Date.parse(grant.expiresAt) > now();
+            let validSeedance = false;
+            if (protocol && !startFrame && current.provider.model === 'seedance' && current.provider.recipe === SEEDANCE_RECIPE_VERSION) {
+              try {
+                verifySeedanceCanaryGrant(grant, { email: body.email, ownerHash: current.ownerHash, id: current.id, now: now() });
+                validSeedance = current.authorization?.environment === 'production'
+                  && current.authorization.manifestHash === body.manifestHash
+                  && current.authorization.quoteReference === grant.quoteReference
+                  && current.authorization.budgetCents === grant.maximumCostCents;
+                const claim = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/visual-review-claims/${digest(body.shotId)}.json`))?.value;
+                const inputHash = digest(JSON.stringify({ email: body.email, preparedId: body.preparedId,
+                  manifestHash: body.manifestHash, shotId: body.shotId, frames: body.frames }));
+                const claimHash = digest(JSON.stringify(claim || null));
+                validSeedance = validSeedance && claim?.version === 1 && claim.state === 'claimed'
+                  && claim.ownerHash === current.ownerHash && claim.preparedId === current.id
+                  && claim.manifestHash === body.manifestHash && claim.shotId === body.shotId && claim.inputHash === inputHash
+                  && typeof claim.token === 'string' && claim.token.length > 0
+                  && Number.isFinite(Date.parse(claim.claimedAt)) && Date.parse(claim.claimedAt) <= now()
+                  && Date.parse(claim.claimedAt) >= Date.parse(grant.approvedAt)
+                  && (!pinnedReviewClaim || pinnedReviewClaim === claimHash);
+                if (validSeedance) pinnedReviewClaim = claimHash;
+              } catch { /* A different or expanded studio allowance cannot authorize inference. */ }
+            }
+            const valid = isOwner(actor) && (validKling || validSeedance)
+              && typeof lease?.token === 'string' && lease.token.length > 0
               && lease.manifestHash === body.manifestHash && lease.expiresAt > now()
               && (!pinnedLease || lease.token === pinnedLease) && (!pinnedGrant || pinnedGrant === grantHash)
               && (!startFrame || current.authorization?.manifestHash === body.manifestHash
@@ -106,6 +131,13 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           return true;
         };
         if (!await authorize()) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        if (job.mode === 'operator-test' && job.provider.model === 'seedance') {
+          const { bindingHash } = visualReviewBinding(job, body.shotId, body.frames);
+          const previous = await read(visualReceiptPath(job.ownerHash, job.id, bindingHash));
+          // One attempt per exact shot. An uncertain or rate-limited response
+          // consumes this canary's review allowance; it never permits a retry.
+          if (previous && previous.value?.state !== 'reviewed') return json(res, 409, { code: 'VISUAL_REVIEW_UNCERTAIN' });
+        }
         if (!await limiter(`production-worker:visual-review:${body.preparedId}`, 240, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
         const review = (startFrame ? startFrameReviewFactory : visualReviewFactory)({ read, key: () => env.OPENAI_API_KEY, authorize, now });
         return json(res, 200, await review(startFrame

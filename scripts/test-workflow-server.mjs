@@ -3,6 +3,16 @@
  * Start: node scripts/test-workflow-server.mjs
  * Route proof, then exit: node scripts/test-workflow-server.mjs --check
  * Checkout UI fixtures: node scripts/test-workflow-server.mjs --checkout-fixtures
+ * After fake checkout, /__workflow/production can advance that same paid order
+ * through simulated progress and attach the existing demonstration MP4. This
+ * proves UI handoff and delivery only, never actual provider generation.
+ * Browser sequence: sign in with the fictional customer below; choose the paid
+ * invoice draft, prepare its price, accept checkout, and record fake payment in
+ * the local invoice tab. Keep the studio tab open for server confirmation and
+ * automatic return. In a separate /__workflow/production tab, refresh, simulate
+ * progress, then attach the demonstration. The original paid-film view should
+ * reveal the exact saved film's player and download without another payment.
+ * The existing sample's story and duration do not match the fictional plan.
  * Checkout route proof: node scripts/test-workflow-server.mjs --checkout-fixtures --check
  * Finished-film playback fixture: node scripts/test-workflow-server.mjs --delivery-fixture
  * Private media route proof: node scripts/test-workflow-server.mjs --delivery-fixture --check
@@ -259,7 +269,7 @@ function recordSyntheticInvoicePayment(invoiceId) {
   return id;
 }
 if (checkoutFixtures) await write(HOSTED_CHECKOUT_SETTINGS_PATH, { revision: 1, enabled: true, serviceItemId: "2", serviceItemName: "SYNTHETIC film production",
-  taxCode: "NON", deliveryTerms: "SYNTHETIC LOCAL TEST: no film will be delivered.", refundTerms: "SYNTHETIC LOCAL TEST: no payment exists to refund.",
+  taxCode: "NON", deliveryTerms: "SYNTHETIC LOCAL TEST: no new film is rendered; the local helper can attach an existing demonstration video after fake payment.", refundTerms: "SYNTHETIC LOCAL TEST: no payment exists to refund.",
   merchantConfirmed: true, pciAcknowledged: true, automaticInvoiceEmailDisabled: true, merchantBinding: syntheticQuickBooksBinding, updatedBy: OWNER_EMAIL });
 const syntheticReceipts = [], syntheticQueue = [];
 // The real payment-to-production outbox; its queue hand-off is recorded here
@@ -274,15 +284,17 @@ const hostedCheckout = createHostedCheckoutService({ read, write, transport: syn
   funding: createFalFunding({ read, write, listBlobs: listRecords, fetchImpl: syntheticFalFetch,
     env: { FAL_BILLING_KEY: "synthetic-billing-key-local-only", FAL_BILLING_ACCOUNT: syntheticFalBillingAccount } }) });
 let deliveryMedia, deliveryProject, generationProject;
+const checkoutMedia = new Map();
 let deliveryBlobReads = 0;
 const getDeliveryBlob = async (pathname, options) => {
-  assert.equal(deliveryFixture || generationReviewFixture, true);
+  assert.equal(deliveryFixture || generationReviewFixture || checkoutFixtures, true);
   assert.equal(options.access, "private");
   assert.equal(options.useCache, false);
   deliveryBlobReads++;
-  if (!deliveryMedia || pathname !== deliveryMedia.pathname) return null;
-  const range = parseRange(options.headers?.Range, deliveryMedia.bytes.length);
-  const bytes = range ? deliveryMedia.bytes.subarray(range.start, range.end + 1) : deliveryMedia.bytes;
+  const media = checkoutMedia.get(pathname) || (deliveryMedia?.pathname === pathname ? deliveryMedia : null);
+  if (!media) return null;
+  const range = parseRange(options.headers?.Range, media.bytes.length);
+  const bytes = range ? media.bytes.subarray(range.start, range.end + 1) : media.bytes;
   return { statusCode: 200, stream: new Response(bytes).body,
     headers: new Headers({ "content-type": "video/mp4", "content-length": String(bytes.length), ...(range ? { "content-range": range.contentRange } : {}) }),
     blob: { pathname, contentType: "video/mp4", size: bytes.length } };
@@ -329,7 +341,7 @@ const generationReviewService = createPaidFilmGenerationReviewService({ read, wr
 const handlers = {
   "/api/auth": createAuthHandler({ ...shared,
     verificationMail: { available: () => false, send: refuseProvider } }),
-  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider, ...((deliveryFixture || generationReviewFixture) ? { getBlob: getDeliveryBlob } : {}),
+  "/api/studio": createStudioHandler({ ...shared, generateStory: refuseProvider, ...((deliveryFixture || generationReviewFixture || checkoutFixtures) ? { getBlob: getDeliveryBlob } : {}),
     ...(generationReviewFixture ? {
       paidFilmGeneration: { ...generationFixtureService, start: refuseProvider,
         availableFor: actor => actor?.email === OWNER_EMAIL && actor?.role === "owner" && actor?.mustChangePassword !== true },
@@ -512,6 +524,58 @@ window.open=(url,target,features)=>{
   return {get document(){return tab.document;},get closed(){return tab.closed;},close(){tab.close();},location:{replace(next){tab.location.replace(local(next));}}};
 };` : `// SYNTHETIC LOCAL TEST ONLY\nconst fixture=${JSON.stringify(fixture)};\nfor(const email of ${JSON.stringify(accounts.map(account=>account.email))}){const key='lineage-studio-v3:'+email;if(!localStorage.getItem(key))localStorage.setItem(key,JSON.stringify([fixture]));}`;
 
+// Local harness control only: advance the exact fake-paid order through visible
+// progress, then reuse the pinned demonstration MP4. This never calls a worker,
+// claims provider generation, creates a payment, or changes production handlers.
+async function advanceSyntheticCheckout(actor, orderId, stage) {
+  const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
+  if (!checkoutFixtures || !/^[a-f0-9]{64}$/.test(orderId || "") || !["processing", "completed"].includes(stage))
+    fail("Choose a valid local fixture order and stage.", 400);
+  if (!actor?.email) fail("Sign in to the local fictional customer account.", 401);
+  const savedOrder = (await read(`payments/orders/${orderId}.json`))?.value;
+  if (!savedOrder || savedOrder.customerEmail !== actor.email) fail("This local order is unavailable to this fixture account.", 404);
+  const confirmed = await hostedCheckout.order(actor, orderId);
+  if (confirmed.status !== "captured" || !confirmed.charged || !confirmed.receiptAvailable || confirmed.sandbox
+    || confirmed.requiresReview || confirmed.refundedCents !== 0) fail("Confirm the fake invoice payment before advancing this fixture.");
+  const queued = syntheticQueue.find(item => item.orderId === orderId && item.email === actor.email && item.id === confirmed.preparedId);
+  if (!queued) fail("The confirmed local order must reach the automatic production queue first.");
+  const path = productionJobPath(actor.email, queued.id), saved = await read(path), job = saved?.value;
+  if (!job || job.id !== confirmed.preparedId || job.filmId !== confirmed.filmId || job.ownerHash !== auth.digest(actor.email)
+    || job.manifestHash !== savedOrder.manifestHash || job.manifestHash !== auth.digest(JSON.stringify(job.manifest))
+    || orderId !== auth.digest(`${actor.email}:production:${job.manifestHash}`)) fail("The local order and saved film do not match.");
+  if (job.status === stage) return { synthetic: true, orderId, preparedId: job.id, stage, providerGenerated: false };
+  if (stage === "processing" ? job.status !== "prepared" : job.status !== "processing") fail("Advance the local fixture through production before completing it.");
+  const timestamp = new Date().toISOString();
+  const next = { ...job, status: stage, updatedAt: timestamp, lastCheckedAt: timestamp,
+    productionStartedAt: job.productionStartedAt || timestamp,
+    syntheticFixture: { purpose: "same-order-checkout-and-existing-sample-playback", memoryOnly: true, providerGenerated: false, realPayment: false },
+    shots: job.shots.map((shot, index) => ({ ...shot, status: stage === "completed" || index === 0 && job.shots.length > 1 ? "completed" : "processing" })) };
+  if (stage === "completed") {
+    const sha256 = auth.digest(websiteBytes);
+    assert.equal(sha256, "68f017454bf2619b972db7b062badf765829e85f0d8f315ca0f674d763bc708d");
+    assert.equal(websiteBytes.length, 17_193_754);
+    const budget = (await read(FAL_FUNDING_PATH))?.value.entries.find(entry => entry.orderId === orderId)?.maximumCostCents;
+    if (!Number.isSafeInteger(budget) || budget < 1) fail("The local order's fake funding reservation is unavailable.");
+    const pathname = `production/media/${job.ownerHash}/${job.id}/${sha256}.mp4`;
+    next.authorization = { manifestHash: job.manifestHash, environment: "production", budgetCents: budget,
+      quoteReference: "synthetic-existing-demonstration-no-provider-work", authorizedAt: timestamp };
+    next.media = { pathname, sha256, contentType: "video/mp4", sizeBytes: websiteBytes.length, durationSeconds: 78.506 };
+    next.completedAt = timestamp;
+    checkoutMedia.set(pathname, { bytes: websiteBytes, pathname, sha256 });
+  }
+  await write(path, next, saved.etag);
+  return { synthetic: true, orderId, preparedId: job.id, stage, providerGenerated: false };
+}
+async function checkoutProgressControls() {
+  const cards = [];
+  for (const queued of syntheticQueue) {
+    const job = (await read(productionJobPath(queued.email, queued.id)))?.value;
+    const form = (stage, label) => `<form method="post" action="/__workflow/production-progress"><input type="hidden" name="orderId" value="${queued.orderId}"><input type="hidden" name="stage" value="${stage}"><button type="submit">${label}</button></form>`;
+    cards.push(`<li>Fake order ${queued.orderId}<br>Exact saved film ${queued.id} · ${job?.status}<br><a href="/#paid-film?order=${queued.orderId}">Open this fake paid film</a>${job?.status === "prepared" ? form("processing", "Simulate production progress for this paid film") : job?.status === "processing" ? form("completed", "Attach existing demonstration video to this paid film") : "Existing demonstration attached; no video was generated."}</li>`);
+  }
+  return `<h2>Same-order synthetic production controls</h2><p>After the app confirms the fake payment, refresh this page. While signed in as that fictional customer, simulate progress and then attach the existing Thomas Wilson demonstration MP4. Its story and duration do not match the purchased plan. These controls test the actual app's paid-film handoff and private playback only; no worker or provider runs.</p><ul>${cards.join("") || "<li>No confirmed payment has reached the recording queue yet.</li>"}</ul>`;
+}
+
 let vite;
 const server = createServer(async (req, res) => {
   try {
@@ -527,7 +591,8 @@ const server = createServer(async (req, res) => {
       synthetic: true, memoryOnly: true, providersEnabled: false, mailEnabled: false,
       blockedExternalCalls, blockedConnections, recordCount: records.size, checkoutFixtures, deliveryFixture, generationReviewFixture, deliveryBlobReads,
       syntheticProvider, syntheticFalReads, syntheticInvoices: syntheticQuickBooks.invoicePosts, syntheticPayments: syntheticQuickBooks.payments.size,
-      syntheticProductionQueue: syntheticQueue.length,
+      syntheticProductionQueue: syntheticQueue.length, syntheticCompletedFilms: checkoutMedia.size,
+      ...(checkoutFixtures ? { productionControls: "/__workflow/production", illustrativePlaybackOnly: true } : {}),
       ...(deliveryFixture ? { deliveryPreparedId: deliveryProject.productionPreparation.id, illustrativePlaybackOnly: true } : {}),
       ...(generationReviewFixture ? { generationPreparedId: generationProject.productionPreparation.id, generationPaymentChecks, reviewVerificationSimulated: true,
         generationStatusLink: `/#library?film=${generationProject.productionPreparation.id}`, illustrativePlaybackOnly: true } : {}),
@@ -553,6 +618,25 @@ const server = createServer(async (req, res) => {
       const invoiceId = new URLSearchParams(text).get("invoiceId"), invoice = syntheticQuickBooks.invoices.get(invoiceId);
       if (invoice?.Balance > 0) recordSyntheticInvoicePayment(invoiceId);
       res.statusCode = 303; res.setHeader("Location", `/__workflow/invoice?link=${encodeURIComponent(invoice?.InvoiceLink || "")}`); return res.end();
+    }
+    if (checkoutFixtures && path === "/__workflow/production" && req.method === "GET") {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end(`<!doctype html><html><head><title>Synthetic production controls</title></head><body><h1>SYNTHETIC LOCAL TEST ONLY · NO RENDER OR REAL PAYMENT</h1>${await checkoutProgressControls()}<p><a href="/__workflow/production">Refresh fixture controls</a> · <a href="/__workflow">Public fixture accounts</a> · <a href="/__workflow/status">Read test status</a></p></body></html>`);
+    }
+    if (checkoutFixtures && path === "/__workflow/production-progress" && req.method === "POST") {
+      if (req.headers.origin !== origin) return auth.json(res, 403, { message: "Same-origin local fixture requests only." });
+      const signedIn = await session(req);
+      if (!signedIn?.user || signedIn.user.mustChangePassword) return auth.json(res, 401, { message: "Sign in to the local fictional customer account." });
+      const jsonBody = req.headers["content-type"]?.startsWith("application/json");
+      let text = ""; for await (const chunk of req) { text += chunk; if (text.length > 1000) return auth.json(res, 400, { message: "Local fixture request is too large." }); }
+      try {
+        const fields = jsonBody ? Object.entries(JSON.parse(text)) : [...new URLSearchParams(text).entries()];
+        if (fields.length !== 2 || new Set(fields.map(([key]) => key)).size !== 2 || fields.some(([key]) => !["orderId", "stage"].includes(key)))
+          return auth.json(res, 400, { message: "Choose the exact local order and fixture stage." });
+        const body = Object.fromEntries(fields), result = await advanceSyntheticCheckout(signedIn.user, body.orderId, body.stage);
+        if (jsonBody) return auth.json(res, 200, result);
+        res.statusCode = 303; res.setHeader("Location", "/__workflow/production"); return res.end();
+      } catch (error) { return auth.json(res, error.status || 400, { message: error.status ? error.message : "Invalid local fixture request." }); }
     }
     if (path === "/__workflow") {
       // This helper exposes only the intentionally public fixture accounts, never real users.
@@ -952,10 +1036,54 @@ async function checkCheckout() {
   assert.equal((await read(FAL_FUNDING_PATH)).value.entries.length, 3);
 
   assert.equal(syntheticQueue.length, 1);
+  // Continue the very same fake purchase to progress and private delivery.
+  // The helper attaches an existing illustrative asset, not a provider result.
+  const transition = (orderId, stage, cookie = customer, suppliedOrigin = origin) =>
+    route("/__workflow/production-progress", { cookie, suppliedOrigin, body: { orderId, stage } });
+  const beforeOrder = (await read(`payments/orders/${paid.quoted.orderId}.json`)).value;
+  const libraryUrl = `/api/library?action=detail&kind=plan&id=${paid.prepared.id}`;
+  const mediaUrl = `/api/studio?action=productionMedia&id=${paid.prepared.id}`;
+  const waiting = await route(libraryUrl, { cookie: customer });
+  assert.equal(waiting.status, 200); assert.equal(waiting.body.entry.id, paid.prepared.id);
+  assert.equal(waiting.body.entry.payments[0].id, paid.quoted.orderId);
+  assert.equal(waiting.body.entry.payments[0].status, "captured");
+  assert.equal(waiting.body.entry.production.mediaReady, false);
+  assert.equal((await transition(paid.quoted.orderId, "processing", "")).status, 401);
+  assert.equal((await transition(paid.quoted.orderId, "processing", other)).status, 404);
+  assert.equal((await transition(paid.quoted.orderId, "processing", customer, "https://example.invalid")).status, 403);
+  assert.equal((await transition(unpaid.quoted.orderId, "processing")).status, 409);
+  assert.equal((await transition(paid.quoted.orderId, "completed")).status, 409, "Completion must follow the visible production stage");
+  assert.equal((await transition(paid.quoted.orderId, "processing")).status, 200);
+  const processing = await route(libraryUrl, { cookie: customer });
+  assert.equal(processing.body.entry.production.status, "processing");
+  assert.equal(processing.body.entry.production.progress.stage, "creating");
+  assert.equal(processing.body.entry.production.mediaReady, false);
+  assert.equal(processing.body.entry.payments[0].id, paid.quoted.orderId);
+  assert.equal((await mediaRoute(mediaUrl, { cookie: customer })).status, 409, "Paid does not mean the video is ready");
+  const completed = await transition(paid.quoted.orderId, "completed");
+  assert.equal(completed.status, 200); assert.equal(completed.body.preparedId, paid.prepared.id);
+  assert.equal(completed.body.orderId, paid.quoted.orderId); assert.equal(completed.body.providerGenerated, false);
+  assert.equal((await transition(paid.quoted.orderId, "completed")).status, 200, "A repeated local completion is idempotent");
+  assert.equal((await transition(paid.quoted.orderId, "processing")).status, 409, "A completed fixture cannot regress");
+  const ready = await route(libraryUrl, { cookie: customer });
+  assert.equal(ready.body.entry.id, paid.prepared.id); assert.equal(ready.body.entry.filmId, paid.project.id);
+  assert.equal(ready.body.entry.production.mediaReady, true); assert.equal(ready.body.entry.production.progress.stage, "ready");
+  assert.equal(ready.body.entry.mediaUrl, mediaUrl); assert.equal(ready.body.entry.downloadUrl, `${mediaUrl}&download=1`);
+  assert.equal(ready.body.entry.payments[0].id, paid.quoted.orderId);
+  assert.equal(ready.body.entry.payments[0].amountCents, expectedFixturePriceCents);
+  assert.equal((await mediaRoute(ready.body.entry.downloadUrl, { cookie: other })).status, 404);
+  const partial = await mediaRoute(mediaUrl, { cookie: customer, headers: { Range: "bytes=0-63" } });
+  assert.equal(partial.status, 206); assert.deepEqual(partial.bytes, websiteBytes.subarray(0, 64));
+  const download = await mediaRoute(ready.body.entry.downloadUrl, { cookie: customer });
+  assert.equal(download.status, 200); assert.equal(auth.digest(download.bytes), auth.digest(websiteBytes));
+  assert.equal(download.headers["content-disposition"], `attachment; filename="${paid.prepared.id}.mp4"`);
+  assert.deepEqual((await read(`payments/orders/${paid.quoted.orderId}.json`)).value, beforeOrder, "Fixture progression cannot rewrite payment evidence");
+  assert.equal((await route(`/api/library?action=detail&kind=plan&id=${unpaid.prepared.id}`, { cookie: customer })).body.entry.production.mediaReady, false);
+  assert.equal(checkoutMedia.size, 1); assert.equal(syntheticQuickBooks.invoicePosts, 3); assert.equal(syntheticQueue.length, 1);
   assert.doesNotMatch(JSON.stringify([...records.values()]), /synthetic-fal-key-local-only|synthetic-billing-key-local-only|"cvc"/,
     "Provider keys and card data are never stored");
   await checkEgressGuard();
-  console.log("PASS: actual-handler QuickBooks-hosted invoice checkout against in-process fakes of QuickBooks, fal pricing, fal funding and the worker heartbeat: fixed Seedance film quote reaches the invoice unchanged; production consent required; stale worker and short funding block the invoice; one invoice per checkout key; CAPTCHA replay refused; GET-only order reads; verified capture, receipt and a single automatic production hand-off; unpaid invoices never produce; ownership; zero outbound calls, egress guard verified.");
+  console.log("PASS: actual-handler QuickBooks-hosted invoice checkout against in-process fakes of QuickBooks, fal pricing, fal funding and the worker heartbeat: fixed Seedance film quote reaches the invoice unchanged; production consent required; stale worker and short funding block the invoice; one invoice per checkout key; CAPTCHA replay refused; verified capture, receipt and one automatic production hand-off; the exact same paid order advances through simulated progress to private demonstration-video playback and verified download bytes; unpaid, foreign and cross-origin fixture advances refused; payment records unchanged; zero outbound calls, egress guard verified. Existing demonstration MP4 only, no provider render or real payment.");
 }
 function mediaRoute(path, { cookie, method = "GET", headers = {} } = {}) {
   return new Promise((resolve, reject) => {
