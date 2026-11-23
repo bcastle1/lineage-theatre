@@ -20,7 +20,7 @@ export function productionReadiness({ env = process.env, pricingSettings={markup
     quality:{preference:"highest",label:"Highest available realistic film quality",verified:available},
     connections:{
       magiclight:{available,provider:adapter,reason:available
-        ?"Film production is configured. Each saved film still requires verified payment, supported production inputs, and a current provider budget before generation."
+        ?"Film production is configured. Each saved film requires authorized production, supported inputs, and a current provider budget. New films are completed before checkout; confirmed payment unlocks the finished video."
         :"Film production setup is incomplete. Generation settings and finished-film delivery still need verification. Your screenplay, plan, and any recorded payment remain saved."},
       billing:{available:false,reason:"QuickBooks is selected for payments; its merchant connection is pending. When checkout becomes available, payment processing will be provided by Intuit Payments Inc. Film prices use a verified production quote plus the saved administrator markup. The total you approve at checkout is the fixed payment amount."},
     },

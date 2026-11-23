@@ -1474,7 +1474,7 @@ export function CreateStep({
         <div>
           <h2>Bring your family's world to life</h2>
           <p>Create, watch, and keep your film in Lineage Theatre.</p>
-          {!film.paymentReference && !film.job && !film.productionPreparation && caps?.productionProvider === "seedance" && <p className="field-note">Seedance 2.5 US generates the video for your new film. After payment is confirmed, you can follow its progress in your film library.</p>}
+          {!film.paymentReference && !film.job && !film.productionPreparation && caps?.productionProvider === "seedance" && <p className="field-note">Follow production in your film library. Once your film is ready, payment unlocks watching and downloading.</p>}
         </div>
         <FilmIcon size={24} />
       </div>

@@ -11,6 +11,7 @@ import { createStartFrameReviewService } from './_lib/film-start-frame-review.mj
 import { accessStatusForUser, isOwner } from './_lib/access.mjs';
 import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
+import { authorizeFilmProduction, createFilmPreRenderService, readPreRenderGrant, PRERENDER_FLOW } from './_lib/film-prerender.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -18,7 +19,8 @@ import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
 export function createProductionWorkerHandler({ env = process.env, paymentService = payments,
   adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
   visualReviewFactory = createFilmVisualReviewService,
-  startFrameReviewFactory = createStartFrameReviewService } = {}) {
+  startFrameReviewFactory = createStartFrameReviewService,
+  preRenderService = createFilmPreRenderService({ read, now, env }) } = {}) {
   return async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); }
     const secret = env.LINEAGE_WORKER_SECRET, header = req.headers?.authorization;
@@ -60,8 +62,21 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           if (startFrame && (current.manifest.productionPlan?.characterBindingVersion !== 3
             || !['submitting', 'queued', 'processing', 'uncertain'].includes(current.shots.find(s => s.id === body.shotId)?.status)
             || !(current.lease?.expiresAt > now()) || typeof current.lease.token !== 'string' || !current.lease.token)) return false;
-          try { await requireFinishedFilmPayment({ job: current, email: body.email, actor, read, now }); }
-          catch { return false; }
+          const preRenderTicket = current.mode === 'customer' ? (await read(productionQueuePath(body.email, body.preparedId)))?.value : null;
+          const preRendering = preRenderTicket?.authorizationKind === PRERENDER_FLOW;
+          if (preRendering) {
+            try {
+              const grant = await readPreRenderGrant({ email: body.email, id: body.preparedId, job: current, read });
+              const hash = digest(JSON.stringify(grant));
+              if (!grant || grant.id !== preRenderTicket.preRenderGrantId || current.authorization?.environment !== 'production'
+                || current.authorization.manifestHash !== body.manifestHash || current.authorization.budgetCents !== grant.maximumCostCents
+                || current.authorization.quoteReference !== grant.quoteReference || pinnedGrant && pinnedGrant !== hash) return false;
+              pinnedGrant = hash;
+            } catch { return false; }
+          } else {
+            try { await requireFinishedFilmPayment({ job: current, email: body.email, actor, read, now }); }
+            catch { return false; }
+          }
           if (current.mode === 'operator-test') {
             const grant = (await read(`production/operator-canaries/${current.ownerHash}/${current.id}/grant.json`))?.value;
             const lease = startFrame ? { ...current.lease, manifestHash: current.manifestHash }
@@ -121,9 +136,9 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
             || typeof ticket.lease.token !== 'string' || !ticket.lease.token
             || pinnedLease && pinnedLease !== digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`)) return false;
           pinnedLease = digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`);
-          if (!paymentPermission || Date.parse(paymentPermission.expiresAt) <= now()) {
-            const permission = await paymentService.authorizeProduction({ email: body.email, preparedId: body.preparedId,
-              manifestHash: body.manifestHash, orderId: ticket.orderId });
+          if (preRendering || !paymentPermission || Date.parse(paymentPermission.expiresAt) <= now()) {
+            const permission = await authorizeFilmProduction({ email: body.email, preparedId: body.preparedId,
+              manifestHash: body.manifestHash, orderId: ticket.orderId }, { paymentService, preRenderService, read, spending: false });
             if (permission?.allowed !== true || permission.manifestHash !== body.manifestHash
               || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now()) return false;
             paymentPermission = permission;
@@ -175,7 +190,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         return json(res, 409, { code: 'WORKER_MODEL_MISMATCH' });
       if (!await limiter('production-worker:authorize', 120, 60_000)) return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
       const { email, preparedId, manifestHash, orderId } = body;
-      return json(res, 200, await paymentService.authorizeProduction({ email, preparedId, manifestHash, orderId }));
+      return json(res, 200, await authorizeFilmProduction({ email, preparedId, manifestHash, orderId }, { paymentService, preRenderService, read }));
     } catch (error) {
       if (['VISUAL_REVIEW_UNCERTAIN', 'VISUAL_REVIEW_REQUIRED', 'VISUAL_REVIEW_INVALID', 'VISUAL_REVIEW_AUTH_REQUIRED', 'VISUAL_REVIEW_UNAVAILABLE', 'VISUAL_REVIEW_RATE_LIMITED'].includes(error?.code))
         return json(res, error.code === 'VISUAL_REVIEW_RATE_LIMITED' ? 429 : error.code === 'VISUAL_REVIEW_UNAVAILABLE' ? 503 : 409, { code: error.code });

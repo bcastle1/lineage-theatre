@@ -13,7 +13,9 @@ export type LibraryCoverage = {
 export type LibraryEntry = {
   kind: "plan" | "upload"; id: string; filmId: string; title: string; durationSeconds: number;
   createdAt: string; updatedAt: string; libraryState: LibraryView; revision: number;
-  production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean; workerReady?: boolean; message?: string; progress?: unknown };
+  production: { status: string; completedShots: number; shotCount: number; mediaReady: boolean; needsAttention: boolean; workerReady?: boolean; message?: string; progress?: unknown;
+    deliveryFlow?: 'render-before-payment-v1'; artifactReady?: boolean; paymentLocked?: boolean; purchaseReady?: boolean;
+    price?: {amountCents:number;currency:'USD';preparedId:string;manifestHash:string} };
   payments: LibraryPayment[]; coverage?: LibraryCoverage; manifestHash?: string; mediaUrl?: string; downloadUrl?: string; origin?: "studio-delivery";
 };
 export type LibraryPage = { entries: LibraryEntry[]; cursor?: string };
@@ -42,7 +44,7 @@ export function libraryMediaUrl(entry: Pick<LibraryEntry, "kind" | "id">, downlo
   return `/api/${entry.kind === "plan" ? "studio?action=productionMedia" : "archive?action=media"}&id=${encodeURIComponent(entry.id)}${download ? "&download=1" : ""}`;
 }
 export function libraryCanWatch(entry: LibraryEntry): boolean {
-  return entry.production.mediaReady && ["completed", "uploaded"].includes(entry.production.status)
+  return !entry.production.paymentLocked && entry.production.mediaReady && ["completed", "uploaded"].includes(entry.production.status)
     && entry.mediaUrl === libraryMediaUrl(entry) && entry.downloadUrl === libraryMediaUrl(entry, true);
 }
 export function libraryGenerationOrder(entry: LibraryEntry): LibraryPayment | null {
@@ -87,6 +89,20 @@ export function normalizeLibraryEntry(value: unknown): LibraryEntry {
       ...(value.production.message !== undefined ? { message: value.production.message as string } : {}),
       ...(value.production.progress !== undefined ? { progress: value.production.progress } : {}) }, payments,
     ...(value.kind === "plan" ? { manifestHash: value.manifestHash as string } : ["studio-delivery", "magiclight-delivery"].includes(String(value.origin)) ? { origin: "studio-delivery" as const } : {}) };
+  if (value.production.deliveryFlow !== undefined) {
+    const p = value.production, price = p.price;
+    if (entry.kind !== 'plan' || p.deliveryFlow !== 'render-before-payment-v1'
+      || typeof p.artifactReady !== 'boolean' || typeof p.paymentLocked !== 'boolean' || typeof p.purchaseReady !== 'boolean'
+      || !object(price) || !count(price.amountCents) || price.amountCents < 1 || price.amountCents > 100_000_000
+      || price.currency !== 'USD' || price.preparedId !== entry.id || price.manifestHash !== entry.manifestHash
+      || p.artifactReady && (p.status !== 'completed' || p.needsAttention)
+      || p.purchaseReady && (!p.artifactReady || !p.paymentLocked)
+      || p.mediaReady && !p.artifactReady
+      || p.paymentLocked && (p.mediaReady || value.mediaUrl !== undefined || value.downloadUrl !== undefined)) throw invalid();
+    Object.assign(entry.production, { deliveryFlow: p.deliveryFlow, artifactReady: p.artifactReady,
+      paymentLocked: p.paymentLocked, purchaseReady: p.purchaseReady,
+      price: { amountCents: price.amountCents, currency: 'USD', preparedId: entry.id, manifestHash: entry.manifestHash } });
+  }
   if (value.coverage !== undefined) {
     const coverage = value.coverage;
     if (entry.kind !== "plan" || !object(coverage) || coverage.kind !== "original-payment" || !digest(coverage.correctionId)
@@ -208,6 +224,7 @@ export function productionLabel(entry: LibraryEntry): string {
   if (libraryCanWatch(entry)) return "Ready to watch";
   const stage = libraryProgressStage(entry);
   if (entry.production.needsAttention || stage === "attention") return "Needs attention";
+  if (entry.production.artifactReady && entry.production.paymentLocked) return "Ready to purchase";
   if (entry.production.status === "failed") return "Failed";
   if (stage === "reconciling") return "Checking status";
   if (stage === "finishing") return "Finishing checks";

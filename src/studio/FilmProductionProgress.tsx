@@ -7,13 +7,13 @@ const windowTime = (value: string) => new Date(value).toLocaleString(undefined, 
 export default function FilmProductionProgress(props: FilmProductionProgressInput) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (!props.paid || props.ready) return;
+    if ((!props.paid && !props.studioFunded) || props.ready) return;
     const tick = () => { if (document.visibilityState === "visible") setNow(Date.now()); };
     const timer = setInterval(tick, 15_000);
     document.addEventListener("visibilitychange", tick);
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
-  }, [props.paid, props.ready]);
-  if (!props.paid) return null;
+  }, [props.paid, props.ready, props.studioFunded]);
+  if (!props.paid && !props.studioFunded) return null;
   const progress = filmProductionProgress({ ...props, now: props.now ?? now });
   const checking = progress.stageKey === "reconciling";
   const current = stages.findIndex(([stage]) => stage === progress.stageKey);
@@ -23,7 +23,7 @@ export default function FilmProductionProgress(props: FilmProductionProgressInpu
       : <progress max={100} value={progress.percent} aria-label={progress.label} aria-valuetext={`${progress.percent}% · ${progress.stage}`} />}
     <p className="film-progress-stage" role="status">{progress.stage}</p>
     <ol className="film-progress-stages" aria-label="Film production stages">{stages.map(([key, label], index) =>
-      <li key={key} data-complete={current > index || progress.stageKey === "ready"} aria-current={current === index ? "step" : undefined}><span aria-hidden="true">{index + 1}</span>{label}</li>)}</ol>
+      <li key={key} data-complete={current > index || progress.stageKey === "ready"} aria-current={current === index ? "step" : undefined}><span aria-hidden="true">{index + 1}</span>{key === "ready" && props.studioFunded && !props.paid ? "Ready to purchase" : label}</li>)}</ol>
     <div className="film-progress-estimate"><span>Estimated delivery</span><p>{progress.remaining}</p>
       {progress.estimate && <p className="field-note">Delivery window: <time dateTime={progress.estimate.earliestAt}>{windowTime(progress.estimate.earliestAt)}</time> – <time dateTime={progress.estimate.latestAt}>{windowTime(progress.estimate.latestAt)}</time></p>}
     </div>

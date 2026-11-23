@@ -1538,7 +1538,7 @@ export default function Admin({
                   <AlertCircle size={17} />
                   <span>
                     New prices require current provider rates and an available production worker.
-                    Saved customer prices stay fixed. Payment is verified before production.
+                    Saved customer prices stay fixed. New films are created before checkout; confirmed payment unlocks watching and downloading.
                   </span>
                 </div>
                 <button className="text-button" onClick={() => chooseTab("pricing")}>

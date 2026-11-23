@@ -1,5 +1,5 @@
 export type FilmProductionProgressInput = {
-  paid: boolean; ready: boolean; available?: boolean; status?: string | null; completedShots?: number; shotCount?: number;
+  paid: boolean; ready: boolean; studioFunded?: boolean; available?: boolean; status?: string | null; completedShots?: number; shotCount?: number;
   reportedPercent?: number | null; progress?: unknown; needsAttention?: boolean; workerReady?: boolean; message?: string | null; now?: number;
 };
 type Stage = "waiting" | "queued" | "creating" | "reconciling" | "finishing" | "ready" | "attention";
@@ -45,15 +45,16 @@ const remainingText: Record<Timing, string> = { learning: "Calculating your deli
 
 export function filmProductionProgress(input: FilmProductionProgressInput): FilmProductionProgressView {
   const snapshot = normalizeFilmProgress(input.progress), now = input.now ?? Date.now();
+  const authorized = input.paid || input.studioFunded === true, locked = input.studioFunded === true && !input.paid;
   let stageKey: Stage = snapshot?.stage ?? (["failed", "uncertain"].includes(input.status || "") ? "attention"
     : ["completed", "uploaded", "verifying", "awaiting-assembly"].includes(input.status || "") ? "finishing"
       : ["processing", "submitting", "submitted"].includes(input.status || "") ? "creating" : input.status === "queued" ? "queued" : "waiting");
   if (input.needsAttention || input.status === "failed") stageKey = "attention";
   if (stageKey === "ready" && !input.ready) stageKey = "finishing";
-  if (input.paid && input.ready) stageKey = "ready";
-  if (input.paid && stageKey === "waiting" && input.available === false) return {
+  if (authorized && input.ready) stageKey = "ready";
+  if (authorized && stageKey === "waiting" && input.available === false) return {
     percent: 0, label: "Production progress", stageKey, stage: "Production has not started",
-    explanation: "Film production is currently unavailable. Your payment and saved film are safe; you do not need to pay again.",
+    explanation: locked ? "Film production is currently unavailable. Your saved film remains in your account. No payment has been requested." : "Film production is currently unavailable. Your payment and saved film are safe; you do not need to pay again.",
     timing: "paused", remaining: "Delivery estimate unavailable", estimate: null, updatedAt: snapshot?.observedAt ?? null,
   };
   let percent: number | null = snapshot?.percent ?? (stageKey === "creating" ? 10 : stageKey === "finishing" ? 90 : stageKey === "queued" ? 5 : 0);
@@ -64,7 +65,7 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
   let timing: Timing = snapshot?.timing ?? "learning", estimate = snapshot?.estimate ?? null;
   if (snapshot && now - Date.parse(snapshot.asOf) > 600_000 && ["creating", "finishing"].includes(stageKey)) timing = "stale";
   if (estimate && Date.parse(estimate.latestAt) <= now) timing = "delayed";
-  if (!input.paid) { percent = null; timing = "learning"; stageKey = "waiting"; }
+  if (!authorized) { percent = null; timing = "learning"; stageKey = "waiting"; }
   else if (stageKey === "ready") { percent = 100; timing = "complete"; }
   else if (stageKey === "attention") { percent = null; timing = "paused"; }
   else if (stageKey === "reconciling") { percent = null; timing = "checking"; }
@@ -78,7 +79,12 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
       : low === high ? `About ${high} ${high === 1 ? "minute" : "minutes"} remaining` : `About ${low}–${high} minutes remaining`;
   }
   const statusMessage = ["waiting", "queued", "attention"].includes(stageKey) ? input.message : null;
-  const explanation = statusMessage || (stageKey === "reconciling"
+  const explanation = locked && ["ready", "attention", "queued", "reconciling"].includes(stageKey)
+    ? stageKey === "ready" ? "Your finished film has passed its delivery checks. Payment unlocks watching and downloading this saved film."
+      : stageKey === "attention" ? "The studio needs to check this film. Your saved version is safe and no payment is required."
+        : stageKey === "queued" ? "Lineage Theatre is preparing your film before checkout. No payment has been requested."
+          : "We are checking the existing production request. No payment has been requested."
+    : statusMessage || (stageKey === "reconciling"
     ? "We are checking your existing production request automatically. Your payment and saved progress are safe; you do not need to pay again."
     : stageKey === "queued" && input.workerReady === false
     ? "Your film is queued. We are waiting for the production service to confirm it is available before rendering starts. Your payment is saved; you do not need to pay again."
@@ -90,6 +96,6 @@ export function filmProductionProgress(input: FilmProductionProgressInput): Film
         : timing === "paused" ? "The Lineage Theatre team needs to check this film. Your payment and saved version are safe; you do not need to pay again."
           : timing === "complete" ? "Your finished film is available to watch and download in your library."
           : "Progress follows confirmed production stages. A delivery window appears when enough measured timing is available.");
-  return { percent, label: stageKey === "ready" ? "Production complete" : stageKey === "queued" ? "Production queue" : stageKey === "reconciling" ? "Production status" : "Estimated progress", stageKey, stage: input.paid ? titles[stageKey] : "Waiting for payment confirmation",
+  return { percent, label: stageKey === "ready" ? "Production complete" : stageKey === "queued" ? "Production queue" : stageKey === "reconciling" ? "Production status" : "Estimated progress", stageKey, stage: authorized ? locked && stageKey === "ready" ? "Ready to purchase" : titles[stageKey] : "Waiting for payment confirmation",
     explanation, timing, remaining, estimate, updatedAt: snapshot?.observedAt ?? null };
 }

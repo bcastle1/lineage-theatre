@@ -9,6 +9,7 @@ import { createProductionProgress } from "./production-progress.mjs";
 import { productionQueueMessage } from "./production-queue.mjs";
 import { readPaidFilmCorrection, correctionCoverage } from "./paid-film-correction.mjs";
 import { storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
+import { preRenderPresentation } from "./film-prerender.mjs";
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -138,6 +139,9 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
         }
       }
       const queued = ticket || (automaticPending ? { state: "pending" } : null);
+      let preRender;
+      try { preRender = await preRenderPresentation({ email: actor.email, id, job: value, read, now }); }
+      catch { /* A missing or changed studio grant never advertises a purchasable film. */ }
       if (value.status === "completed") {
         try {
           validateStoredProductionMedia(value, actor.email);
@@ -147,11 +151,18 @@ export function createFilmLibraryService({ read = readRecord, write = writeRecor
       }
       // The progress read model distinguishes an uncertain request still being
       // reconciled by its bound queue from an uncertainty requiring review.
+      const artifactReady = preRender?.artifactReady === true;
       production = { status: value.status === "awaiting-assembly" ? "processing" : value.status,
         completedShots: value.shots.filter(shot => shot.status === "completed").length, shotCount: value.shots.length, mediaReady,
         needsAttention: ticket?.state === "attention" || storedFinishingFailure(value)?.state === "attention"
-          || value.status === "failed" || value.status === "completed" && !mediaReady };
-      production.progress = await progress.snapshot({ job: value, email: actor.email, queue: queued, mediaReady, needsAttention: production.needsAttention });
+          || value.status === "failed" || value.status === "completed" && !mediaReady && !artifactReady,
+        ...(preRender ? { ...preRender, paymentLocked: !mediaReady,
+          purchaseReady: preRender.purchaseReady === true && artifactReady && !mediaReady } : {}) };
+      // A verified film can finish rendering before purchase. Completion of
+      // rendering never grants playback: mediaReady and private URLs still
+      // require the independent exact-payment check above.
+      production.progress = await progress.snapshot({ job: value, email: actor.email, queue: queued,
+        mediaReady: mediaReady || artifactReady, needsAttention: production.needsAttention });
       const health = production.progress.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
       Object.assign(production, productionQueueMessage({ progress: production.progress, ticket, automaticPending, health,
         model: value.provider?.model || value.manifest?.productionPlan?.provider, recipe: value.provider?.recipe, now: now() }));

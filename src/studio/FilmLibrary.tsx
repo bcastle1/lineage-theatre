@@ -9,6 +9,7 @@ import FilmProductionProgress from "./FilmProductionProgress";
 import LtxFilmLibrary from "./LtxFilmLibrary";
 import OriginalPaymentReceipt from "./OriginalPaymentReceipt";
 import { startLibraryRefresh } from "./library-refresh";
+import SavedFilmPurchase from "./SavedFilmPurchase";
 
 type Confirmation = { action: LibraryAction; entry?: LibraryEntry; draft?: Film };
 const actions = { archive: "Archive", trash: "Move to trash", restore: "Restore" };
@@ -38,13 +39,14 @@ function resumablePayment(detail: LibraryDetail | null) {
   return libraryGenerationOrder(detail.entry);
 }
 export function LibraryFilmStatus({ entry, productionAvailable, generationAttemptAllowed }: { entry: LibraryEntry; productionAvailable?: boolean; generationAttemptAllowed?: boolean }) {
-  const paid = entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
+  const preRendered = entry.production.deliveryFlow === 'render-before-payment-v1';
+  const paid = (!preRendered || !entry.production.paymentLocked) && entry.payments.some(payment => payment.status === "captured" && !payment.sandbox && !payment.requiresReview
     && payment.refundedCents === 0 && payment.receiptAvailable);
   const covered = Boolean(entry.coverage), productionCovered = paid || covered;
   return <div className="film-library-progress">
     <div className="film-library-statuses"><div><span>Payment</span>{covered && <strong>Covered by original payment</strong>}{entry.payments.length ? entry.payments.map(payment => <strong key={payment.id}>
       {payment.sandbox ? "Test · " : ""}{paymentLabel(payment)} · {(payment.amountCents / 100).toLocaleString(undefined, { style: "currency", currency: payment.currency })}
-    </strong>) : !covered && <strong>{entry.origin === "studio-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
+    </strong>) : !covered && <strong>{preRendered ? entry.production.purchaseReady ? "Payment unlocks this film" : "No payment requested" : entry.origin === "studio-delivery" ? "No charge for transfer" : entry.kind === "upload" ? "Not required for upload" : "No payment recorded"}</strong>}</div>
       <div><span>Production</span><strong>{entry.kind === "upload" && entry.production.status === "prepared" ? "Film details saved" : productionCovered && entry.kind === "plan" && !libraryCanWatch(entry) ? "See progress below" : productionLabel(entry)}</strong></div></div>
     {entry.coverage && <div>
       <p className="field-note">This corrected film is covered by your original payment. There is no additional charge for this correction.</p>
@@ -56,10 +58,11 @@ export function LibraryFilmStatus({ entry, productionAvailable, generationAttemp
       {entry.production.status === "prepared" && entry.kind === "plan" && <p>{covered ? "Your corrected version is saved; follow its production progress below."
         : paid ? "Payment is confirmed. Your paid version is saved; follow its progress below." : "Your production plan is saved. Your video has not been created yet."}</p>}
       {entry.production.shotCount > 0 && ["queued", "submitting", "processing"].includes(entry.production.status) && <p>{entry.production.completedShots} of {entry.production.shotCount} shots complete. Your video is not ready yet.</p>}
-      {["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
+      {entry.production.artifactReady && entry.production.paymentLocked ? <p>Your finished video is verified and saved privately. Complete payment to unlock watching and downloading this film.</p>
+        : ["completed", "uploaded"].includes(entry.production.status) && <p>Your video is being prepared for viewing. Watch and download will appear here when the video is available.</p>}
       {productionCovered && entry.kind === "plan" && <p className="field-note">{covered ? "Your original payment covers this corrected version." : "Your payment covers this saved version."} <a href={`mailto:admin@brocotech.ai?subject=${encodeURIComponent(`Lineage Theatre film ${entry.id}`)}`}>Get help with your film</a>.</p>}
     </>}
-    {entry.kind === "plan" && <FilmProductionProgress paid={productionCovered} ready={libraryCanWatch(entry)} available={productionAvailable} status={entry.production.status}
+    {entry.kind === "plan" && <FilmProductionProgress paid={productionCovered} studioFunded={preRendered} ready={libraryCanWatch(entry) || entry.production.purchaseReady === true} available={productionAvailable} status={entry.production.status}
       completedShots={entry.production.completedShots} shotCount={entry.production.shotCount} progress={entry.production.progress} needsAttention={entry.production.needsAttention}
       workerReady={entry.production.workerReady} message={entry.production.message} />}
   </div>;
@@ -563,6 +566,7 @@ export default function FilmLibrary({ projects, disabled, productionAvailable, g
       <button type="button" className="icon-button" aria-label="Close saved film details" disabled={blocked} onClick={() => closeDetail(true)}><X size={18} /></button></div>
     {notices(`status:${detailKey}`)}
     <LibraryFilmStatus entry={detail.entry} productionAvailable={productionAvailable} generationAttemptAllowed={generationAttemptAllowed} />
+    <SavedFilmPurchase key={detail.entry.id} entry={detail.entry} disabled={blocked} onRefresh={()=>openDetail(detail.entry)} />
     {resumePayment && <p className="field-note">Resume production using this saved screenplay and its existing payment.</p>}
     <div className="action-group film-library-actions">
       {resumePayment && <button type="button" className="button primary small" disabled={blocked || productionAvailable !== true} data-arrival-guard=""
