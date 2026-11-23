@@ -438,8 +438,8 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
     if (!selected) invalid();
     const seedanceFilm = model === 'seedance' && recipe === SEEDANCE_RECIPE_VERSION && manifest.productionPlan?.provider === 'seedance';
     const renderEndpoint = seedanceFilm ? selected.endpoint : plan.endpoint;
-    const identity = digest(`${recipe}:${model}:${idempotencyKey}`), providerJobId = `fal-${identity}`;
-    if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
+    const originalIdentity = digest(`${recipe}:${model}:${idempotencyKey}`);
+    let identity = originalIdentity, providerJobId = `fal-${identity}`;
     const partialContext = typeof input.email === 'string' ? await partialCorrectionExecution({ email: input.email,
       productionId, manifestHash, correctionId: input.correctionId, read, now }) : null;
     if (partialContext) {
@@ -451,6 +451,7 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
       if (reused) {
         // Reuse is a verified input-and-byte binding, never a missing request
         // that may fall through to fresh generation under a full-film budget.
+        if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
         if (reused.inputHash !== expectedHash || await client.get(identity)
           || await read(`production/fal/choices/${identity}.json`)) invalid();
         const saved = await client.get(reused.operationIdentity), url = falMediaUrl(saved?.result?.video?.url);
@@ -470,13 +471,20 @@ export function createFalProductionAdapter({ model = 'seedance', recipe = falRec
       }
       if (shot.id !== p.shotId || expectedHash !== p.newInputHash || selected.seconds !== p.generatedSeconds
         || await read(`production/fal/choices/${identity}.json`)) invalid();
+      if (partialContext.retry) {
+        if (partialContext.retry.pending || !partialContext.job.partialCorrectionRetry) invalid();
+        identity = partialContext.retry.grant.operationIdentity; providerJobId = `fal-${identity}`;
+        if (await read(`production/fal/choices/${identity}.json`)) invalid();
+      }
       await partialContext.recheck();
     }
+    if (input.providerJobId && input.providerJobId !== providerJobId) invalid();
     async function existingOperation(operationId, endpoint) {
       let saved = await client.get(operationId);
       if (saved && saved.endpoint !== endpoint) invalid();
       if (saved && !['completed', 'failed'].includes(saved.state) && saved.requestId) saved = await client.poll(operationId);
       if (saved && saved.endpoint !== endpoint) invalid();
+      if (saved && partialContext && (saved.identity !== operationId || saved.inputHash !== partialContext.partial.newInputHash)) invalid();
       return saved;
     }
     async function operation(operationId, endpoint, body) {

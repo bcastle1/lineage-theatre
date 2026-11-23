@@ -15,6 +15,7 @@ import { createMagicLightLiveTestService, MagicLightLiveTestError } from "./_lib
 import { createMagicLightTestMediaService } from "./_lib/magiclight-live-test-media.mjs";
 import { createMagicLightActivationStatus } from "./_lib/magiclight-activation-status.mjs";
 import { paidFilmCorrections, PaidFilmCorrectionError } from "./_lib/paid-film-correction.mjs";
+import { PartialCorrectionRetryError } from './_lib/partial-correction-retry.mjs';
 import { productionQueue } from "./_lib/production-queue.mjs";
 
 const isTestOrder=order=>order.merchantBinding?.environment==="sandbox"||order.sandbox===true;
@@ -180,6 +181,21 @@ export function createAdminHandler(overrides={}) {
       await audit(actor.email,"production.connection.checked","magiclight",{code:result.code,authentication:result.authentication});
       return json(res,200,result);
     }
+    if(action==="retryPartialProductionCorrection") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can authorize a scene retry.");
+      const allowed=['action','correctionId','preparedId','manifestHash','shotId','failedOperationIdentity','failedRequestId','failedRecordHash','billingEvidence','maximumNewCostCents','reason','confirmed'];
+      if(Object.keys(body).some(key=>!allowed.includes(key)) || body.confirmed!==true)
+        return resultError(res,400,"Confirm the exact failed scene and its single retry allowance.");
+      if(!(await limitAction(`paid-film-correction:${actor.email}`,6,60_000))) return resultError(res,429,"Please wait before checking this retry again.");
+      const {action:ignored,...input}=body;
+      const retry=await (overrides.paidFilmCorrections||paidFilmCorrections).approvePartialRetry({actor,...input});
+      const production=await (overrides.productionQueue||productionQueue).enqueue({actor,id:retry.preparedId,orderId:retry.correctionId});
+      await audit(actor.email,'production.partial-retry.queued',retry.id,{
+        correctionId:retry.correctionId,preparedId:retry.preparedId,manifestHash:retry.manifestHash,
+        maximumNewCostCents:retry.maximumNewCostCents,customerChargeCents:0,
+      });
+      return json(res,200,{retry,production});
+    }
     if(action==="createPartialProductionCorrection") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can authorize a film correction.");
       const allowed=['action','originalOrderId','preparedId','manifestHash','shotId','visual','maximumNewCostCents','reuseEvidence','billingEvidence','reason','confirmed'];
@@ -335,6 +351,7 @@ export function createAdminHandler(overrides={}) {
     }
     return resultError(res,400,"Unknown administrator action.");
   }catch(error){
+    if(error instanceof PartialCorrectionRetryError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
     if(error instanceof PaidFilmCorrectionError) return json(res,error.status,{code:error.code,message:error.message,charged:false});
     if(error instanceof MagicLightLiveTestError) return json(res,error.status,{code:error.code,message:error.message});
     if(error instanceof ReceiptDeliveryError) return json(res,error.status,{code:error.code,message:error.message});

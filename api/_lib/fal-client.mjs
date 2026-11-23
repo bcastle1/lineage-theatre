@@ -53,6 +53,13 @@ export const falRequestPath = identity => {
   return `production/fal/requests/${identity}.json`;
 };
 
+export function falDownstreamFailure(body) {
+  const errors = Array.isArray(body?.detail) ? body.detail : [];
+  return errors.length === 1 && errors[0]?.type === 'downstream_service_error'
+    && errors[0].msg === 'Downstream service error' && Array.isArray(errors[0].loc)
+    && errors[0].loc.length === 1 && errors[0].loc[0] === 'body' && !body.video && !body.images;
+}
+
 // At most one POST for a durable operation identity, including across workers.
 // A timeout or lost receipt never authorizes another submission. An unresolved
 // claim is retained for provider reconciliation; polling cannot create work.
@@ -76,10 +83,8 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
       // the exact request. Generic 5xx/transport failures remain unresolved.
       // Provider details can echo private input; retain only the fixed code.
       if (terminal && requestMatched && response.status === 500) {
-        const body = await boundedJson(response), errors = Array.isArray(body?.detail) ? body.detail : [];
-        if (errors.length === 1 && errors[0]?.type === 'downstream_service_error'
-          && errors[0].msg === 'Downstream service error' && Array.isArray(errors[0].loc)
-          && errors[0].loc.length === 1 && errors[0].loc[0] === 'body' && !body.video && !body.images)
+        const body = await boundedJson(response);
+        if (falDownstreamFailure(body))
           throw failure('FAL_DOWNSTREAM_SERVICE_FAILED');
         throw failure('FAL_HTTP_500');
       }

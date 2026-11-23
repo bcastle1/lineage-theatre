@@ -223,7 +223,7 @@ async function main() {
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
     await writeRecord(healthPath, {
-      version: 1, ready: true, workerProtocol: 2, preRenderAuthorizationVersion: 1, partialCorrectionVersion: 1, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
+      version: 1, ready: true, workerProtocol: 2, preRenderAuthorizationVersion: 1, partialCorrectionVersion: 1, partialCorrectionRetryVersion: 1, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
       referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, checkedAt: new Date().toISOString(),
     }, old?.etag);
   };

@@ -25,14 +25,16 @@ export async function partialFixture(options = {}) {
     workerProtocolVersion: 2, deliveryChecksVersion: 1, preRenderAuthorizationVersion: 1, partialCorrectionVersion: 1,
     checkedAt: new Date(clock).toISOString() });
   const media = new Map(), client = createFalClient({ read, write, now, key: 'offline-only', fetchImpl: async (url, init) => {
-    calls.push({ url, method: init.method });
+    calls.push({ url, method: init.method, ...(init.body ? { body: JSON.parse(init.body) } : {}) });
     if (init.method === 'POST') {
       if (options.lostSubmit) throw Error('Synthetic lost submit reply');
-      const id = 'offline-new-corrected-scene';
+      const id = `offline-new-corrected-scene-${calls.filter(row => row.method === 'POST').length}`;
       return Response.json({ request_id: id, status_url: `https://queue.fal.run/bytedance/seedance-2.5/requests/${id}/status`,
         response_url: `https://queue.fal.run/bytedance/seedance-2.5/requests/${id}` });
     }
-    if (url.endsWith('/status')) return Response.json({ status: 'COMPLETED', request_id: 'offline-new-corrected-scene' });
+    if (url.endsWith('/status')) return Response.json({ status: 'COMPLETED', request_id: url.split('/').at(-2) });
+    if (options.initialNewFailure && url.endsWith('offline-new-corrected-scene-1') || options.retryFailure)
+      return Response.json({ detail: [{ type: 'downstream_service_error', msg: 'Downstream service error', loc: ['body'] }] }, { status: 500 });
     return Response.json({ video: { url: 'https://v3.fal.media/fictional-new.mp4', content_type: 'video/mp4', file_size: 128 } });
   } });
   const adapter = createFalProductionAdapter({ read, write, client, key: 'offline-only', now,
@@ -49,6 +51,13 @@ export async function partialFixture(options = {}) {
   const project = fictionalOperatorProject(); project.duration = 24;
   project.scenes = ['Plant', 'Water', 'Rest', 'Share'].map(title => ({ ...project.scenes[0], title,
     narration: 'The fictional sisters work together in their quiet garden.', visual: `Fictional garden: ${title.toLowerCase()} beside the path.` }));
+  if (options.nineSecondScene) {
+    project.duration = 30;
+    project.scenes.forEach((scene, i) => { scene.narration = [
+      'Fictional sisters work beside flowers.', 'The fictional sisters quietly tend their peaceful garden together.',
+      'The fictional sisters slowly walk along the sunny garden path together.',
+      'The fictional sisters slowly walk along the sunny garden path together.'][i]; });
+  }
   const prepared = await film.prepare({ email, project, preparationConsent: true, idempotencyKey: 'offline-partial-original-001' });
   const source = (await read(jobPath(prepared.id))).value;
   assert.equal(source.shots.length, 4); assert.equal(source.provider.model, 'seedance');
@@ -88,6 +97,7 @@ export async function partialFixture(options = {}) {
   const targetId = partialCorrectionPreparedId(email, source.id, built.manifestHash);
   const funding = createFalFunding({ env, read, write, now, fetchImpl: () => assert.fail('Existing reservation verification must not request balance') });
   service = createPaidFilmCorrections({ env, read, write, now, verifyFunding: funding.verifyReservation,
+    ...(options.verifyRetryFailure ? { verifyRetryFailure: options.verifyRetryFailure } : {}),
     reserveFunding: () => assert.fail('Partial correction must not reserve again'),
     verifyPaidSale: async input => {
       verifications.push(input); if (options.reversed) throw Error('Synthetic reversed payment');
