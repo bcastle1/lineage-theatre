@@ -31,7 +31,7 @@ function fixture(options = {}) {
   const grant = { id: digest('correction'), originalOrderId: original.orderId, originalPreparedId: SOURCE,
     originalManifestHash: sourceHash, preparedId: TARGET, manifestHash, model: 'seedance', recipe: SEEDANCE_RECIPE_VERSION,
     quote: { quoteReference: 'immutable-correction-quote', maximumCostCents: 3840 },
-    partial: { version: 1, kind: 'seedance-single-scene-correction-v1', fundingKind: 'original-reservation',
+    partial: { version: 1, kind: 'seedance-single-scene-correction-v1', fundingKind: 'original-reservation', billingAccount: env.FAL_BILLING_ACCOUNT,
       originalReservation: structuredClone(original) } };
   const sha256 = digest('fictional finished correction');
   const job = { id: TARGET, ownerHash, manifest, manifestHash, status: 'completed',
@@ -70,6 +70,46 @@ test('completed validated partial correction satisfies only its original hold du
   assert.deepEqual(h.records.get(sourcePath), sourceBefore);
   assert.deepEqual(h.records.get(orderPath), orderBefore);
   assert.equal(h.rechecks(), 2);
+});
+
+test('a resolved completed narration successor satisfies the same original hold without reserving its new preparation', async () => {
+  const h = fixture(), orderPath = `payments/orders/${original.orderId}.json`, sourcePath = `production/jobs/${ownerHash}/${SOURCE}.json`;
+  const orderBefore = structuredClone(h.records.get(orderPath)), sourceBefore = structuredClone(h.records.get(sourcePath));
+  h.context.grant.partial.version = 2;
+  h.context.grant.partial.kind = 'seedance-single-scene-narration-successor-v1';
+  await h.service.reserve(next);
+  const entries = h.records.get(FAL_FUNDING_PATH).value.entries;
+  assert.deepEqual(entries.map(entry => entry.orderId), [next.orderId]);
+  assert.ok(entries.every(entry => entry.preparedId !== TARGET));
+  assert.deepEqual(h.records.get(orderPath), orderBefore);
+  assert.deepEqual(h.records.get(sourcePath), sourceBefore);
+  assert.deepEqual(h.writes, [FAL_FUNDING_PATH]);
+  assert.equal(h.rechecks(), 2);
+});
+
+test('narration successor must retain exact kind, account, original reservation and completed private delivery', async () => {
+  for (const change of [
+    context => { context.grant.partial.version = 1; },
+    context => { context.grant.partial.kind = 'seedance-single-scene-correction-v1'; },
+    context => { context.grant.partial.billingAccount = 'different-account'; },
+    context => { context.grant.partial.originalReservation.preparedId = TARGET; },
+    context => { context.grant.partial.originalReservation.orderId = digest('successor-order'); },
+    context => { context.grant.partial.originalReservation.quoteId = digest('successor-quote'); },
+    context => { context.grant.partial.originalReservation.maximumCostCents = 1080; },
+    context => { context.job.status = 'failed'; },
+    context => { context.job.status = 'awaiting-assembly'; },
+    context => { delete context.job.media; },
+    context => { context.job.media.pathname = `production/media/${ownerHash}/${SOURCE}/${context.job.media.sha256}.mp4`; },
+    context => { context.job.authorization.correctionId = digest('parent-grant'); },
+  ]) {
+    const h = fixture();
+    h.context.grant.partial.version = 2;
+    h.context.grant.partial.kind = 'seedance-single-scene-narration-successor-v1';
+    change(h.context);
+    await denied(h.service.reserve(next));
+    assert.deepEqual(h.writes, []);
+    assert.equal(h.records.get(FAL_FUNDING_PATH).value.entries[0].orderId, original.orderId);
+  }
 });
 
 test('incomplete, legacy, mismatched and unverified corrections retain the original commitment', async () => {

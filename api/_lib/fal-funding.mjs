@@ -89,8 +89,8 @@ async function batches(values, callback) {
 export function createFalFunding({ env = process.env, read = readRecord, write = writeRecord,
   listBlobs = list, fetchImpl = fetch, now = Date.now,
   correctionContext = async input => {
-    const { readPaidFilmCorrection, correctionIdForOrder } = await import('./paid-film-correction.mjs');
-    return readPaidFilmCorrection({ ...input, correctionId: correctionIdForOrder(input.orderId) });
+    const { readCorrectionFulfillment } = await import('./narration-successor.mjs');
+    return readCorrectionFulfillment(input);
   } } = {}) {
   function validLedger(saved) {
     const ledger = saved?.value;
@@ -142,7 +142,9 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
       requireValue(order && same(orderEntry(order), entry));
       const context = await correctionContext({ email: order.customerEmail, orderId: entry.orderId, read, now });
       const grant = context?.grant, target = context?.job, partial = grant?.partial;
-      requireValue(partial?.version === 1 && partial.kind === 'seedance-single-scene-correction-v1'
+      requireValue((partial?.version === 1 && partial.kind === 'seedance-single-scene-correction-v1'
+        || partial?.version === 2 && partial.kind === 'seedance-single-scene-narration-successor-v1')
+        && partial.billingAccount === env.FAL_BILLING_ACCOUNT
         && partial.fundingKind === 'original-reservation' && same(partial.originalReservation || {}, entry)
         && grant.originalOrderId === entry.orderId && grant.originalPreparedId === entry.preparedId
         && grant.originalManifestHash === entry.manifestHash && context.order?.id === entry.orderId

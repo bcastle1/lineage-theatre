@@ -174,9 +174,11 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       }
       if (!body || !['email,manifestHash,model,orderId,preparedId,recipe,workerProtocol',
         'email,manifestHash,model,orderId,partialCorrectionVersion,preparedId,recipe,workerProtocol',
-        'email,manifestHash,model,orderId,partialCorrectionRetryVersion,partialCorrectionVersion,preparedId,recipe,workerProtocol'].includes(Object.keys(body).sort().join(','))
+        'email,manifestHash,model,orderId,partialCorrectionRetryVersion,partialCorrectionVersion,preparedId,recipe,workerProtocol',
+        'email,manifestHash,model,narrationSuccessorVersion,orderId,partialCorrectionRetryVersion,partialCorrectionVersion,preparedId,recipe,workerProtocol'].includes(Object.keys(body).sort().join(','))
         || ('partialCorrectionVersion' in body && body.partialCorrectionVersion !== 1)
         || ('partialCorrectionRetryVersion' in body && body.partialCorrectionRetryVersion !== 1)
+        || ('narrationSuccessorVersion' in body && body.narrationSuccessorVersion !== 1)
         || body.workerProtocol !== 2 || body.model !== 'seedance' || body.recipe !== SEEDANCE_RECIPE_VERSION
         || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
         || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim()
@@ -191,6 +193,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         return json(res, 409, { code: 'WORKER_PARTIAL_CORRECTION_REQUIRED' });
       if (job?.partialCorrectionRetry && body.partialCorrectionRetryVersion !== 1)
         return json(res, 409, { code: 'WORKER_PARTIAL_RETRY_REQUIRED' });
+      if (job?.narrationSuccessor && body.narrationSuccessorVersion !== 1)
+        return json(res, 409, { code: 'WORKER_NARRATION_SUCCESSOR_REQUIRED' });
       if (job?.id !== body.preparedId || job.ownerHash !== digest(body.email) || job.manifestHash !== body.manifestHash
         || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash
         || job.manifest.productionPlan?.provider !== 'seedance' || job.manifest.productionPlan.version !== 1
