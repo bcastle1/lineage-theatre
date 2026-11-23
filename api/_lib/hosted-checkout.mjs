@@ -10,6 +10,7 @@ import {createFalFunding,fundingCycleCanExpire} from "./fal-funding.mjs";
 import {createHostedReversalVerifier,HOSTED_REVERSAL_SCOPE} from "./hosted-reversals.mjs";
 import {markProductionAuthorizationFailure} from "./production-authorization-diagnostics.mjs";
 import {normalizeHostedInvoiceUrl as safeLink} from "../../src/studio/hosted-invoice-url.mjs";
+import {createFilmPreRenderService,preRenderPath,PRERENDER_FLOW} from "./film-prerender.mjs";
 
 export class HostedCheckoutError extends PaymentError {}
 export const HOSTED_CHECKOUT_SETTINGS_PATH="settings/quickbooks-hosted.json";
@@ -81,13 +82,15 @@ function safeLinkDiagnostics(value) {
   return result;
 }
 function publicQuote(q) {return {id:q.id,orderId:orderId(q),preparedId:q.preparedId,manifestHash:q.manifestHash,filmId:q.filmId,filmTitle:q.filmTitle,currency:q.currency,
-  amountCents:q.amountCents,expiresAt:q.expiresAt,sandbox:sandbox(q),method:METHOD,deliveryTerms:q.checkoutSettings.deliveryTerms,refundTerms:q.checkoutSettings.refundTerms};}
+  amountCents:q.amountCents,expiresAt:q.expiresAt,sandbox:sandbox(q),method:METHOD,deliveryTerms:q.checkoutSettings.deliveryTerms,refundTerms:q.checkoutSettings.refundTerms,
+  ...(q.deliveryFlow===PRERENDER_FLOW?{deliveryFlow:PRERENDER_FLOW}: {})};}
 function publicOrder(v,at) {
   const paid=v.status==="captured"&&Boolean(v.capturedAt),review=!paid&&v.status!=="awaiting-payment";
   return {id:v.id,quoteId:v.quoteId,preparedId:v.preparedId,filmId:v.filmId,filmTitle:v.filmTitle,status:v.status,currency:v.currency,amountCents:v.amountCents,
     refundedCents:0,charged:paid?true:review?null:false,requiresReview:review,receiptAvailable:paid,createdAt:v.createdAt,updatedAt:v.updatedAt,sandbox:sandbox(v),
     checkoutMethod:METHOD,invoiceUrl:review||paid?null:safeLink(v.invoiceUrl),invoiceNumber:v.invoiceNumber||null,
-    retryAllowed:v.status==="uncertain"&&!v.invoiceAttemptedAt&&Date.parse(v.expiresAt)>at,...(paid?{confirmationSource:SOURCE}:{})};
+    retryAllowed:v.status==="uncertain"&&!v.invoiceAttemptedAt&&Date.parse(v.expiresAt)>at,...(paid?{confirmationSource:SOURCE}:{}),
+    ...(v.deliveryFlow===PRERENDER_FLOW?{deliveryFlow:PRERENDER_FLOW}: {})};
 }
 function itemData(item) {return item&&numeric.test(item.Id||"")&&typeof item.Name==="string"&&item.Name.length<=500
   ?{id:item.Id,name:item.Name,active:item.Active===true,type:typeof item.Type==="string"?item.Type:"",taxable:item.Taxable===true}:null;}
@@ -145,7 +148,8 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   productionAutomation={schedule:async input=>(await import("./automatic-production.mjs")).automaticProduction.schedule(input)},
   pricingSettings=readPricingSettings,quoteProvider=async(...args)=>(await import("./film-pricing.mjs")).filmPricing.quoteForPayment(...args),
   productionQuote=async input=>(await import("./film-production.mjs")).filmProduction.quoteForProductionBudget(input),
-  verifyReversals=createHostedReversalVerifier({transport,now}),funding=createFalFunding({read,write,now,env}),reserveFunding=funding.reserve}={}) {
+  verifyReversals=createHostedReversalVerifier({transport,now}),funding=createFalFunding({read,write,now,env}),reserveFunding=funding.reserve,
+  preRenderService=createFilmPreRenderService({read,write,now,env})}={}) {
   async function save(path,previous,value) {
     const next={...value,changeId:randomUUID(),updatedAt:stamp(now())};
     try {const result=await write(path,next,previous?.etag);if(result?.etag)return {value:next,etag:result.etag};}catch{}
@@ -248,16 +252,20 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
   async function quote(actor,body) {
     exact(body,["project","preparedId","idempotencyKey"]);reference(body.idempotencyKey,keys);if(body.preparedId!==undefined)reference(body.preparedId,keys);
     const email=emailFor(actor),{binding,settings:s}=await enabled(actor,true);
-    const supplied=await quoteProvider(body.project,actor,{preparedId:body.preparedId,idempotencyKey:body.idempotencyKey,environment:binding.environment}),until=Date.parse(supplied?.expiresAt);
+    const hasPreRender=binding.environment==="production"&&body.preparedId&&await read(preRenderPath(email,body.preparedId));
+    const supplied=hasPreRender?await preRenderService.purchaseQuote({email,preparedId:body.preparedId})
+      :await quoteProvider(body.project,actor,{preparedId:body.preparedId,idempotencyKey:body.idempotencyKey,environment:binding.environment}),until=Date.parse(supplied?.expiresAt);
+    const preRendered=supplied?.deliveryFlow===PRERENDER_FLOW;
     if(!supplied||(body.preparedId&&body.preparedId!==supplied.preparedId)||supplied.environment!==binding.environment||supplied.currency!=="USD"||!amountValid(supplied.providerCostCents)
       ||!hex.test(supplied.manifestHash||"")||!keys.test(supplied.preparedId||"")||typeof supplied.filmId!=="string"||supplied.filmId.length>100
       ||typeof supplied.filmTitle!=="string"||supplied.filmTitle.length>300||typeof supplied.quoteReference!=="string"||!supplied.quoteReference||supplied.quoteReference.length>200
       ||!Number.isFinite(until)||until<=now()||(supplied.pricingBasis!=="planning-rate"&&(supplied.apiVerified!==true||supplied.qualityVerified!==true||supplied.commercialTermsVerified!==true)))throw unavailable();
     const pricing=await pricingSettings();if(!Number.isSafeInteger(pricing.revision)||pricing.revision<0||!Number.isInteger(pricing.markupBasisPoints)||pricing.markupBasisPoints<0||pricing.markupBasisPoints>100_000)throw unavailable();
-    if(supplied.pricingRevision!==undefined&&supplied.pricingRevision!==pricing.revision)throw expired();
-    const markupCents=Number((BigInt(supplied.providerCostCents)*BigInt(pricing.markupBasisPoints)+5000n)/10000n),amountCents=supplied.providerCostCents+markupCents;if(!amountValid(amountCents))throw unavailable();
+    if(!preRendered&&supplied.pricingRevision!==undefined&&supplied.pricingRevision!==pricing.revision)throw expired();
+    const markupCents=preRendered?supplied.markupCents:Number((BigInt(supplied.providerCostCents)*BigInt(pricing.markupBasisPoints)+5000n)/10000n),amountCents=supplied.providerCostCents+markupCents;if(!amountValid(amountCents))throw unavailable();
     const q={id:digest(`${email}:${body.idempotencyKey}`),customerEmail:email,preparedId:supplied.preparedId,manifestHash:supplied.manifestHash,filmId:supplied.filmId,filmTitle:supplied.filmTitle,currency:"USD",amountCents,
-      providerCostCents:supplied.providerCostCents,markupCents,pricingRevision:pricing.revision,pricingBasis:supplied.pricingBasis,quoteReference:supplied.quoteReference,
+      providerCostCents:supplied.providerCostCents,markupCents,pricingRevision:preRendered?supplied.pricingRevision:pricing.revision,pricingBasis:supplied.pricingBasis,quoteReference:supplied.quoteReference,
+      ...(preRendered?{deliveryFlow:PRERENDER_FLOW,preRenderGrantId:supplied.preRenderGrantId,artifactSha256:supplied.artifactSha256}:{}),
       merchantBinding:binding,checkoutSettings:s,createdAt:stamp(now()),expiresAt:stamp(Math.min(until,now()+15*60_000))};
     await legacyGuard(q);let order=await read(orderPath(orderId(q)));
     if(order?.value.quoteRollover===true&&order.value.checkoutKeyHash===null) {
@@ -354,10 +362,19 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       if(existing.value.fundingRelease)throw expired();
       if(existing.value.status!=="uncertain"||existing.value.invoiceAttemptedAt)return presentOrder(existing.value);
     }
-    if(binding.environment==="production"&&body.productionConsent!==true)throw new HostedCheckoutError("Confirm that this saved film should be produced automatically after payment before opening checkout.",400,"PRODUCTION_CONSENT_REQUIRED");
+    const preRendered=q.deliveryFlow===PRERENDER_FLOW;
+    if(binding.environment==="production"&&!existing&&!preRendered)
+      throw new HostedCheckoutError("Create and verify this film before opening its payment page.",409,"FILM_NOT_READY_FOR_PAYMENT");
+    const validateDelivery=async()=>{
+      if(binding.environment!=="production")return;
+      if(preRendered)await preRenderService.verifyPurchase(q);
+      else if(await read(preRenderPath(email,q.preparedId)))throw new HostedCheckoutError("This film is being created before payment. Wait for verification, then open its purchase page.",409,"FILM_NOT_READY_FOR_PAYMENT");
+    };
+    await validateDelivery();
+    if(binding.environment==="production"&&body.productionConsent!==true)throw new HostedCheckoutError("Confirm that you want this saved film before opening checkout.",400,"PRODUCTION_CONSENT_REQUIRED");
     if(Date.parse(q.expiresAt)<=now()||q.checkoutSettings.revision!==s.revision)throw expired();
     let productionUntil=Infinity,fundingReservation;
-    if(binding.environment==="production") {
+    if(binding.environment==="production"&&!preRendered) {
       // Recheck the exact saved plan immediately before opening a payable
       // invoice. A browser capability snapshot cannot authorize this step.
       let production;
@@ -382,7 +399,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       ...productionConsent});}
     catch(error) {const winner=await read(path);if(winner?.value.checkoutMethod===METHOD&&winner.value.customerEmail===email&&winner.value.quoteId===q.id&&winner.value.preparedId===q.preparedId&&winner.value.checkoutKeyHash===digest(body.idempotencyKey)&&sameBinding(winner.value.merchantBinding,binding))return presentOrder(winner.value);throw error;}
     try {
-      if(binding.environment==="production") {
+      if(binding.environment==="production"&&!preRendered) {
         try {
           fundingReservation=await reserveFunding({orderId:id,customerEmail:email,preparedId:q.preparedId,
             manifestHash:q.manifestHash,quoteId:q.id,maximumCostCents:q.providerCostCents});
@@ -394,12 +411,13 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
       const customerId=await customer(actor,binding);record=await save(path,record,{...record.value,customerId});
       const fresh=await enabled(actor,false);if(fresh.settings.revision!==s.revision||!sameBinding(binding,fresh.binding))throw conflict();
       const item=itemData((await response(binding,{method:"GET",path:`/item/${s.serviceItemId}`})).Item);if(!item||!item.active||item.type!=="Service"||item.id!==s.serviceItemId)throw conflict();
-      if(binding.environment==="production") {
+      if(binding.environment==="production"&&!preRendered) {
         try {if(await fundingReservation.recheck()!==true)throw fundingUnavailable();}catch {throw fundingUnavailable();}
       }
       if(binding.environment==="production"&&(productionUntil<=now()||Date.parse(q.expiresAt)<=now()))throw checkoutProductionUnavailable();
       // This claim is durable before the one allowed POST. A timeout never retries it.
       record=await save(path,record,{...record.value,invoiceAttemptedAt:stamp(now())});
+      await validateDelivery();
       const final=await enabled(actor,false);if(final.settings.revision!==s.revision||!sameBinding(binding,final.binding))throw conflict();
       if(binding.environment==="production"&&(productionUntil<=now()||Date.parse(q.expiresAt)<=now()))throw checkoutProductionUnavailable();
       const amount=q.amountCents/100,body={CustomerRef:{value:customerId},BillEmail:{Address:email},CurrencyRef:{value:"USD"},AllowOnlineCreditCardPayment:true,AllowOnlineACHPayment:true,EmailStatus:"NotSet",PrivateNote:`Lineage order ${id}`,
@@ -462,7 +480,7 @@ export function createHostedCheckoutService({read=readRecord,write=writeRecord,n
     // Persist production intent independently of the browser and receipt mail.
     // A transient queue failure is retried by payment reconciliation; payment
     // confirmation remains the verified Accounting result.
-    if(saved.status==="captured"&&saved.productionConsent===true)try {await productionAutomation.schedule({id:saved.id});}catch{}
+    if(saved.status==="captured"&&saved.productionConsent===true&&saved.deliveryFlow!==PRERENDER_FLOW)try {await productionAutomation.schedule({id:saved.id});}catch{}
     // Receipt delivery is recoverable independently; mail problems must never
     // turn a verified payment into an uncertain financial result.
     if(saved.status==="captured")try {await receiptDelivery.deliver(saved);}catch{}

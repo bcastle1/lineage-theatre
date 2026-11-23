@@ -4,6 +4,7 @@ import {createHostedCheckoutService,HostedCheckoutError,HOSTED_CHECKOUT_SETTINGS
 import {digest,userPath} from "../api/_lib/auth.mjs";
 import {OWNER_EMAIL} from "../api/_lib/access.mjs";
 import {createFalFunding} from "../api/_lib/fal-funding.mjs";
+import {legacyHostedOrder} from "./fixtures/legacy-hosted-order.mjs";
 
 const OWNER={email:OWNER_EMAIL,role:"owner"};
 const CUSTOMER={email:"customer@example.invalid",role:"customer",status:"active",approvedAt:"2026-09-01T00:00:00Z",approvedBy:OWNER_EMAIL};
@@ -43,6 +44,7 @@ function fixture(options={}) {
   const dependencies={read,write,transport,receiptDelivery:options.receiptDelivery||{deliver:async()=>{}},now:()=>time,env:{QUICKBOOKS_ENVIRONMENT:"production",LINEAGE_PAYMENT_ACCESS:"owner",...options.env},
     reserveFunding:options.reserveFunding||(async()=>({recheck:async()=>true})),
     ...(options.productionAutomation?{productionAutomation:options.productionAutomation}:{}),
+    ...(options.preRenderService?{preRenderService:options.preRenderService}:{}),
     productionQuote:async input=>{
       productionQuotes.push(structuredClone(input));
       if(options.productionQuote)return options.productionQuote(input);
@@ -53,13 +55,68 @@ function fixture(options={}) {
     pricingSettings:options.pricingSettings||(async()=>({revision:0,markupBasisPoints:5000})),quoteProvider:async(project,actor,request)=>{
       quotes.push({project,actor,request});return {preparedId:PREPARED,manifestHash:manifest,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",providerCostCents:1000,
         pricingBasis:"planning-rate",pricingRevision:0,quoteReference:"fictional-reference",environment:binding.environment,expiresAt:new Date(time+300_000).toISOString(),...options.quoteOverrides};}};
-  const service=createHostedCheckoutService(dependencies),makeQuote=(actor=OWNER,key=KEY)=>service.quote(actor,{project:{title:"Private source material"},preparedId:PREPARED,idempotencyKey:key});
+  function historicalService() {
+    const service=createHostedCheckoutService(dependencies), checkout=service.checkout;
+    service.checkout=async(actor,body)=>{
+      const q=(await read(`payments/hosted-quotes/${digest(actor.email)}/${body.quoteId}.json`))?.value;
+      if(options.legacy!==false&&q&&!q.deliveryFlow) {
+        const old=legacyHostedOrder(q,body.idempotencyKey,time),path=`payments/orders/${old.id}.json`;
+        if(!records.has(path))seed(path,old);
+      }
+      return checkout(actor,body);
+    };
+    return service;
+  }
+  const service=historicalService(),makeQuote=(actor=OWNER,key=KEY)=>service.quote(actor,{project:{title:"Private source material"},preparedId:PREPARED,idempotencyKey:key});
   const checkout=async(actor=OWNER)=>{const q=await makeQuote(actor);return service.checkout(actor,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});};
-  return {service,records,requests,bindings,quotes,productionQuotes,read,write,seed,makeQuote,checkout,peer:()=>createHostedCheckoutService(dependencies),advance:n=>time+=n,setBinding:b=>binding=b,setDispatch:d=>dispatch=d,
+  return {service,records,requests,bindings,quotes,productionQuotes,read,write,seed,makeQuote,checkout,peer:historicalService,advance:n=>time+=n,setBinding:b=>binding=b,setDispatch:d=>dispatch=d,
     invoice:()=>invoice,editInvoice:changes=>invoice={...invoice,...changes},setManifest:value=>manifest=value,editCustomer:changes=>customer={...customer,...changes}};
 }
 const error=(promise,code)=>assert.rejects(promise,e=>e instanceof HostedCheckoutError&&(!code||e.code===code));
 const mutationRequests=h=>h.requests.filter(r=>r.method==="POST");
+
+test("verified pre-rendered film checkout keeps its saved price and does not reserve or render again after payment",async()=>{
+  let ready=true,verificationCalls=0,schedules=0;
+  const grantId=digest("fictional-pre-render-grant"),artifactSha256=digest("existing-fictional-film");
+  const saved={preparedId:PREPARED,manifestHash:MANIFEST,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",
+    providerCostCents:1000,markupCents:500,amountCents:1500,pricingRevision:2,pricingBasis:"provider-quote",quoteReference:"locked-pre-render-price",
+    environment:"production",expiresAt:new Date(NOW+300_000).toISOString(),apiVerified:true,qualityVerified:true,commercialTermsVerified:true,
+    deliveryFlow:"render-before-payment-v1",preRenderGrantId:grantId,artifactSha256};
+  const preRenderService={purchaseQuote:async()=>{if(!ready)throw new HostedCheckoutError("Film not ready",409,"FILM_NOT_READY_FOR_PAYMENT");return saved;},
+    verifyPurchase:async q=>{verificationCalls++;assert.equal(q.artifactSha256,artifactSha256);assert.equal(q.preRenderGrantId,grantId);if(!ready)throw Error("Artifact unavailable");}};
+  const h=fixture({legacy:false,preRenderService,pricingSettings:async()=>({revision:7,markupBasisPoints:9000}),
+    reserveFunding:async()=>assert.fail("A completed pre-render cannot reserve a second provider budget"),
+    productionAutomation:{schedule:async()=>{schedules++;}}});
+  h.seed(`production/prerenders/${digest(OWNER.email)}/${PREPARED}.json`,{id:grantId});
+  const quote=await h.service.quote(OWNER,{preparedId:PREPARED,idempotencyKey:KEY});
+  assert.equal(quote.amountCents,1500);assert.equal(quote.deliveryFlow,"render-before-payment-v1");assert.equal(h.quotes.length,0);
+  const order=await h.service.checkout(OWNER,{quoteId:quote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});
+  assert.equal(order.status,"awaiting-payment");assert.equal(h.productionQuotes.length,0);assert.ok(verificationCalls>=2);
+  h.editInvoice({Balance:0,LinkedTxn:[{TxnId:"40",TxnType:"Payment"}]});
+  const paid=await h.service.check(OWNER,{orderId:order.id});
+  assert.equal(paid.status,"captured");assert.equal(schedules,0);assert.equal(h.productionQuotes.length,0);
+  ready=false;assert.equal((await h.service.order(OWNER,order.id)).status,"captured","Existing payment records remain readable");
+});
+
+test("pre-render invoices require readiness at quote and final invoice claim; an older price cannot bypass rendering",async()=>{
+  let ready=false;
+  const saved={preparedId:PREPARED,manifestHash:MANIFEST,filmId:"fictional-film",filmTitle:"Private fictional story",currency:"USD",
+    providerCostCents:1000,markupCents:500,amountCents:1500,pricingRevision:0,pricingBasis:"provider-quote",quoteReference:"locked",
+    environment:"production",expiresAt:new Date(NOW+300_000).toISOString(),apiVerified:true,qualityVerified:true,commercialTermsVerified:true,
+    deliveryFlow:"render-before-payment-v1",preRenderGrantId:digest("grant"),artifactSha256:digest("film")};
+  const h=fixture({legacy:false,preRenderService:{purchaseQuote:async()=>{if(!ready)throw Error("Not ready");return saved;},
+    verifyPurchase:async()=>{if(!ready)throw Error("Not ready");}},
+    dispatch:async operation=>{if(operation.path==="/item/2")ready=false;},
+    reserveFunding:async()=>assert.fail("No additional provider reservation")});
+  const legacy=await h.makeQuote();
+  h.seed(`production/prerenders/${digest(OWNER.email)}/${PREPARED}.json`,{id:digest("grant")});
+  await assert.rejects(h.service.checkout(OWNER,{quoteId:legacy.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}),e=>e.code==="FILM_NOT_READY_FOR_PAYMENT");
+  assert.equal(mutationRequests(h).length,0);
+  await assert.rejects(h.service.quote(OWNER,{preparedId:PREPARED,idempotencyKey:"ready-quote-request-002"}));assert.equal(mutationRequests(h).length,0);
+  ready=true;const quote=await h.service.quote(OWNER,{preparedId:PREPARED,idempotencyKey:"ready-quote-request-002"});
+  const order=await h.service.checkout(OWNER,{quoteId:quote.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true});
+  assert.equal(order.status,"uncertain");assert.equal(h.requests.filter(r=>r.method==="POST"&&r.path==="/invoice").length,0);
+});
 
 test("hosted settings default disabled; read-only configuration does not refresh and draft saves require explicit fields",async()=>{
   const h=fixture({configured:false});const initial=await h.service.settings(OWNER);assert.equal(initial.enabled,false);assert.equal(initial.configured,false);assert.equal(initial.serviceItemId,"");
@@ -278,7 +335,7 @@ test("unavailable, over-budget or unverified production blocks checkout before a
     {apiVerified:false}, {qualityVerified:false}, {commercialTermsVerified:false}, {quoteReference:""},
     {expiresAt:"invalid"}, {expiresAt:new Date(NOW).toISOString()}]) {
     const h=fixture({productionQuoteOverrides});await error(h.checkout(),"PRODUCTION_UNAVAILABLE");
-    assert.equal(h.requests.length,0);assert.equal([...h.records.keys()].some(path=>path.startsWith("payments/orders/")),false);
+    assert.equal(h.requests.length,0);assert.equal([...h.records.values()].filter(record=>record.value.checkoutMethod==="quickbooks-hosted-invoice").every(record=>!record.value.invoiceAttemptedAt),true);
   }
   const h=fixture({productionQuote:async()=>{throw Error("PRIVATE_PROVIDER_DIAGNOSTIC");}});
   await assert.rejects(h.checkout(),cause=>cause.code==="PRODUCTION_UNAVAILABLE"&&!cause.message.includes("PRIVATE_PROVIDER_DIAGNOSTIC"));
@@ -534,7 +591,15 @@ test("ambiguous customer and invoice create results never replay POST or issue a
 });
 
 test("durable claim failure occurs before any customer/invoice mutation",async()=>{
-  const h=fixture({beforeWrite:path=>{if(path.startsWith("payments/orders/"))throw Error("storage failed");}});await error(h.checkout(),"PAYMENT_CONFLICT");assert.equal(mutationRequests(h).length,0);
+  const h=fixture({beforeWrite:path=>{if(path.startsWith("payments/orders/"))throw Error("storage failed");}});
+  const unchanged=await h.checkout();assert.equal(unchanged.status,"uncertain");assert.equal(mutationRequests(h).length,0);
+});
+
+test("a direct new production checkout cannot bypass rendering even with a valid planning quote",async()=>{
+  const h=fixture({legacy:false}),q=await h.makeQuote();
+  await error(h.service.checkout(OWNER,{quoteId:q.id,idempotencyKey:CHECKOUT,consent:true,productionConsent:true}),"FILM_NOT_READY_FOR_PAYMENT");
+  assert.equal(mutationRequests(h).length,0);assert.equal(h.productionQuotes.length,0);
+  assert.equal([...h.records.keys()].some(path=>path.startsWith("payments/orders/")),false);
 });
 
 test("stale grant, terms, legacy production identity and direct-card collision prevent new invoices",async()=>{

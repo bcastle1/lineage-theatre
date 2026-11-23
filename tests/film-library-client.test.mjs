@@ -31,6 +31,7 @@ const correctionUrl = moduleUrl(compile(await readFile(new URL("../src/admin/pro
 const { productionCorrectionRequest, verifyProductionCorrection } = await import(correctionUrl);
 const generationStatusUrl = moduleUrl("export default function FilmGenerationStatus() { return null; }");
 const ltxLibraryUrl = moduleUrl("export default function LtxFilmLibrary() { return null; }");
+const savedPurchaseUrl = moduleUrl("export default function SavedFilmPurchase() { return null; }");
 const progressHelperUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-production-progress.ts", import.meta.url), "utf8")));
 const fulfillmentUrl = moduleUrl(compile(await readFile(new URL("../src/studio/film-fulfillment.ts", import.meta.url), "utf8"))
   .replaceAll('from "./film-production-progress"', `from "${progressHelperUrl}"`));
@@ -81,6 +82,38 @@ test("watch and download require exact same-origin paths bound to the ready vers
   }
   const upload = entry({ kind: "upload", payments: [], manifestHash: undefined, production: { status: "prepared", completedShots: 0, shotCount: 0, mediaReady: false, needsAttention: false } });
   assert.equal(helpers.normalizeLibraryEntry(upload).production.mediaReady, false);
+});
+function lockedFilm() {
+  const value = entry({ payments: [] });
+  value.production = { status: 'completed', completedShots: 12, shotCount: 12, mediaReady: false, needsAttention: false,
+    deliveryFlow: 'render-before-payment-v1', artifactReady: true, paymentLocked: true, purchaseReady: true,
+    price: { amountCents: 330, currency: 'USD', preparedId: value.id, manifestHash: value.manifestHash } };
+  return value;
+}
+test('a finished unpaid film stays locked with an exact frozen price and no playback URLs', () => {
+  const value = lockedFilm(), saved = helpers.normalizeLibraryEntry(value);
+  assert.equal(helpers.productionLabel(saved), 'Ready to purchase');
+  assert.equal(helpers.libraryCanWatch(saved), false);
+  assert.equal(saved.mediaUrl, undefined); assert.equal(saved.downloadUrl, undefined);
+  assert.deepEqual(saved.production.price, value.production.price);
+  for (const mutate of [v => { v.mediaUrl = helpers.libraryMediaUrl(v); }, v => { v.downloadUrl = helpers.libraryMediaUrl(v, true); },
+    v => { v.production.mediaReady = true; }, v => { v.production.artifactReady = false; }, v => { v.production.needsAttention = true; },
+    v => { v.production.price.preparedId = 'another-film'; }, v => { v.production.price.manifestHash = 'b'.repeat(64); },
+    v => { v.production.price.amountCents = 0; }, v => { v.production.price.currency = 'CAD'; }]) {
+    const changed = lockedFilm(); mutate(changed); assert.throws(() => helpers.normalizeLibraryEntry(changed));
+  }
+});
+test('verified payment unlocks the same finished film without changing its identity or price', () => {
+  const before = lockedFilm(), after = structuredClone(before);
+  after.payments = entry().payments;
+  Object.assign(after.production, { paymentLocked: false, purchaseReady: false, mediaReady: true });
+  after.mediaUrl = helpers.libraryMediaUrl(after); after.downloadUrl = helpers.libraryMediaUrl(after, true);
+  const saved = helpers.normalizeLibraryEntry(after);
+  assert.equal(helpers.libraryCanWatch(saved), true);
+  assert.equal(saved.id, before.id); assert.equal(saved.manifestHash, before.manifestHash);
+  assert.deepEqual(saved.production.price, before.production.price);
+  assert.equal(helpers.productionLabel(saved), 'Ready to watch');
+  assert.throws(() => helpers.normalizeLibraryEntry({ ...after, production: { ...after.production, artifactReady: false } }));
 });
 test("filtered pages retain their cursor and reject mixed states or duplicate identities", () => {
   assert.deepEqual(helpers.normalizeLibraryPage({ entries: [], cursor: "continue-to-uploads" }, "active"), { entries: [], cursor: "continue-to-uploads" });
@@ -164,6 +197,7 @@ async function libraryComponents() {
   source = source.replaceAll('from "./FilmProductionProgress"', `from "${progressComponentUrl}"`);
   source = source.replaceAll('from "./LtxFilmLibrary"', `from "${ltxLibraryUrl}"`);
   source = source.replaceAll('from "./OriginalPaymentReceipt"', `from "${originalReceiptUrl}"`);
+  source = source.replaceAll('from "./SavedFilmPurchase"', `from "${savedPurchaseUrl}"`);
   source = source.replaceAll('from "./library-refresh"', `from "${refreshUrl}"`);
   return import(moduleUrl(source));
 }
@@ -197,6 +231,17 @@ test("paid saved plan status confirms payment without claiming a completed video
   assert.doesNotMatch(html, /Production complete|video is complete|>Watch film<|>Download film<|MagicLight|QuickBooks/i);
   const unknown = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: helpers.normalizeLibraryEntry(entry()) }));
   assert.doesNotMatch(unknown, /Film creation is currently unavailable/);
+});
+test('finished locked library status offers purchase without claiming payment or playback', async () => {
+  const { LibraryFilmStatus } = await libraryComponents();
+  const value = helpers.normalizeLibraryEntry(lockedFilm());
+  const html = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: value, productionAvailable: true }));
+  assert.match(html, /Ready to purchase/); assert.match(html, /Payment unlocks this film/);
+  assert.match(html, /finished video is verified and saved privately/);
+  assert.doesNotMatch(html, /Ready to watch|Payment is confirmed|Your payment covers|>Watch film<|>Download film<|<video/);
+  const review = renderToStaticMarkup(React.createElement(LibraryFilmStatus, { entry: { ...value, payments: entry().payments } }));
+  assert.match(review, /Ready to purchase/);
+  assert.doesNotMatch(review, /Ready to watch|Your payment covers/);
 });
 
 const coverage = () => ({ kind: "original-payment", correctionId: "c".repeat(64), orderId: "a".repeat(64),

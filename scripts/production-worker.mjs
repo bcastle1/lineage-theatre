@@ -17,6 +17,7 @@ import { createRemoteProductionAuthorization } from "../api/_lib/remote-producti
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 import { createFilmVisualReviewer } from './review-film-visuals.mjs';
 import { verifyFilmVisualReceipts } from '../api/_lib/film-visual-review.mjs';
+import { authorizeFilmProduction, createFilmPreRenderService } from '../api/_lib/film-prerender.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -185,9 +186,13 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
   let film;
   const productionQuote = input => film.quoteForProductionBudget(input);
   const hosted = dependencies.hostedCheckout || createHostedCheckoutService({ ...dependencies, read, write, productionQuote });
-  const authorizer = paymentService || (process.env.LINEAGE_WORKER_SECRET
+  const baseAuthorizer = paymentService || (process.env.LINEAGE_WORKER_SECRET
     ? createRemoteProductionAuthorization({ adapter })
     : createPaymentsService({ ...dependencies, read, write, hostedCheckout: hosted, productionQuote }));
+  const authorizer = paymentService || process.env.LINEAGE_WORKER_SECRET ? baseAuthorizer : {
+    authorizeProduction: input => authorizeFilmProduction(input, { paymentService: baseAuthorizer, read,
+      preRenderService: createFilmPreRenderService({ ...dependencies, read, write, film }) }),
+  };
   film = createFilmProductionService({ ...dependencies, adapter,
     readRecordImpl: read,
     writeRecordImpl: write,
@@ -206,7 +211,7 @@ async function main() {
   const readiness = worker.readiness();
   if (args[0] === "--check") {
     process.stdout.write(`${JSON.stringify({ available: readiness.available, provider: readiness.adapter, model: falProductionAdapter.model,
-      recipe: falProductionAdapter.modelVersion, workerProtocol: 2,
+      recipe: falProductionAdapter.modelVersion, workerProtocol: 2, preRenderAuthorizationVersion: 1,
       storageConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN), gaps: readiness.gaps })}\n`);
     return;
   }
@@ -216,7 +221,7 @@ async function main() {
   const heartbeat=async()=>{
     const old=await readRecord(healthPath);
     await writeRecord(healthPath, {
-      version: 1, ready: true, workerProtocol: 2, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
+      version: 1, ready: true, workerProtocol: 2, preRenderAuthorizationVersion: 1, model: falProductionAdapter.model, recipe: falProductionAdapter.modelVersion,
       referencePhotoVersion: 1, deliveryChecksVersion: 1, visualChecksVersion: 1, checkedAt: new Date().toISOString(),
     }, old?.etag);
   };

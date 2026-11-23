@@ -6,6 +6,9 @@ import { buildFilmManifest, fictionalOperatorProject, productionJobPath } from "
 import { digest, userPath } from "../api/_lib/auth.mjs";
 import { metadataPath, mediaPath } from "../api/_lib/archive.mjs";
 import { OWNER_EMAIL } from "../api/_lib/access.mjs";
+import { createFilmPreRenderService, preRenderPath, PRERENDER_FLOW } from "../api/_lib/film-prerender.mjs";
+import { planSeedanceShots } from "../api/_lib/kling-film-plan.mjs";
+import { SEEDANCE_RECIPE_VERSION } from "../api/_lib/fal-production.mjs";
 
 const EMAIL = "family@example.invalid", OTHER = "other@example.invalid";
 const NOW = Date.parse("2026-09-24T12:00:00Z"), TIME = new Date(NOW).toISOString();
@@ -63,6 +66,45 @@ function fixture(options = {}) {
   return { service, records, reads, writes, lists, put, plan, payment, complete, upload, deps,
     list: input => service.list(account(EMAIL), input), detail: (kind, id) => service.detail(account(EMAIL), { kind, id }),
     organize: (action, kind, id, expectedRevision = 0) => service.organize(account(EMAIL), { action, kind, id, expectedRevision }) };
+}
+
+async function preRenderFixture() {
+  const h = fixture(), project = fictionalOperatorProject();
+  project.id = uuid(180); project.title = "Fictional film created before purchase";
+  const manifest = planSeedanceShots(buildFilmManifest(project).manifest), manifestHash = digest(JSON.stringify(manifest));
+  const job = { id: uuid(80), ownerHash: digest(EMAIL), filmId: project.id, manifestHash, manifest, mode: "customer", status: "prepared",
+    provider: { id: "fal", model: "seedance", recipe: SEEDANCE_RECIPE_VERSION },
+    shots: manifest.shots.map(shot => ({ id: shot.id, status: "prepared", requestKey: digest(`${uuid(80)}:${manifestHash}:${shot.id}`) })),
+    createdAt: TIME, updatedAt: TIME };
+  h.put(productionJobPath(EMAIL, job.id), job);
+  h.put("production/worker-health.json", { version: 1, ready: true, model: "seedance", recipe: job.provider.recipe,
+    preRenderAuthorizationVersion: 1, deliveryChecksVersion: 1, checkedAt: TIME });
+  const preRender = createFilmPreRenderService({ ...h.deps,
+    env: { QUICKBOOKS_ENVIRONMENT: "production", LINEAGE_PAYMENT_ACCESS: "approved" },
+    film: { getPrepared: async ({ email, id }) => clone(h.records.get(productionJobPath(email, id))?.value),
+      quoteForProductionBudget: async () => ({ preparedId: job.id, manifestHash, environment: "production", currency: "USD",
+        maximumCostCents: 1920, providerCostCents: 1920, quoteReference: "synthetic-prerender-price",
+        expiresAt: new Date(NOW + 60_000).toISOString(), apiVerified: true, qualityVerified: true, commercialTermsVerified: true }) },
+    pricingSettings: async () => ({ revision: 1, markupBasisPoints: 5000 }),
+    funding: { reserve: async () => ({ recheck: async () => true }) } });
+  await preRender.start(account(EMAIL), { preparedId: job.id, productionConsent: true, acceptedPriceCents: 2880 });
+  const grant = clone(h.records.get(preRenderPath(EMAIL, job.id)).value);
+  function complete() {
+    const saved = h.complete(job);
+    Object.assign(saved.authorization, { budgetCents: grant.maximumCostCents, quoteReference: grant.quoteReference });
+    saved.media.durationSeconds = manifest.targetDurationSeconds;
+    h.put(productionJobPath(EMAIL, job.id), saved);
+    return saved;
+  }
+  function paid(saved, patch = {}) {
+    return h.payment(saved, { amountCents: grant.amountCents, providerCostCents: grant.providerCostCents, checkoutMethod: "quickbooks-hosted-invoice",
+      merchantBinding: { environment: "production", grantId: "a".repeat(64), realmId: "1234" },
+      confirmationSource: "quickbooks-accounting", invoiceId: "5678", balanceCents: 0, accountingCheckedAt: TIME,
+      accountingPayments: [{ id: "9012", allocatedCents: grant.amountCents }],
+      deliveryFlow: PRERENDER_FLOW, preRenderGrantId: grant.id, artifactSha256: saved.media.sha256, ...patch });
+  }
+  h.writes.length = 0;
+  return { ...h, job, grant, complete, paid };
 }
 
 test("server library recovers a paid saved plan without browser storage and excludes private source/provider/payment fields", async () => {
@@ -151,6 +193,73 @@ test("completed playback uses existing payment gates and is independent of curre
   }
   h.payment(job); h.put(productionJobPath(EMAIL, job.id), { ...job, media: { ...job.media, pathname: "https://secret.invalid/video.mp4" } });
   assert.equal((await h.list()).entries[0].production.mediaReady, false);
+});
+
+test("pre-render library shows the saved price and confirmed progress before any invoice exists", async () => {
+  const h = await preRenderFixture();
+  const { entry } = await h.detail("plan", h.job.id);
+  assert.equal(entry.production.deliveryFlow, PRERENDER_FLOW);
+  assert.equal(entry.production.artifactReady, false); assert.equal(entry.production.purchaseReady, false);
+  assert.equal(entry.production.paymentLocked, true); assert.equal(entry.production.mediaReady, false);
+  assert.equal(entry.production.status, "queued"); assert.equal(entry.production.progress.stage, "queued");
+  assert.deepEqual(entry.production.price, { amountCents: 2880, currency: "USD", preparedId: h.job.id, manifestHash: h.job.manifestHash });
+  assert.deepEqual(entry.payments, []); assert.equal(entry.mediaUrl, undefined); assert.equal(entry.downloadUrl, undefined);
+  assert.equal([...h.records.keys()].some(path => path.startsWith("payments/")), false);
+  assert.deepEqual(h.writes, [], "Reading the pre-rendered library must not create an invoice, queue ticket or grant");
+});
+
+test("a verified pre-rendered film is ready to purchase while private watch and download remain locked", async () => {
+  const h = await preRenderFixture(), job = h.complete();
+  const { entry } = await h.detail("plan", job.id);
+  assert.equal(entry.production.status, "completed"); assert.equal(entry.production.needsAttention, false);
+  assert.equal(entry.production.artifactReady, true); assert.equal(entry.production.purchaseReady, true);
+  assert.equal(entry.production.paymentLocked, true); assert.equal(entry.production.mediaReady, false);
+  assert.equal(entry.production.progress.stage, "ready"); assert.equal(entry.production.progress.percent, 100);
+  assert.equal(entry.mediaUrl, undefined); assert.equal(entry.downloadUrl, undefined);
+  assert.deepEqual((await h.list()).entries[0], entry);
+  assert.doesNotMatch(JSON.stringify(entry), /production\/media|artifactSha256|quoteReference|fundingId|providerJobId/);
+  assert.deepEqual(h.writes, []);
+});
+
+test("matching captured payment unlocks the same pre-rendered artifact without another render", async () => {
+  const h = await preRenderFixture(), job = h.complete(), before = clone(h.records.get(productionJobPath(EMAIL, job.id)));
+  const order = h.paid(job), { entry } = await h.detail("plan", job.id);
+  assert.equal(entry.production.artifactReady, true); assert.equal(entry.production.paymentLocked, false);
+  assert.equal(entry.production.purchaseReady, false); assert.equal(entry.production.mediaReady, true);
+  assert.equal(entry.mediaUrl, `/api/studio?action=productionMedia&id=${job.id}`);
+  assert.equal(entry.downloadUrl, `${entry.mediaUrl}&download=1`); assert.equal(entry.payments[0].id, order.id);
+  assert.deepEqual(h.records.get(productionJobPath(EMAIL, job.id)), before);
+  for (const patch of [{ refundedCents: 1 }, { checkOperation: {} }, { preparedId: uuid(999) }, { artifactSha256: "f".repeat(64) },
+    { accountingPayments: [{ id: "9012", allocatedCents: 1 }] }]) {
+    h.paid(job, patch);
+    const locked = (await h.detail("plan", job.id)).entry;
+    assert.equal(locked.production.mediaReady, false); assert.equal(locked.production.paymentLocked, true);
+    assert.equal(locked.mediaUrl, undefined); assert.equal(locked.downloadUrl, undefined);
+  }
+  assert.deepEqual(h.writes, []);
+});
+
+test("missing or changed pre-render grants and malformed completed media cannot advertise a purchasable film", async () => {
+  const changes = [h => { h.records.delete(preRenderPath(EMAIL, h.job.id)); },
+    h => { h.records.get(preRenderPath(EMAIL, h.job.id)).value.ownerHash = digest(OTHER); },
+    h => { h.records.get(preRenderPath(EMAIL, h.job.id)).value.preparedId = uuid(999); },
+    h => { h.records.get(preRenderPath(EMAIL, h.job.id)).value.manifestHash = "f".repeat(64); },
+    h => { h.records.get(preRenderPath(EMAIL, h.job.id)).value.recipe = "different-recipe"; },
+    h => { h.records.get(preRenderPath(EMAIL, h.job.id)).value.amountCents++; },
+    h => { h.records.get(productionJobPath(EMAIL, h.job.id)).value.media.pathname = "https://private.invalid/film.mp4"; }];
+  for (const change of changes) {
+    const h = await preRenderFixture(); h.complete(); change(h);
+    const { entry } = await h.detail("plan", h.job.id);
+    assert.notEqual(entry.production.purchaseReady, true); assert.notEqual(entry.production.artifactReady, true);
+    assert.equal(entry.production.mediaReady, false); assert.equal(entry.mediaUrl, undefined); assert.equal(entry.downloadUrl, undefined);
+    assert.equal(entry.production.needsAttention, true);
+    assert.deepEqual(h.writes, []);
+  }
+  const legacy = fixture(), job = legacy.complete(legacy.plan());
+  legacy.put(productionJobPath(EMAIL, job.id), { ...job, deliveryFlow: PRERENDER_FLOW, artifactReady: true, purchaseReady: true });
+  const entry = (await legacy.detail("plan", job.id)).entry;
+  assert.equal(entry.production.deliveryFlow, undefined); assert.notEqual(entry.production.purchaseReady, true);
+  assert.equal(entry.production.mediaReady, false); assert.equal(entry.mediaUrl, undefined);
 });
 
 test("archive uploads are paginated separately with existing private media links", async () => {

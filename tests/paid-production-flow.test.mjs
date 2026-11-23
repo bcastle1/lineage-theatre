@@ -7,6 +7,7 @@ import { OWNER_EMAIL } from '../api/_lib/access.mjs';
 import { createFilmProductionService, fictionalOperatorProject, productionJobPath } from '../api/_lib/film-production.mjs';
 import { createFilmPricingService } from '../api/_lib/film-pricing.mjs';
 import { createHostedCheckoutService, HOSTED_CHECKOUT_SETTINGS_PATH } from '../api/_lib/hosted-checkout.mjs';
+import { legacyHostedOrder } from './fixtures/legacy-hosted-order.mjs';
 import { createPaymentsService } from '../api/_lib/payments.mjs';
 import { createProductionQueue, productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { createAutomaticProduction, automaticProductionPath } from '../api/_lib/automatic-production.mjs';
@@ -161,7 +162,11 @@ async function fixture({ eager = true, corruptStoredMedia = false, visualResult 
       durationSeconds: job.manifest.targetDurationSeconds, width: 1920, height: 1080, frameRate: 24,
       playable: true, hasAudio: true, technicalSample: false, visualReview };
   };
-  const checkout = async () => (order = await hosted.checkout(actor, { quoteId: quote.id, idempotencyKey: 'fictional-integrated-checkout-001', consent: true, productionConsent: true }));
+  const checkout = async () => {
+    const historical=legacyHostedOrder((await read(`payments/hosted-quotes/${digest(actor.email)}/${quote.id}.json`)).value,'fictional-integrated-checkout-001',time);
+    if(!records.has(`payments/orders/${historical.id}.json`))seed(`payments/orders/${historical.id}.json`,historical);
+    return (order = await hosted.checkout(actor, { quoteId: quote.id, idempotencyKey: 'fictional-integrated-checkout-001', consent: true, productionConsent: true }));
+  };
   return { records, calls, read, write, seed, film, hosted, payments, queue, automatic, quote, plan, path, jobPath, assemble, getBlob, blobs, now,
     checkout, advance: ms => { time += ms; }, setPrice: (value, ceiling = value) => { cost = value; maximumCost = ceiling; }, setCredits: value => { credits = value; },
     setQuoteEffect: effect => { quoteEffect = effect; }, editInvoice: change => Object.assign(invoice, change),

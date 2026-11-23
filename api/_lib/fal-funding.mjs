@@ -88,6 +88,39 @@ async function batches(values, callback) {
 // Holds never expire merely because a quote or external payment link is old.
 export function createFalFunding({ env = process.env, read = readRecord, write = writeRecord,
   listBlobs = list, fetchImpl = fetch, now = Date.now } = {}) {
+  function validLedger(saved) {
+    const ledger = saved?.value;
+    return typeof saved?.etag === 'string' && ledger?.version === 1
+      && ledger.account === env.FAL_BILLING_ACCOUNT && Array.isArray(ledger.entries)
+      && Number.isSafeInteger(ledger.revision) && ledger.revision > 0 && ledger.revision < Number.MAX_SAFE_INTEGER
+      && ledger.entries.length <= MAX_ORDERS && ledger.entries.every(validEntry)
+      && new Set(ledger.entries.map(entry => entry.orderId)).size === ledger.entries.length;
+  }
+  // Initial admission already reserved this entire execution ceiling. Provider
+  // debits reduce the wallet during rendering; comparing that smaller wallet
+  // with the original ceiling again would count completed shots twice. Ongoing
+  // work may only reuse the exact durable, unreleased reservation. This neither
+  // admits another film nor changes or replenishes the existing allowance.
+  async function verifyReservation(input) {
+    try {
+      const wanted = entryFor(input);
+      requireValue(typeof env.FAL_BILLING_ACCOUNT === 'string' && /^[\w.-]{1,100}$/.test(env.FAL_BILLING_ACCOUNT));
+      const held = async () => {
+        const saved = await read(FAL_FUNDING_PATH);
+        requireValue(validLedger(saved));
+        const entry = saved.value.entries.find(value => value.orderId === wanted.orderId);
+        requireValue(entry && same(entry, wanted));
+        return entry;
+      };
+      const entry = await held();
+      // Any receipt at this exact release path, even malformed, needs review.
+      requireValue(!(await read(releasePath(wanted))));
+      const confirmed = await held();
+      requireValue(digest(JSON.stringify(confirmed)) === digest(JSON.stringify(entry)));
+      requireValue(!(await read(releasePath(wanted))));
+      return true;
+    } catch { throw unavailable(); }
+  }
   async function wasReleased(order) {
     try {
       const entry = orderEntry(order), fence = order.fundingRelease;
@@ -135,11 +168,7 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
       && typeof env.FAL_BILLING_ACCOUNT === 'string' && /^[\w.-]{1,100}$/.test(env.FAL_BILLING_ACCOUNT));
     for (let attempt = 0; attempt < 3; attempt++) {
       const saved = await read(FAL_FUNDING_PATH), ledger = saved?.value;
-      requireValue(!saved || typeof saved.etag === 'string' && ledger?.version === 1
-        && ledger.account === env.FAL_BILLING_ACCOUNT && Array.isArray(ledger.entries)
-        && Number.isSafeInteger(ledger.revision) && ledger.revision > 0 && ledger.revision < Number.MAX_SAFE_INTEGER
-        && ledger.entries.length <= MAX_ORDERS && ledger.entries.every(validEntry)
-        && new Set(ledger.entries.map(entry => entry.orderId)).size === ledger.entries.length);
+      requireValue(!saved || validLedger(saved));
       const holds = new Map((ledger?.entries || []).map(entry => [entry.orderId, entry]));
       // Immutable receipts remain valid after a newer checkout cycle replaces
       // the unattempted order. They cannot release that newer quote's budget.
@@ -225,5 +254,5 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
   async function reserve(input) {
     try { return await reserveAttempt(input); } catch { throw unavailable(); }
   }
-  return { reserve, releaseExpiredOrder, wasReleased };
+  return { reserve, verifyReservation, releaseExpiredOrder, wasReleased };
 }

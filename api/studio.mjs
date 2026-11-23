@@ -16,6 +16,7 @@ import { paidFilmGeneration, PaidFilmGenerationError } from "./_lib/paid-film-ge
 import { paidFilmGenerationReview, PaidFilmReviewError } from "./_lib/paid-film-generation-review.mjs";
 import { localVideoHandler, aiVideoHandler } from "./_lib/local-video-handler.mjs";
 import { productionAuthorizationDiagnostic } from "./_lib/production-authorization-diagnostics.mjs";
+import { createFilmPreRenderService } from "./_lib/film-prerender.mjs";
 
 export async function connections({fetchImpl=fetch,key=process.env.OPENAI_API_KEY,pricingSettings,checkoutConfiguration,filmService=filmProduction}={}) {
   let story={available:false,reason:"Connect the existing OpenAI project to enable GPT-6.2 Astra story development."};
@@ -95,6 +96,8 @@ export function createStudioHandler(overrides={}) {
  const filmPricing=overrides.filmPricing||createFilmPricingService({filmProduction:dependencies.filmProduction,pricingSettings:dependencies.readPricingSettings});
  const queue=overrides.productionQueue||createProductionQueue({film:dependencies.filmProduction,paymentService:dependencies.payments,
    read:dependencies.readRecord,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
+ const preRender=overrides.filmPreRender||createFilmPreRenderService({film:dependencies.filmProduction,read:dependencies.readRecord,
+   pricingSettings:dependencies.readPricingSettings,...(overrides.writeRecord?{write:overrides.writeRecord}:{})});
  return async function handler(req,res) {
   if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="1") return (overrides.localVideoHandler||localVideoHandler)(req,res);
   if(new URL(req.url,`https://${req.headers.host}`).searchParams.get("local")==="ltx") return (overrides.aiVideoHandler||aiVideoHandler)(req,res);
@@ -220,6 +223,15 @@ export function createStudioHandler(overrides={}) {
       if(body.preparationConsent!==true) return json(res,400,{message:"Allow your screenplay, cast, and production plan to be saved privately before preparing your film."});
       if(!(await limitAction(`prepare:${email}`,30,3600_000))) return json(res,429,{message:"Please wait before preparing another production plan."});
       return json(res,201,await filmProduction.prepare({email,project:body.project,idempotencyKey:body.idempotencyKey,preparationConsent:true}));
+    }
+    if(body?.action==="startPreRender") {
+      productionStartRequest=true;
+      if(Object.keys(body).some(key=>!["action","preparedId","productionConsent","acceptedPriceCents"].includes(key)))
+        return json(res,400,{message:"Choose the saved film and displayed price before creating it."});
+      if(!(await limitAction(`prerender-start:${email}`,20,3600_000)))
+        return json(res,429,{message:"Please wait before requesting film creation again."});
+      const saved=await preRender.start(session.user,body);
+      return json(res,202,{...await queue.status({email,id:body.preparedId}),...saved});
     }
     if(body?.action==="startProduction") {
       productionStartRequest=true;

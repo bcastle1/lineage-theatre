@@ -9,6 +9,7 @@ import { heartbeatSupports } from "./worker-models.mjs";
 import { falRecipeVersion } from "./fal-production.mjs";
 import { finishingFailure, sanitizeFinishingFailure, storedFinishingFailure } from "./film-finishing-diagnostics.mjs";
 import { validateStoredProductionMedia, requireFinishedFilmPayment } from "./production-media.mjs";
+import { preRenderPresentation, PRERENDER_FLOW } from "./film-prerender.mjs";
 
 const prefix = "production/queue/";
 const automaticPrefix = "production/automatic-starts/";
@@ -31,6 +32,7 @@ function approved(actor, email = actor?.email) {
 // progress stage can tell the customer that production is still waiting to start.
 export function productionQueueMessage({ progress, ticket, automaticPending = false, health, model = "seedance", recipe = falRecipeVersion(model), now = Date.now() }) {
   if (progress?.stage !== "queued") return {};
+  if (ticket?.authorizationKind === PRERENDER_FLOW) return { message: "Your film is queued for creation. Payment will open after the finished film passes verification." };
   if (automaticPending) return {
     message: "Your paid film is scheduled. The studio is saving its place in the production queue and will retry automatically. You do not need to pay again.",
   };
@@ -160,13 +162,14 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
         mediaReady = true;
       } catch { /* Keep playback unavailable while its saved evidence needs review. */ }
     }
-    const needsAttention = !mediaReady && (validTicket?.state === "attention" || saved.status === "completed"
+    const preRender = await preRenderPresentation({ email, id, job: saved, read, now });
+    const needsAttention = !mediaReady && (validTicket?.state === "attention" || saved.status === "completed" && !preRender?.artifactReady
       || storedFinishingFailure(saved)?.state === "attention");
-    const snapshot = await progress.snapshot({ job: saved, email, queue: queued, mediaReady, needsAttention });
+    const snapshot = await progress.snapshot({ job: saved, email, queue: queued, mediaReady: mediaReady || preRender?.artifactReady === true, needsAttention });
     const health = snapshot.stage === "queued" && !automaticPending ? (await read("production/worker-health.json"))?.value : undefined;
     const queueMessage = productionQueueMessage({ progress: snapshot, ticket: validTicket, automaticPending, health,
       model: saved.provider?.model || saved.manifest?.productionPlan?.provider, recipe: saved.provider?.recipe, now: now() });
-    return { ...job, mediaReady, progress: snapshot,
+    return { ...job, mediaReady, progress: snapshot, ...(preRender || {}),
       ...(mediaReady ? { status: "completed", preparationOnly: false } : {}),
       ...(job.status === "prepared" && ["creating", "finishing"].includes(snapshot.stage) ? { status: "processing", preparationOnly: false } : {}),
       ...(snapshot.stage === "attention" ? { needsAttention: true } : {}),

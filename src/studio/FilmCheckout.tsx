@@ -14,6 +14,7 @@ import { filmFulfillmentProgress, filmReadyToWatch, type ProductionStatus } from
 import { libraryFilmLink, normalizeLibraryEntry, type LibraryEntry } from "./film-library";
 import FilmProductionProgress from "./FilmProductionProgress";
 import { confirmedFilmPayment, paidFilmPlaybackLink } from "./payment-confirmation";
+import { normalizePreRenderStatus, preRenderCanPurchase, preRenderCanResume, preRenderQuoteMatches, preRenderRequest, type PreRenderStatus } from "./film-prerender";
 import "./checkout.css";
 
 const money = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -37,6 +38,8 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const [planRefreshRequired, setPlanRefreshRequired] = useState(false);
   const [savedOrder, setOrder] = useState<FilmOrder | null>(null);
   const [productionStatus, setProduction] = useState<ProductionStatus | null>(null);
+  const [preRenderStatus, setPreRender] = useState<PreRenderStatus | null>(null);
+  const [renderConsent, setRenderConsent] = useState(false);
   const [delivery, setDelivery] = useState<LibraryEntry | null>(null);
   const [paidPlan, setPaidPlan] = useState<PaidFilmPlan | null>(null);
   const [inputHash, setInputHash] = useState("");
@@ -58,6 +61,9 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   const priceCurrent = Boolean(price && prepared && currentPlan && price.preparedId===prepared.id && price.manifestHash===prepared.manifestHash && Date.parse(price.expiresAt)>now);
   const quoteCurrent = Boolean(quote && prepared && quote.preparedId === prepared.id && quote.manifestHash === prepared.manifestHash && currentPlan && quoteMatchesConfiguration(quote, configuration) && Date.parse(quote.expiresAt) > now);
   const paymentReference = payment || attemptedPayment.current;
+  const preRender = prepared && preRenderStatus?.id === prepared.id && preRenderStatus.manifestHash === prepared.manifestHash ? preRenderStatus : null;
+  const purchaseReady = Boolean(prepared && currentPlan && preRenderCanPurchase(preRender, prepared));
+  const canResumePreRender = Boolean(prepared && currentPlan && preRenderCanResume(preRender, prepared));
   const order = paidOrderMatches(paymentReference, savedOrder, film.id) ? savedOrder : null;
   const production = productionStatus?.id === paymentReference?.preparedId && productionStatus?.manifestHash === paymentReference?.manifestHash ? productionStatus : null;
   const hostedOrder = order?.checkoutMethod === "quickbooks-hosted-invoice";
@@ -74,6 +80,28 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   useEffect(() => { setConsent(false); }, [productionAvailable]);
   useEffect(() => { setRetryProductionConsent(false); }, [paymentReference?.orderId, order?.retryAllowed]);
   useEffect(() => { setPlanRefreshRequired(false); }, [input, prepared?.id]);
+  useEffect(() => { setRenderConsent(false); }, [input, price?.amountCents, preRender?.id, preRender?.status]);
+  useEffect(() => {
+    if (!prepared || paymentReference) return;
+    const expected = { id: prepared.id, manifestHash: prepared.manifestHash };
+    let active = true, reading = false, timer: ReturnType<typeof setTimeout> | undefined;
+    async function refresh() {
+      if (!active || reading) return;
+      if (timer) clearTimeout(timer);
+      reading = true;
+      let continuing = Boolean(preRenderStatus?.id === expected.id);
+      try {
+        const value = await api(`/api/studio?action=productionStatus&id=${encodeURIComponent(expected.id)}`);
+        const saved = normalizePreRenderStatus(value, expected);
+        if (active) { setPreRender(saved); continuing = Boolean(saved); }
+      } catch { /* Preserve saved progress; checkout rechecks the server before opening an invoice. */ }
+      finally { reading = false; if (active && continuing) timer = setTimeout(() => void refresh(), 10_000); }
+    }
+    void refresh();
+    const returned = () => { if (document.visibilityState === "visible") void refresh(); };
+    window.addEventListener("focus", returned); document.addEventListener("visibilitychange", returned);
+    return () => { active = false; if (timer) clearTimeout(timer); window.removeEventListener("focus", returned); document.removeEventListener("visibilitychange", returned); };
+  }, [prepared?.id, prepared?.manifestHash, paymentReference?.orderId, preRenderStatus?.id]);
 
   useEffect(() => {
     let active = true; setInputHash(""); setConsent(false);
@@ -175,6 +203,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   async function requestQuote(restartExpired = false) {
     if (restartExpired ? !paymentReference || order?.checkoutBlock !== "production-funding" || order.retryAllowed
       : !prepared || !currentPlan || paymentReference) return;
+    if (!restartExpired && !purchaseReady) return;
     await work("Checking your film price…", async () => {
       if (restartExpired && paymentReference && order) {
         const closed = await restartableFilmPayment(api, paymentReference, order);
@@ -186,6 +215,13 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       if (!prepared || !currentPlan || planRefreshRequired) {
         setMessage("The expired unused payment request is closed. Prepare a price for your current saved film before continuing.");
         return;
+      }
+      let finishedFilm = preRender;
+      if (!restartExpired) {
+        const fresh = normalizePreRenderStatus(await api(`/api/studio?action=productionStatus&id=${encodeURIComponent(prepared.id)}`), prepared);
+        setPreRender(fresh);
+        if (!preRenderCanPurchase(fresh, prepared)) throw new Error("Your film must finish its delivery checks before payment is available.");
+        finishedFilm = fresh;
       }
       const latestConfiguration = normalizeCheckoutConfiguration(await api("/api/studio", { action: "prepareCheckout" }));
       setConfiguration(latestConfiguration);
@@ -206,6 +242,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       }
       const result = normalizeFilmQuote(value);
       if (!result || result.preparedId !== prepared.id || result.manifestHash !== prepared.manifestHash || result.filmId !== film.id
+        || !restartExpired && (!finishedFilm || !preRenderQuoteMatches(result, { ...prepared, filmId: film.id, price: finishedFilm.price }))
         || !quoteMatchesConfiguration(result, latestConfiguration) || Date.parse(result.expiresAt) <= Date.now()) {
         quoteRequest.current = null;
         throw new Error("Your film price could not be verified against the saved plan. No payment has been requested.");
@@ -215,7 +252,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
     });
   }
   async function requestPrice() {
-    if(paymentReference||((!currentPlan||planRefreshRequired)&&!preparationConsent))return;
+    if(paymentReference||preRender||((!currentPlan||planRefreshRequired)&&!preparationConsent))return;
     await work("Preparing your pricing…",async()=>{
       setQuote(null);setPrice(null);setConsent(false);
       quoteRequest.current = null;
@@ -239,6 +276,17 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       setPlanRefreshRequired(false);
       setPrice(result.price);setNow(Date.now());
       setMessage("Your production plan is saved and your film price is ready.");
+    });
+  }
+  async function startPreRender() {
+    if (!prepared || !currentPlan || !renderConsent || paymentReference) return;
+    const amountCents = canResumePreRender ? preRender?.price.amountCents : !preRender && priceCurrent ? price?.amountCents : undefined;
+    if (!amountCents) return;
+    await work("Starting your film before payment…", async () => {
+      const value = await api("/api/studio", preRenderRequest(prepared.id, amountCents, renderConsent));
+      const status = normalizePreRenderStatus(value, prepared);
+      if (!status) throw new Error("The production request could not be verified. Check this saved film’s status before starting another film.");
+      setPreRender(status); setMessage("Your film is being prepared. Lineage Theatre funds production; payment is offered after the finished video passes its checks.");
     });
   }
   async function downloadPlan() {
@@ -375,14 +423,14 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
   }
 
   return <section className="readiness-panel film-checkout" aria-label="Film payment and production">
-    <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Your film price and payment"}</h3>
-    {!paymentReference && <>
-      <p>Save your production plan and calculate your film price in one step. This does not take a payment or start rendering.</p>
+    <h3>{paymentReference ? order?.status === "captured" ? "Your paid film" : "Your saved payment" : "Create your film, then pay to unlock it"}</h3>
+    {!paymentReference && !preRender && <>
+      <p>Save your plan and review the price first. Lineage Theatre renders and checks the video before you pay. Payment then unlocks that finished film for watching and downloading.</p>
       {(!currentPlan||planRefreshRequired)&&<label className="check-label film-consent"><input type="checkbox" checked={preparationConsent} disabled={Boolean(busy)} onChange={event=>setPreparationConsent(event.target.checked)}/><span>Save this screenplay, cast, and production plan privately in Lineage Theatre with administrator access. Use my selected appearance photos when producing this film.</span></label>}
       <button className="button primary film-checkout-lead" disabled={Boolean(busy) || !film.scenes.length || ((!currentPlan||planRefreshRequired)&&!preparationConsent)} onClick={() => void requestPrice()}>{busy?<Loader2 className="spin" size={15}/>:<RefreshCw size={15} />}{busy|| (planRefreshRequired ? "Refresh production plan" : price ? "Refresh my pricing" : "Prepare my pricing")}</button>
     </>}
     {prepared&&!paymentReference&&<p className="field-note film-plan-note">{!inputHash?"Checking your draft against its saved plan…":currentPlan?`Plan saved: ${prepared.sceneCount} scenes, ${prepared.durationSeconds} seconds target.`:"Your film has changed since this plan was saved. The download contains the saved version."} <button className="text-button" disabled={Boolean(busy)} onClick={()=>void downloadPlan()}><Download size={15}/>Download prepared plan</button></p>}
-    {price&&!paymentReference&&!quote&&<div className="film-price-review" role="status">
+    {price&&!paymentReference&&!quote&&!preRender&&<div className="film-price-review" role="status">
       <div className="film-price-summary">
         <p className="eyebrow">Your film price</p>
         <p className="film-price-total">{money(price.amountCents)} <span>USD total</span></p>
@@ -390,7 +438,23 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       </div>
       <p className="field-note">{price.note}</p>
       {!priceCurrent&&<p className="feedback warning">Refresh your pricing to include the latest plan and rates.</p>}
-      {price.kind==="confirmed"&&priceCurrent&&<button className="button primary" disabled={Boolean(busy)} onClick={()=>void requestQuote()}>Continue to payment</button>}
+      {price.kind==="confirmed"&&priceCurrent&&<>
+        <label className="check-label film-consent"><input type="checkbox" checked={renderConsent} disabled={Boolean(busy)} onChange={event=>setRenderConsent(event.target.checked)}/><span>Create and check this saved film before checkout. Lineage Theatre covers rendering. If I purchase it, my total is {money(price.amountCents)}. I have not paid and the finished video stays locked until payment is confirmed.</span></label>
+        <button className="button primary" disabled={Boolean(busy)||!renderConsent||!productionAvailable} onClick={()=>void startPreRender()}><Play size={15}/>Render my film before payment</button>
+      </>}
+    </div>}
+    {preRender&&!paymentReference&&<div className="film-price-review" aria-label="Film creation before payment">
+      <h4>{preRender.purchaseReady ? "Your finished film is ready to purchase" : "Creating your film before payment"}</h4>
+      <p>{money(preRender.price.amountCents)} USD total to unlock this saved version. No payment has been requested.</p>
+      <FilmProductionProgress paid={false} studioFunded ready={preRender.purchaseReady} available={productionAvailable}
+        status={preRender.status} completedShots={preRender.completedShots} shotCount={preRender.shotCount} progress={preRender.progress}
+        needsAttention={preRender.needsAttention} workerReady={preRender.workerReady} message={preRender.message}/>
+      {!currentPlan&&<p className="feedback warning">Your draft has changed. This production belongs to its original saved version. Open that film to review and purchase it.</p>}
+      {canResumePreRender&&<><p>Production has not entered the queue. You can retry this same saved film when the studio is available.</p>
+        <label className="check-label"><input type="checkbox" checked={renderConsent} disabled={Boolean(busy)} onChange={event=>setRenderConsent(event.target.checked)}/><span>Retry creating this saved film before payment. My purchase price remains {money(preRender.price.amountCents)}.</span></label>
+        <button className="button primary" disabled={Boolean(busy)||!renderConsent} onClick={()=>void startPreRender()}>Retry this saved film</button></>}
+      {purchaseReady&&!quote&&<button className="button primary" disabled={Boolean(busy)} onClick={()=>void requestQuote()}>Continue to payment</button>}
+      <p><a href={libraryFilmLink(preRender.id)}>Open this saved film</a></p>
     </div>}
     {quote && !paymentReference && <div className="film-price-review">
       <div className="film-price-summary">
@@ -400,7 +464,8 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       </div>
       <p className="field-note">Price valid until {new Date(quote.expiresAt).toLocaleString()}. The confirmed payment amount stays fixed for this saved film.</p>
       <p className="field-note">{!quote.sandbox
-        ? "Production starts automatically when QuickBooks confirms payment. Follow its progress here or in your film library. The finished film opens after verification."
+        ? preRender ? "Your finished film has already passed its checks. Once QuickBooks confirms payment, the same film unlocks for watching and downloading. Confirmation may take a moment."
+          : "Production starts automatically when QuickBooks confirms payment. Follow its progress here or in your film library. The finished film opens after verification."
         : "A test payment does not start production of this film."}</p>
       {!quote.sandbox && !checkoutProductionReady && <div className="feedback warning" role="status">
         <p>Production availability must be confirmed before a payment page can be created. Your saved film and price remain available.</p>
@@ -412,7 +477,7 @@ export default function FilmCheckout({ film, productionAvailable, generationAtte
       </div>
       {!quoteCurrent && <p className="feedback warning">This price has expired or the plan has changed. Request a new price before paying.</p>}
       <label className="check-label film-consent"><input type="checkbox" checked={consent} disabled={Boolean(busy) || !quoteCurrent || !quote.sandbox && !checkoutProductionReady} onChange={event => setConsent(event.target.checked)} />
-        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks. Start this saved version automatically when my payment is confirmed.`}</span>
+        <span>{quote.sandbox ? `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} test invoice for this saved film. No real money will move.` : preRender ? `I accept the delivery and refund terms and want to pay ${money(quote.amountCents)} on QuickBooks to unlock this finished film.` : `I accept the delivery and refund terms and want to create a ${money(quote.amountCents)} invoice for this saved film. I will complete payment on QuickBooks. Start this saved version automatically when my payment is confirmed.`}</span>
       </label>
       {configuration?.available && quoteCurrent && <>
         <p className="field-note">Your secure payment page opens in another tab. Enter your payment details there, then return here to check payment status. Your finished film unlocks only after payment is confirmed.</p>

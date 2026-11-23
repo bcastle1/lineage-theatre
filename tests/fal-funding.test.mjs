@@ -19,7 +19,7 @@ function fixture(options = {}) {
   let serial = 0, balance = options.balance ?? 10;
   const records = new Map(), requests = [], writes = [];
   const seed = (path, value) => records.set(path, { etag: `etag-${++serial}`, value: structuredClone(value) });
-  const read = async path => structuredClone(records.get(path) || null);
+  const read = async path => { await options.beforeRead?.(path); return structuredClone(records.get(path) || null); };
   const write = async (path, value, etag) => {
     await options.beforeWrite?.(path, value, etag);
     const prior = records.get(path);
@@ -285,4 +285,78 @@ test('a concurrent invoice claim defeats an expired-order release fence', async 
   h.seed(path, { ...(await h.read(path)).value, checkoutMethod: 'quickbooks-hosted-invoice', expiresAt: new Date(now - 1).toISOString() });
   await failure(h.service.releaseExpiredOrder(old.orderId, old.quoteId));
   assert.equal(h.writes.length, 0);
+});
+
+test('ongoing funded work verifies its hold after provider debit without billing reads or ledger writes', async () => {
+  const h = fixture(), first = input('funded', 1000);
+  await h.service.reserve(first);
+  const saved = await h.read(FAL_FUNDING_PATH), requests = h.requests.length, writes = h.writes.length;
+  h.balance(4); // Earlier clips already spent six dollars from the admitted budget.
+  assert.equal(await h.service.verifyReservation(first), true);
+  assert.equal(await h.service.verifyReservation(first), true);
+  assert.equal(h.requests.length, requests); assert.equal(h.writes.length, writes);
+  assert.deepEqual(await h.read(FAL_FUNDING_PATH), saved);
+  await failure(h.service.reserve(input('another-film', 1)));
+  assert.equal(h.requests.length, requests + 1, 'A new film still checks current wallet funds against all commitments');
+  assert.equal(h.writes.length, writes, 'No additional allowance is admitted');
+  assert.equal(await h.service.verifyReservation(first), true);
+});
+
+test('continuation requires exact identity, ceiling and account without creating a missing hold', async () => {
+  const first = input();
+  for (const change of [{ orderId: digest('other order') }, { customerEmail: 'other@example.invalid' },
+    { preparedId: input('other').preparedId }, { manifestHash: digest('other manifest') },
+    { quoteId: digest('other quote') }, { maximumCostCents: first.maximumCostCents - 1 }, { maximumCostCents: first.maximumCostCents + 1 }]) {
+    const h = fixture(); await h.service.reserve(first); const writes = h.writes.length, reads = h.requests.length;
+    await failure(h.service.verifyReservation({ ...first, ...change }));
+    assert.equal(h.writes.length, writes); assert.equal(h.requests.length, reads);
+  }
+  const empty = fixture(); await failure(empty.service.verifyReservation(first));
+  assert.equal(empty.writes.length, 0); assert.equal(empty.requests.length, 0);
+  for (const change of [{ version: 2 }, { account: 'other-account' }, { revision: 0 }, { entries: [] },
+    { entries: [{ invalid: true }] }]) {
+    const h = fixture(); await h.service.reserve(first); const previous = (await h.read(FAL_FUNDING_PATH)).value;
+    h.seed(FAL_FUNDING_PATH, { ...previous, ...change });
+    await failure(h.service.verifyReservation(first));
+  }
+  const duplicate = fixture(); await duplicate.service.reserve(first);
+  const ledger = (await duplicate.read(FAL_FUNDING_PATH)).value;
+  duplicate.seed(FAL_FUNDING_PATH, { ...ledger, entries: [ledger.entries[0], ledger.entries[0]] });
+  await failure(duplicate.service.verifyReservation(first));
+});
+
+test('released or corrupt release evidence blocks continuation while other quote cycles stay isolated', async () => {
+  for (const receipt of [{ version: 1, kind: 'unattempted-funding-cycle-release' }, { malformed: true }, null]) {
+    const h = fixture(), first = input(); await h.service.reserve(first);
+    h.seed(`production/fal/funding-releases/${first.orderId}/${first.quoteId}.json`, receipt);
+    await failure(h.service.verifyReservation(first));
+  }
+  const h = fixture(), first = input(); await h.service.reserve(first);
+  h.seed(`production/fal/funding-releases/${first.orderId}/${digest('older-quote')}.json`, { malformed: true });
+  assert.equal(await h.service.verifyReservation(first), true);
+});
+
+test('a held entry removed during its continuation check cannot authorize work', async () => {
+  let h, checking = false;
+  h = fixture({ beforeRead: path => {
+    if (checking && path.startsWith('production/fal/funding-releases/')) {
+      checking = false; const ledger = h.records.get(FAL_FUNDING_PATH).value;
+      h.seed(FAL_FUNDING_PATH, { ...ledger, revision: ledger.revision + 1, entries: [] });
+    }
+  } });
+  const first = input(); await h.service.reserve(first); checking = true;
+  await failure(h.service.verifyReservation(first));
+  assert.equal(h.writes.length, 1, 'Verification cannot restore a removed reservation');
+});
+
+test('a release written during the held-entry readback blocks continuation', async () => {
+  let h, checking = false, ledgerReads = 0;
+  const first = input();
+  h = fixture({ beforeRead: path => {
+    if (checking && path === FAL_FUNDING_PATH && ++ledgerReads === 2)
+      h.seed(`production/fal/funding-releases/${first.orderId}/${first.quoteId}.json`, { released: true });
+  } });
+  await h.service.reserve(first); checking = true;
+  await failure(h.service.verifyReservation(first));
+  assert.equal(h.writes.length, 1);
 });

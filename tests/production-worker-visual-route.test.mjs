@@ -12,13 +12,14 @@ import { productionQueuePath } from '../api/_lib/production-queue.mjs';
 import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, visualSampleTimes, visualReviewBinding, visualReceiptPath } from '../api/_lib/film-visual-review.mjs';
 import { createStartFrameReviewService } from '../api/_lib/film-start-frame-review.mjs';
 import { seedanceCanaryIdentity, seedanceCanaryProfile } from '../api/_lib/seedance-operator-canary.mjs';
+import { createFilmPreRenderService, preRenderPath, PRERENDER_FLOW } from '../api/_lib/film-prerender.mjs';
 
 // Exercise the real route, reference lookup, JPEG validation, receipt writing,
 // and authorization callbacks. Only private storage/payment/model IO is fake.
 const secret = 'a'.repeat(64), now = 1_800_000_000_000, defaultId = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
-async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false, seedance = false } = {}) {
+async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false, seedance = false, preRender = false } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
   const id = operator && seedance ? seedanceCanaryIdentity(email).id : defaultId;
   const seedanceQuote = digest(`${SEEDANCE_RECIPE_VERSION}:seedance:${seedanceCanaryProfile().fixedHash}:1200000:0`);
@@ -88,6 +89,20 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     if (old ? old.etag !== expected : expected !== undefined) throw Error('private CAS conflict');
     records.set(path, { value: clone(value), etag: `write-${writes.length}` }); writes.push({ path, value: clone(value) });
   };
+  if (preRender) {
+    assert.equal(seedance, true); assert.equal(operator, false);
+    records.delete(orderPath);
+    const grantId = digest(`prerender:${email}:${manifestHash}`);
+    records.set(preRenderPath(email, id), { etag: 'studio-allowance', value: {
+      version: 1, kind: PRERENDER_FLOW, id: grantId, ownerHash: job.ownerHash, preparedId: id, manifestHash,
+      filmId: job.filmId, filmTitle: manifest.title, model: 'seedance', recipe: SEEDANCE_RECIPE_VERSION,
+      orderId, fundingId: digest(`prerender-funding:${grantId}`), quoteId: digest('locked-film-price'), maximumCostCents: 300,
+      providerCostCents: 200, amountCents: 300, markupCents: 100, pricingRevision: 1, quoteReference: job.authorization.quoteReference,
+      createdAt: new Date(now - 1000).toISOString() } });
+    records.set(`production/prerenders/${job.ownerHash}/active.json`, { etag: 'active-unpaid-film', value: { version: 1,
+      ownerHash: job.ownerHash, preparedId: id, manifestHash } });
+    Object.assign(records.get(ticketPath).value, { authorizationKind: PRERENDER_FLOW, preRenderGrantId: grantId });
+  }
   const permissions = { allowed: true, environment: 'production', manifestHash, fictionalOnly: false,
     budgetCents: 300, quoteReference: 'b'.repeat(64), expiresAt: new Date(now + 60_000).toISOString() };
   const paymentService = { authorizeProduction: async request => {
@@ -97,6 +112,17 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     return clone(permissions);
   } };
   const handler = createProductionWorkerHandler({ env, read, paymentService, now: () => now,
+    ...(preRender ? { preRenderService: createFilmPreRenderService({ read, write, now: () => now,
+      env: { QUICKBOOKS_ENVIRONMENT: 'production', LINEAGE_PAYMENT_ACCESS: 'approved' },
+      funding: { reserve: async () => assert.fail('Visual review must not re-reserve fal funding after rendering'),
+        verifyReservation: async input => {
+          const grant = records.get(preRenderPath(email, id))?.value;
+          assert.deepEqual(input, { orderId: grant.fundingId, customerEmail: email, preparedId: id,
+            manifestHash, quoteId: grant.quoteId, maximumCostCents: grant.maximumCostCents });
+          return true;
+        } },
+      film: { getPrepared: async () => clone(records.get(jobPath).value), quoteForProductionBudget: async () => ({
+        manifestHash, environment: 'production', providerCostCents: 200, maximumCostCents: 300, expiresAt: new Date(now + 60000).toISOString() }) } }) } : {}),
     adapter: { model: 'kling', modelVersion: FAL_RECIPE_VERSION, available: true },
     limiter: async () => { limiterCalls++; return true; },
     visualReviewFactory: options => {
@@ -142,6 +168,28 @@ test('visual route completes an owned paid film review and returns only the boun
   assert.ok(!JSON.stringify(f.writes).includes(f.env.OPENAI_API_KEY));
   const repeated = await f.invoke(); assert.equal(repeated.statusCode, 200); assert.deepEqual(repeated.body, result.body);
   assert.equal(f.counts().modelCalls, 1);
+});
+
+test('studio pre-render visual review uses its exact funded grant and never requires or fabricates a customer sale', async () => {
+  const f = await fixture({ seedance: true, preRender: true }), result = await f.invoke();
+  assert.equal(result.statusCode, 200); assert.equal(result.body.passed, true);
+  assert.equal(f.counts().modelCalls, 1); assert.equal(f.counts().paymentCalls, 0);
+  assert.equal(f.records.has(f.orderPath), false);
+  assert.ok(f.writes.every(entry => entry.path.startsWith('production/visual-reviews/')));
+});
+
+test('revoking a pre-render allowance or queue lease during inference cannot approve the film', async () => {
+  for (const mutate of [
+    f => { f.records.get(preRenderPath(f.body.email, f.body.preparedId)).value.maximumCostCents++; },
+    f => { f.records.get(f.ticketPath).value.lease.token = 'replacement-worker'; },
+    f => { f.records.get(f.userPath).value.status = 'suspended'; },
+  ]) {
+    const f = await fixture({ seedance: true, preRender: true });
+    f.setAfterInference(async () => mutate(f));
+    const result = await f.invoke(); assert.notEqual(result.statusCode, 200);
+    assert.equal(f.counts().modelCalls, 1); assert.equal(f.counts().paymentCalls, 0);
+    assert.ok(f.writes.every(entry => entry.value.state !== 'reviewed'));
+  }
 });
 
 test('v3 starting-frame review uses the ordinary paid worker or exact separate fictional grant before rendering', async () => {

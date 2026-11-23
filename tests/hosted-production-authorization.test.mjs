@@ -9,6 +9,7 @@ import { productionQueuePath } from "../api/_lib/production-queue.mjs";
 import { createProductionWorker } from "../scripts/production-worker.mjs";
 import { HOSTED_REVERSAL_SCOPE } from "../api/_lib/hosted-reversals.mjs";
 import { createProductionAllowance, productionAllowancePath } from "../api/_lib/production-allowance.mjs";
+import { legacyHostedOrder } from "./fixtures/legacy-hosted-order.mjs";
 
 const NOW = Date.parse("2026-09-23T18:00:00Z"), EMAIL = "customer@example.invalid";
 const BINDING = { environment: "production", grantId: "a".repeat(64), realmId: "1234" };
@@ -99,6 +100,8 @@ async function fixture(options = {}) {
   };
   const hosted = createHostedCheckoutService(dependencies);
   const q = await hosted.quote(actor, { project: {}, preparedId: plan.id, idempotencyKey: "fictional-hosted-quote" });
+  const historical=legacyHostedOrder((await read(`payments/hosted-quotes/${digest(email)}/${q.id}.json`)).value,"fictional-hosted-checkout",time);
+  await write(`payments/orders/${historical.id}.json`,historical);
   const order = await hosted.checkout(actor, { quoteId: q.id, idempotencyKey: "fictional-hosted-checkout", consent: true, productionConsent: true });
   checkoutComplete=true;
   invoice.Balance = 0; invoice.LinkedTxn = [{ TxnId: "40", TxnType: "Payment" }];

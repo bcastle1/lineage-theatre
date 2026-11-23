@@ -552,6 +552,7 @@ export const filmProduction = createFilmProductionService({
   // Lazy import avoids a construction-time cycle with payment quotes. The
   // payment service verifies the saved account, plan, order and merchant grant.
   authorize: async ({ email, id, manifestHash, authorizationReference }) =>
-    (await import("./payments.mjs")).payments.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
+    (await import("./film-prerender.mjs")).authorizeFilmProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference },
+      { paymentService: (await import("./payments.mjs")).payments }),
 });
 export const quoteForPayment = (...args) => filmProduction.quoteForPayment(...args);

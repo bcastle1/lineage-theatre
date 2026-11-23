@@ -84,6 +84,15 @@ export async function requireFinishedFilmPayment({ job, email, actor, read, now 
     || order.currency !== "USD" || !Number.isSafeInteger(order.amountCents) || order.amountCents <= 0 || order.amountCents > 100_000_000
     || order.refundedCents !== 0 || order.refundOperation || order.checkOperation || order.provider !== "quickbooks"
     || order.merchantBinding?.environment !== "production" || !HASH.test(order.merchantBinding.grantId || "")) throw paymentRequired();
+  if (order.deliveryFlow === 'render-before-payment-v1') {
+    try {
+      const { readPreRenderGrant } = await import('./film-prerender.mjs');
+      const grant = await readPreRenderGrant({ email, id: job.id, job, read });
+      if (!grant || order.preRenderGrantId !== grant.id || order.artifactSha256 !== job.media?.sha256
+        || order.amountCents !== grant.amountCents || order.providerCostCents !== grant.providerCostCents
+        || job.authorization.budgetCents !== grant.maximumCostCents || job.authorization.quoteReference !== grant.quoteReference) throw paymentRequired();
+    } catch { throw paymentRequired(); }
+  }
   if (order.checkoutMethod === "quickbooks-hosted-invoice") {
     const paid = order.accountingPayments;
     if (order.confirmationSource !== "quickbooks-accounting" || !/^[0-9]{1,30}$/.test(order.invoiceId || "")
