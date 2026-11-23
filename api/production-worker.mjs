@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import { list as listBlobs } from '@vercel/blob';
 import { digest, json, readBody, readRecord, limitAction, userPath } from './_lib/auth.mjs';
 import { payments } from './_lib/payments.mjs';
 import { falProductionAdapter, SEEDANCE_RECIPE_VERSION, FAL_RECIPE_VERSION } from './_lib/fal-production.mjs';
@@ -12,7 +13,7 @@ import { accessStatusForUser, isOwner } from './_lib/access.mjs';
 import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
 import { authorizeFilmProduction, createFilmPreRenderService, readPreRenderGrant, PRERENDER_FLOW } from './_lib/film-prerender.mjs';
-import { createVisualReviewRecovery } from './_lib/film-visual-review-recovery.mjs';
+import { createVisualReviewRecovery, createPreclaimVisualReviewResume } from './_lib/film-visual-review-recovery.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -21,7 +22,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
   adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
   visualReviewFactory = createFilmVisualReviewService,
   startFrameReviewFactory = createStartFrameReviewService,
-  preRenderService = createFilmPreRenderService({ read, now, env }) } = {}) {
+  preRenderService = createFilmPreRenderService({ read, now, env }), list = listBlobs } = {}) {
   return async (req, res) => {
     if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); }
     const secret = env.LINEAGE_WORKER_SECRET, header = req.headers?.authorization;
@@ -31,6 +32,41 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       return json(res, 401, { code: 'WORKER_AUTH_REQUIRED' });
     try {
       const body = await readBody(req, 1_500_000);
+      if (body?.action === 'authorize-visual-review-preclaim-resume') {
+        const plan = body.resumePlan;
+        if (Object.keys(body).sort().join(',') !== 'action,resumePlan,workerProtocol' || body.workerProtocol !== 2
+          || !plan || typeof plan !== 'object' || Array.isArray(plan)
+          || Object.keys(plan).sort().join(',') !== 'email,id,jobHash,manifestHash,queueHash,recoveryGrantHash'
+          || typeof plan.email !== 'string' || plan.email.length > 254 || plan.email !== plan.email.trim().toLowerCase()
+          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(plan.email)
+          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(plan.id || '')
+          || ![plan.manifestHash, plan.recoveryGrantHash, plan.jobHash, plan.queueHash]
+            .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)))
+          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (!await limiter('production-worker:visual-review-preclaim-resume', 10, 60_000))
+          return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
+        const reject = () => { throw Object.assign(Error('The stopped review requires verification.'), { code: 'VISUAL_REVIEW_AUTH_REQUIRED' }); };
+        // The inspection remains read-only even if the exact paused record is
+        // replayed. Only the separate reviewed operator command may resume it.
+        const inspect = createPreclaimVisualReviewResume({ read, listBlobs: list, now, write: reject, authorize: reject });
+        if ((await inspect(plan)).status !== 'planned') return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const ticketPath = productionQueuePath(plan.email, plan.id), jobPath = productionJobPath(plan.email, plan.id);
+        const [ticket, job] = await Promise.all([read(ticketPath), read(jobPath)]);
+        const orderId = ticket?.value?.orderId;
+        if (ticket?.value?.state !== 'attention' || ticket.value.lease?.expiresAt > now()
+          || !/^[a-f0-9]{64}$/.test(orderId || '') || digest(JSON.stringify(ticket.value)) !== plan.queueHash
+          || job?.value?.provider?.recipe !== SEEDANCE_RECIPE_VERSION
+          || job.value.manifest.productionPlan.version !== 1) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const permission = await paymentService.authorizeProduction({ email: plan.email, preparedId: plan.id,
+          manifestHash: plan.manifestHash, orderId });
+        const checked = await inspect(plan), latest = (await read(ticketPath))?.value;
+        if (checked.status !== 'planned' || digest(JSON.stringify(latest)) !== plan.queueHash || latest?.orderId !== orderId
+          || latest.state !== 'attention' || latest.lease?.expiresAt > now() || permission?.allowed !== true
+          || permission.environment !== 'production' || permission.manifestHash !== plan.manifestHash
+          || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now())
+          return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        return json(res, 200, { ...permission, recoveryRequestHash: digest(JSON.stringify(plan)) });
+      }
       if (body?.action === 'authorize-visual-review-recovery') {
         const plan = body.recoveryPlan, keys = plan && typeof plan === 'object' && !Array.isArray(plan)
           ? Object.keys(plan).sort().join(',') : '';
@@ -176,12 +212,24 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
             || typeof ticket.lease.token !== 'string' || !ticket.lease.token
             || pinnedLease && pinnedLease !== digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`)) return false;
           pinnedLease = digest(`${ticket.orderId}:${ticket.lease.token}:${startFrame ? current.lease.token : ''}`);
-          if (preRendering || !paymentPermission || Date.parse(paymentPermission.expiresAt) <= now()) {
-            const permission = await authorizeFilmProduction({ email: body.email, preparedId: body.preparedId,
-              manifestHash: body.manifestHash, orderId: ticket.orderId }, { paymentService, preRenderService, read, spending: false });
-            if (permission?.allowed !== true || permission.manifestHash !== body.manifestHash
-              || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now()) return false;
-            paymentPermission = permission;
+          if (preRendering || !paymentPermission || Date.parse(paymentPermission.expiresAt) - now() <= 5000) {
+            // Recovery and immutable-claim reads follow this authorization.
+            // Obtain a little usable time; never stretch the payment proof's
+            // own expiry or loop indefinitely when fresh checks consume it.
+            let usable = false;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const permission = await authorizeFilmProduction({ email: body.email, preparedId: body.preparedId,
+                manifestHash: body.manifestHash, orderId: ticket.orderId }, { paymentService, preRenderService, read, spending: false });
+              if (permission?.allowed !== true || permission.environment !== 'production' || permission.manifestHash !== body.manifestHash
+                || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now()) return false;
+              const freshTicket = (await read(productionQueuePath(body.email, body.preparedId)))?.value;
+              if (freshTicket?.state !== 'pending' || freshTicket.email !== body.email || freshTicket.id !== body.preparedId
+                || freshTicket.manifestHash !== body.manifestHash || freshTicket.orderId !== ticket.orderId
+                || freshTicket.lease?.token !== ticket.lease.token || !(freshTicket.lease.expiresAt > now())) return false;
+              if (Date.parse(permission.expiresAt) - now() <= 5000) continue;
+              paymentPermission = permission; usable = true; break;
+            }
+            if (!usable) return false;
           }
           return true;
         };

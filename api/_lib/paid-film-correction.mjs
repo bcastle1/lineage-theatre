@@ -88,13 +88,19 @@ export async function readPaidFilmCorrection({ email, job, correctionId, read = 
     || !(seedanceGrant(grant) || legacyKlingGrant(grant))
     || typeof grant.reason !== 'string' || grant.reason.trim().length < 10 || grant.reason.length > 500
     || !time(grant.approvedAt) || Date.parse(grant.approvedAt) > now() || !quoteValid(grant.quote, grant, now, false)) throw invalid();
-  const claim = await read(claimPath(id)), owner = await read(userPath(email));
-  const targetIndex = index || await read(targetPath(email, grant.preparedId));
+  // These records depend only on the already-validated grant. Read them
+  // together so nested corrections do not consume a short payment proof on
+  // serial storage round trips. The exact validation and etag recheck below
+  // still reject any mutation during or after this snapshot.
+  const [claim, owner, targetIndex, target, original, source] = await Promise.all([
+    read(claimPath(id)), read(userPath(email)), index || read(targetPath(email, grant.preparedId)),
+    read(jobPath(email, grant.preparedId)), read(`payments/orders/${grant.originalOrderId}.json`),
+    read(jobPath(email, grant.originalPreparedId)),
+  ]);
   const expectedIndex = { version: 1, correctionId: id, preparedId: grant.preparedId, manifestHash: grant.manifestHash, grantHash: hash(grant) };
   if (!claim?.etag || hash(claim.value) !== hash(grant) || !owner?.etag || !isOwner(owner.value) || owner.value.mustChangePassword
     || owner.value.email !== email || !targetIndex?.etag || hash(targetIndex.value) !== hash(expectedIndex)) throw invalid();
-  const target = await read(jobPath(email, grant.preparedId)), original = await read(`payments/orders/${grant.originalOrderId}.json`);
-  const source = await read(jobPath(email, grant.originalPreparedId)), value = original?.value;
+  const value = original?.value;
   if (!target?.etag || !validJob(target.value, email, grant.preparedId, grant.manifestHash)
     || (target.value.manifest.productionPlan?.provider ?? 'kling') !== grant.model
     || job && hash(job) !== hash(target.value) || target.value.filmId !== grant.filmId

@@ -137,6 +137,21 @@ test('remote visual review uses the authenticated fixed worker endpoint and boun
     await assert.rejects(createRemoteVisualReview({ env: { LINEAGE_WORKER_SECRET: 'a'.repeat(64) }, fetchImpl: async () => response() })(input));
 });
 
+test('worker preserves fixed authorization, validation and uncertainty failures without retaining server detail', async () => {
+  for (const code of ['VISUAL_REVIEW_AUTH_REQUIRED', 'VISUAL_REVIEW_INVALID', 'VISUAL_REVIEW_UNCERTAIN']) {
+    const review = createRemoteVisualReview({ env: { LINEAGE_WORKER_SECRET: 'a'.repeat(64) },
+      fetchImpl: async () => new Response(JSON.stringify({ code, detail: 'private-provider-url' }), { status: 409 }) });
+    await assert.rejects(review({}), error => {
+      assert.deepEqual(finishingFailure(error), { stage: 'visual-review', reason: code });
+      assert.doesNotMatch(JSON.stringify(finishingFailure(error)), /private-provider-url/);
+      return true;
+    });
+  }
+  const review = createRemoteVisualReview({ env: { LINEAGE_WORKER_SECRET: 'a'.repeat(64) },
+    fetchImpl: async () => new Response(JSON.stringify({ code: 'private-provider-url' }), { status: 409 }) });
+  await assert.rejects(review({}), failureReason('VISUAL_REVIEW_UNAVAILABLE'));
+});
+
 test('the assembly worker never assembles or publishes new films without a passing visual review', async () => {
   const f = await fixture(), root = await mkdtemp(join(tmpdir(), 'lineage-visual-gate-test-'));
   try {
