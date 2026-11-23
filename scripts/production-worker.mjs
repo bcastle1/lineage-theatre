@@ -18,6 +18,8 @@ import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs
 import { createFilmVisualReviewer } from './review-film-visuals.mjs';
 import { verifyFilmVisualReceipts } from '../api/_lib/film-visual-review.mjs';
 import { authorizeFilmProduction, createFilmPreRenderService } from '../api/_lib/film-prerender.mjs';
+import { readVisualReviewRecovery } from '../api/_lib/film-visual-review-recovery.mjs';
+import { applyFilmTextCorrections } from './apply-film-text-correction.mjs';
 
 const MAX_BYTES = 250 * 1024 * 1024;
 const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -104,6 +106,7 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
 
 export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, fetchImpl = fetch, putBlob = put,
   assemble = assembleFilm, reviewVisuals = createFilmVisualReviewer(), prepareClips,
+  read = readRecord, recoveryFor = readVisualReviewRecovery, applyTextCorrections = applyFilmTextCorrections,
   ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", tempRoot = workerTempRoot } = {}) {
   return async ({ email, id, job, stillOwned }) => {
     let stage = 'assembly';
@@ -141,12 +144,20 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
       }
       const outputPath = join(work, "film.mp4");
       stage = 'visual-review';
+      let workingClips = clips;
+      if (job.visualReviewRecovery?.textCorrections !== undefined) {
+        if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
+        if (!await recoveryFor(job, { read })) throw finishingError('The text correction needs an approved recovery.', 'VISUAL_REVIEW_REQUIRED');
+        workingClips = await applyTextCorrections({ job, clips, work, ffmpeg });
+        if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
+        if (!await recoveryFor(job, { read })) throw finishingError('The text correction recovery changed.', 'VISUAL_REVIEW_REQUIRED');
+      }
       const visualReview = job.manifest.visualContinuity
-        ? await reviewVisuals({ email, id, job, clips, work, ffmpeg, stillOwned }) : null;
+        ? await reviewVisuals({ email, id, job, clips: workingClips, work, ffmpeg, stillOwned }) : null;
       if (job.manifest.visualContinuity && visualReview?.passed !== true)
         throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
       stage = 'assembly';
-      const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips, outputPath, ffmpeg, technicalSample: false });
+      const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips: workingClips, outputPath, ffmpeg, technicalSample: false });
       verifiedMediaProfile(report);
       const bytes = await readFile(outputPath);
       if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
@@ -201,7 +212,7 @@ export function createProductionWorker({ adapter = falProductionAdapter, payment
     authorize: ({ email, id, manifestHash, authorizationReference }) => authorizer.authorizeProduction({ email, preparedId: id, manifestHash, orderId: authorizationReference }),
     verifyAssembledMedia: value => verifyPublishedFilm(value, dependencies) });
   const queue = createProductionQueue({ ...dependencies, read, write, film, paymentService: authorizer });
-  const assemble = createWorkerAssembly({ ...dependencies, adapter });
+  const assemble = createWorkerAssembly({ ...dependencies, adapter, read });
   return { runBatch: options => queue.runBatch({ ...options, assemble }), readiness: film.readiness };
 }
 
