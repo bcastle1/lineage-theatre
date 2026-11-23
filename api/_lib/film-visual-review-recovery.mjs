@@ -3,6 +3,7 @@ import { isOwner } from './access.mjs';
 import { requireFinishedFilmPayment } from './production-media.mjs';
 import { parsedAssemblyOverlays } from './film-overlays.mjs';
 import { validateFilmTextCorrections } from './film-text-correction.mjs';
+import { list } from '@vercel/blob';
 
 export const VISUAL_RECOVERY_POLICY = 'pre-assembly-overlays-v2';
 const HASH = /^[a-f0-9]{64}$/;
@@ -161,5 +162,170 @@ export function createVisualReviewRecovery({ read = readRecord, write = writeRec
     await writeExact(queuePath(ctx.job), { ...ticket, state: 'pending', attempts: 0, nextAttemptAt: now(),
       lastResult: 'RESUMED', lastFailure: null, visualReviewRecoveryHash: grantHash }, ctx.ticket.etag);
     return { ...summary, status: 'resumed', queueState: 'pending', changed: true };
+  };
+}
+
+const PRECLAIM_POLICY = 'visual-review-preclaim-resume-v1';
+const resumeJobFields = ['finishingFailure', 'revision', 'updatedAt'];
+const resumeQueueFields = ['state', 'attempts', 'updatedAt', 'nextAttemptAt', 'lastResult', 'lastFailure', 'lease'];
+const hash = value => digest(JSON.stringify(value));
+const savedFields = (value, keys) => Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
+function restoreFields(value, fields, keys) {
+  const restored = structuredClone(value);
+  for (const key of keys) {
+    if (Object.hasOwn(fields, key)) restored[key] = fields[key];
+    else delete restored[key];
+  }
+  delete restored.visualReviewPreclaimResumeHash;
+  return restored;
+}
+export const visualReviewPreclaimResumePath = job => {
+  need(HASH.test(job?.ownerHash || '') && UUID.test(job?.id || ''));
+  return `production/visual-review-recoveries/${job.ownerHash}/${job.id}/preclaim-resume-v1.json`;
+};
+
+// This is a single technical continuation before any recovered review claim.
+// It cannot clear, replace or buy another model attempt. The prior failed job
+// is identified by its complete hash; only control fields are copied here.
+export function createPreclaimVisualReviewResume({ read = readRecord, write = writeRecord, listBlobs = list, now = Date.now,
+  paymentCheck = requireFinishedFilmPayment,
+  authorize = async ({ recoveryPlan, ...input }) => ({ ...(await (await import('./payments.mjs')).payments.authorizeProduction(input)),
+    recoveryRequestHash: hash(recoveryPlan) }) } = {}) {
+  async function listed(prefix) {
+    const paths = [], cursors = new Set(); let cursor;
+    do {
+      const page = await listBlobs({ prefix, limit: 32 - paths.length, ...(cursor ? { cursor } : {}) });
+      need(page && Array.isArray(page.blobs) && typeof page.hasMore === 'boolean');
+      for (const blob of page.blobs) {
+        need(typeof blob?.pathname === 'string' && blob.pathname.startsWith(prefix) && !paths.includes(blob.pathname));
+        paths.push(blob.pathname);
+      }
+      need(paths.length <= 32 && (!page.hasMore || paths.length < 32 && page.blobs.length > 0
+        && typeof page.cursor === 'string' && page.cursor.length > 0 && !cursors.has(page.cursor)));
+      if (page.hasMore) cursors.add(page.cursor);
+      cursor = page.hasMore ? page.cursor : null;
+    } while (cursor);
+    return paths.sort();
+  }
+  async function noClaims(job, grant) {
+    const suffix = `${job.ownerHash}/${job.id}/`;
+    const bindingPrefix = `production/visual-review-bindings/${suffix}`;
+    const receiptPrefix = `production/visual-reviews/${suffix}`;
+    const reservedPrefix = `production/operator-canaries/${suffix}visual-review-claims/`;
+    const [bindings, receipts, reservations, direct] = await Promise.all([
+      listed(bindingPrefix), listed(receiptPrefix), listed(reservedPrefix),
+      Promise.all(job.shots.map(shot => read(`${bindingPrefix}${VISUAL_RECOVERY_POLICY}/${digest(shot.id)}.json`))),
+    ]);
+    need(bindings.length === 0 && reservations.length === 0 && direct.every(record => !record)
+      && same(receipts, [priorPath(grant)]));
+  }
+  function receiptMatches(receipt, input) {
+    need(receipt?.version === 1 && receipt.policy === PRECLAIM_POLICY && receipt.ownerHash === digest(input.email)
+      && receipt.preparedId === input.id && receipt.manifestHash === input.manifestHash
+      && receipt.recoveryGrantHash === input.recoveryGrantHash && receipt.requestHash === hash(input)
+      && receipt.jobHash === input.jobHash && receipt.queueHash === input.queueHash
+      && receipt.approvedBy === input.email && Number.isFinite(Date.parse(receipt.approvedAt))
+      && Date.parse(receipt.approvedAt) <= now()
+      && receipt.priorJobControl && receipt.priorQueueControl
+      && Object.keys(receipt.priorJobControl).every(key => resumeJobFields.includes(key))
+      && Object.keys(receipt.priorQueueControl).every(key => resumeQueueFields.includes(key)));
+  }
+  function retryJob(prior, receipt) {
+    return { ...prior, visualReviewPreclaimResumeHash: hash(receipt), revision: (prior.revision || 0) + 1,
+      updatedAt: receipt.approvedAt, finishingFailure: { ...prior.finishingFailure, state: 'retrying' } };
+  }
+  function retryQueue(prior, receipt) {
+    const { lease, ...ticket } = prior;
+    return { ...ticket, state: 'pending', attempts: 0, updatedAt: receipt.approvedAt,
+      nextAttemptAt: Date.parse(receipt.approvedAt), lastResult: 'RESUMED', lastFailure: null,
+      visualReviewPreclaimResumeHash: hash(receipt) };
+  }
+  async function context(input) {
+    need(input && Object.keys(input).sort().join(',') === 'email,id,jobHash,manifestHash,queueHash,recoveryGrantHash'
+      && typeof input.email === 'string' && input.email === input.email.trim().toLowerCase()
+      && /^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(input.email) && input.email.length <= 254
+      && UUID.test(input.id || '') && [input.manifestHash, input.recoveryGrantHash, input.jobHash, input.queueHash]
+        .every(value => typeof value === 'string' && HASH.test(value)));
+    const identity = { ownerHash: digest(input.email), id: input.id };
+    const [stored, ticket, account, saved] = await Promise.all([read(jobPath(identity)), read(queuePath(identity)),
+      read(userPath(input.email)), read(visualReviewPreclaimResumePath(identity))]);
+    const job = stored?.value, actor = account?.value;
+    validJob(job);
+    need(stored.etag && ticket?.etag && isOwner(actor) && actor.email === input.email && !actor.mustChangePassword
+      && job.ownerHash === identity.ownerHash && job.manifestHash === input.manifestHash && job.shots.length === 4
+      && ticket.value.version === 1 && ticket.value.email === input.email && ticket.value.id === input.id
+      && ticket.value.manifestHash === input.manifestHash && HASH.test(ticket.value.orderId || ''));
+    const grant = await readVisualReviewRecovery(job, { read });
+    need(grant && hash(grant) === input.recoveryGrantHash && ticket.value.visualReviewRecoveryHash === input.recoveryGrantHash);
+    await paymentCheck({ job, email: input.email, actor, read, now });
+    const receipt = saved?.value;
+    if (saved) { need(saved.etag); receiptMatches(receipt, input); }
+    if (ticket.value.visualReviewPreclaimResumeHash) {
+      need(receipt && ticket.value.visualReviewPreclaimResumeHash === hash(receipt)
+        && job.visualReviewPreclaimResumeHash === hash(receipt));
+      return { job, stored, ticket, grant, receipt, actor, already: true };
+    }
+    need(job.status === 'awaiting-assembly' && !job.media && ticket.value.state === 'attention'
+      && !(job.lease?.expiresAt > now()) && !(ticket.value.lease?.expiresAt > now()));
+    const priorJob = receipt ? restoreFields(job, receipt.priorJobControl, resumeJobFields) : job;
+    const priorQueue = receipt ? restoreFields(ticket.value, receipt.priorQueueControl, resumeQueueFields) : ticket.value;
+    need(hash(priorJob) === input.jobHash && hash(priorQueue) === input.queueHash
+      && (!job.visualReviewPreclaimResumeHash ? hash(job) === input.jobHash
+        : receipt && same(job, retryJob(priorJob, receipt)))
+      && hash(ticket.value) === input.queueHash
+      && priorJob.finishingFailure?.version === 1 && priorJob.finishingFailure.manifestHash === input.manifestHash
+      && priorJob.finishingFailure.state === 'attention' && priorJob.finishingFailure.stage === 'visual-review'
+      && priorJob.finishingFailure.reason === 'VISUAL_REVIEW_REQUIRED'
+      && Number.isFinite(Date.parse(priorJob.finishingFailure.recordedAt))
+      && Date.parse(priorJob.finishingFailure.recordedAt) >= Date.parse(grant.approvedAt)
+      && Date.parse(priorJob.finishingFailure.recordedAt) <= now()
+      && priorQueue.lastResult === 'REVIEW_REQUIRED'
+      && same(priorQueue.lastFailure, { stage: 'visual-review', reason: 'VISUAL_REVIEW_REQUIRED' }));
+    await noClaims(job, grant);
+    return { job, stored, ticket, grant, receipt, actor, priorJob, priorQueue, already: false };
+  }
+  async function exactWrite(path, value, etag) {
+    try { await write(path, value, etag); }
+    catch { need(same((await read(path))?.value, value)); }
+    need(same((await read(path))?.value, value));
+  }
+  return async (input, { apply = false } = {}) => {
+    let ctx = await context(input);
+    const summary = { version: 1, policy: PRECLAIM_POLICY, preparedId: input.id, manifestHash: input.manifestHash,
+      recoveryGrantHash: input.recoveryGrantHash, preservedClips: 4, maximumNewVideoRequests: 0, additionalReviewAllowance: 0 };
+    if (ctx.already) return { ...summary, status: 'already-resumed', changed: false, queueState: ctx.ticket.value.state };
+    if (!apply) return { ...summary, status: 'planned', changed: false };
+    const freshPermission = async () => {
+      const value = await authorize({ email: input.email, preparedId: input.id, manifestHash: input.manifestHash,
+        orderId: ctx.ticket.value.orderId, recoveryPlan: input });
+      need(value?.allowed === true && value.environment === 'production' && value.manifestHash === input.manifestHash
+        && value.recoveryRequestHash === hash(input) && Date.parse(value.expiresAt) > now());
+      return value;
+    };
+    let permission = await freshPermission();
+    const path = visualReviewPreclaimResumePath(ctx.job);
+    if (!ctx.receipt) {
+      const candidate = { version: 1, policy: PRECLAIM_POLICY, ownerHash: ctx.job.ownerHash, preparedId: input.id,
+        manifestHash: input.manifestHash, recoveryGrantHash: input.recoveryGrantHash, requestHash: hash(input),
+        jobHash: input.jobHash, queueHash: input.queueHash, approvedAt: new Date(now()).toISOString(), approvedBy: input.email,
+        priorJobControl: savedFields(ctx.priorJob, resumeJobFields), priorQueueControl: savedFields(ctx.priorQueue, resumeQueueFields) };
+      try { await write(path, candidate); } catch { /* Exact-input winner is validated below; never overwrite it. */ }
+      const saved = await read(path); need(saved?.etag); receiptMatches(saved.value, input);
+    }
+    ctx = await context(input);
+    if (ctx.already) return { ...summary, status: 'already-resumed', changed: false, queueState: ctx.ticket.value.state };
+    need(ctx.receipt);
+    if (!ctx.job.visualReviewPreclaimResumeHash) await exactWrite(jobPath(ctx.job), retryJob(ctx.priorJob, ctx.receipt), ctx.stored.etag);
+    ctx = await context(input);
+    if (ctx.already) return { ...summary, status: 'already-resumed', changed: false, queueState: ctx.ticket.value.state };
+    need(ctx.job.visualReviewPreclaimResumeHash === hash(ctx.receipt));
+    if (Date.parse(permission.expiresAt) - now() <= 5000) {
+      permission = await freshPermission();
+      ctx = await context(input);
+      if (ctx.already) return { ...summary, status: 'already-resumed', changed: false, queueState: ctx.ticket.value.state };
+    }
+    need(Date.parse(permission.expiresAt) > now());
+    await exactWrite(queuePath(ctx.job), retryQueue(ctx.priorQueue, ctx.receipt), ctx.ticket.etag);
+    return { ...summary, status: 'resumed', changed: true, queueState: 'pending' };
   };
 }
