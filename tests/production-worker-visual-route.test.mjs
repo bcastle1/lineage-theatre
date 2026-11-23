@@ -9,16 +9,19 @@ import { planKlingShots, planSeedanceShots } from '../api/_lib/kling-film-plan.m
 import { FAL_RECIPE_VERSION, SEEDANCE_RECIPE_VERSION, startFrameIdentity } from '../api/_lib/fal-production.mjs';
 import { falRequestPath, FAL_MODELS } from '../api/_lib/fal-client.mjs';
 import { productionQueuePath } from '../api/_lib/production-queue.mjs';
-import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, visualSampleTimes } from '../api/_lib/film-visual-review.mjs';
+import { VISUAL_REVIEW_MODEL, createFilmVisualReviewService, visualSampleTimes, visualReviewBinding, visualReceiptPath } from '../api/_lib/film-visual-review.mjs';
 import { createStartFrameReviewService } from '../api/_lib/film-start-frame-review.mjs';
+import { seedanceCanaryIdentity, seedanceCanaryProfile } from '../api/_lib/seedance-operator-canary.mjs';
 
 // Exercise the real route, reference lookup, JPEG validation, receipt writing,
 // and authorization callbacks. Only private storage/payment/model IO is fake.
-const secret = 'a'.repeat(64), now = 1_800_000_000_000, id = '11111111-1111-4111-8111-111111111111';
+const secret = 'a'.repeat(64), now = 1_800_000_000_000, defaultId = '11111111-1111-4111-8111-111111111111';
 const clone = structuredClone;
 const decision = { appearance: 'consistent', wardrobe: 'consistent', sceneAction: 'consistent', imageIntegrity: 'consistent', findings: [] };
 async function fixture({ operator = false, changeManifest, bindingVersion = 2, startFrame = false, seedance = false } = {}) {
   const email = operator ? OWNER_EMAIL : 'visual-customer@example.invalid';
+  const id = operator && seedance ? seedanceCanaryIdentity(email).id : defaultId;
+  const seedanceQuote = digest(`${SEEDANCE_RECIPE_VERSION}:seedance:${seedanceCanaryProfile().fixedHash}:1200000:0`);
   const manifest = seedance ? planSeedanceShots(buildFilmManifest(fictionalOperatorProject()).manifest) : planKlingShots(buildFilmManifest(fictionalOperatorProject()).manifest, {
     characterBinding: bindingVersion !== null, ...(bindingVersion === null ? {} : { characterBindingVersion: bindingVersion }),
   });
@@ -28,7 +31,8 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     status: startFrame ? 'processing' : 'awaiting-assembly', manifest, manifestHash,
     ...(startFrame ? { lease: { token: 'current-generation-lease', expiresAt: now + 90_000 } } : {}),
     provider: { id: 'fal', model: seedance ? 'seedance' : 'kling', recipe: seedance ? SEEDANCE_RECIPE_VERSION : FAL_RECIPE_VERSION },
-    authorization: { environment: 'production', manifestHash, budgetCents: bindingVersion === 3 ? 450 : 300, quoteReference: 'b'.repeat(64) },
+    authorization: { environment: 'production', manifestHash, budgetCents: operator && seedance ? 1920 : bindingVersion === 3 ? 450 : 300,
+      quoteReference: operator && seedance ? seedanceQuote : 'b'.repeat(64) },
     shots: manifest.shots.map(shot => ({ id: shot.id, status: startFrame ? 'processing' : 'completed', requestKey: digest(`${id}:${manifestHash}:${shot.id}`),
       output: { url: `https://v3.fal.media/${shot.id}.mp4`, contentType: 'video/mp4', sizeBytes: 1024, durationSeconds: shot.targetDurationMs / 1000 } })) };
   const orderId = digest(`${email}:production:${manifestHash}`), orderPath = `payments/orders/${orderId}.json`;
@@ -48,6 +52,12 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     maximumVideoRequests: 3, maximumReferenceRequests: bindingVersion === 3 ? 7 : bindingVersion === 2 ? 4 : 2, videoMicroUsdPerSecond: 140_000,
     referenceMicroUsd: 300_000, quoteReference: 'b'.repeat(64), quotedCostCents: bindingVersion === 3 ? 434 : bindingVersion === 2 ? 344 : 284,
     approvedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 600_000).toISOString() };
+  if (operator && seedance) {
+    delete grant.characterBindingVersion;
+    Object.assign(grant, { kind: seedanceCanaryProfile().summary.kind, recipe: SEEDANCE_RECIPE_VERSION,
+      maximumCostCents: 1920, maximumReferenceRequests: 0, maximumVisualReviewRequests: 3, maximumStartFrameReviews: 0,
+      videoMicroUsdPerSecond: 1_200_000, referenceMicroUsd: 0, quoteReference: seedanceQuote, quotedCostCents: 1920 });
+  }
   const records = new Map(), reads = [], writes = [];
   for (const [path, value] of [[jobPath, job], [userPath(email), user], [orderPath, order], [ticketPath, ticket],
     [grantPath, grant], [leasePath, { token: 'owned-operator-claim', expiresAt: now + 600_000, manifestHash }]])
@@ -65,6 +75,11 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
   const body = startFrame
     ? { action: 'review-start-frame', email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, referenceIdentity }
     : { action: 'review-film-visuals', ...(seedance ? { workerProtocol:2 } : {}), email, preparedId: id, manifestHash, shotId: manifest.shots[0].id, frames };
+  const claimPath = `production/operator-canaries/${job.ownerHash}/${id}/visual-review-claims/${digest(body.shotId)}.json`;
+  if (operator && seedance && !startFrame) records.set(claimPath, { etag: 'review-claim', value: {
+    version: 1, ownerHash: job.ownerHash, preparedId: id, manifestHash, shotId: body.shotId,
+    inputHash: digest(JSON.stringify({ email, preparedId: id, manifestHash, shotId: body.shotId, frames })),
+    token: 'owned-shot-review', state: 'claimed', claimedAt: new Date(now - 500).toISOString() } });
   const env = { LINEAGE_WORKER_SECRET: secret, OPENAI_API_KEY: 'synthetic-visual-key' };
   let modelCalls = 0, paymentCalls = 0, reviewCalls = 0, limiterCalls = 0, afterInference, afterReference;
   const read = async path => { reads.push(path); return clone(records.get(path) ?? null); };
@@ -113,7 +128,7 @@ async function fixture({ operator = false, changeManifest, bindingVersion = 2, s
     await handler({ method: 'POST', headers: { authorization: `Bearer ${secret}` }, body: clone(body), ...changes }, result);
     return result;
   };
-  return { env, body, job, jobPath, ticketPath, grantPath, leasePath, userPath: userPath(email), orderPath, records, reads, writes,
+  return { env, body, job, jobPath, ticketPath, grantPath, leasePath, claimPath, userPath: userPath(email), orderPath, records, reads, writes,
     permissions, invoke, setAfterInference: value => { afterInference = value; }, setAfterReference: value => { afterReference = value; },
     counts: () => ({ modelCalls, paymentCalls, reviewCalls, limiterCalls }) };
 }
@@ -308,4 +323,70 @@ test('new Seedance films use Astra for continuity and require a worker that pres
   assert.equal(f.counts().modelCalls,0);
   const result = await f.invoke();
   assert.equal(result.statusCode,200); assert.equal(result.body.passed,true); assert.equal(f.counts().modelCalls,1);
+});
+
+test('the fixed studio-funded Seedance film receives a bound Astra receipt without a customer payment', async () => {
+  const f = await fixture({ operator: true, seedance: true });
+  f.records.delete(f.orderPath); f.records.delete(f.ticketPath);
+  const result = await f.invoke();
+  assert.equal(result.statusCode, 200); assert.equal(result.body.passed, true);
+  assert.equal(f.counts().modelCalls, 1); assert.equal(f.counts().paymentCalls, 0);
+  assert.ok(f.writes.every(entry => entry.path.startsWith('production/visual-reviews/')));
+  assert.deepEqual((await f.invoke()).body, result.body);
+  assert.equal(f.counts().modelCalls, 1, 'An existing exact receipt does not incur another review');
+});
+
+test('Seedance operator review rejects expanded, legacy, unclaimed and changed authorizations before inference', async () => {
+  const changes = [
+    f => { delete f.body.workerProtocol; },
+    f => { f.records.get(f.grantPath).value.kind = 'fictional-kling-quality-canary-v1'; },
+    f => { f.records.get(f.grantPath).value.maximumCostCents++; },
+    f => { f.records.get(f.grantPath).value.maximumVideoRequests++; },
+    f => { f.records.get(f.grantPath).value.maximumReferenceRequests++; },
+    f => { f.records.get(f.grantPath).value.maximumVisualReviewRequests++; },
+    f => { f.records.get(f.grantPath).value.maximumStartFrameReviews++; },
+    f => { f.records.get(f.grantPath).value.expiresAt = new Date(now).toISOString(); },
+    f => { f.records.get(f.jobPath).value.authorization.budgetCents++; },
+    f => { f.records.get(f.jobPath).value.authorization.quoteReference = 'f'.repeat(64); },
+    f => { f.records.get(f.jobPath).value.mode = 'customer'; f.records.delete(f.orderPath); },
+    f => { f.records.get(f.userPath).value.status = 'suspended'; },
+    f => { f.records.get(f.leasePath).value.expiresAt = now; },
+    f => { f.records.delete(f.claimPath); },
+    f => { f.records.get(f.claimPath).value.state = 'completed'; },
+    f => { f.records.get(f.claimPath).value.inputHash = 'f'.repeat(64); },
+    f => { f.body.frames[0].dataUrl += 'AAAA'; },
+  ];
+  for (const change of changes) {
+    const f = await fixture({ operator: true, seedance: true }); change(f);
+    assert.notEqual((await f.invoke()).statusCode, 200);
+    assert.equal(f.counts().modelCalls, 0); assert.equal(f.writes.length, 0);
+  }
+  const arbitrary = await fixture({ operator: true, seedance: true,
+    changeManifest: manifest => { manifest.screenplay.logline += ' Unapproved family material.'; } });
+  assert.equal((await arbitrary.invoke()).statusCode, 409); assert.equal(arbitrary.counts().modelCalls, 0);
+  const start = await fixture({ operator: true, seedance: true, startFrame: true });
+  start.body.workerProtocol = 2;
+  assert.equal((await start.invoke()).statusCode, 409); assert.equal(start.counts().modelCalls, 0);
+});
+
+test('Seedance canary cannot retry a prior uncertain or rate-limited model attempt', async () => {
+  for (const state of ['submitting', 'uncertain', 'rate-limited']) {
+    const f = await fixture({ operator: true, seedance: true });
+    const { binding, bindingHash } = visualReviewBinding(f.job, f.body.shotId, f.body.frames);
+    f.records.set(visualReceiptPath(f.job.ownerHash, f.job.id, bindingHash), { etag: 'previous-attempt',
+      value: { version: 1, state, binding, bindingHash, attempts: 1, retryAt: now - 1, model: VISUAL_REVIEW_MODEL } });
+    const result = await f.invoke();
+    assert.equal(result.statusCode, 409); assert.equal(result.body.code, 'VISUAL_REVIEW_UNCERTAIN');
+    assert.equal(f.counts().modelCalls, 0); assert.equal(f.writes.length, 0);
+  }
+});
+
+test('Seedance claim, grant or finishing lease changes during inference cannot publish a passing receipt', async () => {
+  for (const change of [f => { f.records.get(f.claimPath).value.token = 'replacement'; },
+    f => { f.records.get(f.grantPath).value.approvedAt = new Date(now - 2000).toISOString(); },
+    f => { f.records.get(f.leasePath).value.token = 'replacement'; }]) {
+    const f = await fixture({ operator: true, seedance: true }); f.setAfterInference(() => change(f));
+    assert.equal((await f.invoke()).statusCode, 409); assert.equal(f.counts().modelCalls, 1);
+    assert.ok(f.writes.every(entry => entry.value.state !== 'reviewed'));
+  }
 });
