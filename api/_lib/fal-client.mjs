@@ -58,7 +58,7 @@ export const falRequestPath = identity => {
 // claim is retained for provider reconciliation; polling cannot create work.
 export function createFalClient({ key = () => process.env.FAL_KEY, read = readRecord, write = writeRecord,
   fetchImpl = fetch, now = Date.now, submissionEndpoints = [FAL_MODELS.seedance, FAL_MODELS.seedanceText] } = {}) {
-  async function request(url, method, body, terminal = false) {
+  async function request(url, method, body, { terminal = false, requestMatched = false } = {}) {
     const secret = typeof key === 'function' ? key() : key;
     if (!secret || typeof secret !== 'string') throw failure('FAL_KEY_REQUIRED');
     const response = await fetchImpl(url, { method, redirect: 'error', credentials: 'omit', cache: 'no-store',
@@ -70,6 +70,18 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
         const errors = Array.isArray(body.detail) ? body.detail : [];
         throw failure(errors.length && errors.every(error => error.type === 'file_too_large')
           ? 'FAL_REFERENCE_TOO_LARGE' : 'FAL_RENDER_FAILED');
+      }
+      // A completed request's result repeats the model's own error response.
+      // Recognize only this known terminal shape after the queue confirms
+      // the exact request. Generic 5xx/transport failures remain unresolved.
+      // Provider details can echo private input; retain only the fixed code.
+      if (terminal && requestMatched && response.status === 500) {
+        const body = await boundedJson(response), errors = Array.isArray(body?.detail) ? body.detail : [];
+        if (errors.length === 1 && errors[0]?.type === 'downstream_service_error'
+          && errors[0].msg === 'Downstream service error' && Array.isArray(errors[0].loc)
+          && errors[0].loc.length === 1 && errors[0].loc[0] === 'body' && !body.video && !body.images)
+          throw failure('FAL_DOWNSTREAM_SERVICE_FAILED');
+        throw failure('FAL_HTTP_500');
       }
       await response.body?.cancel(); throw failure(`FAL_HTTP_${response.status}`);
     }
@@ -127,10 +139,11 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
       if (status.error || status.error_type) next.state = 'failed';
       else {
         try {
-          const result = await request(falRequestUrl(job.responseUrl, job.endpoint, job.requestId, 'result'), 'GET', undefined, true);
+          const result = await request(falRequestUrl(job.responseUrl, job.endpoint, job.requestId, 'result'), 'GET', undefined,
+            { terminal: true, requestMatched: status.request_id === job.requestId });
           next = { ...next, state: 'completed', result };
         } catch (error) {
-          if (!['FAL_REFERENCE_TOO_LARGE', 'FAL_RENDER_FAILED'].includes(error.code)) throw error;
+          if (!['FAL_REFERENCE_TOO_LARGE', 'FAL_RENDER_FAILED', 'FAL_DOWNSTREAM_SERVICE_FAILED'].includes(error.code)) throw error;
           next = { ...next, state: 'failed', failureCode: error.code };
         }
       }
@@ -138,7 +151,11 @@ export function createFalClient({ key = () => process.env.FAL_KEY, read = readRe
     else if (status.status === 'IN_PROGRESS') next.state = 'processing';
     else next.state = 'uncertain';
     try { await write(path, next, record.etag); }
-    catch { return (await read(path))?.value || next; }
+    catch {
+      const saved = (await read(path))?.value;
+      if (!saved) throw failure('FAL_RECEIPT_UNCONFIRMED');
+      return saved;
+    }
     return next;
   }
   return { submit, poll, get: async identity => (await read(falRequestPath(identity)))?.value || null };
