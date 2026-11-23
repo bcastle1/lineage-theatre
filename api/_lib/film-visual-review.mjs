@@ -5,6 +5,8 @@ import { productionPhotoData } from './production-photo-reference.mjs';
 import { falReferenceData } from './fal-reference.mjs';
 import { falRequestPath, FAL_MODELS } from './fal-client.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
+import { parsedAssemblyOverlays } from './film-overlays.mjs';
+import { validateFilmTextCorrections } from './film-text-correction.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 export const VISUAL_REVIEW_MODEL = STORY_MODEL;
@@ -15,6 +17,7 @@ const reviewsCast = manifest => seedancePlan(manifest) || manifest.productionPla
 export const acceptsVisualReceiptModel = (job, model) => model === VISUAL_REVIEW_MODEL
   || (model === 'gpt-6-astra' && job?.provider?.model === 'kling' && !seedancePlan(job.manifest));
 export const VISUAL_REVIEW_VERSION = 1;
+export const STAGE_VISUAL_REVIEW_POLICY = 'pre-assembly-overlays-v2';
 export const visualSampleTimes = shot => [.15, .5, .85].map(fraction => Math.round(shot.targetDurationMs * fraction));
 const failure = code => Object.assign(new Error('The film needs visual continuity verification.'), { code });
 const requireValue = condition => { if (!condition) throw failure('VISUAL_REVIEW_INVALID'); };
@@ -39,12 +42,52 @@ export const castVisualReviewSchema = { type: 'object', additionalProperties: fa
   properties: { ...visualReviewSchema.properties, cast: { type: 'string', enum: states },
     findings: { type: 'array', items: { type: 'string', enum: castCodes }, maxItems: 5 } },
   required: [...dimensions, 'cast', 'findings'] };
+export const stageVisualReviewSchema = { type: 'object', additionalProperties: false,
+  properties: { ...castVisualReviewSchema.properties, observations: { type: 'array', minItems: 5, maxItems: 10,
+    items: { type: 'object', additionalProperties: false,
+      properties: { dimension: { type: 'string', enum: [...dimensions, 'cast'] },
+        sampleIndex: { type: 'integer', minimum: 0, maximum: 3 }, visibleEvidence: { type: 'string', minLength: 1, maxLength: 240 } },
+      required: ['dimension', 'sampleIndex', 'visibleEvidence'] } } },
+  required: [...castVisualReviewSchema.required, 'observations'] };
 export function verifiedVisualDecision(value, castRequired = false) {
   const expected = castRequired ? [...dimensions, 'cast'] : dimensions;
   requireValue(value && Object.keys(value).sort().join(',') === [...expected, 'findings'].sort().join(',')
     && expected.every(key => states.includes(value[key])) && Array.isArray(value.findings)
     && value.findings.length <= 5 && value.findings.every(code => (castRequired ? castCodes : codes).includes(code)));
   return { ...value, passed: expected.every(key => value[key] === 'consistent') && value.findings.length === 0 };
+}
+export function verifiedStageVisualDecision(value, frameCount) {
+  requireValue(value && Object.keys(value).sort().join(',') === [...dimensions, 'cast', 'findings', 'observations'].sort().join(',')
+    && Number.isSafeInteger(frameCount) && frameCount >= 3 && frameCount <= 4 && Array.isArray(value.observations)
+    && value.observations.length >= 5 && value.observations.length <= 10);
+  const { observations, ...decision } = value;
+  requireValue(observations.every(row => row && Object.keys(row).sort().join(',') === 'dimension,sampleIndex,visibleEvidence'
+    && [...dimensions, 'cast'].includes(row.dimension) && Number.isSafeInteger(row.sampleIndex)
+    && row.sampleIndex >= 0 && row.sampleIndex < frameCount && typeof row.visibleEvidence === 'string'
+    && row.visibleEvidence.trim() && row.visibleEvidence.length <= 240 && !/[\x00-\x1f\x7f]/.test(row.visibleEvidence))
+    && [...dimensions, 'cast'].every(dimension => observations.some(row => row.dimension === dimension)));
+  return { ...value, passed: verifiedVisualDecision(decision, true).passed };
+}
+function recoveryBinding(job, binding, shot) {
+  const recovery = job.visualReviewRecovery;
+  if (!recovery) return binding;
+  requireValue(seedancePlan(job.manifest) && recovery.version === 1 && recovery.policy === STAGE_VISUAL_REVIEW_POLICY
+    && recovery.ownerHash === job.ownerHash && recovery.preparedId === job.id && recovery.sourceManifestHash === job.manifestHash
+    && typeof recovery.approvedBy === 'string' && digest(recovery.approvedBy) === job.ownerHash
+    && Number.isFinite(Date.parse(recovery.approvedAt)) && HASH.test(recovery.priorBindingHash || '')
+    && HASH.test(recovery.priorReceiptHash || '') && HASH.test(recovery.sourceOutputHash || '')
+    && Array.isArray(recovery.shots) && recovery.shots.length === job.shots.length
+    && recovery.shots.every((row, i) => row.shotId === job.shots[i].id && job.shots[i].status === 'completed'
+      && row.outputHash === digest(JSON.stringify(job.shots[i].output)))
+    && recovery.shots.some(row => row.shotId === recovery.shotId && row.outputHash === recovery.sourceOutputHash)
+    && Array.isArray(recovery.sourceFrameHashes) && [3, 4].includes(recovery.sourceFrameHashes.length)
+    && recovery.sourceFrameHashes.every(value => HASH.test(value || '')));
+  if (recovery.shotId === shot.id) requireValue(binding.outputHash === recovery.sourceOutputHash
+    && digest(JSON.stringify(binding.frameHashes)) === digest(JSON.stringify(recovery.sourceFrameHashes))
+    && digest(JSON.stringify(binding)) === recovery.priorBindingHash);
+  return { ...binding, version: 2, policy: STAGE_VISUAL_REVIEW_POLICY,
+    priorBindingHash: recovery.shotId === shot.id ? recovery.priorBindingHash : null,
+    stageContextHash: digest(JSON.stringify(stageVisualSceneContext(job, shot))) };
 }
 export function visualReviewBinding(job, shotId, frames) {
   requireValue(job?.manifest?.visualContinuity?.version === 1 && HASH.test(job.manifestHash || '')
@@ -65,15 +108,26 @@ export function visualReviewBinding(job, shotId, frames) {
     requireValue(bytes.length >= 100 && bytes.length <= 250_000);
     return digest(bytes);
   });
-  const binding = { version: 1, manifestHash: job.manifestHash, shotId,
+  const originalBinding = { version: 1, manifestHash: job.manifestHash, shotId,
     outputHash: digest(JSON.stringify(stored.output)),
     precedingOutputHash: previous ? digest(JSON.stringify(job.shots[index - 1].output)) : null, frameHashes: hashes };
-  return { binding, bindingHash: digest(JSON.stringify(binding)), shot, previous };
+  const binding = recoveryBinding(job, originalBinding, shot);
+  return { binding, bindingHash: digest(JSON.stringify(binding)), shot, previous, originalBinding };
 }
 export const visualReceiptPath = (ownerHash, id, bindingHash) => {
   requireValue(HASH.test(ownerHash || '') && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id || '') && HASH.test(bindingHash || ''));
   return `production/visual-reviews/${ownerHash}/${id}/${bindingHash}.json`;
 };
+function stageBindingClaim(job, shotId, bindingHash) {
+  requireValue(job.visualReviewRecovery && HASH.test(bindingHash || '') && job.shots.some(shot => shot.id === shotId));
+  return { path: `production/visual-review-bindings/${job.ownerHash}/${job.id}/${STAGE_VISUAL_REVIEW_POLICY}/${digest(shotId)}.json`,
+    value: { version: 1, policy: STAGE_VISUAL_REVIEW_POLICY, grantHash: digest(JSON.stringify(job.visualReviewRecovery)),
+      manifestHash: job.manifestHash, shotId, bindingHash } };
+}
+async function verifyStageBindingClaim(job, shotId, bindingHash, read) {
+  const claim = stageBindingClaim(job, shotId, bindingHash), saved = await read(claim.path);
+  requireValue(saved?.etag && digest(JSON.stringify(saved.value)) === digest(JSON.stringify(claim.value)));
+}
 export async function imageData(data) {
   const bytes = Buffer.from(data.slice(data.indexOf(',') + 1), 'base64');
   const image = sharp(bytes, { limitInputPixels: 40_000_000, failOn: 'warning' });
@@ -112,26 +166,69 @@ export function visualSceneContext(job, shot) {
     sceneNarration: scene?.narration || '', sceneDialogue: scene?.dialogue || [], dramatization: shot.dramatization,
     castIds: shot.characterIds };
 }
+export function stageVisualSceneContext(job, shot) {
+  const overlays = parsedAssemblyOverlays(shot.visual);
+  const corrections = validateFilmTextCorrections(job, job.visualReviewRecovery?.textCorrections);
+  const appliedTextCorrections = corrections.filter(correction => correction.shotId === shot.id).map(correction => structuredClone(correction));
+  let visual = '', position = 0;
+  for (const overlay of overlays) {
+    requireValue(Number.isSafeInteger(overlay.start) && Number.isSafeInteger(overlay.end)
+      && overlay.start >= position && overlay.end > overlay.start && overlay.end <= shot.visual.length);
+    visual += shot.visual.slice(position, overlay.start); position = overlay.end;
+  }
+  visual += shot.visual.slice(position);
+  return { ...visualSceneContext(job, shot), visual,
+    reviewStage: appliedTextCorrections.length ? 'provider-clip-with-approved-text-corrections-before-assembly-overlays' : 'raw-clip-before-assembly-overlays',
+    assemblyOverlays: overlays.map(({ text, style }) => ({ text, style })), appliedTextCorrections };
+}
+const stageInstructions = 'These samples are provider clips before final assembly, with any scene.appliedTextCorrections already applied. Evaluate the physical scene, action, setting, cast, wardrobe and image integrity against scene.visual. The exact text listed in scene.assemblyOverlays is added later by the application; its absence in these frames is expected and is not a scene mismatch. In contrast, scene.appliedTextCorrections is already visible within each listed rectangle and clip-local startMs/endMs: check its exact spelling, punctuation, legibility, placement and whether it obscures required scene action. Wrong or missing corrected text within that interval is not waived. Do not waive any other saved visual direction or invent an overlay for text not in those lists. Scene titles, narration and historical context describe the story; do not require spoken biographical facts to be literally visible. Do not infer that a brief action never occurs between the supplied frames: report unverifiable when the samples cannot establish it, and mismatch only for a visible contradiction. For every dimension provide a concise visible observation tied to a supplied zero-based sampleIndex, including uncertainty where appropriate. Report what the sample shows, not hidden reasoning or an explanation of a prior decision. No instruction here requires a pass.';
+const readRecovery = async (job, read) => {
+  const { readVisualReviewRecovery } = await import('./film-visual-review-recovery.mjs');
+  return readVisualReviewRecovery(job, { read });
+};
 
 export function createFilmVisualReviewService({ read = readRecord, write = writeRecord, fetchImpl = fetch,
   key = () => process.env.OPENAI_API_KEY, now = Date.now, selectedPhoto = productionPhotoData,
-  generatedPhoto = falReferenceData, authorize = async () => false } = {}) {
+  generatedPhoto = falReferenceData, authorize = async () => false, recoveryFor = readRecovery } = {}) {
   return async input => {
     const { email, id, job, shotId, frames } = input;
     requireValue(job.ownerHash === digest(email) && job.id === id
       && job.provider?.model === (seedancePlan(job.manifest) ? 'seedance' : 'kling'));
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
-    const { binding, bindingHash, shot } = visualReviewBinding(job, shotId, frames);
+    requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
+    const { binding, bindingHash, shot, originalBinding } = visualReviewBinding(job, shotId, frames);
+    const stageAware = binding.version === 2;
     const checkCast = reviewsCast(job.manifest);
     const path = visualReceiptPath(job.ownerHash, id, bindingHash);
     const old = await read(path);
     const receipt = value => {
-      requireValue(value?.version === 1 && acceptsVisualReceiptModel(job, value.model) && value.state === 'reviewed'
+      requireValue(value?.version === binding.version && acceptsVisualReceiptModel(job, value.model) && value.state === 'reviewed'
+        && (!stageAware || value.attempts === 1)
         && value.bindingHash === bindingHash && digest(JSON.stringify(value.binding)) === bindingHash);
-      const { passed } = verifiedVisualDecision(value.decision, checkCast);
-      return { version: 1, bindingHash, manifestHash: job.manifestHash, shotId, passed, receiptPath: path };
+      const { passed } = stageAware ? verifiedStageVisualDecision(value.decision, frames.length) : verifiedVisualDecision(value.decision, checkCast);
+      return { version: 1, ...(stageAware ? { reviewVersion: 2 } : {}), bindingHash, manifestHash: job.manifestHash, shotId, passed, receiptPath: path };
     };
-    if (old?.value.state === 'reviewed') return receipt(old.value);
+    if (stageAware) {
+      const originalHash = digest(JSON.stringify(originalBinding)), originalPath = visualReceiptPath(job.ownerHash, id, originalHash);
+      const original = (await read(originalPath))?.value;
+      if (shotId === job.visualReviewRecovery.shotId) requireValue(original?.version === 1 && original.state === 'reviewed'
+        && original.bindingHash === originalHash && digest(JSON.stringify(original)) === job.visualReviewRecovery.priorReceiptHash
+        && !verifiedVisualDecision(original.decision, checkCast).passed);
+      else if (original) {
+        requireValue(original.version === 1 && original.state === 'reviewed' && acceptsVisualReceiptModel(job, original.model)
+          && original.bindingHash === originalHash && digest(JSON.stringify(original.binding)) === originalHash
+          && verifiedVisualDecision(original.decision, checkCast).passed);
+        // An old review covers the uncorrected clip only. Approved text already
+        // applied to these working pixels still needs its exact v2 review.
+        if (!job.visualReviewRecovery.textCorrections?.some(value => value.shotId === shotId))
+          return { version: 1, bindingHash: originalHash, manifestHash: job.manifestHash, shotId, passed: true, receiptPath: originalPath };
+      }
+    }
+    if (old?.value.state === 'reviewed') {
+      if (stageAware) await verifyStageBindingClaim(job, shotId, bindingHash, read);
+      return receipt(old.value);
+    }
+    if (stageAware && old) throw failure('VISUAL_REVIEW_UNCERTAIN');
     if (old && (old.value.state !== 'rate-limited' || old.value.attempts >= 2
       || old.value.bindingHash !== bindingHash)) throw failure('VISUAL_REVIEW_UNCERTAIN');
     if (old && old.value.retryAt > now()) throw failure('VISUAL_REVIEW_RATE_LIMITED');
@@ -143,18 +240,28 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     ]).finally(() => clearTimeout(referenceTimer));
     const content = [{ type: 'input_text', text: JSON.stringify({ era: job.manifest.era,
       characters: job.manifest.screenplay.characters.filter(c => shot.characterIds.includes(c.id)).map(c => ({ id: c.id, description: c.description })),
-      scene: checkCast ? visualSceneContext(job, shot) : { sceneIndex: shot.sceneIndex, visual: shot.visual, dramatization: shot.dramatization } }) }];
+      scene: stageAware ? stageVisualSceneContext(job, shot) : checkCast ? visualSceneContext(job, shot) : { sceneIndex: shot.sceneIndex, visual: shot.visual, dramatization: shot.dramatization } }) }];
     for (const ref of refs) content.push({ type: 'input_text', text: `Approved reference ${ref.id}` }, { type: 'input_image', image_url: ref.dataUrl, detail: 'high' });
-    for (const frame of frames) content.push({ type: 'input_text', text: `${frame.shotId === shotId ? 'Current' : 'Preceding same-scene'} cut ${frame.shotId}, sample ${frame.atMs}ms` },
+    for (const [sampleIndex, frame] of frames.entries()) content.push({ type: 'input_text', text: `${stageAware ? `Sample ${sampleIndex}: ` : ''}${frame.shotId === shotId ? 'Current' : 'Preceding same-scene'} cut ${frame.shotId}, sample ${frame.atMs}ms` },
       { type: 'input_image', image_url: await imageData(frame.dataUrl), detail: 'high' });
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
+    requireValue(Boolean(await recoveryFor(job, read)) === stageAware);
+    if (stageAware) {
+      // The allowance is per clip, not per JPEG encoding. Freeze the first
+      // exact frame binding before inference; a different binding cannot buy
+      // another review of this shot under the same recovery.
+      const index = stageBindingClaim(job, shotId, bindingHash), saved = await read(index.path);
+      if (!saved) { try { await write(index.path, index.value); } catch { /* Adopt only the exact durable winner. */ } }
+      await verifyStageBindingClaim(job, shotId, bindingHash, read);
+    }
     // Claim before inference. Lost replies never cause unlimited repeated model
     // calls. A review is reused only for the exact source clips and frame bytes.
-    try { await write(path, { version: 1, state: 'submitting', binding, bindingHash, model: VISUAL_REVIEW_MODEL,
+    try { await write(path, { version: binding.version, state: 'submitting', binding, bindingHash, model: VISUAL_REVIEW_MODEL,
       attempts: (old?.value.attempts || 0) + 1, createdAt: new Date(now()).toISOString() }, old?.etag); }
     catch { const recovered = await read(path); if (recovered?.value.state === 'reviewed') return receipt(recovered.value); throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     const claim = await read(path);
-    requireValue(claim?.value?.state === 'submitting' && claim.value.version === 1 && claim.value.model === VISUAL_REVIEW_MODEL
+    requireValue(claim?.value?.state === 'submitting' && claim.value.version === binding.version && claim.value.model === VISUAL_REVIEW_MODEL
+      && (!stageAware || claim.value.attempts === 1)
       && claim.value.bindingHash === bindingHash && digest(JSON.stringify(claim.value.binding)) === bindingHash
       && typeof claim.etag === 'string' && claim.etag.length > 0);
     let result;
@@ -162,12 +269,12 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
       const response = await fetchImpl('https://api.openai.com/v1/responses', { method: 'POST', redirect: 'error',
         headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(100_000),
         body: JSON.stringify({ model: VISUAL_REVIEW_MODEL, store: false, reasoning: { effort: 'low' }, max_output_tokens: 1800,
-          instructions: instructions + (seedancePlan(job.manifest) ? ' For characters without an approved photo, compare the saved description, wardrobe direction and consistency across samples. Do not assume an unseen photographic likeness.' : '') + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
+          instructions: instructions + (seedancePlan(job.manifest) ? ' For characters without an approved photo, compare the saved description, wardrobe direction and consistency across samples. Do not assume an unseen photographic likeness.' : '') + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : '') + (stageAware ? ' ' + stageInstructions : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: stageAware ? stageVisualReviewSchema : checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
       if (!response.ok) {
         await response.body?.cancel();
         // A confirmed rate-limit rejection is not an executed review. Retry at
         // most once after backoff; transport/5xx ambiguity remains held.
-        if (response.status === 429) {
+        if (response.status === 429 && !stageAware) {
           await write(path, { ...claim.value, state: 'rate-limited', retryAt: now() + 60_000 }, claim.etag);
           throw failure('VISUAL_REVIEW_RATE_LIMITED');
         }
@@ -180,9 +287,11 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     } catch (error) { if (error?.code === 'VISUAL_REVIEW_RATE_LIMITED') throw error; throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     const raw = result.output?.flatMap(item => item.content || []).filter(item => item.type === 'output_text').map(item => item.text).join('');
     let decision;
-    try { decision = JSON.parse(raw); verifiedVisualDecision(decision, checkCast); }
+    try { decision = JSON.parse(raw); if (stageAware) verifiedStageVisualDecision(decision, frames.length); else verifiedVisualDecision(decision, checkCast); }
     catch { throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
+    requireValue(Boolean(await recoveryFor(job, read)) === stageAware);
+    if (stageAware) await verifyStageBindingClaim(job, shotId, bindingHash, read);
     const value = { ...claim.value, state: 'reviewed', decision, reviewedAt: new Date(now()).toISOString() };
     try { await write(path, value, claim.etag); }
     catch { const recovered = await read(path); if (recovered?.value.state === 'reviewed') return receipt(recovered.value); throw failure('VISUAL_REVIEW_UNCERTAIN'); }
@@ -190,24 +299,42 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
   };
 }
 
-export async function verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review }, { read = readRecord } = {}) {
+export async function verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review }, { read = readRecord, recoveryFor = readRecovery } = {}) {
   if (!manifest.visualContinuity) return;
   requireValue(review?.version === 1 && review.manifestHash === manifestHash && review.passed === true
     && Array.isArray(review.shots) && review.shots.length === manifest.shots.length);
   const job = (await read(`production/jobs/${digest(email)}/${id}.json`))?.value;
   requireValue(job?.manifestHash === manifestHash && digest(JSON.stringify(job.manifest)) === manifestHash
     && job.ownerHash === digest(email) && job.shots?.length === manifest.shots.length);
+  requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
   for (const [index, shot] of manifest.shots.entries()) {
     const proof = review.shots[index];
     requireValue(proof.shotId === shot.id && proof.passed === true && proof.manifestHash === manifestHash
       && proof.receiptPath === visualReceiptPath(digest(email), id, proof.bindingHash));
     const stored = (await read(proof.receiptPath))?.value;
-    requireValue(stored?.version === 1 && stored.binding?.version === 1 && acceptsVisualReceiptModel(job, stored.model) && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
+    const stageAware = stored?.version === 2;
+    const previous = index > 0 && manifest.shots[index - 1].sceneIndex === shot.sceneIndex;
+    const frameCount = previous ? 4 : 3;
+    requireValue((stageAware || stored?.version === 1) && stored.binding?.version === stored.version
+      && (stageAware ? proof.reviewVersion === 2 && Boolean(job.visualReviewRecovery) : proof.reviewVersion === undefined
+        && job.visualReviewRecovery?.shotId !== shot.id
+        && !job.visualReviewRecovery?.textCorrections?.some(value => value.shotId === shot.id))
+      && (!stageAware || stored.attempts === 1)
+      && acceptsVisualReceiptModel(job, stored.model) && stored.state === 'reviewed' && stored.bindingHash === proof.bindingHash
       && digest(JSON.stringify(stored.binding)) === proof.bindingHash && stored.binding.manifestHash === manifestHash
       && stored.binding.shotId === shot.id && job.shots[index].id === shot.id && job.shots[index].status === 'completed'
       && stored.binding.outputHash === digest(JSON.stringify(job.shots[index].output))
-      && stored.binding.precedingOutputHash === (index > 0 && manifest.shots[index - 1].sceneIndex === shot.sceneIndex
+      && stored.binding.precedingOutputHash === (previous
         ? digest(JSON.stringify(job.shots[index - 1].output)) : null)
-      && verifiedVisualDecision(stored.decision, reviewsCast(manifest)).passed);
+      && (stageAware ? verifiedStageVisualDecision(stored.decision, frameCount) : verifiedVisualDecision(stored.decision, reviewsCast(manifest))).passed);
+    if (stageAware) {
+      await verifyStageBindingClaim(job, shot.id, proof.bindingHash, read);
+      requireValue(Array.isArray(stored.binding.frameHashes) && stored.binding.frameHashes.length === frameCount
+        && stored.binding.frameHashes.every(value => HASH.test(value || '')));
+      const original = { version: 1, manifestHash, shotId: shot.id, outputHash: stored.binding.outputHash,
+        precedingOutputHash: stored.binding.precedingOutputHash, frameHashes: stored.binding.frameHashes };
+      requireValue(digest(JSON.stringify(recoveryBinding(job, original, shot))) === proof.bindingHash);
+    }
   }
+  requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
 }

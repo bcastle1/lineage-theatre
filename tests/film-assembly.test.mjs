@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { assembleFilm, chooseAssemblyProfile, filmOverlayAss } from "../scripts/assemble-film.mjs";
+import sharp from 'sharp';
 
 const profile = (width, height, frameRate = 30, frameRateRatio) => ({ width, height, frameRate, ...(frameRateRatio ? { frameRateRatio } : {}) });
 test('film overlays preserve explicit date captions and a legible final dramatization disclosure', () => {
@@ -16,6 +17,7 @@ test('film overlays preserve explicit date captions and a legible final dramatiz
   const ass = filmOverlayAss(manifest);
   assert.match(ass, /0:00:00.00,0:00:07.37,Location.*Saratoga • 1777/);
   assert.match(ass, /0:00:07.37,0:00:14.22,Disclosure.*Based on a true story\. Some scenes, dialogue and supporting characters are dramatized\./);
+  assert.match(ass, /Dialogue: 1,0:00:07.37,0:00:14.22,DisclosureBand.*\\pos\(0,945\).*1920 135/);
   manifest.shots[0].visual = 'Caption: "{\\pos(1,1)}untrusted"';
   assert.doesNotMatch(filmOverlayAss(manifest), /\{\\pos/);
   assert.equal(filmOverlayAss({ shots: [{ visual: 'Uncaptioned fictional scene.' }] }), null);
@@ -34,7 +36,7 @@ test('saved unquoted titles retain dates and punctuation once across split scene
   })));
   const manifest = { factuality: 'based-on-a-true-story', shots }, before = structuredClone(manifest);
   const ass = filmOverlayAss(manifest), events = ass.split('\n').filter(line => line.startsWith('Dialogue:'));
-  assert.equal(events.length, 8);
+  assert.equal(events.length, 9);
   assert.match(ass, /0:00:00.00,0:00:10.00,Opening.*A Fictional Legacy\./);
   assert.match(ass, /0:00:00.00,0:00:10.00,Location.*Example University\./);
   assert.match(ass, /0:00:20.00,0:00:30.00,Location.*Accounting graduate, 1961; Service entry, 1964\./);
@@ -132,6 +134,66 @@ test("real FFmpeg verifies native profiles and separate reviewed audio", { skip:
       assert.match(independentDecode, /1920x1080/); assert.match(independentDecode, /24 fps/); assert.match(independentDecode, /Audio: aac/);
       assert.equal(report.sha256, createHash("sha256").update(await readFile(outputPath)).digest("hex"));
       assert.equal(report.sizeBytes, (await stat(outputPath)).size);
+    });
+
+    await t.test('the saved over-action title and smaller date caption are both visible in real assembled frames', async () => {
+      const input = inputFor([{ path: silent1080, audioPath: audio }]);
+      input.manifest.shots[0].visual = 'A fictional green test background. Title over action: A Fictional Garden. Smaller caption: 1950–1953.';
+      input.manifestHash = createHash('sha256').update(JSON.stringify(input.manifest)).digest('hex');
+      const outputPath = join(root, 'paired-overlays.mp4'), framePath = join(root, 'paired-overlays.png');
+      const report = await assembleFilm({ ...input, ffmpeg, outputPath });
+      assert.equal(report.width, 1920); assert.equal(report.height, 1080); assert.equal(report.hasAudio, true);
+      const ass = await readFile(join(root, `${input.manifestHash}.ass`), 'utf8');
+      assert.match(ass, /Title,,0,0,0,,A Fictional Garden\./);
+      assert.match(ass, /Location,,0,0,170,,1950–1953\./);
+      await run(['-v', 'error', '-n', '-ss', '0.5', '-i', outputPath, '-frames:v', '1', framePath]);
+      const { data, info } = await sharp(await readFile(framePath)).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+      const whitePixels = (left, top, right, bottom) => {
+        let count = 0;
+        for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+          const at = (y * info.width + x) * info.channels;
+          if (data[at] > 200 && data[at + 1] > 200 && data[at + 2] > 200) count++;
+        }
+        return count;
+      };
+      assert.ok(whitePixels(500, 60, 1420, 140) > 100, 'The centered title must have visible glyphs above the green source');
+      assert.ok(whitePixels(70, 160, 500, 250) > 50, 'The separate smaller date caption must also have visible glyphs');
+    });
+
+    await t.test('the last-shot disclosure has an opaque bottom band that hides embedded glyphs and leaves the name-card region unchanged', async () => {
+      const source = join(root, 'embedded-bottom-caption.mp4');
+      await run(['-v', 'error', '-n', '-i', silent1080,
+        '-vf', 'drawbox=x=100:y=1000:w=1720:h=30:color=white:t=fill',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', source]);
+      const sourceHash = createHash('sha256').update(await readFile(source)).digest('hex');
+      const input = inputFor([{ path: source, audioPath: audio }, { path: source, audioPath: audio }]);
+      input.manifest.factuality = 'based-on-a-true-story';
+      input.manifestHash = createHash('sha256').update(JSON.stringify(input.manifest)).digest('hex');
+      const outputPath = join(root, 'disclosure-backing.mp4');
+      await assembleFilm({ ...input, ffmpeg, outputPath });
+      const ass = await readFile(join(root, `${input.manifestHash}.ass`), 'utf8');
+      assert.match(ass, /Dialogue: 1,0:00:01.00,0:00:02.00,DisclosureBand/);
+      assert.match(ass, /Dialogue: 2,0:00:01.00,0:00:02.00,Disclosure,,0,0,0,,Based on a true story\. Some scenes, dialogue and supporting characters are dramatized\./);
+      for (const [at, active] of [[0.5, false], [1.5, true]]) {
+        const path = join(root, `disclosure-${at}.png`);
+        await run(['-v', 'error', '-n', '-ss', String(at), '-i', outputPath, '-frames:v', '1', path]);
+        const { data, info } = await sharp(await readFile(path)).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+        const pixel = (x, y) => [...data.subarray((y * info.width + x) * info.channels, (y * info.width + x) * info.channels + 3)];
+        const formerGlyph = pixel(120, 1010);
+        assert.ok(active ? formerGlyph.every(channel => channel < 8) : formerGlyph.every(channel => channel > 245),
+          'The opaque band covers embedded text only during the scheduled disclosure');
+        assert.ok(pixel(960, 530)[1] > 100 && pixel(960, 530)[0] < 10, 'The higher name-card area stays green and unobscured');
+        if (active) {
+          assert.ok(pixel(10, 950).every(channel => channel < 8));
+          assert.ok(pixel(1910, 1070).every(channel => channel < 8), 'The backing reaches both sides and the bottom edge');
+          let glyphs = 0;
+          for (let y = 945; y < 1060; y++) for (let x = 180; x < 1740; x++) {
+            if (pixel(x, y).every(channel => channel > 200)) glyphs++;
+          }
+          assert.ok(glyphs > 1000, 'The unchanged white disclosure remains legible above the opaque backing');
+        }
+      }
+      assert.equal(createHash('sha256').update(await readFile(source)).digest('hex'), sourceHash);
     });
 
     await t.test("mixed native dimensions use 720p24 without upscaling the smaller input", async () => {

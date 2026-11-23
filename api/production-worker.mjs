@@ -12,6 +12,7 @@ import { accessStatusForUser, isOwner } from './_lib/access.mjs';
 import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
 import { authorizeFilmProduction, createFilmPreRenderService, readPreRenderGrant, PRERENDER_FLOW } from './_lib/film-prerender.mjs';
+import { createVisualReviewRecovery } from './_lib/film-visual-review-recovery.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -30,6 +31,45 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       return json(res, 401, { code: 'WORKER_AUTH_REQUIRED' });
     try {
       const body = await readBody(req, 1_500_000);
+      if (body?.action === 'authorize-visual-review-recovery') {
+        const plan = body.recoveryPlan, keys = plan && typeof plan === 'object' && !Array.isArray(plan)
+          ? Object.keys(plan).sort().join(',') : '';
+        if (Object.keys(body).sort().join(',') !== 'action,recoveryPlan,workerProtocol' || body.workerProtocol !== 2
+          || !['bindingHash,email,id,manifestHash,receiptHash,shots',
+            'bindingHash,email,id,manifestHash,receiptHash,shots,textCorrections'].includes(keys)
+          || typeof plan.email !== 'string' || plan.email.length > 254 || plan.email !== plan.email.trim().toLowerCase()
+          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(plan.email)
+          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(plan.id || '')
+          || ![plan.manifestHash, plan.bindingHash, plan.receiptHash].every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))
+          || !Array.isArray(plan.shots) || plan.shots.length < 1 || plan.shots.length > 200
+          || plan.shots.some(shot => !shot || Object.keys(shot).sort().join(',') !== 'outputHash,shotId'
+            || !/^shot-\d{3}$/.test(shot.shotId || '') || !/^[a-f0-9]{64}$/.test(shot.outputHash || ''))
+          || new Set(plan.shots.map(shot => shot.shotId)).size !== plan.shots.length
+          || JSON.stringify(plan).length > 64_000)
+          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (!await limiter('production-worker:visual-review-recovery', 10, 60_000))
+          return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
+        const reject = () => { throw Object.assign(Error('The saved visual recovery requires verification.'), { code: 'VISUAL_REVIEW_AUTH_REQUIRED' }); };
+        // This narrow authorization checks an attention ticket without leasing,
+        // resuming or mutating it. Ordinary production still requires its lease.
+        const inspect = createVisualReviewRecovery({ read, now, write: reject, authorize: reject });
+        const planned = await inspect(plan);
+        if (planned.status !== 'planned') return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const ticketPath = productionQueuePath(plan.email, plan.id), jobPath = productionJobPath(plan.email, plan.id);
+        const [ticket, job] = await Promise.all([read(ticketPath), read(jobPath)]);
+        const orderId = ticket?.value?.orderId;
+        if (ticket?.value?.state !== 'attention' || ticket.value.lease?.expiresAt > now()
+          || !/^[a-f0-9]{64}$/.test(orderId || '') || job?.value?.provider?.recipe !== SEEDANCE_RECIPE_VERSION
+          || job.value.manifest.productionPlan.version !== 1) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const permission = await paymentService.authorizeProduction({ email: plan.email, preparedId: plan.id,
+          manifestHash: plan.manifestHash, orderId });
+        const checked = await inspect(plan), latest = (await read(ticketPath))?.value;
+        if (checked.status !== 'planned' || latest?.orderId !== orderId || latest.state !== 'attention'
+          || latest.lease?.expiresAt > now() || permission?.allowed !== true || permission.environment !== 'production'
+          || permission.manifestHash !== plan.manifestHash || !Number.isFinite(Date.parse(permission.expiresAt))
+          || Date.parse(permission.expiresAt) <= now()) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        return json(res, 200, { ...permission, recoveryRequestHash: digest(JSON.stringify(plan)) });
+      }
       if (['review-film-visuals', 'review-start-frame'].includes(body?.action)) {
         const startFrame = body.action === 'review-start-frame';
         const protocol = body.workerProtocol === 2;
