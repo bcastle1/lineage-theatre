@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAdminHandler } from "../api/admin.mjs";
+import { PartialCorrectionRetryError } from '../api/_lib/partial-correction-retry.mjs';
 import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "../api/_lib/access.mjs";
 import { userPath } from "../api/_lib/auth.mjs";
 import { builtInSourceAgreement, sourceAgreementVersionPath, SOURCE_AGREEMENT_PATH } from "../api/_lib/source-agreement.mjs";
@@ -8,6 +9,33 @@ import { newInvitation, validateInvitation, validateUserAction, validateRefund, 
 const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
 const admin={email:"admin@example.invalid",role:"admin",status:"active"};
 const customer={email:"customer@example.invalid",role:"customer",status:"active"};
+
+test('the explicit partial retry route preserves owner guards, approves before queueing and returns a fixed verification refusal', async () => {
+  const result = { id: 'e'.repeat(64), status: 'authorized', correctionId: 'c'.repeat(64),
+    preparedId: '11111111-1111-4111-8111-111111111111', manifestHash: 'd'.repeat(64), shotId: 'shot-003',
+    failedRequestId: 'synthetic-failed-request', maximumNewCostCents: 1080, customerChargeCents: 0 };
+  const body = { correctionId: result.correctionId, preparedId: result.preparedId, manifestHash: result.manifestHash,
+    shotId: result.shotId, failedOperationIdentity: 'a'.repeat(64), failedRequestId: result.failedRequestId,
+    failedRecordHash: 'b'.repeat(64), billingEvidence: { private: 'DO_NOT_LOG' }, maximumNewCostCents: 1080,
+    reason: 'Approved one synthetic scene retry.', confirmed: true };
+  const calls = [], overrides = { paidFilmCorrections: { approvePartialRetry: async value => { calls.push(['approve', value]); return result; } },
+    productionQueue: { enqueue: async value => { calls.push(['queue', value]); return { status: 'processing' }; } } };
+  for (const actor of [null, customer, admin, { ...owner, status: 'suspended' }])
+    assert.ok([401, 403].includes((await harness(actor, overrides).run('retryPartialProductionCorrection', body)).status));
+  const h = harness(owner, overrides);
+  assert.equal((await h.run('retryPartialProductionCorrection', body, { origin: 'https://other.invalid' })).status, 403);
+  for (const changes of [{ confirmed: false }, { maximumRequests: 2 }, { actor: customer }])
+    assert.equal((await h.run('retryPartialProductionCorrection', { ...body, ...changes })).status, 400);
+  assert.deepEqual(calls, []);
+  const saved = await h.run('retryPartialProductionCorrection', body); assert.equal(saved.status, 200); assert.deepEqual(saved.body.retry, result);
+  assert.deepEqual(calls.map(row => row[0]), ['approve', 'queue']);
+  assert.deepEqual(calls[1][1], { actor: owner, id: result.preparedId, orderId: result.correctionId });
+  assert.doesNotMatch(JSON.stringify(h.events), /DO_NOT_LOG|billingEvidence/);
+  const denied = harness(owner, { ...overrides, paidFilmCorrections: { approvePartialRetry: async () => { throw new PartialCorrectionRetryError(); } } });
+  const rejection = await denied.run('retryPartialProductionCorrection', body);
+  assert.equal(rejection.status, 409); assert.equal(rejection.body.code, 'PARTIAL_RETRY_UNVERIFIED'); assert.equal(rejection.body.charged, false);
+  assert.equal(calls.filter(row => row[0] === 'queue').length, 1);
+});
 
 test('single-scene correction is owner-only, same-origin and queues only the verified correction without private audit data', async () => {
   const calls = [], response = { correctionId: 'c'.repeat(64), originalOrderId: 'a'.repeat(64),

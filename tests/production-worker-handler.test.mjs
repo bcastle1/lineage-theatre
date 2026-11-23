@@ -41,7 +41,7 @@ test('wrong secret, provider recipe, absent lease and unexpected fields cannot i
 test('remote authorization uses a fixed origin, no redirects and bounded response bytes',async()=>{
   const service=createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async(url,options)=>{
     assert.equal(url,'https://lineagetheater.com/api/production-worker');assert.equal(options.redirect,'error');
-    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2,partialCorrectionVersion:1});return new Response('{"allowed":true}');
+    assert.deepEqual(JSON.parse(options.body),{...input,model:adapter.model,recipe:adapter.modelVersion,workerProtocol:2,partialCorrectionVersion:1,partialCorrectionRetryVersion:1});return new Response('{"allowed":true}');
   }});assert.equal((await service.authorizeProduction(input)).allowed,true);
   for(const response of [new Response('',{status:302}),new Response(' '.repeat(4097))])
     await assert.rejects(createRemoteProductionAuthorization({adapter,env:{LINEAGE_WORKER_SECRET:secret},fetchImpl:async()=>response}).authorizeProduction(input));
@@ -75,6 +75,20 @@ test('reviewed delivery uses the worker credential, exact artifact binding and s
   assert.equal((await invoke(f,{body,headers:{}})).statusCode,401);assert.equal(delivered,0);
   assert.equal((await invoke(f,{body:{...body,paid:true}})).statusCode,400);assert.equal(delivered,0);
   assert.equal((await invoke(f,{body})).body.status,'completed');assert.equal(delivered,1);assert.equal(f.calls(),0);
+});
+
+test('a partial-retry target requires the new worker capability before any paid authorization', async () => {
+  const corrected = { ...job, partialCorrection: { version: 1 }, partialCorrectionRetry: { version: 1 } };
+  const make = () => fixture({ read: async path => ({ value: path.startsWith('production/jobs/') ? corrected : ticket }) });
+  const body = { ...input, model: adapter.model, recipe: adapter.modelVersion, workerProtocol: 2, partialCorrectionVersion: 1 };
+  const old = make(), denied = await invoke(old, { body });
+  assert.equal(denied.statusCode, 409); assert.equal(denied.body.code, 'WORKER_PARTIAL_RETRY_REQUIRED'); assert.equal(old.calls(), 0);
+  for (const partialCorrectionRetryVersion of [0, 2, '1', null]) {
+    const unsupported = make(); assert.equal((await invoke(unsupported, { body: { ...body, partialCorrectionRetryVersion } })).statusCode, 400);
+    assert.equal(unsupported.calls(), 0);
+  }
+  const current = make(); assert.equal((await invoke(current, { body: { ...body, partialCorrectionRetryVersion: 1 } })).statusCode, 200);
+  assert.equal(current.calls(), 1);
 });
 
 test('reviewed replacement forwards the exact previous digest and rejects invalid replacement fields',async()=>{

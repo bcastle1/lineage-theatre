@@ -15,3 +15,15 @@ Deploy the web route before the matching worker. The worker advertises `partialC
 Finished playback and download remain covered by the original payment and its normal access controls. Ordinary later funding admission may retire the original hold only after validating the exact completed correction and private media. No failed source record is rewritten as successful, and no hold is released merely because approval or rendering started.
 
 Validation uses synthetic fixtures only. Run `node --test tests/partial-film-correction.test.mjs tests/fal-funding-correction.test.mjs tests/production-worker-handler.test.mjs tests/production-worker.test.mjs tests/admin.test.mjs`. These tests prove code paths and invariants; they do not claim a live render, charge or delivered film.
+
+## Retry after a confirmed provider service failure
+
+An owner can authorize one retry of the unchanged corrected scene after a confirmed downstream HTTP 500 failure. The separate retry journal preserves the original correction grant and failed provider receipt. It binds the exact failed request, input and record hash to one deterministic replacement operation; the original correction alone cannot authorize that operation. The three completed clips remain intact.
+
+The private import for `retryPartialProductionCorrection` contains the correction ID, prepared ID, manifest hash, shot ID, failed operation identity, failed request ID, failed record hash, maximum new cost, reason, billing evidence and `confirmed: false`. It cannot change a prompt or scene design. Importing the file only opens the review; the owner confirms submission separately. An uncertain browser response retains the exact request for reconciliation, not another paid attempt.
+
+Zero-charge evidence explicitly uses `basis: provider-terminal500-nonbilling-policy` and fal's published pricing policy. It is not a claim that a request-level billing row exists. The server independently checks the exact request's terminal status and recognized downstream HTTP 500 result, then verifies the original payment, provider account and existing funding reservation. A wallet balance alone is insufficient. Moderation failures, uncertain submissions and unknown errors do not qualify.
+
+Deploy the web before its matching worker, which advertises `partialCorrectionRetryVersion: 1`. The approved journal permits the service to resume the failed target and attention queue with conditional writes. The failed receipt remains immutable. The adapter may submit only the journal's one replacement operation, with the original input and the approved scene-cost ceiling. Reconciliation or concurrent submissions must reuse the saved identity. A second failure or lost submission response cannot authorize another render.
+
+The recovered film still passes the normal fresh visual, native-audio, assembly and private-delivery checks. Its original payment governs playback and download. No new invoice, additional reservation or automatic credit purchase is part of this retry.
