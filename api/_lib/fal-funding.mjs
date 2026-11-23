@@ -143,7 +143,8 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
       const context = await correctionContext({ email: order.customerEmail, orderId: entry.orderId, read, now });
       const grant = context?.grant, target = context?.job, partial = grant?.partial;
       requireValue((partial?.version === 1 && partial.kind === 'seedance-single-scene-correction-v1'
-        || partial?.version === 2 && partial.kind === 'seedance-single-scene-narration-successor-v1')
+        || partial?.version === 2 && partial.kind === 'seedance-single-scene-narration-successor-v1'
+        || partial?.version === 3 && partial.kind === 'seedance-single-scene-context-successor-v1')
         && partial.billingAccount === env.FAL_BILLING_ACCOUNT
         && partial.fundingKind === 'original-reservation' && same(partial.originalReservation || {}, entry)
         && grant.originalOrderId === entry.orderId && grant.originalPreparedId === entry.preparedId

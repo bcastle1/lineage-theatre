@@ -5,7 +5,7 @@ export function createRemoteProductionAuthorization({ adapter, env = process.env
     const response = await fetchImpl('https://lineagetheater.com/api/production-worker', {
       method: 'POST', redirect: 'error', credentials: 'omit', cache: 'no-store', signal: AbortSignal.timeout(120_000),
       headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ ...input, workerProtocol: 2, partialCorrectionVersion: 1, partialCorrectionRetryVersion: 1, narrationSuccessorVersion: 1, model: adapter.model, recipe: adapter.modelVersion }),
+      body: JSON.stringify({ ...input, workerProtocol: 2, partialCorrectionVersion: 1, partialCorrectionRetryVersion: 1, narrationSuccessorVersion: 1, sceneContextSuccessorVersion: 1, model: adapter.model, recipe: adapter.modelVersion }),
     });
     if (!response.ok) { await response.body?.cancel(); throw new Error('Live payment authorization needs attention.'); }
     const reader = response.body?.getReader(); if (!reader) throw new Error('Missing payment authorization.');

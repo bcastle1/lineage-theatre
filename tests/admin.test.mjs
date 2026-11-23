@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createAdminHandler } from "../api/admin.mjs";
 import { PartialCorrectionRetryError } from '../api/_lib/partial-correction-retry.mjs';
 import { NarrationSuccessorError } from '../api/_lib/narration-successor.mjs';
+import { ContextSuccessorError } from '../api/_lib/context-successor.mjs';
 import { OWNER_EMAIL, roleForUser, accessStatusForUser } from "../api/_lib/access.mjs";
 import { userPath } from "../api/_lib/auth.mjs";
 import { builtInSourceAgreement, sourceAgreementVersionPath, SOURCE_AGREEMENT_PATH } from "../api/_lib/source-agreement.mjs";
@@ -10,6 +11,32 @@ import { newInvitation, validateInvitation, validateUserAction, validateRefund, 
 const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
 const admin={email:"admin@example.invalid",role:"admin",status:"active"};
 const customer={email:"customer@example.invalid",role:"customer",status:"active"};
+
+test('scene-context approval keeps owner, exact request and safe diagnostic guards before queueing', async () => {
+  const result = { correctionId: 'e'.repeat(64), parentCorrectionId: 'c'.repeat(64),
+    preparedId: '11111111-1111-4111-8111-111111111111', manifestHash: 'd'.repeat(64), maximumNewCostCents: 1080, customerChargeCents: 0 };
+  const body = { parentCorrectionId: result.parentCorrectionId, preparedId: result.preparedId, manifestHash: result.manifestHash,
+    shotId: 'shot-003', filmContext: 'PRIVATE FICTIONAL CONTEXT', historicalBoundaries: 'PRIVATE BOUNDARIES',
+    failedOperationIdentity: 'a'.repeat(64), failedRequestId: 'offline-request', failedRecordHash: 'b'.repeat(64),
+    billingEvidence: { private: 'DO_NOT_LOG' }, maximumNewCostCents: 1080, reason: 'Approved exact synthetic scene instructions.', confirmed: true };
+  const calls = [], overrides = { paidFilmCorrections: { approveContextSuccessor: async value => { calls.push(['approve', value]); return result; } },
+    productionQueue: { enqueue: async value => { calls.push(['queue', value]); return { status: 'processing' }; } } };
+  for (const actor of [null, customer, admin, { ...owner, status: 'suspended' }])
+    assert.ok([401, 403].includes((await harness(actor, overrides).run('createContextSuccessorCorrection', body)).status));
+  const h = harness(owner, overrides);
+  assert.equal((await h.run('createContextSuccessorCorrection', body, { origin: 'https://other.invalid' })).status, 403);
+  for (const changes of [{ confirmed: false }, { maximumRequests: 2 }, { actor: customer }, { narration: 'Unapproved' }])
+    assert.equal((await h.run('createContextSuccessorCorrection', { ...body, ...changes })).status, 400);
+  assert.deepEqual(calls, []);
+  const saved = await h.run('createContextSuccessorCorrection', body); assert.equal(saved.status, 200); assert.deepEqual(saved.body.correction, result);
+  assert.deepEqual(calls.map(row => row[0]), ['approve', 'queue']);
+  assert.deepEqual(calls[1][1], { actor: owner, id: result.preparedId, orderId: result.correctionId });
+  assert.doesNotMatch(JSON.stringify(h.events), /PRIVATE|DO_NOT_LOG|billingEvidence|filmContext|historicalBoundaries/);
+  const denied = harness(owner, { ...overrides, paidFilmCorrections: { approveContextSuccessor: async () => { throw new ContextSuccessorError(); } } });
+  const rejection = await denied.run('createContextSuccessorCorrection', body);
+  assert.equal(rejection.status, 409); assert.equal(rejection.body.code, 'CONTEXT_SUCCESSOR_UNVERIFIED'); assert.equal(rejection.body.charged, false);
+  assert.equal(calls.filter(row => row[0] === 'queue').length, 1);
+});
 
 test('narration successor route is owner-only, exact-input and never queues an unverified revision', async () => {
   const result = { correctionId: 'e'.repeat(64), parentCorrectionId: 'c'.repeat(64),

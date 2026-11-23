@@ -112,6 +112,40 @@ test('narration successor must retain exact kind, account, original reservation 
   }
 });
 
+test('a resolved completed context successor satisfies only the unchanged original hold', async () => {
+  const h = fixture(), before = structuredClone([...h.records.entries()]);
+  h.context.grant.partial.version = 3;
+  h.context.grant.partial.kind = 'seedance-single-scene-context-successor-v1';
+  await h.service.reserve(next);
+  assert.deepEqual(h.records.get(FAL_FUNDING_PATH).value.entries.map(entry => entry.orderId), [next.orderId]);
+  assert.deepEqual(h.writes, [FAL_FUNDING_PATH]);
+  assert.equal(h.rechecks(), 2);
+  assert.deepEqual([...h.records.entries()].filter(([path]) => path !== FAL_FUNDING_PATH),
+    before.filter(([path]) => path !== FAL_FUNDING_PATH));
+});
+
+test('context fulfillment rejects unsupported generations, altered source bindings and non-delivery', async () => {
+  for (const change of [
+    context => { context.grant.partial.version = 2; },
+    context => { context.grant.partial.version = 4; },
+    context => { context.grant.partial.kind = 'seedance-single-scene-narration-successor-v1'; },
+    context => { context.grant.partial.billingAccount = 'another-account'; },
+    context => { context.grant.partial.originalReservation.quoteId = digest('other-source-quote'); },
+    context => { context.grant.partial.originalReservation.ownerHash = digest('other-owner'); },
+    context => { context.grant.partial.originalReservation.maximumCostCents = 1080; },
+    context => { context.job.authorization.originalOrderId = digest('parent-correction-id'); },
+    context => { context.job.status = 'uncertain'; },
+    context => { delete context.job.media; },
+    context => { context.job.media.pathname = `production/media/${ownerHash}/${SOURCE}/${context.job.media.sha256}.mp4`; },
+  ]) {
+    const h = fixture(); h.context.grant.partial.version = 3;
+    h.context.grant.partial.kind = 'seedance-single-scene-context-successor-v1';
+    change(h.context);
+    await denied(h.service.reserve(next)); assert.deepEqual(h.writes, []);
+    assert.equal(h.records.get(FAL_FUNDING_PATH).value.entries[0].orderId, original.orderId);
+  }
+});
+
 test('incomplete, legacy, mismatched and unverified corrections retain the original commitment', async () => {
   const changes = [
     context => { delete context.grant.partial; },
