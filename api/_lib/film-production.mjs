@@ -155,7 +155,9 @@ export function validateProviderAudio(output, allowedHosts = []) {
 }
 export function validateProviderOutput(output, allowedHosts = []) {
   const video = validateProviderMedia(output, allowedHosts, ["video/mp4", "video/webm"]);
-  return { ...video, ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}) };
+  if (output.sha256 !== undefined && !HASH.test(output.sha256)) throw new FilmProductionError('The preserved clip checksum is invalid.', 409, 'PRODUCTION_REVIEW_REQUIRED');
+  return { ...video, ...(output.sha256 ? { sha256: output.sha256 } : {}),
+    ...(output.audio !== undefined ? { audio: validateProviderAudio(output.audio, allowedHosts) } : {}) };
 }
 
 function customerJob(job) {
@@ -433,6 +435,7 @@ export function createFilmProductionService(dependencies = {}) {
       throw authorizationExpired();
     }
     const request = { email, productionId: id, manifestHash: job.manifestHash, shot: clone(job.manifest.shots.find(s => s.id === shot.id)), manifest: clone(job.manifest), idempotencyKey: shot.requestKey,
+      ...(job.authorization?.correctionId ? { correctionId: job.authorization.correctionId } : {}),
       // A provider pipeline may need reference images before the scene render.
       // Each new paid operation obtains a current grant; status GETs do not.
       authorizeSpend: async () => {

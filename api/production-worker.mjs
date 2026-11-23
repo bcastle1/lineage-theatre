@@ -172,7 +172,9 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           ...('model' in body ? { model: body.model } : {}),
           ...('previousArtifactSha256' in body ? { previousArtifactSha256: body.previousArtifactSha256 } : {}) }));
       }
-      if (!body || Object.keys(body).sort().join(',') !== 'email,manifestHash,model,orderId,preparedId,recipe,workerProtocol'
+      if (!body || !['email,manifestHash,model,orderId,preparedId,recipe,workerProtocol',
+        'email,manifestHash,model,orderId,partialCorrectionVersion,preparedId,recipe,workerProtocol'].includes(Object.keys(body).sort().join(','))
+        || ('partialCorrectionVersion' in body && body.partialCorrectionVersion !== 1)
         || body.workerProtocol !== 2 || body.model !== 'seedance' || body.recipe !== SEEDANCE_RECIPE_VERSION
         || body.model !== adapter.model || body.recipe !== adapter.modelVersion || !adapter.available
         || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim()
@@ -183,6 +185,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         || ticket.orderId !== body.orderId || ticket.manifestHash !== body.manifestHash || !(ticket.lease?.expiresAt > now()))
         return json(res, 409, { code: 'WORKER_QUEUE_REQUIRED' });
       const job = (await read(productionJobPath(body.email, body.preparedId)))?.value;
+      if (job?.partialCorrection && body.partialCorrectionVersion !== 1)
+        return json(res, 409, { code: 'WORKER_PARTIAL_CORRECTION_REQUIRED' });
       if (job?.id !== body.preparedId || job.ownerHash !== digest(body.email) || job.manifestHash !== body.manifestHash
         || !job.manifest || digest(JSON.stringify(job.manifest)) !== job.manifestHash
         || job.manifest.productionPlan?.provider !== 'seedance' || job.manifest.productionPlan.version !== 1

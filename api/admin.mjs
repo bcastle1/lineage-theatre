@@ -180,6 +180,21 @@ export function createAdminHandler(overrides={}) {
       await audit(actor.email,"production.connection.checked","magiclight",{code:result.code,authentication:result.authentication});
       return json(res,200,result);
     }
+    if(action==="createPartialProductionCorrection") {
+      if(!isOwner(actor)) return resultError(res,403,"Only the owner can authorize a film correction.");
+      const allowed=['action','originalOrderId','preparedId','manifestHash','shotId','visual','maximumNewCostCents','reuseEvidence','billingEvidence','reason','confirmed'];
+      if(Object.keys(body).some(key=>!allowed.includes(key)) || body.confirmed!==true)
+        return resultError(res,400,"Confirm the exact scene revision and its bounded production allowance.");
+      if(!(await limitAction(`paid-film-correction:${actor.email}`,6,60_000))) return resultError(res,429,"Please wait before checking this correction again.");
+      const {action:ignored,...input}=body;
+      const correction=await (overrides.paidFilmCorrections||paidFilmCorrections).approvePartial({actor,...input});
+      const production=await (overrides.productionQueue||productionQueue).enqueue({actor,id:correction.preparedId,orderId:correction.correctionId});
+      await audit(actor.email,'production.partial-correction.queued',correction.correctionId,{
+        originalOrderId:correction.originalOrderId,preparedId:correction.preparedId,manifestHash:correction.manifestHash,
+        maximumNewCostCents:correction.maximumNewCostCents,customerChargeCents:0,
+      });
+      return json(res,200,{correction,production});
+    }
     if(action==="createProductionCorrection") {
       if(!isOwner(actor)) return resultError(res,403,"Only the owner can authorize a corrected film against an original payment.");
       const allowed=["action","originalOrderId","preparedId","manifestHash","maximumCostCents","reason","confirmed"];

@@ -87,7 +87,11 @@ async function batches(values, callback) {
 // production orders are also counted, including orders from before this guard.
 // Holds never expire merely because a quote or external payment link is old.
 export function createFalFunding({ env = process.env, read = readRecord, write = writeRecord,
-  listBlobs = list, fetchImpl = fetch, now = Date.now } = {}) {
+  listBlobs = list, fetchImpl = fetch, now = Date.now,
+  correctionContext = async input => {
+    const { readPaidFilmCorrection, correctionIdForOrder } = await import('./paid-film-correction.mjs');
+    return readPaidFilmCorrection({ ...input, correctionId: correctionIdForOrder(input.orderId) });
+  } } = {}) {
   function validLedger(saved) {
     const ledger = saved?.value;
     return typeof saved?.etag === 'string' && ledger?.version === 1
@@ -128,6 +132,37 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
       const receipt = (await read(releasePath(entry)))?.value;
       return releaseMatches(receipt, entry) && receipt.releaseId === fence.releaseId && receipt.releasedAt === fence.releasedAt;
     } catch { return false; }
+  }
+  async function completedCorrection(entry) {
+    try {
+      // A correction has a different preparation. Its original failed job and
+      // paid order remain intact; only a verified delivered replacement can
+      // satisfy this exact original commitment during later admission.
+      const order = (await read(`payments/orders/${entry.orderId}.json`))?.value;
+      requireValue(order && same(orderEntry(order), entry));
+      const context = await correctionContext({ email: order.customerEmail, orderId: entry.orderId, read, now });
+      const grant = context?.grant, target = context?.job, partial = grant?.partial;
+      requireValue(partial?.version === 1 && partial.kind === 'seedance-single-scene-correction-v1'
+        && partial.fundingKind === 'original-reservation' && same(partial.originalReservation || {}, entry)
+        && grant.originalOrderId === entry.orderId && grant.originalPreparedId === entry.preparedId
+        && grant.originalManifestHash === entry.manifestHash && context.order?.id === entry.orderId
+        && context.order.quoteId === entry.quoteId && context.order.customerEmail === order.customerEmail
+        && same(orderEntry(context.order), entry));
+      requireValue(target?.status === 'completed' && target.id === grant.preparedId && target.id !== entry.preparedId
+        && target.ownerHash === entry.ownerHash && target.manifestHash === grant.manifestHash
+        && digest(JSON.stringify(target.manifest)) === target.manifestHash
+        && target.authorization?.correctionId === grant.id && target.authorization.originalOrderId === entry.orderId
+        && target.authorization.environment === 'production' && target.authorization.manifestHash === target.manifestHash
+        && target.authorization.quoteReference === grant.quote?.quoteReference
+        && target.authorization.budgetCents === grant.quote?.maximumCostCents
+        && grant.quote.maximumCostCents === entry.maximumCostCents
+        && target.provider?.id === 'fal' && target.provider.model === grant.model && target.provider.recipe === grant.recipe);
+      const { validateStoredProductionMedia } = await import('./production-media.mjs');
+      validateStoredProductionMedia(target, order.customerEmail);
+      requireValue(typeof context.recheck === 'function');
+      await context.recheck();
+      return context.recheck;
+    } catch { return null; }
   }
   async function releaseExpiredOrder(orderId, expectedQuoteId) {
     try {
@@ -219,18 +254,20 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
         return { ...entry, createdAt: held?.createdAt || new Date(now()).toISOString() };
       });
       for (const entry of orders.filter(Boolean)) holds.set(entry.orderId, entry);
-      // Release only exact, completed private films. Failed, uncertain,
-      // unpaid, refunded and missing-job commitments remain held for review.
+      // Only exact completed private films or their verified completed partial
+      // corrections satisfy a commitment. Other commitments remain held.
       const completed = await batches([...holds.values()], async entry => {
         const job = (await read(`production/jobs/${entry.ownerHash}/${entry.preparedId}.json`))?.value;
-        return job?.status === 'completed' && job.id === entry.preparedId && job.ownerHash === entry.ownerHash
+        if (job?.status === 'completed' && job.id === entry.preparedId && job.ownerHash === entry.ownerHash
           && job.manifestHash === entry.manifestHash && digest(JSON.stringify(job.manifest)) === entry.manifestHash
           && HASH.test(job.media?.sha256 || '') && job.media.contentType === 'video/mp4'
-          && job.media.pathname === `production/media/${entry.ownerHash}/${entry.preparedId}/${job.media.sha256}.mp4`
-          ? entry.orderId : null;
+          && job.media.pathname === `production/media/${entry.ownerHash}/${entry.preparedId}/${job.media.sha256}.mp4`)
+          return { orderId: entry.orderId };
+        const recheck = await completedCorrection(entry);
+        return recheck ? { orderId: entry.orderId, recheck } : null;
       });
-      for (const orderId of completed.filter(Boolean)) holds.delete(orderId);
-      requireValue(!completed.includes(wanted.orderId));
+      for (const fulfilled of completed.filter(Boolean)) holds.delete(fulfilled.orderId);
+      requireValue(!completed.some(value => value?.orderId === wanted.orderId));
       requireValue(!releaseMatches((await read(releasePath(wanted)))?.value, wanted));
       const current = holds.get(wanted.orderId);
       requireValue(!current || same(current, wanted));
@@ -238,6 +275,7 @@ export function createFalFunding({ env = process.env, read = readRecord, write =
       requireValue(holds.size <= MAX_ORDERS);
       const required = [...holds.values()].reduce((total, entry) => total + entry.maximumCostCents, 0);
       requireValue(Number.isSafeInteger(required) && required <= await readFalCreditCents({ env, fetchImpl }));
+      for (const fulfilled of completed) if (fulfilled?.recheck) await fulfilled.recheck();
       const next = { version: 1, account: env.FAL_BILLING_ACCOUNT, revision: (ledger?.revision || 0) + 1,
         checkedAt: new Date(now()).toISOString(), entries: [...holds.values()].sort((a, b) => a.orderId.localeCompare(b.orderId)) };
       try {

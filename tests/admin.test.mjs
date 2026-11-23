@@ -9,6 +9,31 @@ const owner={email:OWNER_EMAIL,role:"owner",status:"active"};
 const admin={email:"admin@example.invalid",role:"admin",status:"active"};
 const customer={email:"customer@example.invalid",role:"customer",status:"active"};
 
+test('single-scene correction is owner-only, same-origin and queues only the verified correction without private audit data', async () => {
+  const calls = [], response = { correctionId: 'c'.repeat(64), originalOrderId: 'a'.repeat(64),
+    preparedId: '11111111-1111-4111-8111-111111111111', manifestHash: 'b'.repeat(64), maximumNewCostCents: 720 };
+  const body = { originalOrderId: response.originalOrderId, preparedId: response.preparedId, manifestHash: response.manifestHash,
+    shotId: 'shot-003', visual: 'PRIVATE FICTIONAL VISUAL', maximumNewCostCents: 720, reuseEvidence: [],
+    billingEvidence: {}, reason: 'Reviewed fictional correction.', confirmed: true };
+  const overrides = { paidFilmCorrections: { approvePartial: async input => { calls.push(['approve', input]); return response; } },
+    productionQueue: { enqueue: async input => { calls.push(['queue', input]); return { status: 'queued' }; } } };
+  for (const actor of [null, customer, admin, { ...owner, status: 'suspended' }]) {
+    assert.ok([401, 403].includes((await harness(actor, overrides).run('createPartialProductionCorrection', body)).status));
+  }
+  const h = harness(owner, overrides);
+  assert.equal((await h.run('createPartialProductionCorrection', body, { origin: 'https://other.invalid' })).status, 403);
+  for (const changes of [{ confirmed: false }, { force: true }, { actor: customer }])
+    assert.equal((await h.run('createPartialProductionCorrection', { ...body, ...changes })).status, 400);
+  assert.deepEqual(calls, []);
+  assert.equal((await h.run('createPartialProductionCorrection', body)).status, 200);
+  assert.deepEqual(calls.map(row => row[0]), ['approve', 'queue']);
+  assert.deepEqual(calls[1][1], { actor: owner, id: response.preparedId, orderId: response.correctionId });
+  assert.doesNotMatch(JSON.stringify(h.events), /PRIVATE|billingEvidence|reuseEvidence/);
+  const denied = harness(owner, { ...overrides, paidFilmCorrections: { approvePartial: async () => { throw Error('Unverified plan'); } } });
+  assert.equal((await denied.run('createPartialProductionCorrection', body)).status, 503);
+  assert.equal(calls.filter(row => row[0] === 'queue').length, 1);
+});
+
 test("recorded reversal diagnostic is owner-only, same-origin and restricted to a saved order ID",async()=>{
   const id="a".repeat(64),calls=[];
   const service=async(input)=>{calls.push(input);return {recordedReversalsVerified:true,productionReady:false,scope:"quickbooks-accounting-recorded-reversals",code:"RECORDED_REVERSALS_VERIFIED",totals:{accountingReads:12}};};

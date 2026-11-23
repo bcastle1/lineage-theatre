@@ -6,9 +6,24 @@ import { tmpdir, hostname } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { createWorkerAssembly, downloadProductionClip, downloadProductionAudio, verifyPublishedFilm, cleanStaleWorkerDirectories } from "../scripts/production-worker.mjs";
 import { digest } from "../api/_lib/auth.mjs";
+import { finishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
 const bytes = Buffer.from("0000ftypisom00000000000000000000");
 const output = { url: "https://media.example.invalid/clip.mp4?secret=test", contentType: "video/mp4", sizeBytes: bytes.length, durationSeconds: 5 };
+test('assembly rechecks the retained clip checksum before visual review, finishing or publishing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lineage-preserved-checksum-'));
+  const job = { status: 'awaiting-assembly', manifestHash: 'a'.repeat(64), manifest: { shots: [{ id: 'shot-1' }] },
+    shots: [{ id: 'shot-1', status: 'completed', output: { ...output, sha256: digest('different preserved bytes') } }] };
+  try {
+    const finish = createWorkerAssembly({ tempRoot: root, adapter: { available: true, outputHosts: ['media.example.invalid'] },
+      fetchImpl: async () => new Response(bytes, { headers: { 'content-type': 'video/mp4' } }),
+      assemble: () => assert.fail('Changed retained bytes must not be assembled'), putBlob: () => assert.fail('Changed bytes must remain unpublished'),
+      reviewVisual: () => assert.fail('Changed retained bytes must not incur review') });
+    await assert.rejects(finish({ email: 'customer@example.invalid', id: '00000000-0000-4000-8000-000000000001', job,
+      stillOwned: async () => true }), error => finishingFailure(error, 'download')?.reason === 'STORED_CHECKSUM_MISMATCH');
+    assert.deepEqual(await readdir(root), []);
+  } finally { if (dirname(resolve(root)) === resolve(tmpdir())) await rm(root, { recursive: true, force: true }); }
+});
 test("worker downloads only allowlisted HTTPS media and refuses redirects, changed headers and truncated bytes", async () => {
   let calls = 0;
   const fetchImpl = async (_url, options) => { calls++; assert.equal(options.redirect, "error"); assert.equal(options.credentials, "omit"); return new Response(bytes, { headers: { "content-type": "video/mp4", "content-length": String(bytes.length) } }); };

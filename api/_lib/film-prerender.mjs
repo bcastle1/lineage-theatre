@@ -96,6 +96,7 @@ export function createFilmPreRenderService({ read = readRecord, write = writeRec
     const email = actor?.email; identity(email, id); await account(email);
     if (productionConsent !== true || !cents(acceptedPriceCents)) throw fail('PRERENDER_CONSENT_REQUIRED', 'Confirm the displayed price and allow this saved film to be created before payment.', 400);
     const { service, job, grant: existing } = await context(email, id);
+    if (job.partialCorrection) throw fail('PRODUCTION_CORRECTION_REQUIRED', 'Continue this film through its approved correction.', 409);
     const path = preRenderPath(email, id);
     let grant = existing;
     if (!grant) {
