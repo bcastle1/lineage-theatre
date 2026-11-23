@@ -14,6 +14,7 @@ import { requireFinishedFilmPayment } from './_lib/production-media.mjs';
 import { verifySeedanceCanaryGrant } from './_lib/seedance-operator-canary.mjs';
 import { authorizeFilmProduction, createFilmPreRenderService, readPreRenderGrant, PRERENDER_FLOW } from './_lib/film-prerender.mjs';
 import { createVisualReviewRecovery, createPreclaimVisualReviewResume } from './_lib/film-visual-review-recovery.mjs';
+import { createRecordValidationSnapshot } from './_lib/record-validation-snapshot.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -48,10 +49,12 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         const reject = () => { throw Object.assign(Error('The stopped review requires verification.'), { code: 'VISUAL_REVIEW_AUTH_REQUIRED' }); };
         // The inspection remains read-only even if the exact paused record is
         // replayed. Only the separate reviewed operator command may resume it.
-        const inspect = createPreclaimVisualReviewResume({ read, listBlobs: list, now, write: reject, authorize: reject });
+        const snapshot = createRecordValidationSnapshot({ read, listBlobs: list, now });
+        const inspect = createPreclaimVisualReviewResume({ read: snapshot.read, listBlobs: snapshot.listBlobs,
+          now, write: reject, authorize: reject });
         if ((await inspect(plan)).status !== 'planned') return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
         const ticketPath = productionQueuePath(plan.email, plan.id), jobPath = productionJobPath(plan.email, plan.id);
-        const [ticket, job] = await Promise.all([read(ticketPath), read(jobPath)]);
+        const [ticket, job] = await Promise.all([snapshot.read(ticketPath), snapshot.read(jobPath)]);
         const orderId = ticket?.value?.orderId;
         if (ticket?.value?.state !== 'attention' || ticket.value.lease?.expiresAt > now()
           || !/^[a-f0-9]{64}$/.test(orderId || '') || digest(JSON.stringify(ticket.value)) !== plan.queueHash
@@ -59,12 +62,14 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           || job.value.manifest.productionPlan.version !== 1) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
         const permission = await paymentService.authorizeProduction({ email: plan.email, preparedId: plan.id,
           manifestHash: plan.manifestHash, orderId });
-        const checked = await inspect(plan), latest = (await read(ticketPath))?.value;
-        if (checked.status !== 'planned' || digest(JSON.stringify(latest)) !== plan.queueHash || latest?.orderId !== orderId
-          || latest.state !== 'attention' || latest.lease?.expiresAt > now() || permission?.allowed !== true
+        if (permission?.allowed !== true
           || permission.environment !== 'production' || permission.manifestHash !== plan.manifestHash
           || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now())
           return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        // Re-read the exact complete evidence set in bounded parallel. The
+        // original plan validation still owns every rule; unchanged records
+        // and claim-list pages preserve its result without another graph walk.
+        await snapshot.recheck({ expiresAt: permission.expiresAt });
         return json(res, 200, { ...permission, recoveryRequestHash: digest(JSON.stringify(plan)) });
       }
       if (body?.action === 'authorize-visual-review-recovery') {

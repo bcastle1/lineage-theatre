@@ -6,11 +6,11 @@ import { preclaimFixture, sha } from './fixtures/visual-preclaim-resume.mjs';
 
 const secret = 'a'.repeat(64);
 async function routeFixture() {
-  const h = await preclaimFixture(), calls = [], limits = [], hooks = {}; let reads = 0;
+  const h = await preclaimFixture(), calls = [], limits = [], hooks = {}, readPaths = []; let reads = 0;
   const permission = { allowed: true, environment: 'production', manifestHash: h.resumeInput.manifestHash,
     budgetCents: 3000, quoteReference: digest('fictional quote'), expiresAt: new Date(h.now() + 60000).toISOString() };
   const handler = createProductionWorkerHandler({ env: { LINEAGE_WORKER_SECRET: secret }, now: h.now,
-    read: async path => { reads++; return h.read(path); }, list: h.listBlobs,
+    read: async path => { reads++; readPaths.push(path); return h.read(path); }, list: h.listBlobs,
     limiter: async (...args) => { limits.push(args); return hooks.limit !== false; },
     paymentService: { authorizeProduction: async input => { calls.push(input); await hooks.authorize?.(); return structuredClone(permission); } },
     visualReviewFactory: () => assert.fail('Plan authorization cannot infer'),
@@ -22,7 +22,7 @@ async function routeFixture() {
     await handler({ method: 'POST', headers: { authorization: `Bearer ${secret}` }, body, ...change }, result);
     return result;
   };
-  return { h, calls, limits, permission, body, invoke, hooks, reads: () => reads };
+  return { h, calls, limits, permission, body, invoke, hooks, readPaths, reads: () => reads };
 }
 
 test('preclaim authorization binds the entire stopped attempt without writes, leases, inference or new video requests', async () => {
@@ -112,4 +112,37 @@ test('the exact partial job update can renew permission before queue release, wh
   assert.deepEqual([...f.h.records], before); assert.deepEqual(f.h.writes, writes);
   f.h.mutate(f.h.jobPath, value => { value.updatedAt = new Date(f.h.now() + 1).toISOString(); });
   assert.equal((await f.invoke()).statusCode, 409); assert.equal(f.calls.length, 1); assert.deepEqual(f.h.writes, writes);
+});
+
+test('after live permission every unique validated record and exact claim-list page is freshly checked once', async () => {
+  const f = await routeFixture(); let initialReads, initialLists;
+  f.hooks.authorize = () => { initialReads = [...f.readPaths]; initialLists = structuredClone(f.h.lists); };
+  const before = structuredClone([...f.h.records]), result = await f.invoke();
+  assert.equal(result.statusCode, 200); assert.equal(result.body.expiresAt, f.permission.expiresAt);
+  assert.ok(initialReads.length > new Set(initialReads).size, 'the original full validation includes repeated graph reads');
+  assert.deepEqual([...f.readPaths.slice(initialReads.length)].sort(), [...new Set(initialReads)].sort());
+  assert.equal(initialLists.length, 3);
+  assert.deepEqual(f.h.lists.slice(initialLists.length), initialLists);
+  assert.ok(initialReads.includes(f.h.jobPath)); assert.ok(initialReads.includes(f.h.queuePath));
+  assert.ok(initialReads.includes(f.h.resumePath)); assert.ok(initialReads.includes(f.h.orderPath));
+  assert.deepEqual([...f.h.records], before); assert.deepEqual(f.h.writes, []);
+});
+
+test('an identical value with a new ETag or a newly listed unrecognized claim invalidates the snapshot', async () => {
+  for (const change of [
+    f => f.h.seed(f.h.orderPath, f.h.value(f.h.orderPath)),
+    f => f.h.seed(`${f.h.bindingPrefix}unknown-policy/${digest('new claim')}.json`, { claimed: true }),
+  ]) {
+    const f = await routeFixture(); f.hooks.authorize = () => change(f);
+    assert.equal((await f.invoke()).statusCode, 409); assert.equal(f.calls.length, 1); assert.deepEqual(f.h.writes, []);
+  }
+});
+
+test('authorization that expires during fresh evidence rechecks cannot leave the route', async () => {
+  const f = await routeFixture(); let advanced = false;
+  f.h.hooks.beforeRead = () => {
+    if (f.calls.length === 1 && !advanced) { advanced = true; f.h.advance(60001); }
+  };
+  assert.equal((await f.invoke()).statusCode, 409); assert.equal(advanced, true);
+  assert.equal(f.calls.length, 1); assert.deepEqual(f.h.writes, []);
 });
