@@ -66,6 +66,20 @@ test('invalid frame positions, failed extraction and output limits cannot produc
   }
 });
 
+test('assembled global timestamps require an explicit bounded film window while raw clip bounds stay unchanged', async () => {
+  const f = await fixture(); let calls = 0;
+  const spawnImpl = (_binary, args) => {
+    calls++; assert.equal(args[args.indexOf('-ss') + 1], '59.000');
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.kill = () => assert.fail('No valid extraction cancellation');
+    queueMicrotask(() => { child.stdout.end(f.jpeg); child.emit('close', 0); }); return child;
+  };
+  await assert.rejects(extractVisualFrame({ path: 'raw.mp4', atMs: 59000, spawnImpl }), failureReason('VISUAL_REVIEW_REQUIRED'));
+  assert.equal(await extractVisualFrame({ path: 'assembled.mp4', atMs: 59000, maxAtMs: 60000, spawnImpl }), f.image);
+  for (const maxAtMs of [59000 - 1, 600001, NaN, '60000'])
+    await assert.rejects(extractVisualFrame({ path: 'assembled.mp4', atMs: 59000, maxAtMs, spawnImpl }), failureReason('VISUAL_REVIEW_REQUIRED'));
+  assert.equal(calls, 1);
+});
+
 test('worker samples every cut and compares a preceding sample only at same-scene boundaries', async () => {
   const f = await fixture(), extracts = [], requests = [];
   const work = await mkdtemp(join(tmpdir(), 'lineage-visual-test-'));
@@ -144,6 +158,42 @@ test('editorial recovery samples every retained cut densely and preserves the ex
   assert.deepEqual(result.shots[0].editorialRevision, editorialRevision);
   assert.ok(result.shots.slice(1).every(proof => !Object.hasOwn(proof, 'editorialRevision')));
   assert.equal(result.sampling, 'editorial-expanded-evidence-and-same-scene-boundary');
+});
+
+test('assembled ending samples use final-film global times and final same-scene boundary while retained proofs use raw clips', async () => {
+  const f = await fixture(), extracts = [], requests = [];
+  f.job.visualEditorialRecovery = { policy: 'visual-editorial-recovery-v4', shotId: f.job.manifest.shots[0].id };
+  f.job.assembledVisualReviewRecovery = { policy: 'assembled-ending-review-v6', shotId: f.job.manifest.shots[2].id };
+  f.job.manifest.targetDurationSeconds = 60;
+  f.job.manifest.shots.forEach((shot, index) => { shot.startMs = index * 20000; shot.targetDurationMs = 20000; shot.sceneIndex = index === 0 ? 0 : 1; });
+  const assembled = { path: 'completed-film.mp4', sha256: digest('fictional assembled film'), sizeBytes: 1024, durationSeconds: 60 };
+  const metadata = { sha256: assembled.sha256, sizeBytes: assembled.sizeBytes, durationSeconds: assembled.durationSeconds };
+  const reviewer = createFilmVisualReviewer({ extract: async input => { extracts.push(input); return f.image; },
+    review: async input => { requests.push(input); return { ...f.proof(input.shotId),
+      ...(input.assembledArtifact ? { reviewVersion: 6, assembledArtifact: input.assembledArtifact } : {}) }; } });
+  const result = await reviewer({ ...f.input, assembled });
+  assert.deepEqual(requests.slice(0, 2).map(request => request.frames.map(frame => frame.atMs)),
+    Array.from({ length: 2 }, () => [1000, 3000, 5000, 7000, 10000, 13000, 15000, 17000, 19000]));
+  assert.ok(requests.slice(0, 2).every(request => !Object.hasOwn(request, 'assembledArtifact')));
+  assert.deepEqual(requests[2].frames.map(frame => frame.atMs), [41000, 43000, 45000, 47000, 50000, 53000, 55000, 57000, 59000, 37000]);
+  assert.deepEqual(requests[2].assembledArtifact, metadata);
+  assert.ok(extracts.slice(0, 18).every(value => value.path !== assembled.path && value.maxAtMs === undefined));
+  assert.ok(extracts.slice(18).every(value => value.path === assembled.path && value.maxAtMs === 60000));
+  assert.equal(result.sampling, 'assembled-ending-and-retained-scene-evidence');
+});
+
+test('an assembled-ending review requires final bytes metadata and rejects a proof for another artifact', async () => {
+  const f = await fixture();
+  f.job.assembledVisualReviewRecovery = { policy: 'assembled-ending-review-v6', shotId: f.job.manifest.shots[0].id };
+  f.job.manifest.shots[0].startMs = 0;
+  const assembled = { path: 'completed-film.mp4', sha256: digest('fictional film'), sizeBytes: 1024, durationSeconds: 30 };
+  const noRead = createFilmVisualReviewer({ extract: () => assert.fail('Missing final artifact cannot be sampled') });
+  for (const change of [undefined, { ...assembled, sha256: 'invalid' }, { ...assembled, sizeBytes: 0 }, { ...assembled, durationSeconds: 31.1 }])
+    await assert.rejects(noRead({ ...f.input, assembled: change }), failureReason('VISUAL_REVIEW_REQUIRED'));
+  const mismatch = createFilmVisualReviewer({ extract: async () => f.image,
+    review: async input => ({ ...f.proof(input.shotId), reviewVersion: 6,
+      assembledArtifact: { ...input.assembledArtifact, sha256: digest('another film') } }) });
+  await assert.rejects(mismatch({ ...f.input, assembled }), failureReason('VISUAL_REVIEW_REQUIRED'));
 });
 
 test('lost worker ownership before extraction or after model review prevents a passing report', async () => {

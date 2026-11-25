@@ -5,7 +5,7 @@ import { productionPhotoData } from './production-photo-reference.mjs';
 import { falReferenceData } from './fal-reference.mjs';
 import { falRequestPath, FAL_MODELS } from './fal-client.mjs';
 import { resolveReferenceChoice } from './fal-reference-choice.mjs';
-import { parsedAssemblyOverlays } from './film-overlays.mjs';
+import { parsedAssemblyOverlays, FILM_DISCLOSURE } from './film-overlays.mjs';
 import { validateFilmTextCorrections } from './film-text-correction.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -22,6 +22,7 @@ export const visualSampleTimes = shot => [.15, .5, .85].map(fraction => Math.rou
 export const VISUAL_EVIDENCE_POLICY = 'expanded-visual-evidence-v3';
 export const VISUAL_EDITORIAL_POLICY = 'visual-editorial-recovery-v4';
 export const VISUAL_FINAL_EDITORIAL_POLICY = 'final-scene-editorial-recovery-v5';
+export const ASSEMBLED_REVIEW_POLICY = 'assembled-ending-review-v6';
 const evidenceTarget = (job, shot) => job.visualEvidenceRecovery?.shotId === shot.id;
 export const visualReviewSampleTimes = (job, shot) => job.visualEditorialRecovery || evidenceTarget(job, shot)
   ? [.05, .15, .25, .35, .5, .65, .75, .85, .95].map(fraction => Math.round(shot.targetDurationMs * fraction))
@@ -157,15 +158,53 @@ export function validatePriorEditorialReceipt(job, receipt) {
   requireValue(digest(JSON.stringify(editorialBinding(job, recoveryBinding(job, original, shot), shot, binding.frameHashes, times))) === receipt.bindingHash);
   return { index, shot, decision: verifiedStageVisualDecision(receipt.decision, count, true) };
 }
-export function visualReviewBinding(job, shotId, frames) {
+export function validatePriorFinalEditorialReceipt(job, receipt) {
+  const index = job.manifest.shots.findIndex(shot => shot.id === receipt?.binding?.shotId), shot = job.manifest.shots[index];
+  const previous = index > 0 && job.manifest.shots[index - 1].sceneIndex === shot?.sceneIndex;
+  const binding = receipt?.binding, count = previous ? 10 : 9;
+  requireValue(shot && index === job.manifest.shots.length - 1 && receipt.version === 5 && receipt.state === 'reviewed' && receipt.attempts === 1
+    && acceptsVisualReceiptModel(job, receipt.model) && receipt.bindingHash === digest(JSON.stringify(binding))
+    && Array.isArray(binding.frameHashes) && binding.frameHashes.length === count && binding.frameHashes.every(value => HASH.test(value || '')));
+  const original = { version: 1, manifestHash: job.manifestHash, shotId: shot.id,
+    outputHash: digest(JSON.stringify(job.shots[index].output)),
+    precedingOutputHash: previous ? digest(JSON.stringify(job.shots[index - 1].output)) : null,
+    frameHashes: [binding.frameHashes[1], binding.frameHashes[4], binding.frameHashes[7], ...(previous ? [binding.frameHashes[9]] : [])] };
+  const times = [...visualReviewSampleTimes(job, shot), ...(previous ? [visualSampleTimes(job.manifest.shots[index - 1])[2]] : [])];
+  const prior = editorialBinding(job, recoveryBinding(job, original, shot), shot, binding.frameHashes, times);
+  requireValue(digest(JSON.stringify(finalEditorialBinding(job, prior, shot))) === receipt.bindingHash);
+  return { index, shot, decision: verifiedStageVisualDecision(receipt.decision, count, true) };
+}
+export function validatedAssembledArtifact(job, artifact) {
+  requireValue(artifact && Object.keys(artifact).sort().join(',') === 'durationSeconds,sha256,sizeBytes'
+    && HASH.test(artifact.sha256 || '') && Number.isSafeInteger(artifact.sizeBytes) && artifact.sizeBytes >= 16
+    && artifact.sizeBytes <= 250 * 1024 * 1024 && Number.isFinite(artifact.durationSeconds)
+    && artifact.durationSeconds > 0 && Math.abs(artifact.durationSeconds - job.manifest.targetDurationSeconds) <= 1);
+  return { sha256: artifact.sha256, sizeBytes: artifact.sizeBytes, durationSeconds: artifact.durationSeconds };
+}
+function assembledBinding(job, shot, previous, hashes, times, artifact) {
+  const grant = job.assembledVisualReviewRecovery, index = job.manifest.shots.findIndex(value => value.id === shot.id);
+  requireValue(grant?.version === 1 && grant.policy === ASSEMBLED_REVIEW_POLICY && grant.shotId === shot.id
+    && grant.ownerHash === job.ownerHash && grant.preparedId === job.id && grant.manifestHash === job.manifestHash
+    && grant.recoveryGrantHash === digest(JSON.stringify(job.visualFinalEditorialRecovery))
+    && HASH.test(grant.priorBindingHash || '') && HASH.test(grant.priorReceiptHash || ''));
+  return { version: 6, policy: ASSEMBLED_REVIEW_POLICY, manifestHash: job.manifestHash, shotId: shot.id,
+    outputHash: digest(JSON.stringify(job.shots[index].output)),
+    precedingOutputHash: previous ? digest(JSON.stringify(job.shots[index - 1].output)) : null,
+    grantHash: digest(JSON.stringify(grant)), priorBindingHash: grant.priorBindingHash, priorReceiptHash: grant.priorReceiptHash,
+    frameHashes: hashes, sampleTimes: times, assembledArtifact: validatedAssembledArtifact(job, artifact),
+    assembledContextHash: digest(JSON.stringify(assembledSceneContext(job, shot))) };
+}
+export function visualReviewBinding(job, shotId, frames, assembledArtifact) {
   requireValue(job?.manifest?.visualContinuity?.version === 1 && HASH.test(job.manifestHash || '')
     && digest(JSON.stringify(job.manifest)) === job.manifestHash);
   const index = job.manifest.shots.findIndex(shot => shot.id === shotId), shot = job.manifest.shots[index];
   const stored = job.shots?.[index];
   requireValue(shot && stored?.id === shot.id && stored.status === 'completed' && stored.output);
   const previous = index > 0 && job.manifest.shots[index - 1].sceneIndex === shot.sceneIndex ? job.manifest.shots[index - 1] : null;
-  const expected = [...visualReviewSampleTimes(job, shot).map(atMs => ({ shotId, atMs })),
-    ...(previous ? [{ shotId: previous.id, atMs: visualSampleTimes(previous)[2] }] : [])];
+  const assembled = job.assembledVisualReviewRecovery?.shotId === shotId;
+  requireValue(assembled === Boolean(assembledArtifact));
+  const expected = [...visualReviewSampleTimes(job, shot).map(atMs => ({ shotId, atMs: atMs + (assembled ? shot.startMs : 0) })),
+    ...(previous ? [{ shotId: previous.id, atMs: visualSampleTimes(previous)[2] + (assembled ? previous.startMs : 0) }] : [])];
   requireValue(Array.isArray(frames) && frames.length === expected.length);
   const hashes = frames.map((frame, i) => {
     requireValue(frame && Object.keys(frame).sort().join(',') === 'atMs,dataUrl,shotId'
@@ -176,6 +215,10 @@ export function visualReviewBinding(job, shotId, frames) {
     requireValue(bytes.length >= 100 && bytes.length <= 250_000);
     return digest(bytes);
   });
+  if (assembled) {
+    const binding = assembledBinding(job, shot, previous, hashes, expected.map(row => row.atMs), assembledArtifact);
+    return { binding, bindingHash: digest(JSON.stringify(binding)), shot, previous, originalBinding: null };
+  }
   const originalHashes = job.visualEditorialRecovery || evidenceTarget(job, shot) ? [hashes[1], hashes[4], hashes[7], ...(previous ? [hashes[9]] : [])] : hashes;
   const originalBinding = { version: 1, manifestHash: job.manifestHash, shotId,
     outputHash: digest(JSON.stringify(stored.output)),
@@ -194,9 +237,10 @@ function stageBindingClaim(job, shotId, bindingHash) {
   requireValue(job.visualReviewRecovery && HASH.test(bindingHash || '') && job.shots.some(shot => shot.id === shotId));
   const evidence = job.visualEvidenceRecovery?.shotId === shotId;
   const finalEditorial = job.visualFinalEditorialRecovery?.shotId === shotId;
-  const policy = finalEditorial ? VISUAL_FINAL_EDITORIAL_POLICY : job.visualEditorialRecovery ? VISUAL_EDITORIAL_POLICY : evidence ? VISUAL_EVIDENCE_POLICY : STAGE_VISUAL_REVIEW_POLICY;
+  const assembled = job.assembledVisualReviewRecovery?.shotId === shotId;
+  const policy = assembled ? ASSEMBLED_REVIEW_POLICY : finalEditorial ? VISUAL_FINAL_EDITORIAL_POLICY : job.visualEditorialRecovery ? VISUAL_EDITORIAL_POLICY : evidence ? VISUAL_EVIDENCE_POLICY : STAGE_VISUAL_REVIEW_POLICY;
   return { path: `production/visual-review-bindings/${job.ownerHash}/${job.id}/${policy}/${digest(shotId)}.json`,
-    value: { version: 1, policy, grantHash: digest(JSON.stringify(finalEditorial ? job.visualFinalEditorialRecovery : job.visualEditorialRecovery || (evidence ? job.visualEvidenceRecovery : job.visualReviewRecovery))),
+    value: { version: 1, policy, grantHash: digest(JSON.stringify(assembled ? job.assembledVisualReviewRecovery : finalEditorial ? job.visualFinalEditorialRecovery : job.visualEditorialRecovery || (evidence ? job.visualEvidenceRecovery : job.visualReviewRecovery))),
       manifestHash: job.manifestHash, shotId, bindingHash } };
 }
 async function verifyStageBindingClaim(job, shotId, bindingHash, read) {
@@ -289,6 +333,14 @@ export function finalEditorialSceneContext(job, shot) {
     && typeof grant.originalAction === 'string' && stage.visual.split(grant.originalAction).length === 2);
   return { ...stage, visual: stage.visual.replace(grant.originalAction, grant.revisedAction), editorialRevision: finalEditorialRevision(job, shot) };
 }
+export function assembledSceneContext(job, shot) {
+  const scene = finalEditorialSceneContext(job, shot), endMs = shot.startMs + shot.targetDurationMs;
+  return { ...scene, reviewStage: 'assembled-film', shotStartMs: shot.startMs,
+    assemblyOverlays: scene.assemblyOverlays.map(overlay => ({ ...overlay,
+      startMs: overlay.style === 'EndCard' ? Math.max(shot.startMs, endMs - 4000) : shot.startMs, endMs })),
+    ...(job.manifest.factuality === 'based-on-a-true-story' ? { renderedDisclosure: { text: FILM_DISCLOSURE, startMs: shot.startMs, endMs } } : {}) };
+}
+const assembledInstructions = 'These samples come from the FINAL ASSEMBLED FILM, after all application overlays and approved text corrections have been rendered. Evaluate physical scene, action, cast, wardrobe and image integrity against the effective scene.visual. The exact texts in assemblyOverlays and renderedDisclosure MUST now be visible and correctly spelled in samples inside their global startMs/endMs interval. Do not excuse missing or misspelled final text as pending assembly. AppliedTextCorrections use clip-local intervals; add shotStartMs to compare them with global sample timestamps. Check their spelling, legibility and placement in the relevant samples. The approved editorialRevision changes only its recorded action; all other requirements remain. For every dimension provide a concise visible observation tied to a supplied sampleIndex. Report mismatch for visible contradictions and unverifiable for materially inadequate evidence. No instruction here requires a pass.';
 const stageInstructions = 'These samples are provider clips before final assembly, with any scene.appliedTextCorrections already applied. Evaluate the physical scene, action, setting, cast, wardrobe and image integrity against scene.visual. The exact text listed in scene.assemblyOverlays is added later by the application; its absence in these frames is expected and is not a scene mismatch. In contrast, scene.appliedTextCorrections is already visible within each listed rectangle and clip-local startMs/endMs: check its exact spelling, punctuation, legibility, placement and whether it obscures required scene action. Wrong or missing corrected text within that interval is not waived. Do not waive any other saved visual direction or invent an overlay for text not in those lists. Scene titles, narration and historical context describe the story; do not require spoken biographical facts to be literally visible. Do not infer that a brief action never occurs between the supplied frames: report unverifiable when the samples cannot establish it, and mismatch only for a visible contradiction. For every dimension provide a concise visible observation tied to a supplied zero-based sampleIndex, including uncertainty where appropriate. Report what the sample shows, not hidden reasoning or an explanation of a prior decision. No instruction here requires a pass.';
 const readRecovery = async (job, read) => {
   const { readVisualReviewRecovery } = await import('./film-visual-review-recovery.mjs');
@@ -306,22 +358,32 @@ const readFinalEditorial = async (job, read) => {
   const { readVisualFinalEditorialRecovery } = await import('./film-visual-final-editorial-recovery.mjs');
   return readVisualFinalEditorialRecovery(job, { read });
 };
+const readAssembled = async (job, read) => {
+  const { readAssembledReviewRecovery } = await import('./film-assembled-review-recovery.mjs');
+  return readAssembledReviewRecovery(job, { read });
+};
+async function validateRecoveryPhase(job, read, checks) {
+  // One immutable/current record is fetched once within this phase. Every call
+  // creates a fresh cache: approval, pre-claim and post-inference never share it.
+  const pending = new Map();
+  const phaseRead = path => { if (!pending.has(path)) pending.set(path, Promise.resolve().then(() => read(path))); return pending.get(path); };
+  await Promise.all(checks.map(async ([lookup, marker]) => requireValue(Boolean(await lookup(job, phaseRead)) === Boolean(job[marker]))));
+}
 
 export function createFilmVisualReviewService({ read = readRecord, write = writeRecord, fetchImpl = fetch,
   key = () => process.env.OPENAI_API_KEY, now = Date.now, selectedPhoto = productionPhotoData,
   generatedPhoto = falReferenceData, authorize = async () => false, recoveryFor = readRecovery, evidenceFor = readEvidence,
-  editorialFor = readEditorial, finalEditorialFor = readFinalEditorial } = {}) {
+  editorialFor = readEditorial, finalEditorialFor = readFinalEditorial, assembledFor = readAssembled } = {}) {
   return async input => {
-    const { email, id, job, shotId, frames } = input;
+    const { email, id, job, shotId, frames, assembledArtifact } = input;
+    const validateRecoveries = () => validateRecoveryPhase(job, read, [[recoveryFor, 'visualReviewRecovery'], [evidenceFor, 'visualEvidenceRecovery'],
+      [editorialFor, 'visualEditorialRecovery'], [finalEditorialFor, 'visualFinalEditorialRecovery'], [assembledFor, 'assembledVisualReviewRecovery']]);
     requireValue(job.ownerHash === digest(email) && job.id === id
       && job.provider?.model === (seedancePlan(job.manifest) ? 'seedance' : 'kling'));
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
-    requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
-    requireValue(Boolean(await evidenceFor(job, read)) === Boolean(job.visualEvidenceRecovery));
-    requireValue(Boolean(await editorialFor(job, read)) === Boolean(job.visualEditorialRecovery));
-    requireValue(Boolean(await finalEditorialFor(job, read)) === Boolean(job.visualFinalEditorialRecovery));
-    const { binding, bindingHash, shot, originalBinding } = visualReviewBinding(job, shotId, frames);
-    const finalEditorial = binding.version === 5, editorial = binding.version >= 4, evidence = binding.version >= 3, stageAware = binding.version >= 2;
+    await validateRecoveries();
+    const { binding, bindingHash, shot, originalBinding } = visualReviewBinding(job, shotId, frames, assembledArtifact);
+    const assembled = binding.version === 6, finalEditorial = binding.version >= 5, editorial = binding.version >= 4, evidence = binding.version >= 3, stageAware = binding.version >= 2;
     const checkCast = reviewsCast(job.manifest);
     const path = visualReceiptPath(job.ownerHash, id, bindingHash);
     const old = await read(path);
@@ -331,11 +393,12 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
         && value.bindingHash === bindingHash && digest(JSON.stringify(value.binding)) === bindingHash);
       const { passed } = stageAware ? verifiedStageVisualDecision(value.decision, frames.length, evidence) : verifiedVisualDecision(value.decision, checkCast);
       return { version: 1, ...(stageAware ? { reviewVersion: binding.version } : {}), bindingHash, manifestHash: job.manifestHash, shotId, passed, receiptPath: path,
+        ...(assembled ? { assembledArtifact: binding.assembledArtifact } : {}),
         ...(finalEditorial ? { editorialRevision: finalEditorialRevision(job, shot) }
           : editorial && editorialRevision(job, shot) ? { editorialRevision: editorialRevision(job, shot) } : {}),
         ...(!passed ? { failureReason: visualDecisionFailure(value.decision) } : {}) };
     };
-    if (stageAware) {
+    if (stageAware && !assembled) {
       const originalHash = digest(JSON.stringify(originalBinding)), originalPath = visualReceiptPath(job.ownerHash, id, originalHash);
       const original = (await read(originalPath))?.value;
       if (shotId === job.visualReviewRecovery.shotId) requireValue(original?.version === 1 && original.state === 'reviewed'
@@ -367,15 +430,12 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     ]).finally(() => clearTimeout(referenceTimer));
     const content = [{ type: 'input_text', text: JSON.stringify({ era: job.manifest.era,
       characters: seedancePlan(job.manifest) ? visualReferenceContext(job, shot) : job.manifest.screenplay.characters.filter(c => shot.characterIds.includes(c.id)).map(c => ({ id: c.id, description: c.description })),
-      scene: finalEditorial ? finalEditorialSceneContext(job, shot) : editorial ? editorialSceneContext(job, shot) : stageAware ? stageVisualSceneContext(job, shot) : checkCast ? visualSceneContext(job, shot) : { sceneIndex: shot.sceneIndex, visual: shot.visual, dramatization: shot.dramatization } }) }];
+      scene: assembled ? assembledSceneContext(job, shot) : finalEditorial ? finalEditorialSceneContext(job, shot) : editorial ? editorialSceneContext(job, shot) : stageAware ? stageVisualSceneContext(job, shot) : checkCast ? visualSceneContext(job, shot) : { sceneIndex: shot.sceneIndex, visual: shot.visual, dramatization: shot.dramatization } }) }];
     for (const ref of refs) content.push({ type: 'input_text', text: `Approved reference ${ref.id}` }, { type: 'input_image', image_url: ref.dataUrl, detail: 'high' });
     for (const [sampleIndex, frame] of frames.entries()) content.push({ type: 'input_text', text: `${stageAware ? `Sample ${sampleIndex}: ` : ''}${frame.shotId === shotId ? 'Current' : 'Preceding same-scene'} cut ${frame.shotId}, sample ${frame.atMs}ms` },
       { type: 'input_image', image_url: await imageData(frame.dataUrl), detail: 'high' });
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
-    requireValue(Boolean(await recoveryFor(job, read)) === stageAware);
-    requireValue(Boolean(await evidenceFor(job, read)) === Boolean(job.visualEvidenceRecovery));
-    requireValue(Boolean(await editorialFor(job, read)) === Boolean(job.visualEditorialRecovery));
-    requireValue(Boolean(await finalEditorialFor(job, read)) === Boolean(job.visualFinalEditorialRecovery));
+    await validateRecoveries();
     if (stageAware) {
       // The allowance is per clip, not per JPEG encoding. Freeze the first
       // exact frame binding before inference; a different binding cannot buy
@@ -399,7 +459,7 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
       const response = await fetchImpl('https://api.openai.com/v1/responses', { method: 'POST', redirect: 'error',
         headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(100_000),
         body: JSON.stringify({ model: VISUAL_REVIEW_MODEL, store: false, reasoning: { effort: 'low' }, max_output_tokens: 1800,
-          instructions: instructions + (seedancePlan(job.manifest) ? ' For characters without an approved photo, compare the saved description, wardrobe direction and consistency across samples. Do not assume an unseen photographic likeness.' : '') + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : '') + (stageAware ? ' ' + stageInstructions : '')
+          instructions: instructions + (seedancePlan(job.manifest) ? ' For characters without an approved photo, compare the saved description, wardrobe direction and consistency across samples. Do not assume an unseen photographic likeness.' : '') + (checkCast ? ' ' + CAST_REVIEW_DIRECTION : '') + (assembled ? ' ' + assembledInstructions : stageAware ? ' ' + stageInstructions : '')
             + (seedancePlan(job.manifest) ? ' The authoritative appearanceReference field states which evidence was actually supplied. When it is description-and-cross-frame-consistency, no portrait was supplied: evaluate visible consistency across these samples and the descriptive traits. A creative description referring to a supplied or labeled portrait does not create that missing reference, and photographic likeness is not being verified. Do not fail solely because that absent portrait cannot be compared. All physical scene, cast, wardrobe, image integrity and action requirements still apply; retain unverifiable or mismatch when the samples do not establish them.' : '')
             + (editorial ? ' When an editorialRevision is present, it is an approved change to the requested scene action. Evaluate the effective scene.visual, which contains that revised action, rather than requiring the superseded originalAction in the audit record. This is a changed editorial requirement, not evidence the original micro-action occurred. It does not waive any other action, cast, appearance, clothing or image-integrity requirement, and it never requires a pass.' : ''), input: [{ role: 'user', content }], text: { format: { type: 'json_schema', name: 'film_visual_review', strict: true, schema: evidence ? evidenceVisualReviewSchema : stageAware ? stageVisualReviewSchema : checkCast ? castVisualReviewSchema : visualReviewSchema } } }) });
       if (!response.ok) {
@@ -422,10 +482,7 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
     try { decision = JSON.parse(raw); if (stageAware) verifiedStageVisualDecision(decision, frames.length, evidence); else verifiedVisualDecision(decision, checkCast); }
     catch { throw failure('VISUAL_REVIEW_UNCERTAIN'); }
     if (!await authorize(input)) throw failure('VISUAL_REVIEW_AUTH_REQUIRED');
-    requireValue(Boolean(await recoveryFor(job, read)) === stageAware);
-    requireValue(Boolean(await evidenceFor(job, read)) === Boolean(job.visualEvidenceRecovery));
-    requireValue(Boolean(await editorialFor(job, read)) === Boolean(job.visualEditorialRecovery));
-    requireValue(Boolean(await finalEditorialFor(job, read)) === Boolean(job.visualFinalEditorialRecovery));
+    await validateRecoveries();
     if (stageAware) await verifyStageBindingClaim(job, shotId, bindingHash, read);
     const value = { ...claim.value, state: 'reviewed', decision, reviewedAt: new Date(now()).toISOString() };
     try { await write(path, value, claim.etag); }
@@ -434,28 +491,31 @@ export function createFilmVisualReviewService({ read = readRecord, write = write
   };
 }
 
-export async function verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review }, { read = readRecord, recoveryFor = readRecovery,
-  evidenceFor = readEvidence, editorialFor = readEditorial, finalEditorialFor = readFinalEditorial } = {}) {
+export async function verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review, artifact }, { read = readRecord, recoveryFor = readRecovery,
+  evidenceFor = readEvidence, editorialFor = readEditorial, finalEditorialFor = readFinalEditorial, assembledFor = readAssembled } = {}) {
   if (!manifest.visualContinuity) return;
   requireValue(review?.version === 1 && review.manifestHash === manifestHash && review.passed === true
     && Array.isArray(review.shots) && review.shots.length === manifest.shots.length);
   const job = (await read(`production/jobs/${digest(email)}/${id}.json`))?.value;
   requireValue(job?.manifestHash === manifestHash && digest(JSON.stringify(job.manifest)) === manifestHash
     && job.ownerHash === digest(email) && job.shots?.length === manifest.shots.length);
-  requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
-  requireValue(Boolean(await evidenceFor(job, read)) === Boolean(job.visualEvidenceRecovery));
-  requireValue(Boolean(await editorialFor(job, read)) === Boolean(job.visualEditorialRecovery));
-  requireValue(Boolean(await finalEditorialFor(job, read)) === Boolean(job.visualFinalEditorialRecovery));
+  const validateRecoveries = () => validateRecoveryPhase(job, read, [[recoveryFor, 'visualReviewRecovery'], [evidenceFor, 'visualEvidenceRecovery'],
+    [editorialFor, 'visualEditorialRecovery'], [finalEditorialFor, 'visualFinalEditorialRecovery'], [assembledFor, 'assembledVisualReviewRecovery']]);
+  await validateRecoveries();
+  const assembledArtifact = job.assembledVisualReviewRecovery ? validatedAssembledArtifact(job,
+    { sha256: artifact?.sha256, sizeBytes: artifact?.sizeBytes, durationSeconds: artifact?.durationSeconds }) : undefined;
   for (const [index, shot] of manifest.shots.entries()) {
     const proof = review.shots[index];
     requireValue(proof.shotId === shot.id && proof.passed === true && proof.manifestHash === manifestHash
       && proof.receiptPath === visualReceiptPath(digest(email), id, proof.bindingHash));
     const stored = (await read(proof.receiptPath))?.value;
-    const finalEditorial = stored?.version === 5, editorial = [4, 5].includes(stored?.version), evidence = [3, 4, 5].includes(stored?.version), stageAware = [2, 3, 4, 5].includes(stored?.version);
+    const assembled = stored?.version === 6, finalEditorial = [5, 6].includes(stored?.version), editorial = [4, 5, 6].includes(stored?.version), evidence = [3, 4, 5, 6].includes(stored?.version), stageAware = [2, 3, 4, 5, 6].includes(stored?.version);
     const previous = index > 0 && manifest.shots[index - 1].sceneIndex === shot.sceneIndex;
     const frameCount = evidence ? (previous ? 10 : 9) : previous ? 4 : 3;
     requireValue((stageAware || stored?.version === 1) && stored.binding?.version === stored.version
       && editorial === Boolean(job.visualEditorialRecovery)
+      && assembled === (job.assembledVisualReviewRecovery?.shotId === shot.id)
+      && JSON.stringify(proof.assembledArtifact) === JSON.stringify(assembled ? assembledArtifact : undefined)
       && finalEditorial === (job.visualFinalEditorialRecovery?.shotId === shot.id)
       && evidence === Boolean(job.visualEditorialRecovery || evidenceTarget(job, shot))
       && JSON.stringify(proof.editorialRevision) === JSON.stringify(finalEditorial ? finalEditorialRevision(job, shot) : editorial ? editorialRevision(job, shot) : undefined)
@@ -474,6 +534,14 @@ export async function verifyFilmVisualReceipts({ email, id, manifestHash, manife
       await verifyStageBindingClaim(job, shot.id, proof.bindingHash, read);
       requireValue(Array.isArray(stored.binding.frameHashes) && stored.binding.frameHashes.length === frameCount
         && stored.binding.frameHashes.every(value => HASH.test(value || '')));
+      if (assembled) {
+        const preceding = previous ? manifest.shots[index - 1] : null;
+        const times = [...visualReviewSampleTimes(job, shot).map(time => time + shot.startMs),
+          ...(preceding ? [preceding.startMs + visualSampleTimes(preceding)[2]] : [])];
+        const expected = assembledBinding(job, shot, preceding, stored.binding.frameHashes, times, assembledArtifact);
+        requireValue(digest(JSON.stringify(expected)) === proof.bindingHash);
+        continue;
+      }
       const original = { version: 1, manifestHash, shotId: shot.id, outputHash: stored.binding.outputHash,
         precedingOutputHash: stored.binding.precedingOutputHash, frameHashes: evidence
           ? [stored.binding.frameHashes[1], stored.binding.frameHashes[4], stored.binding.frameHashes[7], ...(previous ? [stored.binding.frameHashes[9]] : [])]
@@ -486,8 +554,5 @@ export async function verifyFilmVisualReceipts({ email, id, manifestHash, manife
       requireValue(digest(JSON.stringify(expected)) === proof.bindingHash);
     }
   }
-  requireValue(Boolean(await recoveryFor(job, read)) === Boolean(job.visualReviewRecovery));
-  requireValue(Boolean(await evidenceFor(job, read)) === Boolean(job.visualEvidenceRecovery));
-  requireValue(Boolean(await editorialFor(job, read)) === Boolean(job.visualEditorialRecovery));
-  requireValue(Boolean(await finalEditorialFor(job, read)) === Boolean(job.visualFinalEditorialRecovery));
+  await validateRecoveries();
 }
