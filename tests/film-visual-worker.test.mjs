@@ -127,6 +127,25 @@ test('insufficient evidence stays a distinct attention diagnostic and cannot pro
   await assert.rejects(mismatch(f.input), failureReason('VISUAL_CONTINUITY_MISMATCH'));
 });
 
+test('editorial recovery samples every retained cut densely and preserves the explicit revision only on its target proof', async () => {
+  const f = await fixture(), requests = [];
+  f.job.visualEvidenceRecovery = { version: 1, policy: 'expanded-visual-evidence-v3', shotId: f.job.manifest.shots[0].id };
+  f.job.visualEditorialRecovery = { version: 1, policy: 'visual-editorial-recovery-v4', shotId: f.job.manifest.shots[0].id };
+  const editorialRevision = { version: 1, shotId: f.job.manifest.shots[0].id,
+    originalAction: 'At the last letter she lifts her finger; they exchange a smile.',
+    revisedAction: 'After the writing, they exchange a smile.', effectiveVisual: 'A fictional writer finishes writing and smiles.',
+    grantHash: digest('fictional editorial grant') };
+  const reviewer = createFilmVisualReviewer({ extract: async () => f.image,
+    review: async input => { requests.push(input); return { ...f.proof(input.shotId),
+      ...(input.shotId === editorialRevision.shotId ? { editorialRevision } : {}) }; } });
+  const result = await reviewer(f.input);
+  assert.deepEqual(requests.map(request => request.frames.length), [9, 10, 9]);
+  assert.deepEqual(requests[1].frames[9], requests[0].frames[7]);
+  assert.deepEqual(result.shots[0].editorialRevision, editorialRevision);
+  assert.ok(result.shots.slice(1).every(proof => !Object.hasOwn(proof, 'editorialRevision')));
+  assert.equal(result.sampling, 'editorial-expanded-evidence-and-same-scene-boundary');
+});
+
 test('lost worker ownership before extraction or after model review prevents a passing report', async () => {
   const f = await fixture();
   const initial = createFilmVisualReviewer({ extract: () => assert.fail('No extraction without lease'), review: () => assert.fail('No inference without lease') });

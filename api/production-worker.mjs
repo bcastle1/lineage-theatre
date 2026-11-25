@@ -16,6 +16,7 @@ import { authorizeFilmProduction, createFilmPreRenderService, readPreRenderGrant
 import { createVisualReviewRecovery, createPreclaimVisualReviewResume } from './_lib/film-visual-review-recovery.mjs';
 import { createRecordValidationSnapshot } from './_lib/record-validation-snapshot.mjs';
 import { createVisualEvidenceRecovery } from './_lib/film-visual-evidence-recovery.mjs';
+import { createVisualEditorialRecovery } from './_lib/film-visual-editorial-recovery.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -24,6 +25,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
   adapter = falProductionAdapter, read = readRecord, limiter = limitAction, now = Date.now, delivery = falReviewedDelivery,
   visualReviewFactory = createFilmVisualReviewService,
   visualEvidenceRecoveryFactory = createVisualEvidenceRecovery,
+  visualEditorialRecoveryFactory = createVisualEditorialRecovery,
   startFrameReviewFactory = createStartFrameReviewService,
   preRenderService = createFilmPreRenderService({ read, now, env }), list = listBlobs } = {}) {
   return async (req, res) => {
@@ -41,6 +43,42 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         && !(body?.action === 'review-film-visuals' && body.workerProtocol === 2
           && Array.isArray(body.frames) && body.frames.length > 4 && body.frames.length <= 10))
         return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+      if (body?.action === 'authorize-visual-editorial-recovery') {
+        const plan = body.recoveryPlan;
+        if (Object.keys(body).sort().join(',') !== 'action,recoveryPlan,workerProtocol' || body.workerProtocol !== 2
+          || !plan || typeof plan !== 'object' || Array.isArray(plan)
+          || Object.keys(plan).sort().join(',') !== 'email,id,jobHash,manifestHash,originalAction,priorBindingHash,priorReceiptHash,queueHash,revisedAction'
+          || typeof plan.email !== 'string' || plan.email.length > 254 || plan.email !== plan.email.trim().toLowerCase()
+          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(plan.email)
+          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(plan.id || '')
+          || ![plan.originalAction, plan.revisedAction].every(value => typeof value === 'string' && value.trim() && value.length <= 1000 && !/[\x00-\x1f\x7f]/.test(value))
+          || plan.originalAction === plan.revisedAction
+          || ![plan.manifestHash, plan.priorBindingHash, plan.priorReceiptHash, plan.jobHash, plan.queueHash]
+            .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)))
+          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (!await limiter('production-worker:visual-editorial-recovery', 10, 60_000))
+          return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
+        const reject = () => { throw Object.assign(Error('The stopped editorial review requires verification.'), { code: 'VISUAL_REVIEW_AUTH_REQUIRED' }); };
+        // Authorization is a read-only check of the exact recovery plan. Only
+        // the separately applied operator command may release its queue.
+        const snapshot = createRecordValidationSnapshot({ read, listBlobs: list, now });
+        const inspect = visualEditorialRecoveryFactory({ read: snapshot.read, listBlobs: snapshot.listBlobs, now, write: reject, authorize: reject });
+        if ((await inspect(plan)).status !== 'planned') return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const ticketPath = productionQueuePath(plan.email, plan.id), jobPath = productionJobPath(plan.email, plan.id);
+        const [ticket, job] = await Promise.all([snapshot.read(ticketPath), snapshot.read(jobPath)]);
+        const orderId = ticket?.value?.orderId;
+        if (ticket?.value?.state !== 'attention' || ticket.value.lease?.expiresAt > now()
+          || !/^[a-f0-9]{64}$/.test(orderId || '') || digest(JSON.stringify(ticket.value)) !== plan.queueHash
+          || job?.value?.provider?.recipe !== SEEDANCE_RECIPE_VERSION
+          || job.value.manifest.productionPlan.version !== 1) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const permission = await paymentService.authorizeProduction({ email: plan.email, preparedId: plan.id,
+          manifestHash: plan.manifestHash, orderId });
+        if (permission?.allowed !== true || permission.environment !== 'production' || permission.manifestHash !== plan.manifestHash
+          || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now())
+          return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        await snapshot.recheck({ expiresAt: permission.expiresAt });
+        return json(res, 200, { ...permission, recoveryRequestHash: digest(JSON.stringify(plan)) });
+      }
       if (body?.action === 'authorize-visual-evidence-recovery') {
         const plan = body.recoveryPlan;
         if (Object.keys(body).sort().join(',') !== 'action,recoveryPlan,workerProtocol' || body.workerProtocol !== 2
@@ -169,8 +207,9 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         const path = productionJobPath(body.email, body.preparedId), job = (await read(path))?.value;
         if (!startFrame && body.frames.length > 4
-          && (!protocol || job?.visualEvidenceRecovery?.policy !== 'expanded-visual-evidence-v3'
-            || job.visualEvidenceRecovery.shotId !== body.shotId))
+          && (!protocol || !(job?.visualEditorialRecovery?.policy === 'visual-editorial-recovery-v4'
+            || job?.visualEvidenceRecovery?.policy === 'expanded-visual-evidence-v3'
+              && job.visualEvidenceRecovery.shotId === body.shotId)))
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         let paymentPermission = null, pinnedLease = null, pinnedGrant = null, pinnedReviewClaim = null;
         const authorize = async () => {
