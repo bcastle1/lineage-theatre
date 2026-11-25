@@ -1,6 +1,7 @@
 // The assembler and pre-assembly reviewer share this bounded interpretation
 // of saved graphics. Unrecognized prose remains scene direction. Offsets are
 // UTF-16 string.slice indexes, with an exclusive end; text is never inferred.
+export const FILM_DISCLOSURE = 'Based on a true story. Some scenes, dialogue and supporting characters are dramatized.';
 export function parsedAssemblyOverlays(visual) {
   if (typeof visual !== 'string' || visual.length > 20_000) return [];
   const labels = /\b(opening title|title over action|small location title|location title|on-screen text|title card|end card|smaller caption|caption|title|overlay identifies examples from (?:his|her|their) career)(?:\s*:\s*|\s+(?=["“]))/gi;

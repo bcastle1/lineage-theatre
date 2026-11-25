@@ -99,7 +99,7 @@ export async function verifyPublishedFilm({ email, id, manifestHash, artifact, m
   }
   const bytes = await boundedBytes(stored.stream, artifact.sizeBytes);
   if (sha256(bytes) !== artifact.sha256) throw finishingError("The private film checksum does not match.", "STORED_CHECKSUM_MISMATCH");
-  await verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review: artifact.visualReview }, { read });
+  await verifyFilmVisualReceipts({ email, id, manifestHash, manifest, review: artifact.visualReview, artifact }, { read });
   return { ...artifact, playable: true };
   } catch (error) { throw markFinishingFailure(error, 'stored-verification'); }
 }
@@ -152,19 +152,43 @@ export function createWorkerAssembly({ adapter = unavailableMagicLightAdapter, f
         if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
         if (!await recoveryFor(job, { read })) throw finishingError('The text correction recovery changed.', 'VISUAL_REVIEW_REQUIRED');
       }
-      const visualReview = job.manifest.visualContinuity
-        ? await reviewVisuals({ email, id, job, clips: workingClips, work, ffmpeg, stillOwned }) : null;
-      if (job.manifest.visualContinuity && visualReview?.passed !== true)
-        throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
-      stage = 'assembly';
-      const report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips: workingClips, outputPath, ffmpeg, technicalSample: false });
-      verifiedMediaProfile(report);
-      const bytes = await readFile(outputPath);
-      if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
-        || report.manifestHash !== job.manifestHash || !Number.isFinite(report.durationSeconds)
-        || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
-        || seedance && !checkedSeedanceAudio(report)
-        || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false) throw finishingError("Assembly verification failed.", "ASSEMBLY_REPORT_INVALID");
+      const assembledReview = job.assembledVisualReviewRecovery?.policy === 'assembled-ending-review-v6';
+      if (job.assembledVisualReviewRecovery && (!assembledReview || !job.manifest.visualContinuity))
+        throw finishingError('The assembled-film review requires verification.', 'VISUAL_REVIEW_REQUIRED');
+      let report, bytes, visualReview = null;
+      const assembleAndVerify = async () => {
+        stage = 'assembly';
+        if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
+        report = await assemble({ manifest: job.manifest, manifestHash: job.manifestHash, clips: workingClips, outputPath, ffmpeg, technicalSample: false });
+        verifiedMediaProfile(report);
+        bytes = await readFile(outputPath);
+        if (bytes.length > MAX_BYTES || report.sizeBytes !== bytes.length || report.sha256 !== sha256(bytes)
+          || report.manifestHash !== job.manifestHash || !Number.isFinite(report.durationSeconds)
+          || Math.abs(report.durationSeconds - job.manifest.targetDurationSeconds) > 1
+          || seedance && !checkedSeedanceAudio(report)
+          || report.hasAudio !== true || report.playable !== true || report.technicalSample !== false)
+          throw finishingError('Assembly verification failed.', 'ASSEMBLY_REPORT_INVALID');
+      };
+      // This recovery reviews the actual composed ending, including its labels
+      // and disclosure. Earlier policies retain their review-before-assembly gate.
+      if (assembledReview) await assembleAndVerify();
+      if (job.manifest.visualContinuity) {
+        stage = 'visual-review';
+        if (!await stillOwned()) throw finishingError('The worker claim expired.', 'WORKER_CLAIM_EXPIRED');
+        visualReview = await reviewVisuals({ email, id, job, clips: workingClips, work, ffmpeg, stillOwned,
+          ...(assembledReview ? { assembled: { path: outputPath, sha256: report.sha256,
+            sizeBytes: report.sizeBytes, durationSeconds: report.durationSeconds } } : {}) });
+        if (visualReview?.passed !== true) throw finishingError('Film continuity was not verified.', 'VISUAL_REVIEW_REQUIRED');
+        if (assembledReview) {
+          // Read again after inference and publish this exact immutable buffer.
+          // A changed working file must never reuse the review of earlier bytes.
+          const reviewedBytes = await readFile(outputPath);
+          if (reviewedBytes.length !== bytes.length || sha256(reviewedBytes) !== report.sha256)
+            throw finishingError('The reviewed assembled film changed.', 'STORED_CHECKSUM_MISMATCH');
+          bytes = reviewedBytes;
+        }
+      }
+      if (!assembledReview) await assembleAndVerify();
       if (!await stillOwned()) throw finishingError("The worker claim expired.", "WORKER_CLAIM_EXPIRED");
       const pathname = `production/media/${digest(email)}/${id}/${report.sha256}.mp4`;
       // Immutable, content-addressed publication: retrying a lost response never

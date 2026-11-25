@@ -5,7 +5,7 @@ import { readFile, writeFile, stat, mkdir } from "node:fs/promises";
 import { dirname, extname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifiedMediaProfile } from "../api/_lib/media-profile.mjs";
-import { parsedAssemblyOverlays } from '../api/_lib/film-overlays.mjs';
+import { parsedAssemblyOverlays, FILM_DISCLOSURE } from '../api/_lib/film-overlays.mjs';
 
 async function run(binary, args, onStderrLine, cwd) {
   return new Promise((resolveRun, reject) => {
@@ -137,7 +137,7 @@ const timecode = ms => {
 export function filmCaptions(manifest) {
   return "WEBVTT\n\n" + manifest.shots.map(shot => `${shot.id}\n${timecode(shot.startMs)} --> ${timecode(shot.startMs + shot.targetDurationMs)}\n${`${shot.narration}\n${shot.dialogue}`.trim().replace(/[\r\n]+/g, " ").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}\n`).join("\n");
 }
-const DISCLOSURE = "Based on a true story. Some scenes, dialogue and supporting characters are dramatized.";
+const DISCLOSURE = FILM_DISCLOSURE;
 const assTime = ms => {
   const cs = Math.round(ms / 10);
   return `${Math.floor(cs / 360000)}:${String(Math.floor(cs / 6000) % 60).padStart(2, '0')}:${String(Math.floor(cs / 100) % 60).padStart(2, '0')}.${String(cs % 100).padStart(2, '0')}`;

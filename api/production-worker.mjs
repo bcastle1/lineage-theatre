@@ -18,6 +18,7 @@ import { createRecordValidationSnapshot } from './_lib/record-validation-snapsho
 import { createVisualEvidenceRecovery } from './_lib/film-visual-evidence-recovery.mjs';
 import { createVisualEditorialRecovery } from './_lib/film-visual-editorial-recovery.mjs';
 import { createVisualFinalEditorialRecovery } from './_lib/film-visual-final-editorial-recovery.mjs';
+import { createAssembledReviewRecovery } from './_lib/film-assembled-review-recovery.mjs';
 
 // The isolated media worker receives short-lived payment grants, never the
 // merchant's QuickBooks credentials. Every grant still runs the live invoice,
@@ -28,6 +29,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
   visualEvidenceRecoveryFactory = createVisualEvidenceRecovery,
   visualEditorialRecoveryFactory = createVisualEditorialRecovery,
   visualFinalEditorialRecoveryFactory = createVisualFinalEditorialRecovery,
+  assembledReviewRecoveryFactory = createAssembledReviewRecovery,
   startFrameReviewFactory = createStartFrameReviewService,
   preRenderService = createFilmPreRenderService({ read, now, env }), list = listBlobs } = {}) {
   return async (req, res) => {
@@ -45,6 +47,40 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         && !(body?.action === 'review-film-visuals' && body.workerProtocol === 2
           && Array.isArray(body.frames) && body.frames.length > 4 && body.frames.length <= 10))
         return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+      if (body?.action === 'authorize-assembled-visual-review-recovery') {
+        const plan = body.recoveryPlan;
+        if (Object.keys(body).sort().join(',') !== 'action,recoveryPlan,workerProtocol' || body.workerProtocol !== 2
+          || !plan || typeof plan !== 'object' || Array.isArray(plan)
+          || Object.keys(plan).sort().join(',') !== 'email,id,jobHash,manifestHash,priorBindingHash,priorReceiptHash,queueHash'
+          || typeof plan.email !== 'string' || plan.email.length > 254 || plan.email !== plan.email.trim().toLowerCase()
+          || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(plan.email)
+          || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(plan.id || '')
+          || ![plan.manifestHash, plan.priorBindingHash, plan.priorReceiptHash, plan.jobHash, plan.queueHash]
+            .every(value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)))
+          return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (!await limiter('production-worker:assembled-visual-review-recovery', 10, 60_000))
+          return json(res, 429, { code: 'WORKER_RATE_LIMITED' });
+        const reject = () => { throw Object.assign(Error('The stopped assembled-film review requires verification.'), { code: 'VISUAL_REVIEW_AUTH_REQUIRED' }); };
+        // Authorization is a read-only check of the exact recovery plan. Only
+        // the separately applied operator command may release its queue.
+        const snapshot = createRecordValidationSnapshot({ read, listBlobs: list, now });
+        const inspect = assembledReviewRecoveryFactory({ read: snapshot.read, listBlobs: snapshot.listBlobs, now, write: reject, authorize: reject });
+        if ((await inspect(plan)).status !== 'planned') return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const ticketPath = productionQueuePath(plan.email, plan.id), jobPath = productionJobPath(plan.email, plan.id);
+        const [ticket, job] = await Promise.all([snapshot.read(ticketPath), snapshot.read(jobPath)]);
+        const orderId = ticket?.value?.orderId;
+        if (ticket?.value?.state !== 'attention' || ticket.value.lease?.expiresAt > now()
+          || !/^[a-f0-9]{64}$/.test(orderId || '') || digest(JSON.stringify(ticket.value)) !== plan.queueHash
+          || job?.value?.provider?.recipe !== SEEDANCE_RECIPE_VERSION
+          || job.value.manifest.productionPlan.version !== 1) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        const permission = await paymentService.authorizeProduction({ email: plan.email, preparedId: plan.id,
+          manifestHash: plan.manifestHash, orderId });
+        if (permission?.allowed !== true || permission.environment !== 'production' || permission.manifestHash !== plan.manifestHash
+          || !Number.isFinite(Date.parse(permission.expiresAt)) || Date.parse(permission.expiresAt) <= now())
+          return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
+        await snapshot.recheck({ expiresAt: permission.expiresAt });
+        return json(res, 200, { ...permission, recoveryRequestHash: digest(JSON.stringify(plan)) });
+      }
       if (body?.action === 'authorize-visual-final-editorial-recovery') {
         const plan = body.recoveryPlan;
         if (Object.keys(body).sort().join(',') !== 'action,recoveryPlan,workerProtocol' || body.workerProtocol !== 2
@@ -232,10 +268,12 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
       if (['review-film-visuals', 'review-start-frame'].includes(body?.action)) {
         const startFrame = body.action === 'review-start-frame';
         const protocol = body.workerProtocol === 2;
+        const assembled = Object.hasOwn(body, 'assembledArtifact');
         const keys = Object.keys(body).filter(key => key !== 'workerProtocol').sort().join(',');
         if ('workerProtocol' in body && !protocol) return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         if (keys !== (startFrame
-          ? 'action,email,manifestHash,preparedId,referenceIdentity,shotId' : 'action,email,frames,manifestHash,preparedId,shotId')
+          ? 'action,email,manifestHash,preparedId,referenceIdentity,shotId'
+          : assembled ? 'action,assembledArtifact,email,frames,manifestHash,preparedId,shotId' : 'action,email,frames,manifestHash,preparedId,shotId')
           || typeof body.email !== 'string' || body.email !== body.email.toLowerCase().trim() || body.email.length > 254
           || !/^[^\s@/\\]+@[^\s@/\\]+\.[^\s@/\\]+$/.test(body.email)
           || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body.preparedId || '')
@@ -243,7 +281,17 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
           || (startFrame ? !/^[a-f0-9]{64}$/.test(body.referenceIdentity || '')
             : !Array.isArray(body.frames) || body.frames.length < 3 || body.frames.length > 10))
           return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
+        if (assembled && (!protocol || startFrame || !body.assembledArtifact || Array.isArray(body.assembledArtifact)
+          || Object.keys(body.assembledArtifact).sort().join(',') !== 'durationSeconds,sha256,sizeBytes'
+          || !/^[a-f0-9]{64}$/.test(body.assembledArtifact.sha256 || '')
+          || !Number.isSafeInteger(body.assembledArtifact.sizeBytes) || body.assembledArtifact.sizeBytes < 16
+          || body.assembledArtifact.sizeBytes > 250 * 1024 * 1024
+          || !Number.isFinite(body.assembledArtifact.durationSeconds) || body.assembledArtifact.durationSeconds <= 0
+          || body.assembledArtifact.durationSeconds > 600)) return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         const path = productionJobPath(body.email, body.preparedId), job = (await read(path))?.value;
+        const assembledTarget = job?.assembledVisualReviewRecovery?.policy === 'assembled-ending-review-v6'
+          && job.assembledVisualReviewRecovery.shotId === body.shotId;
+        if (!startFrame && assembled !== assembledTarget) return json(res, 400, { code: 'WORKER_REQUEST_INVALID' });
         if (!startFrame && body.frames.length > 4
           && (!protocol || !(job?.visualEditorialRecovery?.policy === 'visual-editorial-recovery-v4'
             || job?.visualEvidenceRecovery?.policy === 'expanded-visual-evidence-v3'
@@ -363,7 +411,7 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         };
         if (!await authorize()) return json(res, 409, { code: 'VISUAL_REVIEW_AUTH_REQUIRED' });
         if (job.mode === 'operator-test' && job.provider.model === 'seedance') {
-          const { bindingHash } = visualReviewBinding(job, body.shotId, body.frames);
+            const { bindingHash } = visualReviewBinding(job, body.shotId, body.frames, body.assembledArtifact);
           const previous = await read(visualReceiptPath(job.ownerHash, job.id, bindingHash));
           // One attempt per exact shot. An uncertain or rate-limited response
           // consumes this canary's review allowance; it never permits a retry.
@@ -373,7 +421,8 @@ export function createProductionWorkerHandler({ env = process.env, paymentServic
         const review = (startFrame ? startFrameReviewFactory : visualReviewFactory)({ read, key: () => env.OPENAI_API_KEY, authorize, now });
         return json(res, 200, await review(startFrame
           ? { email: body.email, productionId: body.preparedId, manifestHash: body.manifestHash, shotId: body.shotId, referenceIdentity: body.referenceIdentity }
-          : { email: body.email, id: body.preparedId, job, shotId: body.shotId, frames: body.frames }));
+          : { email: body.email, id: body.preparedId, job, shotId: body.shotId, frames: body.frames,
+            ...(assembled ? { assembledArtifact: body.assembledArtifact } : {}) }));
       }
       if (body?.action === 'authorize-failed-shot-recovery')
         return json(res, 410, { code: 'LEGACY_GENERATION_RETIRED' });
