@@ -56,7 +56,8 @@ export function createFilmVisualReviewer({ extract = extractVisualFrame, review 
       proofs.push(proof);
     }
     const result = { version: 1, manifestHash: job.manifestHash, passed: true,
-      sampling: job.visualEvidenceRecovery ? 'expanded-evidence-and-same-scene-boundary' : 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
+      sampling: job.visualEditorialRecovery ? 'editorial-expanded-evidence-and-same-scene-boundary'
+        : job.visualEvidenceRecovery ? 'expanded-evidence-and-same-scene-boundary' : 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
     if (work) await writeFile(join(work, 'visual-review.json'), JSON.stringify(result), { flag: 'wx' });
     return result;
   };

@@ -1,5 +1,5 @@
 import sharp from 'sharp';
-import { fixture as stageFixture } from './visual-review-recovery.mjs';
+import { fixture as stageFixture, correctionFor } from './visual-review-recovery.mjs';
 import { digest } from '../../api/_lib/auth.mjs';
 import { createFilmVisualReviewService, VISUAL_REVIEW_MODEL, visualReceiptPath, visualSampleTimes, visualReviewSampleTimes } from '../../api/_lib/film-visual-review.mjs';
 import { createVisualEvidenceRecovery } from '../../api/_lib/film-visual-evidence-recovery.mjs';
@@ -12,14 +12,18 @@ export const decision = (count = 3) => ({ ...Object.fromEntries(dimensions.map(k
 export const response = value => Response.json({ status: 'completed', model: VISUAL_REVIEW_MODEL,
   output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(value) }] }] });
 
-export async function fixture() {
-  const h = stageFixture();
+export async function fixture(fixtureOptions = {}) {
+  const h = stageFixture(fixtureOptions);
   const bytes = await sharp({ create: { width: 96, height: 96, channels: 3, background: '#557799' } }).jpeg().toBuffer();
   const dataUrl = `data:image/jpeg;base64,${bytes.toString('base64')}`;
   h.receipt.binding.frameHashes = [digest(bytes), digest(bytes), digest(bytes)];
   h.receipt.bindingHash = hash(h.receipt.binding);
   h.seed(visualReceiptPath(h.job.ownerHash, h.job.id, h.receipt.bindingHash), h.receipt);
   h.input.bindingHash = h.receipt.bindingHash; h.input.receiptHash = hash(h.receipt);
+  if (fixtureOptions.textCorrection) {
+    const end = h.job.manifest.shots[3].targetDurationMs;
+    h.input.textCorrections = [{ ...correctionFor(h), startMs: end - 2000, endMs: end - 1000 }];
+  }
   await h.apply();
   const job = h.value(h.jobPath);
   const shot = job.manifest.shots[0];
