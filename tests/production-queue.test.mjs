@@ -187,18 +187,20 @@ test("claim is checked again after slow final media verification", async () => {
 });
 
 test("terminal visual finishing failure persists on both job and ticket without another generation attempt", async () => {
+  for (const reason of ['VISUAL_CONTINUITY_MISMATCH', 'VISUAL_EVIDENCE_INSUFFICIENT']) {
   const f = fixture(), job = await f.prepare(); await f.queue.enqueue({ actor, id: job.id, orderId });
   const path = productionQueuePath(email, job.id);
   for (let step = 0; step < 6; step++) { await f.queue.runTicket(path); f.advanceTime(); }
-  const error = markFinishingFailure(Error('private response'), 'visual-review', 'VISUAL_CONTINUITY_MISMATCH');
+  const error = markFinishingFailure(Error('private response'), 'visual-review', reason);
   assert.deepEqual(await f.queue.runTicket(path, { assemble: async () => { throw error; } }), { state: 'attention' });
   const saved = await f.film.getPrepared({ email, id: job.id });
-  assert.equal(saved.finishingFailure.state, 'attention'); assert.equal(saved.finishingFailure.reason, 'VISUAL_CONTINUITY_MISMATCH');
+  assert.equal(saved.finishingFailure.state, 'attention'); assert.equal(saved.finishingFailure.reason, reason);
   assert.equal((await f.queue.status({ email, id: job.id })).progress.stage, 'attention');
   assert.doesNotMatch(JSON.stringify(saved), /private response/);
   await f.queue.enqueue({ actor, id: job.id, orderId }); f.advanceTime();
   assert.deepEqual(await f.queue.runTicket(path, { assemble: f.assemble }), { state: 'skipped' });
   assert.equal(f.calls.submit, 3); assert.equal(f.calls.assembly, 0);
+  }
 });
 
 test("a late finishing failure cannot replace completed media or a newer worker claim", async () => {

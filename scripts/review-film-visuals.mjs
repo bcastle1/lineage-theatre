@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { visualSampleTimes, boundedVisualJson } from '../api/_lib/film-visual-review.mjs';
+import { visualSampleTimes, visualReviewSampleTimes, boundedVisualJson } from '../api/_lib/film-visual-review.mjs';
 import { markFinishingFailure } from '../api/_lib/film-finishing-diagnostics.mjs';
 
 const failed = reason => markFinishingFailure(Object.assign(new Error('Visual continuity needs review before delivery.'), { code: reason }), 'visual-review', reason);
@@ -42,8 +42,8 @@ export function createFilmVisualReviewer({ extract = extractVisualFrame, review 
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
       const clip = clips[index]; if (clip?.shotId !== shot.id) throw failed('VISUAL_REVIEW_REQUIRED');
       const frames = [];
-      for (const atMs of visualSampleTimes(shot)) frames.push({ shotId: shot.id, atMs, dataUrl: await extract({ path: clip.path, atMs, ffmpeg }) });
-      previousFrames.set(shot.id, frames[2]);
+      for (const atMs of visualReviewSampleTimes(job, shot)) frames.push({ shotId: shot.id, atMs, dataUrl: await extract({ path: clip.path, atMs, ffmpeg }) });
+      previousFrames.set(shot.id, frames.find(frame => frame.atMs === visualSampleTimes(shot)[2]));
       const previous = job.manifest.shots[index - 1];
       if (previous && previous.sceneIndex === shot.sceneIndex) frames.push(previousFrames.get(previous.id));
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
@@ -51,10 +51,12 @@ export function createFilmVisualReviewer({ extract = extractVisualFrame, review 
       if (!await stillOwned()) throw failed('WORKER_CLAIM_EXPIRED');
       if (proof?.version !== 1 || proof.manifestHash !== job.manifestHash || proof.shotId !== shot.id
         || !/^[a-f0-9]{64}$/.test(proof.bindingHash || '') || typeof proof.receiptPath !== 'string') throw failed('VISUAL_REVIEW_REQUIRED');
-      if (proof.passed !== true) throw failed('VISUAL_CONTINUITY_MISMATCH');
+      if (proof.passed !== true) throw failed(proof.failureReason === 'VISUAL_EVIDENCE_INSUFFICIENT'
+        ? 'VISUAL_EVIDENCE_INSUFFICIENT' : 'VISUAL_CONTINUITY_MISMATCH');
       proofs.push(proof);
     }
-    const result = { version: 1, manifestHash: job.manifestHash, passed: true, sampling: 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
+    const result = { version: 1, manifestHash: job.manifestHash, passed: true,
+      sampling: job.visualEvidenceRecovery ? 'expanded-evidence-and-same-scene-boundary' : 'three-frames-per-cut-and-same-scene-boundary', shots: proofs };
     if (work) await writeFile(join(work, 'visual-review.json'), JSON.stringify(result), { flag: 'wx' });
     return result;
   };
