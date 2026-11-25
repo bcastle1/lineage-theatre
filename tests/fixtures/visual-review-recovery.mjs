@@ -20,6 +20,7 @@ export function fixture(options = {}) {
     narration: 'The fictional sisters tend their quiet garden together.',
     visual: 'Two adult sisters tend the flower garden together.' }));
   if (options.openingAction) project.scenes[0].visual += ` ${options.openingAction}`;
+  if (options.finalAction) project.scenes[3].visual += ` ${options.finalAction}`;
   if (!options.noOverlay) project.scenes[0].visual += ' Title over action: The Fictional Garden. Smaller caption: An imaginary summer.';
   const manifest = planSeedanceShots(buildFilmManifest(project).manifest), manifestHash = sha(manifest);
   assert.equal(manifest.shots.length, 4);

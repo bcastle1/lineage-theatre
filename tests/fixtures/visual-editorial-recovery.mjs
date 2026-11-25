@@ -4,8 +4,8 @@ import { createVisualEditorialRecovery } from '../../api/_lib/film-visual-editor
 export { hash, decision, response };
 export const originalAction = 'At the last letter she lifts her finger; they exchange a smile.';
 export const revisedAction = 'After the writing, they exchange a smile.';
-export async function fixture() {
-  const h = await evidenceFixture({ openingAction: originalAction, textCorrection: true });
+export async function fixture(fixtureOptions = {}) {
+  const h = await evidenceFixture({ ...fixtureOptions, openingAction: originalAction, textCorrection: true });
   // The fixture replaced its initial synthetic v1 receipt with actual JPEG hashes.
   // Remove that unused seed so the private inventory contains the exact history.
   h.records.delete(h.receiptPath);
