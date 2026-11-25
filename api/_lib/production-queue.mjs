@@ -250,7 +250,7 @@ export function createProductionQueue({ read = readRecord, write = writeRecord, 
       const retryable = error instanceof FilmProductionError
         && ["PRODUCTION_UNAVAILABLE", "PRODUCTION_GRANT_EXPIRED", "ASSEMBLY_CLAIM_EXPIRED"].includes(error.code);
       const failure = finishingFailure(error, finishingStage);
-      const visualReviewRequired = ["VISUAL_CONTINUITY_MISMATCH", "VISUAL_REVIEW_REQUIRED", "VISUAL_REVIEW_UNCERTAIN",
+      const visualReviewRequired = ["VISUAL_CONTINUITY_MISMATCH", "VISUAL_EVIDENCE_INSUFFICIENT", "VISUAL_REVIEW_REQUIRED", "VISUAL_REVIEW_UNCERTAIN",
         "VISUAL_REVIEW_INVALID", "VISUAL_REVIEW_AUTH_REQUIRED"];
       // A mismatch or an unknown, already-claimed model response needs review.
       // Only pre-claim unavailability and confirmed retryable rejection use the

@@ -102,6 +102,31 @@ test('missing, swapped, mismatched or failing visual proofs stop the worker befo
   await assert.rejects(reviewer({ ...f.input, clips: [...f.clips].reverse() }), failureReason('VISUAL_REVIEW_REQUIRED'));
 });
 
+test('an approved evidence target uses expanded samples while retaining the original boundary frame and normal other shots', async () => {
+  const f = await fixture(), requests = [], extracted = [];
+  f.job.visualEvidenceRecovery = { version: 1, policy: 'expanded-visual-evidence-v3', shotId: f.job.manifest.shots[0].id };
+  const reviewer = createFilmVisualReviewer({ extract: async input => { extracted.push(input.atMs); return f.image; },
+    review: async input => { requests.push(input); return f.proof(input.shotId); } });
+  const result = await reviewer(f.input);
+  assert.deepEqual(requests[0].frames.map(frame => frame.atMs), [500, 1500, 2500, 3500, 5000, 6500, 7500, 8500, 9500]);
+  assert.deepEqual(requests[1].frames.map(frame => frame.atMs), [1500, 5000, 8500, 8500]);
+  assert.deepEqual(requests[1].frames[3], requests[0].frames[7]);
+  assert.deepEqual(requests[2].frames.map(frame => frame.atMs), [1500, 5000, 8500]);
+  assert.equal(extracted.length, 15);
+  assert.equal(result.sampling, 'expanded-evidence-and-same-scene-boundary');
+});
+
+test('insufficient evidence stays a distinct attention diagnostic and cannot produce a passing film report', async () => {
+  const f = await fixture(); let calls = 0;
+  const reviewer = createFilmVisualReviewer({ extract: async () => f.image,
+    review: async input => { calls++; return { ...f.proof(input.shotId), passed: false, failureReason: 'VISUAL_EVIDENCE_INSUFFICIENT' }; } });
+  await assert.rejects(reviewer(f.input), failureReason('VISUAL_EVIDENCE_INSUFFICIENT'));
+  assert.equal(calls, 1);
+  const mismatch = createFilmVisualReviewer({ extract: async () => f.image,
+    review: async input => ({ ...f.proof(input.shotId), passed: false, failureReason: 'untrusted-upstream-detail' }) });
+  await assert.rejects(mismatch(f.input), failureReason('VISUAL_CONTINUITY_MISMATCH'));
+});
+
 test('lost worker ownership before extraction or after model review prevents a passing report', async () => {
   const f = await fixture();
   const initial = createFilmVisualReviewer({ extract: () => assert.fail('No extraction without lease'), review: () => assert.fail('No inference without lease') });

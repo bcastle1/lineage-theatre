@@ -1,0 +1,11 @@
+# Expanded evidence after an inconclusive visual review
+
+The owner can authorize one additional visual review of an existing four-clip Seedance film when its stage-aware v2 review was conclusively recorded as insufficient visible evidence. No dimension may contain a mismatch. This recovery preserves the original manifest, clips, payment coverage and rejected receipts. It creates no video requests, invoice or credit purchase.
+
+The private operator plan contains exactly `email`, `id`, `manifestHash`, `jobHash`, `queueHash`, `priorBindingHash` and `priorReceiptHash`. All hashes come from the current stopped records. `node scripts/recover-film-visual-evidence.mjs plan <private-plan>` validates without changing state. Applying the same reviewed plan uses `apply <private-plan> --apply-reviewed-evidence-recovery`, obtains a fresh payment authorization from the web host, saves an immutable grant, and conditionally resumes only the attention job and queue.
+
+The targeted shot receives nine predetermined samples at 5%, 15%, 25%, 35%, 50%, 65%, 75%, 85% and 95%. The original three sample hashes must still match the prior review. A preceding same-scene sample remains at 85%. The other clips keep their existing review policy. An immutable per-shot claim permits one new inference; an ambiguous response or unsuccessful review cannot reopen that allowance.
+
+Reference availability is determined from actual character photo bindings. A creative description mentioning a labeled portrait does not supply that portrait. Characters with no bound photo are checked against their descriptive traits and visible consistency across the samples, without claiming photographic likeness. Cast, clothing, physical action and image checks still apply. Insufficient evidence is reported separately from a visible mismatch, and both stop finishing.
+
+Deploy the web validator and matching worker together before applying a plan. Delivery independently verifies the v3 grant, both prior decisions, exact source outputs, sample binding, saved passing decision and all other shots. Normal audio, assembly and stored-media checks remain mandatory. Tests use synthetic stories, JPEGs, orders and in-memory records; they do not demonstrate a completed live film.
